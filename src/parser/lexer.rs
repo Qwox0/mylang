@@ -34,9 +34,9 @@ pub enum TokenKind {
     FloatLit,
 
     /// `(`
-    OpenParen,
+    OpenParenthesis,
     /// `)`
-    CloseParen,
+    CloseParenthesis,
     /// `[`
     OpenBracket,
     /// `]`
@@ -203,6 +203,7 @@ pub fn is_id_continue(c: char) -> bool {
     unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
+#[derive(Debug, Clone)]
 pub struct Lexer<'c> {
     start: *const u8,
     chars: Chars<'c>,
@@ -281,8 +282,8 @@ impl<'c> Lexer<'c> {
             '\'' => self.char_literal(),
             '0'..='9' => self.num_literal(),
 
-            '(' => TokenKind::OpenParen,
-            ')' => TokenKind::CloseParen,
+            '(' => TokenKind::OpenParenthesis,
+            ')' => TokenKind::CloseParenthesis,
             '[' => TokenKind::OpenBracket,
             ']' => TokenKind::CloseBracket,
             '{' => TokenKind::OpenBrace,

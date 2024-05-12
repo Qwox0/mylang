@@ -1,6 +1,7 @@
 use self::lexer::TokenKind;
 use crate::parser::lexer::{Lexer, Token};
 
+mod ast;
 mod lexer;
 mod parser;
 
@@ -41,18 +42,11 @@ pub trait IteratorBatching: Iterator + Sized {
 
 impl<I: Iterator> IteratorBatching for I {}
 
-pub fn parse(code: &str) {
-    let a = Lexer::new(code).filter(|t| {
-        !matches!(
-            t.kind,
-            TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_)
-        )
-    });
-
+fn debug_lexer(code: &str, lexer: impl Iterator<Item = Token>) {
     let mut full = String::new();
     let mut prev_was_ident = false;
 
-    for Token { kind, span } in a {
+    for Token { kind, span } in lexer {
         let text = code.get(span.bytes).expect("correctly parsed span");
         let is_ident = kind == TokenKind::Ident;
         if prev_was_ident && is_ident {
@@ -65,4 +59,15 @@ pub fn parse(code: &str) {
     }
 
     println!("+++ full code:\n{}", full);
+}
+
+pub fn parse(code: &str) {
+    let lexer = Lexer::new(code).filter(|t| {
+        !matches!(
+            t.kind,
+            TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_)
+        )
+    });
+
+    debug_lexer(code, lexer.clone());
 }
