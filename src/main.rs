@@ -40,13 +40,35 @@ let main = -> {
 "#;
 
     let code = r#"
+let a = a.add(1):add(1):String.from_int().len();
+/*
+let add = (a, b) -> a + b;
+
 /// this is the main function
 let main = -> {
     let a = 1;
-    let b = a + 1;
+    let a = a.add(1):add(1):String.from_int().len();
+*/
+//  -----------------------------------------------;
+//  let - = ---------------------------------------
+//      a   -------------------------------------()
+//          ---------------------------------.---
+//          -------------------------------() len
+//          ---------------:---------------
+//          ------------(1) ------.--------
+//          --------:---    String from_int
+//          -----(1) add
+//          -.---
+//          a add
+
+    let a = a*add(1)+add(1)+String*from_int()*len();
 };
 "#;
     println!("+++ CODE START\n{}\n+++ CODE END", code);
 
-    mylang::parser::parse(code)
+    let exprs = mylang::parser::parse(code);
+
+    for e in exprs {
+        println!("{:#?}", e);
+    }
 }

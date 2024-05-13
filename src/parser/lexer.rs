@@ -1,3 +1,4 @@
+use super::{LitKind, Span};
 use std::{iter::FusedIterator, num::NonZeroU32, ops::Range, str::Chars};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,15 +24,8 @@ pub enum TokenKind {
     /// `let`, `my_var`, `MyStruct`, `_`
     Ident,
 
-    /// `"literal"`
-    StrLiteral,
-    /// `'a'`
-    CharLiteral,
-    /// `1`, `-10`, `10_000`
-    /// allowed but not recommended: `1_0_0_0`
-    IntLit,
-    /// `1.5`
-    FloatLit,
+    /// Note: Bool literals are Idents
+    Literal(LitKind),
 
     /// `(`
     OpenParenthesis,
@@ -146,28 +140,26 @@ pub enum TokenKind {
     Unknown,
 }
 
-#[derive(Debug)]
-pub struct Span {
-    pub(crate) bytes: Range<usize>,
-}
-
-impl Span {
-    pub fn new(bytes: Range<usize>) -> Span {
-        Span { bytes }
+impl TokenKind {
+    pub fn is_ignored(&self) -> bool {
+        match self {
+            TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_) => true,
+            _ => false,
+        }
     }
 }
 
 /// Stores the type of the token and it's position in the original code `&str`
 /// but not the token content.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Token {
     pub(crate) kind: TokenKind,
     pub(crate) span: Span,
 }
 
 impl Token {
-    pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
-        Self { kind, span: Span::new(span) }
+    pub fn new(kind: TokenKind, span: Span) -> Self {
+        Self { kind, span }
     }
 }
 
@@ -370,23 +362,33 @@ impl<'c> Lexer<'c> {
             '~' => TokenKind::Tilde,
             '\\' => todo!("BackSlash"),
 
+            'b' => maybe_followed_by! {
+                default: self.ident(),
+                '\'' => self.bchar_literal()
+            },
             c if is_id_start(c) => self.ident(),
 
             _ => TokenKind::Unknown,
         };
-        Some(Token::new(kind, start..self.get_pos()))
+        Some(Token::new(kind, Span::from(start..self.get_pos())))
     }
 
     fn string_literal(&mut self) -> TokenKind {
         while !matches!(self.next_char(), Some('"' | '\n')) {}
         // TODO: check for invalid literal
-        TokenKind::StrLiteral
+        TokenKind::Literal(LitKind::Str)
+    }
+
+    fn bchar_literal(&mut self) -> TokenKind {
+        while !matches!(self.next_char(), Some('\'' | '\n')) {}
+        // TODO: check for invalid literal
+        TokenKind::Literal(LitKind::BChar)
     }
 
     fn char_literal(&mut self) -> TokenKind {
         while !matches!(self.next_char(), Some('\'' | '\n')) {}
         // TODO: check for invalid literal
-        TokenKind::CharLiteral
+        TokenKind::Literal(LitKind::Char)
     }
 
     fn num_literal(&mut self) -> TokenKind {
@@ -396,9 +398,9 @@ impl<'c> Lexer<'c> {
             Some(('.', c)) if c != '.' && !is_id_start(c) => {
                 self.advance();
                 self.advance_while(|c| matches!(c, '0'..='9' | '_'));
-                TokenKind::FloatLit
+                TokenKind::Literal(LitKind::Float)
             },
-            _ => TokenKind::IntLit,
+            _ => TokenKind::Literal(LitKind::Int),
         }
     }
 
