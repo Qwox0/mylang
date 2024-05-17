@@ -1,5 +1,6 @@
-use super::{LitKind, Span};
-use std::{iter::FusedIterator, num::NonZeroU32, ops::Range, str::Chars};
+use crate::parser::LitKind;
+use core::fmt;
+use std::ops::{Index, Range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentType {
@@ -151,15 +152,94 @@ impl TokenKind {
 
 /// Stores the type of the token and it's position in the original code `&str`
 /// but not the token content.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Token {
-    pub(crate) kind: TokenKind,
-    pub(crate) span: Span,
+    pub kind: TokenKind,
+    pub span: Span,
 }
 
 impl Token {
-    pub fn new(kind: TokenKind, span: Span) -> Self {
-        Self { kind, span }
+    pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
+        Self { kind, span: Span::from(span) }
+    }
+}
+
+/// byte range offset for a [`Code`].
+#[derive(Clone, Copy)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl fmt::Debug for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Span{}..{}", &self.start, &self.end)
+    }
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Span {
+        Span { start, end }
+    }
+
+    pub fn pos(pos: usize) -> Span {
+        Self::new(pos, pos + 1)
+    }
+
+    pub fn len(&self) -> usize {
+        (self.start..self.end).len()
+    }
+
+    pub fn bytes(self) -> Range<usize> {
+        self.into()
+    }
+
+    /// ```text
+    /// join(1..3, 3..10) = 1..10
+    /// join(1..3, 9..10) = 1..10
+    /// join(1..9, 3..10) = 1..10
+    /// join(1..10, 3..9) = 1..10
+    /// ```
+    /// this function is commutative
+    pub fn join(self, other: Span) -> Span {
+        Span::new(self.start.min(other.start), self.end.max(other.end))
+    }
+
+    pub fn multi_join(spans: impl IntoIterator<Item = Span>) -> Option<Span> {
+        let mut iter = spans.into_iter();
+        let first = iter.next();
+        let last = iter.last();
+        first.map(|first| last.map(|last| first.join(last)).unwrap_or(first))
+    }
+}
+
+impl From<Range<usize>> for Span {
+    fn from(bytes: Range<usize>) -> Self {
+        let Range { start, end } = bytes;
+        Span::new(start, end)
+    }
+}
+
+impl From<Span> for Range<usize> {
+    fn from(span: Span) -> Self {
+        span.start..span.end
+    }
+}
+
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Code<'a>(pub &'a str);
+
+impl<'a> Index<Span> for Code<'a> {
+    type Output = str;
+
+    fn index(&self, span: Span) -> &Self::Output {
+        &self.0[span.bytes()]
     }
 }
 
@@ -195,57 +275,29 @@ pub fn is_id_continue(c: char) -> bool {
     unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Lexer<'c> {
-    start: *const u8,
-    chars: Chars<'c>,
+    pub code: Cursor<'c>,
 }
 
 impl<'c> Lexer<'c> {
     pub fn new(code: &'c str) -> Lexer<'c> {
-        Self { start: code.as_ptr(), chars: code.chars() }
-    }
-
-    fn get_pos(&self) -> usize {
-        // SAFETY: the lexer ensures `self >= origin` and that the pointers point to the
-        // underlying code `&str`.
-        unsafe { self.chars.as_str().as_ptr().sub_ptr(self.start) }
-    }
-
-    fn next_char(&mut self) -> Option<char> {
-        self.chars.next()
-    }
-
-    fn advance(&mut self) {
-        self.next_char();
-    }
-
-    /// Advances the inner [`Chars`] [`Iterator`] while a condition is true.
-    fn advance_while(&mut self, mut f: impl FnMut(char) -> bool) {
-        while self.peek().is_some_and(&mut f) {
-            self.advance();
+        let mut lex = Self { code: Cursor::new(code) };
+        if lex.peek().is_some_and(|t| t.kind == TokenKind::Whitespace) {
+            lex.advance();
         }
+        lex
     }
 
-    fn advance_if(&mut self, mut f: impl FnMut(char) -> bool) -> bool {
-        let do_advance = self.peek().is_some_and(&mut f);
-        if do_advance {
-            self.advance();
-        }
-        do_advance
+    pub fn get_code(&self) -> Code<'c> {
+        self.code.code
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.clone().next()
+    pub fn get_pos(&self) -> usize {
+        self.code.pos
     }
 
-    fn peek2(&self) -> Option<char> {
-        let mut c = self.chars.clone();
-        c.next();
-        c.next()
-    }
-
-    pub fn parse_token(&mut self) -> Option<Token> {
+    pub fn next(&mut self) -> Option<Token> {
         /// peeks at the next char, matches the patterns and advances `self` if
         /// needed. the `default` value is returns if no pattern matches
         /// the peeked char
@@ -254,9 +306,9 @@ impl<'c> Lexer<'c> {
                 default: $default:expr,
                 $( $peek_char_option:pat => $option_res:expr ),* $(,)?
             ) => {
-                match self.peek() {
+                match self.code.peek() {
                     $(Some($peek_char_option) => {
-                        self.advance();
+                        self.code.advance();
                         $option_res
                     },)*
                     _ => $default,
@@ -264,10 +316,10 @@ impl<'c> Lexer<'c> {
             };
         }
 
-        let start = self.get_pos();
-        let kind = match self.next_char()? {
+        let start = self.code.pos;
+        let kind = match self.code.next()? {
             w if is_whitespace(w) => {
-                self.advance_while(is_whitespace);
+                self.code.advance_while(is_whitespace);
                 TokenKind::Whitespace
             },
             '"' => self.string_literal(),
@@ -370,34 +422,47 @@ impl<'c> Lexer<'c> {
 
             _ => TokenKind::Unknown,
         };
-        Some(Token::new(kind, Span::from(start..self.get_pos())))
+        Some(Token::new(kind, start..self.code.pos))
+    }
+
+    pub fn peek(&self) -> Option<Token> {
+        self.clone().next()
+    }
+
+    pub fn advance(&mut self) {
+        self.next();
+    }
+
+    pub fn advanced(mut self) -> Self {
+        self.advance();
+        self
     }
 
     fn string_literal(&mut self) -> TokenKind {
-        while !matches!(self.next_char(), Some('"' | '\n')) {}
+        while !matches!(self.code.next(), Some('"' | '\n')) {}
         // TODO: check for invalid literal
         TokenKind::Literal(LitKind::Str)
     }
 
     fn bchar_literal(&mut self) -> TokenKind {
-        while !matches!(self.next_char(), Some('\'' | '\n')) {}
+        while !matches!(self.code.next(), Some('\'' | '\n')) {}
         // TODO: check for invalid literal
         TokenKind::Literal(LitKind::BChar)
     }
 
     fn char_literal(&mut self) -> TokenKind {
-        while !matches!(self.next_char(), Some('\'' | '\n')) {}
+        while !matches!(self.code.next(), Some('\'' | '\n')) {}
         // TODO: check for invalid literal
         TokenKind::Literal(LitKind::Char)
     }
 
     fn num_literal(&mut self) -> TokenKind {
-        self.advance_while(|c| matches!(c, '0'..='9' | '_'));
-        match self.peek().zip(self.peek2()) {
+        self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
+        match self.code.peek().zip(self.code.peek2()) {
             // an integer might be followed by a range operator `..` or a method `1.foo()`
             Some(('.', c)) if c != '.' && !is_id_start(c) => {
-                self.advance();
-                self.advance_while(|c| matches!(c, '0'..='9' | '_'));
+                self.code.advance();
+                self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
                 TokenKind::Literal(LitKind::Float)
             },
             _ => TokenKind::Literal(LitKind::Int),
@@ -405,28 +470,28 @@ impl<'c> Lexer<'c> {
     }
 
     fn line_comment(&mut self) -> TokenKind {
-        let comment_type = match self.peek() {
+        let comment_type = match self.code.peek() {
             Some('!') => CommentType::DocInner,
             Some('/') => CommentType::DocOuter,
             _ => CommentType::Comment,
         };
-        while !matches!(self.next_char(), None | Some('\n')) {}
+        while !matches!(self.code.next(), None | Some('\n')) {}
         TokenKind::LineComment(comment_type)
     }
 
     fn block_comment(&mut self) -> TokenKind {
-        let comment_type = match self.peek() {
+        let comment_type = match self.code.peek() {
             Some('!') => CommentType::DocInner,
             // `/**/` => CommentType::Comment
-            Some('*') if self.peek2() != Some('/') => CommentType::DocOuter,
+            Some('*') if self.code.peek2() != Some('/') => CommentType::DocOuter,
             _ => CommentType::Comment,
         };
 
         let mut depth: usize = 1;
-        while let Some(c) = self.next_char() {
+        while let Some(c) = self.code.next() {
             match c {
-                '/' if self.advance_if(|c| c == '*') => depth += 1,
-                '*' if self.advance_if(|c| c == '/') => {
+                '/' if self.code.advance_if(|c| c == '*') => depth += 1,
+                '*' if self.code.advance_if(|c| c == '/') => {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -440,7 +505,7 @@ impl<'c> Lexer<'c> {
     }
 
     fn ident(&mut self) -> TokenKind {
-        self.advance_while(is_id_continue);
+        self.code.advance_while(is_id_continue);
         TokenKind::Ident
     }
 }
@@ -449,8 +514,58 @@ impl<'c> Iterator for Lexer<'c> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.parse_token()
+        self.next()
     }
 }
 
-impl<'c> FusedIterator for Lexer<'c> {}
+#[derive(Debug, Clone, Copy)]
+pub struct Cursor<'c> {
+    code: Code<'c>,
+    pos: usize,
+}
+
+impl<'c> Cursor<'c> {
+    pub fn new(code: &'c str) -> Cursor<'c> {
+        Cursor { code: Code(code), pos: 0 }
+    }
+
+    pub fn next(&mut self) -> Option<char> {
+        let c = self.peek();
+        self.advance();
+        c
+    }
+
+    pub fn get_rem(self) -> &'c str {
+        &self.code.0[self.pos..]
+    }
+
+    pub fn peek(self) -> Option<char> {
+        self.get_rem().chars().next()
+    }
+
+    fn peek2(&self) -> Option<char> {
+        let mut c = self.get_rem().chars();
+        c.next();
+        c.next()
+    }
+
+    pub fn advance(&mut self) {
+        let offset = self.get_rem().char_indices().next().map(|(idx, _)| idx).unwrap_or_default();
+        self.pos += offset + 1;
+    }
+
+    /// Advances the inner [`Chars`] [`Iterator`] while a condition is true.
+    fn advance_while(&mut self, mut f: impl FnMut(char) -> bool) {
+        while self.peek().is_some_and(&mut f) {
+            self.advance();
+        }
+    }
+
+    fn advance_if(&mut self, mut f: impl FnMut(char) -> bool) -> bool {
+        let do_advance = self.peek().is_some_and(&mut f);
+        if do_advance {
+            self.advance();
+        }
+        do_advance
+    }
+}

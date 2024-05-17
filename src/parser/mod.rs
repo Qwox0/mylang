@@ -1,235 +1,576 @@
-use self::lexer::TokenKind;
-use crate::parser::lexer::{Lexer, Token};
-use std::{
-    iter::Peekable,
-    ops::{Index, Range},
-};
+use lexer::{Lexer, Span, Token, TokenKind};
 
-mod lexer;
-mod util;
+pub mod lexer;
 
-#[derive(Debug, Clone)]
+#[allow(unused)]
+macro_rules! todo {
+    ($msg:literal, $span:expr) => {
+        return Err(ParseError::Tmp(String::leak(format!("TODO: {}", $msg)), $span))
+    };
+}
+
+macro_rules! always {
+    ($val:expr) => {
+        |lex| Ok(($val, lex))
+    };
+}
+
+#[derive(Debug)]
 pub enum ParseError {
     NoInput,
-    MissingToken(TokenKind),
-    MissingLetIdent,
-    /// `let mut mut a = ...`
-    /// `        ^^^` span
-    MultipleMut(Span),
-    MultipleRec(Span),
     UnexpectedToken(Token),
+    NotAnIdent,
+    NotAnKeyword,
+    /// `let mut = ...`
+    MissingLetIdent,
+    /// `let mut mut x;`
+    /// `        ^^^`
+    DoubleLetMarker(Token),
+    /// `let x x;`
+    /// `      ^`
+    TooManyLetIdents(Span),
+
+    NotWasFound,
+
+    Tmp(&'static str, Span),
 }
 
-pub type ParseResult<T> = Result<T, ParseError>;
+type ParseResult<'l, T> = Result<(T, Lexer<'l>), ParseError>;
 
-/*
-impl<T> FromResidual<ParseResult<!>> for ParseResult<T> {
-    fn from_residual(residual: ParseResult<!>) -> Self {
-        match residual {
-            ParseResult::Ok(never) => never,
-            ParseResult::Err(e) => ParseResult::Err(e),
-            ParseResult::None => ParseResult::None,
-        }
-    }
-}
-
-impl<T> Try for ParseResult<T> {
-    type Output = T;
-    type Residual = ParseResult<!>;
-
-    fn from_output(output: Self::Output) -> Self {
-        ParseResult::Ok(output)
-    }
-
-    fn branch(self) -> std::ops::ControlFlow<Self::Residual, Self::Output> {
-        match self {
-            ParseResult::Ok(t) => std::ops::ControlFlow::Continue(t),
-            ParseResult::Err(e) => std::ops::ControlFlow::Break(ParseResult::Err(e)),
-            ParseResult::None => std::ops::ControlFlow::Break(ParseResult::None),
-        }
-    }
-}
-*/
-
-#[derive(Debug, Clone, Copy)]
-pub struct Code<'a>(pub &'a str);
-
-impl<'a> Index<Span> for Code<'a> {
-    type Output = str;
-
-    fn index(&self, span: Span) -> &Self::Output {
-        &self.0[span.bytes()]
-    }
-}
-
-/// byte range offset for a [`Code`].
-#[derive(Debug, Clone, Copy)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl Span {
-    pub fn new(start: usize, end: usize) -> Span {
-        Span { start, end }
-    }
-
-    pub fn bytes(self) -> Range<usize> {
-        self.into()
+pub trait Parser<T>: Fn(Lexer<'_>) -> ParseResult<'_, T> + Copy + Sized {
+    fn new(f: Self) -> impl Parser<T> {
+        f
     }
 
     /// ```text
-    /// join(1..3, 3..10) = 1..10
-    /// join(1..3, 9..10) = 1..10
-    /// join(1..9, 3..10) = 1..10
-    /// join(1..10, 3..9) = 1..10
+    /// | self output   | other output  | output        |
+    /// |:-------------:|:-------------:|:-------------:|
+    /// | Err           | Err           | Err           |
+    /// | Err           | Ok t2         | Ok t2         |
+    /// | Ok t1         | ?             | Ok t1         |
     /// ```
-    /// this function is commutative
-    pub fn join(self, other: Span) -> Span {
-        Span::new(self.start.min(other.start), self.end.min(other.end))
+    fn or(self, other: impl Parser<T>) -> impl Parser<T> {
+        move |lex| self(lex.clone()).or_else(|_| other(lex))
+    }
+
+    /// ```text
+    /// | self output   | other output  | output        |
+    /// |:-------------:|:-------------:|:-------------:|
+    /// | Err           | Err           | Err           |
+    /// | Ok t1         | Err           | Err           |
+    /// | Ok t1         | Ok t2         | Ok (t1, t2)   |
+    /// ```
+    fn and<T2>(self, other: impl Parser<T2>) -> impl Parser<(T, T2)> {
+        move |lex| self(lex).and_then(|(t1, lex)| other(lex).map(|(t2, lex)| ((t1, t2), lex)))
+    }
+
+    /// like [`Parser::and`] but only keeps the lhs
+    fn has_suffix<T2>(self, other: impl Parser<T2>) -> impl Parser<T> {
+        self.and(other).map(|(lhs, _)| lhs)
+    }
+
+    /// like [`Parser::and`] but only keeps the rhs
+    fn prefix_of<T2>(self, other: impl Parser<T2>) -> impl Parser<T2> {
+        self.and(other).map(|(_, rhs)| rhs)
+    }
+
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Err           |
+    /// | Ok t1         | Ok f(t1)      |
+    /// ```
+    fn map<U>(self, f: impl Fn(T) -> U + Copy) -> impl Parser<U> {
+        move |lex| self(lex).map(|(t, lex)| (f(t), lex))
+    }
+
+    fn map_and<U, P2: Parser<U>>(self, other: impl Fn(T) -> P2 + Copy) -> impl Parser<U> {
+        move |lex| self(lex).and_then(|(t1, lex)| other(t1)(lex))
+    }
+
+    fn map_with_data<U>(self, f: impl Fn(T, &Lexer<'_>) -> U + Copy) -> impl Parser<U> {
+        move |lex| self(lex).map(|(t, lex)| (f(t, &lex), lex))
+    }
+
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Err           |
+    /// | Ok t1         | f(t1)         |
+    /// ```
+    fn flat_map<U>(self, f: impl Fn(T) -> Result<U, ParseError> + Copy) -> impl Parser<U> {
+        move |lex| self(lex).and_then(|(t, lex)| Ok((f(t)?, lex)))
+    }
+
+    fn flat_map_with_data<U>(
+        self,
+        f: impl Fn(T, &Lexer<'_>) -> Result<U, ParseError> + Copy,
+    ) -> impl Parser<U> {
+        move |lex| self(lex).and_then(|(t, lex)| Ok((f(t, &lex)?, lex)))
+    }
+
+    fn not(self) -> impl Parser<()> {
+        move |lex| match self(lex) {
+            Ok(_) => Err(ParseError::NotWasFound),
+            Err(_) => Ok(((), lex)),
+        }
+    }
+
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Ok None       |
+    /// | Ok t1         | Ok Some(t1)   |
+    /// ```
+    fn opt(self) -> impl Parser<Option<T>> {
+        self.map(Some).or(always!(None))
+    }
+
+    /// `self` 0 or more times
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Ok []         |
+    /// | Ok t1         | Ok [...]      |
+    /// ```
+    fn many0(self) -> impl Parser<Vec<T>> {
+        self.many0_default(Vec::new)
+    }
+
+    /// `self` 1 or more times
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Err           |
+    /// | Ok t1         | Ok [...]      |
+    /// ```
+    fn many1(self) -> impl Parser<Vec<T>> {
+        move |lex| {
+            let (first, mut lex) = self(lex)?;
+            let mut vec = vec![first];
+            while let Ok((t, new_lex)) = self(lex) {
+                vec.push(t);
+                lex = new_lex;
+            }
+            Ok((vec, lex))
+        }
+    }
+
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Ok [d]        |
+    /// | Ok t1         | Ok [d, ...]   |
+    /// ```
+    fn many0_default(self, def: impl Fn() -> Vec<T> + Copy) -> impl Parser<Vec<T>> {
+        move |mut lex| {
+            let mut vec = def();
+            while let Ok((t, new)) = self(lex) {
+                vec.push(t);
+                lex = new;
+            }
+            Ok((vec, lex))
+        }
+    }
+
+    fn many_until<U>(self, until: impl Parser<U>) -> impl Parser<(Vec<T>, U)> {
+        move |mut lex| {
+            let mut vec = vec![];
+            let u = loop {
+                match until(lex) {
+                    Ok((u, new_lex)) => {
+                        lex = new_lex;
+                        break u;
+                    },
+                    Err(_) => {
+                        let (t, new_lex) = self(lex)?;
+                        lex = new_lex;
+                        vec.push(t)
+                    },
+                }
+            };
+            Ok(((vec, u), lex))
+        }
+    }
+
+    fn sep_by1<Sep>(self, sep: impl Parser<Sep>) -> impl Parser<Vec<T>>
+    where Self: Copy {
+        self.and(sep.prefix_of(self).many0()).map(|(first, mut rest)| {
+            rest.insert(0, first);
+            rest
+        })
+    }
+
+    fn sep_by0<Sep>(self, sep: impl Parser<Sep>) -> impl Parser<Vec<T>>
+    where Self: Copy {
+        self.sep_by1(sep).or(|lex| Ok((Vec::new(), lex)))
+    }
+
+    /// creates a [`Span`] for the entire match
+    /// ```text
+    /// | self output   | output        |
+    /// |:-------------:|:-------------:|
+    /// | Err           | Err           |
+    /// | Ok t1         | Ok (t1, span) |
+    /// ```
+    fn spaned(self) -> impl Parser<(T, Span)> {
+        Parser::new(|lex: Lexer<'_>| Ok((lex.get_pos(), lex)))
+            .and(self)
+            .map_with_data(|(start, t), lex| (t, Span::new(start, lex.get_pos())))
+    }
+
+    fn to_spaned(self) -> impl Parser<Span> {
+        self.spaned().map(|a| a.1)
+    }
+
+    fn to_expr(self) -> impl Parser<Expr>
+    where Expr: From<(T, Span)> {
+        self.spaned().map(Expr::from)
+    }
+
+    fn to_stmt(self) -> impl Parser<Stmt>
+    where Stmt: From<(T, Span)> {
+        self.spaned().map(Stmt::from)
     }
 }
 
-impl From<Range<usize>> for Span {
-    fn from(bytes: Range<usize>) -> Self {
-        let Range { start, end } = bytes;
-        Span::new(start, end)
+impl<T, F: Fn(Lexer<'_>) -> Result<(T, Lexer<'_>), ParseError> + Copy> Parser<T> for F {}
+
+/// no whitespace skipping after the token
+pub fn tok_matches_(f: impl Fn(&TokenKind) -> bool + Copy) -> impl Parser<Token> {
+    move |lex| match lex.peek() {
+        Some(t) if f(&t.kind) => Ok((t, lex.advanced())),
+        Some(t) => Err(ParseError::UnexpectedToken(t)),
+        None => Err(ParseError::NoInput),
     }
 }
 
-impl From<Span> for Range<usize> {
-    fn from(span: Span) -> Self {
-        span.start..span.end
+/// parses any whitespace or comment
+pub fn ws(lex: Lexer<'_>) -> ParseResult<'_, Span> {
+    tok_matches_(|t| t.is_ignored()).many0().to_spaned()(lex)
+}
+
+pub fn tok_matches(f: impl Fn(&TokenKind) -> bool + Copy) -> impl Parser<Token> {
+    tok_matches_(f).has_suffix(ws)
+}
+
+pub fn any_tok() -> impl Parser<Token> {
+    tok_matches(|_| true)
+}
+
+pub fn tok(kind: TokenKind) -> impl Parser<Token> {
+    tok_matches(move |lex| *lex == kind)
+}
+
+macro_rules! tok {
+    ('(') => { tok(TokenKind::OpenParenthesis) };
+    (')') => { tok(TokenKind::CloseParenthesis) };
+    ('[') => { tok(TokenKind::OpenBracket) };
+    (']') => { tok(TokenKind::CloseBracket) };
+    ('{') => { tok(TokenKind::OpenBrace) };
+    ('}') => { tok(TokenKind::CloseBrace) };
+    ('=') => { tok(TokenKind::Equal) };
+    ("==") => { tok(TokenKind::EqualEqual) };
+    ("=>") => { tok(TokenKind::FatArrow) };
+    ('!') => { tok(TokenKind::Bang) };
+    ("!=") => { tok(TokenKind::BangEqual) };
+    ('<') => { tok(TokenKind::Lt) };
+    ("<=") => { tok(TokenKind::LtEqual) };
+    ("<<") => { tok(TokenKind::LtLt) };
+    ("<<=") => { tok(TokenKind::LtLtEqual) };
+    ('>') => { tok(TokenKind::Gt) };
+    (">=") => { tok(TokenKind::GtEqual) };
+    (">>") => { tok(TokenKind::GtGt) };
+    (">>=") => { tok(TokenKind::GtGtEqual) };
+    ('+') => { tok(TokenKind::Plus) };
+    ("+=") => { tok(TokenKind::PlusEqual) };
+    ('-') => { tok(TokenKind::Minus) };
+    ("-=") => { tok(TokenKind::MinusEqual) };
+    ("->") => { tok(TokenKind::Arrow) };
+    ('*') => { tok(TokenKind::Asterisk) };
+    ("*=") => { tok(TokenKind::AsteriskEqual) };
+    ('/') => { tok(TokenKind::Slash) };
+    ("/=") => { tok(TokenKind::SlashEqual) };
+    ('%') => { tok(TokenKind::Percent) };
+    ("%=") => { tok(TokenKind::PercentEqual) };
+
+    ('&') => { tok(TokenKind::Ampersand) };
+    ("&&") => { tok(TokenKind::AmpersandAmpersand) };
+    ("&=") => { tok(TokenKind::AmpersandEqual) };
+    ('|') => { tok(TokenKind::Pipe) };
+    ("||") => { tok(TokenKind::PipePipe) };
+    ("|=") => { tok(TokenKind::PipeEqual) };
+    ('^') => { tok(TokenKind::Caret) };
+    ("^=") => { tok(TokenKind::CaretEqual) };
+    ('.') => { tok(TokenKind::Dot) };
+    ("..") => { tok(TokenKind::DotDot) };
+    (".*") => { tok(TokenKind::DotAsterisk) };
+    (".&") => { tok(TokenKind::DotAmpersand) };
+    (',') => { tok(TokenKind::Comma) };
+    (':') => { tok(TokenKind::Colon) };
+    (';') => { tok(TokenKind::Semicolon) };
+    ('?') => { tok(TokenKind::Question) };
+    ('#') => { tok(TokenKind::Pound) };
+    ('$') => { tok(TokenKind::Dollar) };
+    ('@') => { tok(TokenKind::At) };
+    ('~') => { tok(TokenKind::Tilde) };
+    ('\\') => { compile_error!("TODO: BackSlash") };
+    ($($t:tt)*) => {
+        compile_error!(concat!("cannot convert \"", $($t)*, "\" to TokenKind"))
+    };
+}
+
+pub fn keyword(keyword: &'static str) -> impl Parser<&'static str> {
+    move |lex| {
+        ident_token.flat_map(|t| match &lex.get_code()[t.span] {
+            t if t == keyword => Ok(keyword),
+            _ => Err(ParseError::NotAnKeyword),
+        })(lex)
     }
+}
+
+const KEYWORDS: &[&'static str] = &["let", "mut", "rec", "true", "false"];
+
+/// (`p` (,`p`)* `,`? )?
+/// this function parses expression until a seperator token of `close` is
+/// reached. the `close` token is not consumed!
+pub fn comma_chain<T>(p: impl Parser<T> + Copy) -> impl Parser<Vec<T>> {
+    p.sep_by0(tok!(',')).has_suffix(tok!(',').opt())
+}
+
+// -----------------------
+
+/// [`Expr`] but always returning `()`
+#[derive(Debug, Clone)]
+pub enum StmtKind {
+    /// `let mut rec <name> `(`: <ty>`)?` `(`= <rhs>`)`;`
+    Let { is_mut: bool, is_rec: bool, name: Ident, ty: Option<Box<Expr>>, kind: LetKind },
+
+    /// `<expr>;`
+    Semicolon(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
-pub enum Stmt {
-    /// `let mut rec <name>: <type> = <rhs>`
-    Let {
-        let_: Token,
-        is_mut: bool,
-        is_rec: bool,
-        name: Ident,
-        type_: Option<Box<Expr>>,
-        kind: LetKind,
-    },
-
-    /// `<expr>;`
-    Semicolon {
-        expr: Box<Expr>,
-        span: Span,
-    },
-
-    Expr(Box<Expr>),
+pub struct Stmt {
+    kind: StmtKind,
+    #[allow(unused)]
+    span: Span,
 }
 
 impl Stmt {
-    pub fn parse<'p>(parser: &mut Parser<'p, impl Iterator<Item = Token>>) -> ParseResult<Self> {
-        let token = parser.lexer.next().ok_or(ParseError::NoInput)?;
-        match token.kind {
-            TokenKind::Ident if &parser.code[token.span] == "let" => Stmt::parse_let(token, parser),
-            _ => Err(ParseError::UnexpectedToken(token)),
+    /// This generates new Code and doesn't read the orignal code!
+    pub fn to_text(&self) -> String {
+        match &self.kind {
+            StmtKind::Let { is_mut, is_rec, name, ty, kind } => {
+                format!(
+                    "let{}{} {}{}{};",
+                    if *is_mut { " mut" } else { "" },
+                    if *is_rec { " rec" } else { "" },
+                    name.to_text(),
+                    ty.as_ref().map(|ty| format!(":{}", ty.to_text())).unwrap_or_default(),
+                    if let LetKind::Init(rhs) = kind {
+                        format!("={}", rhs.to_text())
+                    } else {
+                        "".to_string()
+                    }
+                )
+            },
+            StmtKind::Semicolon(expr) => format!("{};", expr.to_text()),
         }
     }
 
-    pub fn parse_let<'c>(
-        let_: Token,
-        parser: &mut Parser<'c, impl Iterator<Item = Token>>,
-    ) -> ParseResult<Stmt> {
-        let mut is_mut = false;
-        let mut is_rec = false;
+    pub fn print_tree(&self) {
+        let mut lines = TreeLines::default();
+        let len = self.to_text().len();
+        match &self.kind {
+            StmtKind::Let { is_mut, is_rec, name, ty, kind } => {
+                lines.write(&format!(
+                    "let{}{} ",
+                    if *is_mut { " mut" } else { "" },
+                    if *is_rec { " rec" } else { "" }
+                ));
 
-        let name = loop {
-            let span = match parser.lexer.next() {
-                Some(Token { kind: TokenKind::Ident, span }) => span,
-                Some(t) => return Err(ParseError::UnexpectedToken(t)),
-                None => return Err(ParseError::MissingLetIdent),
-            };
-            match &parser.code[span] {
-                "mut" => {
-                    if is_mut {
-                        return Err(ParseError::MultipleMut(span));
-                    } else {
-                        is_mut = true;
-                    }
-                },
-                "rec" => {
-                    if is_rec {
-                        return Err(ParseError::MultipleRec(span));
-                    } else {
-                        is_rec = true;
-                    }
-                },
-                _ => break Ident { span },
-            }
-        };
+                lines.scope_next_line(|l| name.write_tree(l));
+                lines.write(&format!("{}", "-".repeat(name.span.len())));
 
-        let type_ = if let Some(Token { kind: TokenKind::Colon, .. }) = parser.lexer.peek() {
-            parser.lexer.next();
-            Some(Expr::parse(parser).map(Box::new)?)
-        } else {
-            None
-        };
+                if let Some(ty) = ty {
+                    lines.write(":");
+                    lines.scope_next_line(|l| ty.write_tree(l));
+                    lines.write(&"-".repeat(ty.to_text().len()));
+                }
 
-        let kind = if let Some(Token { kind: TokenKind::Equal, .. }) = parser.lexer.peek() {
-            parser.lexer.next();
-            LetKind::Init(Box::new(Expr::parse(parser)?))
-        } else {
-            LetKind::Decl
-        };
-
-        Ok(Stmt::Let { let_, is_mut, is_rec, name, type_, kind })
-    }
-
-    /// returns the [`Span`] for the entire expression.
-    pub fn span(&self) -> Span {
-        match self {
-            Stmt::Let { let_, name, type_, kind, .. } => let_.span.join(
-                kind.span().or_else(|| type_.as_ref().map(|e| e.span())).unwrap_or(name.span),
-            ),
-            Stmt::Semicolon { span, .. } => *span,
-            Stmt::Expr(expr) => expr.span(),
+                if let LetKind::Init(rhs) = kind {
+                    lines.write("=");
+                    lines.scope_next_line(|l| rhs.write_tree(l));
+                    lines.write(&"-".repeat(rhs.to_text().len()));
+                    lines.write(";");
+                }
+            },
+            StmtKind::Semicolon(expr) => {
+                lines.write(&"-".repeat(len - 1));
+                lines.write(";");
+                lines.next_line();
+                expr.write_tree(&mut lines)
+            },
+        }
+        for l in lines.lines {
+            println!("| {}", l.0);
         }
     }
 }
 
-/// grouped and ordered by precedence
+#[derive(Default)]
+pub struct TreeLine(pub String);
+
+impl TreeLine {
+    pub fn ensure_len(&mut self, len: usize) {
+        let pad = " ".repeat(len.saturating_sub(self.0.len()));
+        self.0.push_str(&pad);
+    }
+
+    pub fn overwrite(&mut self, offset: usize, text: &str) {
+        self.ensure_len(offset + text.len());
+        self.0.replace_range(offset..offset + text.len(), text);
+    }
+}
+
+#[derive(Default)]
+pub struct TreeLines {
+    lines: Vec<TreeLine>,
+    cur_line: usize,
+    cur_offset: usize,
+}
+
+impl TreeLines {
+    pub fn ensure_lines(&mut self, idx: usize) {
+        while self.lines.get(idx).is_none() {
+            self.lines.push(TreeLine(String::new()))
+        }
+    }
+
+    pub fn get_cur(&mut self) -> &mut TreeLine {
+        self.ensure_lines(self.cur_line);
+        self.lines.get_mut(self.cur_line).unwrap()
+    }
+
+    pub fn write(&mut self, text: &str) {
+        let offset = self.cur_offset;
+        self.get_cur().overwrite(offset, text);
+        self.cur_offset += text.len();
+    }
+
+    pub fn write_minus(&mut self, len: usize) {
+        self.write(&"-".repeat(len))
+    }
+
+    pub fn scope_next_line(&mut self, f: impl FnOnce(&mut Self)) {
+        let state = (self.cur_line, self.cur_offset);
+        self.next_line();
+        f(self);
+        self.cur_line = state.0;
+        self.cur_offset = state.1;
+    }
+
+    pub fn next_line(&mut self) {
+        self.cur_line += 1;
+    }
+
+    pub fn prev_line(&mut self) {
+        self.cur_line -= 1;
+    }
+
+    pub fn set_offset(&mut self, offset: usize) {
+        self.cur_offset = offset;
+    }
+}
+
+impl From<(StmtKind, Span)> for Stmt {
+    fn from((kind, span): (StmtKind, Span)) -> Self {
+        Stmt { kind, span }
+    }
+}
+
+pub fn stmt(lex: Lexer<'_>) -> ParseResult<'_, Stmt> {
+    let let_ = keyword("let")
+        .prefix_of(ident_token.many1())
+        .and(tok!(':').prefix_of(expr).opt())
+        .and(let_kind)
+        .has_suffix(tok!(';')) // ?
+        .flat_map_with_data(|((idents, ty), kind), lex| {
+            let mut is_mut = false;
+            let mut is_rec = false;
+            let mut idents = idents.into_iter();
+            let name = loop {
+                let Some(t) = idents.next() else {
+                    return Err(ParseError::MissingLetIdent);
+                };
+                let text = &lex.get_code()[t.span];
+                match text {
+                    "rec" if !is_rec => is_rec = true,
+                    "mut" if !is_mut => is_mut = true,
+                    "let" | "rec" | "mut" => return Err(ParseError::DoubleLetMarker(t)),
+                    _ => break Ident::try_from_tok(t, &lex)?,
+                }
+            };
+            if let Some(rem) = Span::multi_join(idents.map(|t| t.span)) {
+                return Err(ParseError::TooManyLetIdents(rem));
+            }
+            let ty = ty.map(Box::new);
+            Ok(StmtKind::Let { is_mut, is_rec, name, ty, kind })
+        });
+    let semicolon = expr.has_suffix(tok!(';')).map(|expr| StmtKind::Semicolon(Box::new(expr)));
+    let_.or(semicolon).to_stmt()(lex)
+}
+
 #[derive(Debug, Clone)]
-pub enum Expr {
-    Ident(Ident),
+pub enum LetKind {
+    Decl,
+    Init(Box<Expr>),
+}
+
+pub fn let_kind(lex: Lexer<'_>) -> ParseResult<'_, LetKind> {
+    tok!('=').prefix_of(expr).opt().map(|expr| match expr {
+        Some(expr) => LetKind::Init(Box::new(expr)),
+        None => LetKind::Decl,
+    })(lex)
+}
+
+/// grouped and ordered by precedence
+///
+/// storing all the tokens is inefficient and not needed, but helps with the
+/// implementation
+#[derive(Debug, Clone)]
+pub enum ExprKind {
+    Ident,
     /// `[<val>; <count>]`
     /// both for types and literals
     ArrayShort {
         val: Box<Expr>,
         count: Box<Expr>,
-        span: Span,
     },
     /// `[<expr>, <expr>, ..., <expr>,]`
     ArrayInit {
         elements: Vec<Expr>,
-        span: Span,
     },
     /// `(<expr>, <expr>, ..., <expr>,)`
     /// both for types and literals
     Tuple {
         elements: Vec<Expr>,
-        span: Span,
     },
-    Literal {
-        kind: LitKind,
-        span: Span,
+    /// `( <expr> )`
+    Parenthesis {
+        expr: Box<Expr>,
     },
-    //Type(Type),
+    Literal(LitKind),
+    /// `(<expr>, <expr>: <ty>, ..., <expr>,) -> <body>`
+    /// `-> <body>`
     Fn {
-        signature: (),
+        params: Vec<(Expr, Option<Expr>)>,
         body: Box<Expr>,
-        span: Span,
     },
     /// `struct { ... }`
     StructDef {
         fields: Vec<StructFields>,
-        span: Span,
     },
     /// `MyStruct { a: <expr>, b, }`
     StructInit {
@@ -238,7 +579,7 @@ pub enum Expr {
     },
     /// `struct(...)`
     TupleStructDef {
-        fields: Vec<Expr>,
+        fields: Vec<ExprKind>,
         span: Span,
     },
     /// `union { ... }`
@@ -249,22 +590,26 @@ pub enum Expr {
     Enum {
         span: Span,
     },
+    /// `?<ty>`
+    OptionShort {
+        ty: Box<ExprKind>,
+        span: Span,
+    },
 
-    /// `{ ... }`
+    /// `{ <stmt>`*` }`
     Block {
-        nodes: Vec<Stmt>,
-        span: Span,
-    },
-    /// `( <expr> )`
-    Parenthesis {
-        expr: Box<Expr>,
-        span: Span,
+        stmts: Vec<Stmt>,
     },
 
-    /// `<lhs> . <rhs>`
+    /// [`expr`] . [`expr`]
     Dot {
         lhs: Box<Expr>,
         rhs: Ident,
+    },
+    /// [`dot`] : [`dot`]
+    Colon {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
     },
     /// examples: `<expr>?`, `<expr>.*`
     PostOp {
@@ -279,23 +624,15 @@ pub enum Expr {
         span: Span,
     },
 
-    /// `<lhs> : <rhs>`
-    Colon {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
-    },
-
     /// `<func> < <params> >`
     CompCall {
         func: Box<Expr>,
-        params: Vec<Expr>,
-        span: Span,
+        args: Vec<Expr>,
     },
-    /// `<func> ( <params> )`
+    /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
     Call {
         func: Box<Expr>,
-        params: Vec<Expr>,
-        span: Span,
+        args: Vec<Expr>,
     },
 
     /// examples: `&<expr>`, `- <expr>`
@@ -304,11 +641,13 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// `<lhs> op <lhs>`
     BinOp {
         lhs: Box<Expr>,
         op: BinOpKind,
         rhs: Box<Expr>,
     },
+    /// `<lhs> op= <lhs>`
     BinOpAssign {
         lhs: Box<Expr>,
         op: BinOpKind,
@@ -316,134 +655,488 @@ pub enum Expr {
     },
 }
 
-impl Expr {
-    pub fn parse<'p>(parser: &mut Parser<'p, impl Iterator<Item = Token>>) -> ParseResult<Expr> {
-        while let Some(t) = parser.lexer.next() {
-            let span = t.span;
-            match t.kind {
-                TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_) => {
-                    continue;
-                },
-                TokenKind::Ident => {
-                    let text = &parser.code[t.span];
-                    return ParseResult::Ok(match text {
-                        //"let" => Expr::parse_let(t, parser)?,
-                        "true" | "false" => Expr::Literal { kind: LitKind::Bool, span: t.span },
-                        _ => Expr::Ident(Ident { span }),
-                    });
-                },
-                TokenKind::Literal(l) => todo!("Literal({:?})", l),
-                TokenKind::OpenParenthesis => todo!("OpenParenthesis"),
-                TokenKind::CloseParenthesis => todo!("CloseParenthesis"),
-                TokenKind::OpenBracket => todo!("OpenBracket"),
-                TokenKind::CloseBracket => todo!("CloseBracket"),
-                TokenKind::OpenBrace => todo!("OpenBrace"),
-                TokenKind::CloseBrace => todo!("CloseBrace"),
-                TokenKind::Equal => todo!("Equal"),
-                TokenKind::EqualEqual => todo!("EqualEqual"),
-                TokenKind::FatArrow => todo!("FatArrow"),
-                TokenKind::Bang => todo!("Bang"),
-                TokenKind::BangEqual => todo!("BangEqual"),
-                TokenKind::Lt => todo!("Lt"),
-                TokenKind::LtEqual => todo!("LtEqual"),
-                TokenKind::LtLt => todo!("LtLt"),
-                TokenKind::LtLtEqual => todo!("LtLtEqual"),
-                TokenKind::Gt => todo!("Gt"),
-                TokenKind::GtEqual => todo!("GtEqual"),
-                TokenKind::GtGt => todo!("GtGt"),
-                TokenKind::GtGtEqual => todo!("GtGtEqual"),
-                TokenKind::Plus => todo!("Plus"),
-                TokenKind::PlusEqual => todo!("PlusEqual"),
-                TokenKind::Minus => todo!("Minus"),
-                TokenKind::MinusEqual => todo!("MinusEqual"),
-                TokenKind::Arrow => todo!("Arrow"),
-                TokenKind::Asterisk => todo!("Asterisk"),
-                TokenKind::AsteriskEqual => todo!("AsteriskEqual"),
-                TokenKind::Slash => todo!("Slash"),
-                TokenKind::SlashEqual => todo!("SlashEqual"),
-                TokenKind::Percent => todo!("Percent"),
-                TokenKind::PercentEqual => todo!("PercentEqual"),
-                TokenKind::Ampersand => todo!("Ampersand"),
-                TokenKind::AmpersandAmpersand => todo!("AmpersandAmpersand"),
-                TokenKind::AmpersandEqual => todo!("AmpersandEqual"),
-                TokenKind::Pipe => todo!("Pipe"),
-                TokenKind::PipePipe => todo!("PipePipe"),
-                TokenKind::PipeEqual => todo!("PipeEqual"),
-                TokenKind::Caret => todo!("Caret"),
-                TokenKind::CaretEqual => todo!("CaretEqual"),
-                TokenKind::Dot => todo!("Dot"),
-                TokenKind::DotDot => todo!("DotDot"),
-                TokenKind::DotAsterisk => todo!("DotAsterisk"),
-                TokenKind::DotAmpersand => todo!("DotAmpersand"),
-                TokenKind::Comma => todo!("Comma"),
-                TokenKind::Colon => todo!("Colon"),
-                TokenKind::Semicolon => todo!("Semicolon"),
-                TokenKind::Question => todo!("Question"),
-                TokenKind::Pound => todo!("Pound"),
-                TokenKind::BackSlash => todo!("BackSlash"),
-                TokenKind::Dollar
-                | TokenKind::At
-                | TokenKind::Tilde
-                | TokenKind::BackTick
-                | TokenKind::Unknown => return Err(ParseError::UnexpectedToken(t)),
-            }
-        }
-        Err(ParseError::NoInput)
-    }
-
-    /// returns the [`Span`] for the entire expression.
-    pub fn span(&self) -> Span {
-        match self {
-            Expr::Ident(i) => i.span,
-            Expr::Dot { lhs, rhs } => lhs.span().join(rhs.span),
-            Expr::Colon { lhs, rhs }
-            | Expr::BinOp { lhs, rhs, .. }
-            | Expr::BinOpAssign { lhs, rhs, .. } => lhs.span().join(rhs.span()),
-            Expr::ArrayShort { span, .. }
-            | Expr::StructDef { span, .. }
-            | Expr::StructInit { span, .. }
-            | Expr::Fn { span, .. }
-            | Expr::TupleStructDef { span, .. }
-            | Expr::Union { span, .. }
-            | Expr::Enum { span, .. }
-            | Expr::ArrayInit { span, .. }
-            | Expr::Tuple { span, .. }
-            | Expr::Literal { span, .. }
-            | Expr::Block { span, .. }
-            | Expr::Parenthesis { span, .. }
-            | Expr::PostOp { span, .. }
-            | Expr::PreOp { span, .. }
-            | Expr::Index { span, .. }
-            | Expr::CompCall { span, .. }
-            | Expr::Call { span, .. } => *span,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct Ident {
+pub struct Expr {
+    kind: ExprKind,
     span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct StructFields {
-    name_ident: Expr,
-    type_: Expr,
-}
-
-#[derive(Debug, Clone)]
-pub enum LetKind {
-    Decl,
-    Init(Box<Expr>),
-}
-
-impl LetKind {
-    pub fn span(&self) -> Option<Span> {
-        match self {
-            LetKind::Decl => None,
-            LetKind::Init(expr) => Some(expr.span()),
+impl Expr {
+    /// This generates new Code and doesn't read the orignal code!
+    pub fn to_text(&self) -> String {
+        #[allow(unused)]
+        match &self.kind {
+            ExprKind::Ident => "X".repeat(self.span.len()),
+            ExprKind::ArrayShort { val, count } => {
+                format!("[{};{}]", val.to_text(), count.to_text())
+            },
+            ExprKind::ArrayInit { elements } => format!(
+                "[{}]",
+                elements
+                    .iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            ExprKind::Tuple { elements } => format!(
+                "({})",
+                elements
+                    .iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
+            ExprKind::Literal(LitKind::Bool) => "0".repeat(self.span.len()),
+            ExprKind::Literal(LitKind::Char) => "0".repeat(self.span.len()),
+            ExprKind::Literal(LitKind::BChar) => "0".repeat(self.span.len()),
+            ExprKind::Literal(LitKind::Int) => "0".repeat(self.span.len()),
+            ExprKind::Literal(LitKind::Float) => "0".repeat(self.span.len()),
+            ExprKind::Literal(LitKind::Str) => "0".repeat(self.span.len()),
+            ExprKind::Fn { params, body } => panic!(),
+            ExprKind::StructDef { fields } => panic!(),
+            ExprKind::StructInit { fields, span } => panic!(),
+            ExprKind::TupleStructDef { fields, span } => panic!(),
+            ExprKind::Union { span } => panic!(),
+            ExprKind::Enum { span } => panic!(),
+            ExprKind::OptionShort { ty, span } => panic!(),
+            ExprKind::Block { stmts } => panic!(),
+            ExprKind::Dot { lhs, rhs } => {
+                format!("{}.{}", lhs.to_text(), rhs.to_text())
+            },
+            ExprKind::Colon { lhs, rhs } => {
+                format!("{}:{}", lhs.to_text(), rhs.to_text())
+            },
+            ExprKind::PostOp { kind, expr, span } => panic!(),
+            ExprKind::Index { lhs, idx, span } => panic!(),
+            ExprKind::CompCall { func, args } => panic!(),
+            ExprKind::Call { func, args } => format!(
+                "{}({})",
+                func.to_text(),
+                args.iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            ExprKind::PreOp { kind, expr, span } => panic!(),
+            ExprKind::BinOp { lhs, op, rhs } => panic!(),
+            ExprKind::BinOpAssign { lhs, op, rhs } => panic!(),
         }
     }
+
+    pub fn write_tree(&self, lines: &mut TreeLines) {
+        match &self.kind {
+            ExprKind::Ident
+            | ExprKind::Literal(LitKind::Bool)
+            | ExprKind::Literal(LitKind::Char)
+            | ExprKind::Literal(LitKind::BChar)
+            | ExprKind::Literal(LitKind::Int)
+            | ExprKind::Literal(LitKind::Float)
+            | ExprKind::Literal(LitKind::Str) => lines.write(&self.to_text()),
+            /*
+            ExprKind::ArrayShort { val, count } => {
+                format!("[{};{}]", val.to_text(), count.to_text())
+            },
+            ExprKind::ArrayInit { elements } => format!(
+                "[{}]",
+                elements
+                    .iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            ExprKind::Tuple { elements } => format!(
+                "({})",
+                elements
+                    .iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
+            ExprKind::Fn { params, body } => panic!(),
+            ExprKind::StructDef { fields } => panic!(),
+            ExprKind::StructInit { fields, span } => panic!(),
+            ExprKind::TupleStructDef { fields, span } => panic!(),
+            ExprKind::Union { span } => panic!(),
+            ExprKind::Enum { span } => panic!(),
+            ExprKind::OptionShort { ty, span } => panic!(),
+            ExprKind::Block { stmts } => panic!(),
+            */
+            ExprKind::Dot { lhs, rhs } => {
+                lines.scope_next_line(|l| lhs.write_tree(l));
+                lines.write_minus(lhs.to_text().len());
+                lines.write(".");
+                lines.scope_next_line(|l| rhs.write_tree(l));
+                lines.write_minus(rhs.span.len());
+            },
+            ExprKind::Colon { lhs, rhs } => {
+                lines.scope_next_line(|l| lhs.write_tree(l));
+                lines.write_minus(lhs.to_text().len());
+                lines.write(":");
+                lines.scope_next_line(|l| rhs.write_tree(l));
+                lines.write_minus(rhs.span.len());
+            },
+            /*
+            ExprKind::PostOp { kind, expr, span } => panic!(),
+            ExprKind::Index { lhs, idx, span } => panic!(),
+            ExprKind::CompCall { func, args } => panic!(),
+            */
+            ExprKind::Call { func, args } => {
+                lines.scope_next_line(|l| func.write_tree(l));
+                lines.write_minus(func.to_text().len());
+                lines.write("(");
+                lines.write(&format!(
+                    "{})",
+                    args.iter()
+                        .map(|e| e.to_text())
+                        .intersperse(",".to_string())
+                        .collect::<String>()
+                ));
+            },
+            /*
+            ExprKind::PreOp { kind, expr, span } => panic!(),
+            ExprKind::BinOp { lhs, op, rhs } => panic!(),
+            ExprKind::BinOpAssign { lhs, op, rhs } => panic!(),
+            */
+            k => panic!("{:?}", k),
+        }
+    }
+}
+
+impl From<(ExprKind, Span)> for Expr {
+    fn from((kind, span): (ExprKind, Span)) -> Self {
+        Expr { kind, span }
+    }
+}
+
+pub fn expr(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    let (mut expr, mut lex) = expr_value(lex)?;
+    while let Ok((tail, l)) = expr_tail(lex) {
+        lex = l;
+        expr = tail.into_expr(expr, &lex);
+    }
+    Ok((expr, lex))
+}
+
+pub fn expr_value(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    ident.map(Ident::into_expr).or(array).or(tuple_or_paren).or(literal).or(fn_lit)(lex)
+
+    // /// `struct { ... }`
+    // StructDef {
+    //     fields: Vec<StructFields>,
+    // },
+    // /// `MyStruct { a: <expr>, b, }`
+    // StructInit {
+    //     fields: Vec<StructFields>,
+    //     span: Span,
+    // },
+    // /// `struct(...)`
+    // TupleStructDef {
+    //     fields: Vec<ExprKind>,
+    //     span: Span,
+    // },
+    // /// `union { ... }`
+    // Union {
+    //     span: Span,
+    // },
+    // /// `enum { ... }`
+    // Enum {
+    //     span: Span,
+    // },
+    // /// `?<ty>`
+    // OptionShort {
+    //     ty: Box<ExprKind>,
+    //     span: Span,
+    // },
+}
+
+/// [`expr_value`] | `{` ( [`stmt`] )* `}`
+pub fn block(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    let block = tok!('{')
+        .prefix_of(stmt.many0())
+        .has_suffix(tok!('}'))
+        .map(|stmts| ExprKind::Block { stmts })
+        .to_expr();
+    expr_value.or(block)(lex)
+}
+
+#[derive(Debug, Clone)]
+pub enum ExprTail {
+    Dot(Ident),
+    Colon(Box<Expr>),
+    Call(Vec<Expr>),
+}
+
+pub fn expr_tail(lex: Lexer<'_>) -> ParseResult<'_, ExprTail> {
+    dot.or(colon).or(call)(lex)
+}
+
+impl ExprTail {
+    pub fn into_expr(self, lhs: Expr, lex: &Lexer<'_>) -> Expr {
+        match self {
+            ExprTail::Dot(i) => {
+                let span = lhs.span.join(i.span);
+                let kind = ExprKind::Dot { lhs: Box::new(lhs), rhs: i };
+                Expr { kind, span }
+            },
+            ExprTail::Colon(rhs) => {
+                let span = lhs.span.join(rhs.span);
+                let kind = ExprKind::Colon { lhs: Box::new(lhs), rhs };
+                Expr { kind, span }
+            },
+            ExprTail::Call(args) => {
+                let span = lhs.span.join(Span::pos(lex.get_pos()));
+                let kind = ExprKind::Call { func: Box::new(lhs), args };
+                Expr { kind, span }
+            },
+        }
+    }
+}
+
+/// `.` [`ident`]
+pub fn dot(lex: Lexer<'_>) -> ParseResult<'_, ExprTail> {
+    tok!('.').prefix_of(ident).map(ExprTail::Dot)(lex)
+}
+
+/// `:` [`dot`]
+///
+/// Note: `1:x.y` = `x.y(1)`
+/// Otherwise: `1:x.y`
+// `            ^^^^^` ERR: "func `1:x` has no prop `y`"
+pub fn colon(lex: Lexer<'_>) -> ParseResult<'_, ExprTail> {
+    let rhs = ident.map(Ident::into_expr).and(dot.opt()).map_with_data(|(i, t), lex| match t {
+        Some(t) => t.into_expr(i, lex),
+        None => i,
+    });
+    tok!(':').prefix_of(rhs).map(|rhs| ExprTail::Colon(Box::new(rhs)))(lex)
+}
+
+// /// examples: `<expr>?`, `<expr>.*`
+// PostOp {
+//     kind: PostOpKind,
+//     expr: Box<ExprKind>,
+//     span: Span,
+// },
+// /// `<lhs> [ <idx> ]`
+// Index {
+//     lhs: Box<ExprKind>,
+//     idx: Box<ExprKind>,
+//     span: Span,
+// },
+
+// /// `<func> < <params> >`
+// CompCall {
+//     func: Box<ExprKind>,
+//     params: Vec<ExprKind>,
+//     span: Span,
+// },
+
+/// `(` [`comma_chain`] ([`expr`]) `)`
+pub fn call(lex: Lexer<'_>) -> ParseResult<'_, ExprTail> {
+    tok!('(').prefix_of(comma_chain(expr)).has_suffix(tok!(')')).map(ExprTail::Call)(lex)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Ident {
+    pub span: Span,
+}
+
+impl Ident {
+    pub fn try_from_tok(t: Token, lex: &Lexer<'_>) -> Result<Ident, ParseError> {
+        if KEYWORDS.contains(&&lex.get_code()[t.span]) {
+            return Err(ParseError::NotAnIdent);
+        }
+        Ok(Ident { span: t.span })
+    }
+
+    pub fn into_expr(self) -> Expr {
+        Expr { kind: ExprKind::Ident, span: self.span }
+    }
+
+    pub fn to_text(&self) -> String {
+        "X".repeat(self.span.len())
+    }
+
+    pub fn write_tree(&self, lines: &mut TreeLines) {
+        lines.write(&self.to_text());
+    }
+}
+
+/// returns an [`Ident`] or a keyword
+pub fn ident_token(lex: Lexer<'_>) -> ParseResult<'_, Token> {
+    tok(TokenKind::Ident)(lex)
+}
+
+/// returns an [`Ident`] but not keywords
+pub fn ident(lex: Lexer<'_>) -> ParseResult<'_, Ident> {
+    ident_token.flat_map_with_data(Ident::try_from_tok)(lex)
+}
+
+/// `[<val>; <count>]`
+/// `[<expr>, <expr>, ..., <expr>,]`
+pub fn array(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    let array_semicolon = expr
+        .has_suffix(tok!(';'))
+        .and(expr)
+        .map(|(val, count)| ExprKind::ArrayShort { val: Box::new(val), count: Box::new(count) });
+    let array_comma = comma_chain(expr).map(|elements| ExprKind::ArrayInit { elements });
+    let content = array_semicolon.or(array_comma);
+    tok!('[').prefix_of(content).has_suffix(tok!(']')).to_expr()(lex)
+}
+
+/// `(<expr>, <expr>, ..., <expr>,)` -> Tuple
+/// `()` -> Tuple
+/// `(<expr>)` -> Parenthesis
+/// `(<expr>,)` -> Tuple
+pub fn tuple_or_paren(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    let comma_chain = expr.sep_by0(tok!(',')).and(tok!(',').opt());
+    tok!('(')
+        .prefix_of(comma_chain)
+        .has_suffix(tok!(')'))
+        .map(|(elements, suffix_comma)| match suffix_comma {
+            Some(_) if elements.len() == 1 => {
+                let expr = elements.into_iter().next().map(Box::new).expect("len == 1");
+                ExprKind::Parenthesis { expr }
+            },
+            _ => ExprKind::Tuple { elements },
+        })
+        .to_expr()(lex)
+}
+
+pub fn literal(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    any_tok().flat_map(|t| match t.kind {
+        TokenKind::Literal(l) => {
+            let kind = ExprKind::Literal(l);
+            Ok(Expr { kind, span: t.span })
+        },
+        _ => Err(ParseError::UnexpectedToken(t)),
+    })(lex)
+}
+
+/// `(<expr>, <expr>, ..., <expr>,) -> <body>`
+/// `-> <body>`
+pub fn fn_lit(lex: Lexer<'_>) -> ParseResult<'_, Expr> {
+    let arg = expr.and(tok!(':').prefix_of(expr).opt());
+    let input = tok!('(').prefix_of(comma_chain(arg)).has_suffix(tok!(')')).opt();
+    input
+        .has_suffix(tok!("->"))
+        .and(expr)
+        .map(|(input, body)| ExprKind::Fn {
+            params: input.unwrap_or_default(),
+            body: Box::new(body),
+        })
+        .to_expr()(lex)
+}
+
+///// `struct { ... }`
+//StructDef {
+//    fields: Vec<StructFields>,
+//},
+///// `MyStruct { a: <expr>, b, }`
+//StructInit {
+//    fields: Vec<StructFields>,
+//    span: Span,
+//},
+///// `struct(...)`
+//TupleStructDef {
+//    fields: Vec<ExprKind>,
+//    span: Span,
+//},
+///// `union { ... }`
+//Union {
+//    span: Span,
+//},
+///// `enum { ... }`
+//Enum {
+//    span: Span,
+//},
+///// `?<ty>`
+//OptionShort {
+//    ty: Box<ExprKind>,
+//    span: Span,
+//},
+
+// -------------------------
+
+/*
+ */
+
+///// `<lhs> . <rhs>`
+//Dot {
+//    lhs: Box<ExprKind>,
+//    rhs: Ident,
+//},
+///// `<lhs> : <rhs>`
+//Colon {
+//    lhs: Box<ExprKind>,
+//    rhs: Box<ExprKind>,
+//},
+///// examples: `<expr>?`, `<expr>.*`
+//PostOp {
+//    kind: PostOpKind,
+//    expr: Box<ExprKind>,
+//    span: Span,
+//},
+///// `<lhs> [ <idx> ]`
+//Index {
+//    lhs: Box<ExprKind>,
+//    idx: Box<ExprKind>,
+//    span: Span,
+//},
+
+///// `<func> < <params> >`
+//CompCall {
+//    func: Box<ExprKind>,
+//    params: Vec<ExprKind>,
+//    span: Span,
+//},
+///// `<func> ( <params> )`
+//Call {
+//    func: Box<ExprKind>,
+//    params: Vec<ExprKind>,
+//    span: Span,
+//},
+
+///// examples: `&<expr>`, `- <expr>`
+//PreOp {
+//    kind: PreOpKind,
+//    expr: Box<ExprKind>,
+//    span: Span,
+//},
+///// `<lhs> op <lhs>`
+//BinOp {
+//    lhs: Box<ExprKind>,
+//    op: BinOpKind,
+//    rhs: Box<ExprKind>,
+//},
+///// `<lhs> op= <lhs>`
+//BinOpAssign {
+//    lhs: Box<ExprKind>,
+//    op: BinOpKind,
+//    rhs: Box<ExprKind>,
+//},
+
+// -----------------------
+
+// /// `struct { ... }`
+// /// `MyStruct { a: <expr>, b, }`
+// /// `struct(...)`
+// /// `union { ... }`
+// /// `enum { ... }`
+// /// `?<ty>`
+
+#[allow(unused)]
+pub struct Pattern {
+    kind: ExprKind, // TODO: own kind enum
+    span: Span,
+}
+
+#[allow(unused)]
+#[derive(Debug, Clone)]
+pub struct StructFields {
+    name_ident: ExprKind,
+    type_: ExprKind,
 }
 
 #[derive(Debug, Clone)]
@@ -546,70 +1239,4 @@ pub enum LitKind {
     Float,
     /// `"literal"`
     Str,
-}
-
-#[derive(Debug, Clone)]
-pub struct Parser<'c, Lex: Iterator<Item = Token>> {
-    code: Code<'c>,
-    lexer: Peekable<Lex>,
-}
-
-pub fn parser_new<'c>(code: &'c str) -> Parser<'c, impl Iterator<Item = Token> + 'c> {
-    let lexer = Lexer::new(code).filter(|t| !t.kind.is_ignored()).peekable();
-    let code = Code(code);
-    Parser { code, lexer }
-}
-
-impl<'c, Lex: Iterator<Item = Token>> Parser<'c, Lex> {
-    pub fn peek_kind_is(&mut self, rhs: TokenKind) -> bool {
-        self.lexer.peek().is_some_and(|t| t.kind == rhs)
-    }
-}
-
-impl<'c, Lex: Iterator<Item = Token>> Iterator for Parser<'c, Lex> {
-    type Item = Result<Stmt, ParseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match Stmt::parse(self) {
-            ParseResult::Ok(stmt) => Some(Ok(stmt)),
-            ParseResult::Err(err) => Some(Err(err)),
-            //ParseResult::None => None,
-        }
-    }
-}
-
-fn debug_lexer(code: &str, lexer: impl Iterator<Item = Token>) {
-    let mut full = String::new();
-    let mut prev_was_ident = false;
-
-    for Token { kind, span } in lexer {
-        let text = code.get(span.bytes()).expect("correctly parsed span");
-        let is_ident = kind == TokenKind::Ident;
-        if prev_was_ident && is_ident {
-            full.push(' ');
-        }
-        full.push_str(&text);
-        prev_was_ident = is_ident;
-        let text = format!("{:?}", text);
-        println!("{:<20} -> {:?}", text, kind);
-    }
-
-    println!("+++ full code:\n{}", full);
-}
-
-pub fn debug_tokens(code: &str) {
-    let lexer = Lexer::new(code).filter(|t| {
-        !matches!(
-            t.kind,
-            TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_)
-        )
-    });
-
-    debug_lexer(code, lexer);
-}
-
-pub fn parse(code: &str) -> Result<Vec<Stmt>, ParseError> {
-    debug_tokens(code);
-    //parser_new(code).collect()
-    parser_new(code).next().unwrap().map(|a| vec![a])
 }
