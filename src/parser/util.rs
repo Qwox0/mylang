@@ -1,7 +1,24 @@
+#![allow(unused)]
+
 use std::{
     convert::Infallible,
     ops::{ControlFlow, FromResidual},
 };
+
+pub trait TupleMap0 {
+    type Val0;
+    type Mapped0<T>;
+    fn map0<U>(self, f: impl FnOnce(Self::Val0) -> U) -> Self::Mapped0<U>;
+}
+
+impl<A, B> TupleMap0 for (A, B) {
+    type Mapped0<T> = (T, B);
+    type Val0 = A;
+
+    fn map0<U>(self, f: impl FnOnce(Self::Val0) -> U) -> Self::Mapped0<U> {
+        (f(self.0), self.1)
+    }
+}
 
 pub trait OptionExt<T>: Sized {
     fn ignore(self) {}

@@ -42,76 +42,78 @@ pub enum TokenKind {
     CloseBrace,
 
     /// `=`
-    Equal,
+    Eq,
     /// `==`
-    EqualEqual,
+    EqEq,
     /// `=>`
     FatArrow,
     /// `!`
     Bang,
     /// `!=`
-    BangEqual,
+    BangEq,
     /// `<`
     Lt,
     /// `<=`
-    LtEqual,
+    LtEq,
     /// `<<`
     LtLt,
     /// `<<=`
-    LtLtEqual,
+    LtLtEq,
     /// `>`
     Gt,
     /// `>=`
-    GtEqual,
+    GtEq,
     /// `>>`
     GtGt,
     /// `>>=`
-    GtGtEqual,
+    GtGtEq,
 
     /// `+`
     Plus,
     /// `+=`
-    PlusEqual,
+    PlusEq,
     /// `-`
     Minus,
     /// `-=`
-    MinusEqual,
+    MinusEq,
     /// `->`
     Arrow,
     /// `*`
     Asterisk,
     /// `*=`
-    AsteriskEqual,
+    AsteriskEq,
     /// `/`
     Slash,
     /// `/=`
-    SlashEqual,
+    SlashEq,
     /// `%`
     Percent,
     /// `%=`
-    PercentEqual,
+    PercentEq,
 
     /// `&`
     Ampersand,
     /// `&&`
     AmpersandAmpersand,
     /// `&=`
-    AmpersandEqual,
+    AmpersandEq,
     /// `|`
     Pipe,
     /// `||`
     PipePipe,
     /// `|=`
-    PipeEqual,
+    PipeEq,
     /// `^`
     Caret,
     /// `^=`
-    CaretEqual,
+    CaretEq,
 
     /// `.`
     Dot,
     /// `..`
     DotDot,
+    /// `..=`
+    DotDotEq,
     /// `.*`
     DotAsterisk,
     /// `.&`
@@ -276,6 +278,7 @@ pub fn is_id_continue(c: char) -> bool {
 }
 
 #[derive(Debug, Clone, Copy)]
+//#[derive(Debug, Clone)]
 pub struct Lexer<'c> {
     pub code: Cursor<'c>,
 }
@@ -295,6 +298,14 @@ impl<'c> Lexer<'c> {
 
     pub fn get_pos(&self) -> usize {
         self.code.pos
+    }
+
+    pub fn pos_span(&self) -> Span {
+        Span::pos(self.get_pos())
+    }
+
+    pub fn span_to(&self, other: Lexer<'_>) -> Span {
+        self.pos_span().join(other.pos_span())
     }
 
     pub fn next(&mut self) -> Option<Token> {
@@ -334,73 +345,76 @@ impl<'c> Lexer<'c> {
             '}' => TokenKind::CloseBrace,
 
             '=' => maybe_followed_by! {
-                default: TokenKind::Equal,
-                '=' => TokenKind::EqualEqual,
+                default: TokenKind::Eq,
+                '=' => TokenKind::EqEq,
                 '>' => TokenKind::FatArrow,
             },
             '!' => maybe_followed_by! {
                 default: TokenKind::Bang,
-                '=' => TokenKind::BangEqual,
+                '=' => TokenKind::BangEq,
             },
             '<' => maybe_followed_by! {
                 default: TokenKind::Lt,
-                '=' => TokenKind::LtEqual,
+                '=' => TokenKind::LtEq,
                 '<' => maybe_followed_by! {
                     default: TokenKind::LtLt,
-                    '=' => TokenKind::LtLtEqual,
+                    '=' => TokenKind::LtLtEq,
                 },
             },
             '>' => maybe_followed_by! {
                 default: TokenKind::Gt,
-                '=' => TokenKind::GtEqual,
+                '=' => TokenKind::GtEq,
                 '>' => maybe_followed_by! {
                     default: TokenKind::GtGt,
-                    '=' => TokenKind::GtGtEqual,
+                    '=' => TokenKind::GtGtEq,
                 },
             },
 
             '+' => maybe_followed_by! {
                 default: TokenKind::Plus,
-                '=' => TokenKind::PlusEqual,
+                '=' => TokenKind::PlusEq,
             },
             '-' => maybe_followed_by! {
                 default: TokenKind::Minus,
-                '=' => TokenKind::MinusEqual,
+                '=' => TokenKind::MinusEq,
                 '>' => TokenKind::Arrow,
             },
             '*' => maybe_followed_by! {
                 default: TokenKind::Asterisk,
-                '=' => TokenKind::AsteriskEqual,
+                '=' => TokenKind::AsteriskEq,
             },
             '/' => maybe_followed_by! {
                 default: TokenKind::Slash,
                 '/' => self.line_comment(),
                 '*' => self.block_comment(),
-                '=' => TokenKind::SlashEqual,
+                '=' => TokenKind::SlashEq,
             },
             '%' => maybe_followed_by! {
                 default: TokenKind::Percent,
-                '=' => TokenKind::PercentEqual,
+                '=' => TokenKind::PercentEq,
             },
 
             '&' => maybe_followed_by! {
                 default: TokenKind::Ampersand,
                 '&' => TokenKind::AmpersandAmpersand,
-                '=' => TokenKind::AmpersandEqual,
+                '=' => TokenKind::AmpersandEq,
             },
             '|' => maybe_followed_by! {
                 default: TokenKind::Pipe,
                 '|' => TokenKind::PipePipe,
-                '=' => TokenKind::PipeEqual,
+                '=' => TokenKind::PipeEq,
             },
             '^' => maybe_followed_by! {
                 default: TokenKind::Caret,
-                '=' => TokenKind::CaretEqual,
+                '=' => TokenKind::CaretEq,
             },
 
             '.' => maybe_followed_by! {
                 default: TokenKind::Dot,
-                '.' => TokenKind::DotDot,
+                '.' => maybe_followed_by! {
+                    default: TokenKind::DotDot,
+                    '=' => TokenKind::DotDotEq,
+                },
                 '*' => TokenKind::DotAsterisk,
                 '&' => TokenKind::DotAmpersand,
             },
