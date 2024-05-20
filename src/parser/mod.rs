@@ -244,7 +244,7 @@ pub enum LetKind {
 }
 
 pub fn let_kind() -> Parser<LetKind> {
-    let init = tok!(=).ws0().and_r_fatal(expr().context("let kind expr"));
+    let init = tok!(=).ws0().and_r_fatal(expr());
     opt(init)
         .map(|a| match a {
             Some(expr) => LetKind::Init(Box::new(expr)),
@@ -608,22 +608,18 @@ pub fn factor(lex: Lexer<'_>) -> PResult<'_, Factor> {
 }
 
 pub fn factor_start() -> Parser<Factor> {
-    let ident = ident().map(Ident::into_expr);
     // `[...]`, `(...)`, `(...) -> ...` or `{...}`
     let group = expr_bracket().or(expr_paren()).or(block()).context("group");
     // `-> ...`
-    let no_param_fn = fn_tail().map(|(ret_type, body)| {
-        let ret_type = ret_type.map(Box::new);
-        ExprKind::Fn { params: vec![], ret_type, body: Box::new(body) }
-    });
+    let special_fn = tail_function();
     let custom_type_def = custom_struct_def()
         .or(custom_union_def())
         .or(custom_enum_def())
         .or(option_short())
         .context("custom_type_def");
 
-    let other = group.or(no_param_fn).or(custom_type_def).or(struct_init());
-    ident.or(literal()).or(other.to_expr())
+    let other = group.or(special_fn).or(custom_type_def).or(struct_init());
+    factor_start_ident().or(literal()).or(other.to_expr())
 }
 
 /// returns an [`Ident`] or a keyword
@@ -634,6 +630,26 @@ pub fn ident_token() -> Parser<Token> {
 /// returns an [`Ident`] but not keywords
 pub fn ident() -> Parser<Ident> {
     ident_token().flat_map(Ident::try_from_tok).context("ident")
+}
+
+/// parses an expression starting with an [`ident`]
+pub fn factor_start_ident() -> Parser<Expr> {
+    ident()
+        .ws0()
+        .and_fatal(opt(fn_tail().context("one param fn")))
+        .map(|(ident, fn_)| match fn_ {
+            Some((ret_type, body)) => {
+                let span = ident.span.join(body.span);
+                let kind = ExprKind::Fn {
+                    params: vec![(ident, None)],
+                    ret_type: ret_type.map(Box::new),
+                    body: Box::new(body),
+                };
+                Expr { kind, span }
+            },
+            None => ident.into_expr(),
+        })
+        .context("ident")
 }
 
 pub fn literal() -> Parser<Expr> {
@@ -694,6 +710,16 @@ pub fn fn_tail() -> Parser<(Option<Expr>, Expr)> {
         .or(expr().map(|body| (None, body)))
         .context("function body");
     tok!(->).ws0().and_r_fatal(rhs).context("function")
+}
+
+/// `-> { ... }`
+pub fn tail_function() -> Parser<ExprKind> {
+    fn_tail()
+        .map(|(ret_type, body)| {
+            let ret_type = ret_type.map(Box::new);
+            ExprKind::Fn { params: vec![], ret_type, body: Box::new(body) }
+        })
+        .context("tail function")
 }
 
 /// parses an expression starting with `{`

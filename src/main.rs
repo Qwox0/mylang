@@ -47,6 +47,8 @@ let main = -> {
 "#;
 
     let code = r#"
+let curry = a -> b -> a + b;
+
 let add = (a, b) -> a + b;
 
     let mut rec a = a.add(1):add(1):String.from_int().len();
