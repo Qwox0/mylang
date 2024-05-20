@@ -49,13 +49,8 @@ let main = -> {
     let code = r#"
 let add = (a, b) -> a + b;
 
-/// this is the main function
-let main = -> {
-    let rec a: int = 1;
-    let mut a = a;
-    let a: u8 = a.add(1);
-    let rec mut a = a.add(1):add(1):String.from_int().len();
-//  let rec mut - = ---------------------------------------;
+    let mut rec a = a.add(1):add(1):String.from_int().len();
+//  let mut rec - = ---------------------------------------;
 //              a   -------------------------------------()
 //                  ---------------------------------.---
 //                  -------------------------------() len
@@ -65,9 +60,13 @@ let main = -> {
 //                  -----(1) add
 //                  -.---
 //                  a add
-};
-*/
-"#;
+
+/// this is the main function
+let main = -> {
+    let rec a: int = 1;
+    let mut a = a;
+    let a: u8 = a.add(1);
+};"#;
     println!("+++ CODE START\n{}\n+++ CODE END", code);
 
     let now = std::time::Instant::now();
@@ -80,7 +79,7 @@ let main = -> {
     });
 
     for e in exprs {
-        //println!("{:#?}", e);
+        println!("{:#?}", e);
         println!("> {}", e.to_text());
         e.print_tree();
         println!("\n");

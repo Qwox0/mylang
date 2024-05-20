@@ -2,24 +2,23 @@
 //use self::util::TupleMap0;
 use self::{
     debug::TreeLines,
-    parser::{f, peek, PErrKind, PError, PResult, Parser},
+    parser::{err, f, peek, PErrKind, PError, PResult, Parser},
     result_with_fatal::ResultWithFatal,
 };
 use crate::parser::parser::choice;
+use const_for::const_for;
 use lexer::{Lexer, Span, Token, TokenKind};
 use parser::opt;
 use result_with_fatal::ResultWithFatal::*;
+use std::{
+    mem::{self, MaybeUninit},
+    ptr,
+};
 
 pub mod lexer;
 pub mod parser;
 pub mod result_with_fatal;
 mod util;
-
-macro_rules! err {
-    ($kind:ident $( ( $( $field:expr ),* $(,)? ) )? , $span:expr) => {
-        Err(PError { kind: PErrKind::$kind $( ( $($field),* ) )?, span: $span })
-    };
-}
 
 /*
 #[allow(unused)]
@@ -64,7 +63,7 @@ pub fn ws0() -> Parser<Vec<Token>> {
 }
 
 pub fn ws1() -> Parser<Vec<Token>> {
-    tok_matches(|t| t.is_ignored()).many1()
+    tok_matches(|t| t.is_ignored()).many1().context("ws1")
 }
 
 pub fn any_tok() -> Parser<Token> {
@@ -76,58 +75,57 @@ pub fn tok(kind: TokenKind) -> Parser<Token> {
 }
 
 macro_rules! tok {
-    ('(') => { tok(TokenKind::OpenParenthesis) };
-    (')') => { tok(TokenKind::CloseParenthesis) };
-    ('[') => { tok(TokenKind::OpenBracket) };
-    (']') => { tok(TokenKind::CloseBracket) };
-    ('{') => { tok(TokenKind::OpenBrace) };
-    ('}') => { tok(TokenKind::CloseBrace) };
-    (=) => { tok(TokenKind::Eq) };
-    (==) => { tok(TokenKind::EqEq) };
-    (=>) => { tok(TokenKind::FatArrow) };
-    (!) => { tok(TokenKind::Bang) };
-    (!=) => { tok(TokenKind::BangEq) };
-    (<) => { tok(TokenKind::Lt) };
-    (<=) => { tok(TokenKind::LtEq) };
-    (<<) => { tok(TokenKind::LtLt) };
-    (<<=) => { tok(TokenKind::LtLtEq) };
-    (>) => { tok(TokenKind::Gt) };
-    (>=) => { tok(TokenKind::GtEq) };
-    (>>) => { tok(TokenKind::GtGt) };
-    (>>=) => { tok(TokenKind::GtGtEq) };
-    (+) => { tok(TokenKind::Plus) };
-    (+=) => { tok(TokenKind::PlusEq) };
-    (-) => { tok(TokenKind::Minus) };
-    (-=) => { tok(TokenKind::MinusEq) };
-    (->) => { tok(TokenKind::Arrow) };
-    (*) => { tok(TokenKind::Asterisk) };
-    (*=) => { tok(TokenKind::AsteriskEq) };
-    (/) => { tok(TokenKind::Slash) };
-    (/=) => { tok(TokenKind::SlashEq) };
-    (%) => { tok(TokenKind::Percent) };
-    (%=) => { tok(TokenKind::PercentEq) };
-
-    (&) => { tok(TokenKind::Ampersand) };
-    (&&) => { tok(TokenKind::AmpersandAmpersand) };
-    (&=) => { tok(TokenKind::AmpersandEq) };
-    (|) => { tok(TokenKind::Pipe) };
-    (||) => { tok(TokenKind::PipePipe) };
-    (|=) => { tok(TokenKind::PipeEq) };
-    (^) => { tok(TokenKind::Caret) };
-    (^=) => { tok(TokenKind::CaretEq) };
-    (.) => { tok(TokenKind::Dot) };
-    (..) => { tok(TokenKind::DotDot) };
-    (..=) => { tok(TokenKind::DotDotEq) };
-    (.*) => { tok(TokenKind::DotAsterisk) };
-    (.&) => { tok(TokenKind::DotAmpersand) };
-    (,) => { tok(TokenKind::Comma) };
-    (:) => { tok(TokenKind::Colon) };
-    (;) => { tok(TokenKind::Semicolon) };
-    (?) => { tok(TokenKind::Question) };
-    (#) => { tok(TokenKind::Pound) };
-    ($) => { tok(TokenKind::Dollar) };
-    (@) => { tok(TokenKind::At) };
-    (~) => { tok(TokenKind::Tilde) };
+    ('(') => { tok(TokenKind::OpenParenthesis).context("Token: `(`") };
+    (')') => { tok(TokenKind::CloseParenthesis).context("Token: `)`") };
+    ('[') => { tok(TokenKind::OpenBracket).context("Token: `[`") };
+    (']') => { tok(TokenKind::CloseBracket).context("Token: `]`") };
+    ('{') => { tok(TokenKind::OpenBrace).context("Token: `{`") };
+    ('}') => { tok(TokenKind::CloseBrace).context("Token: `}`") };
+    (=) => { tok(TokenKind::Eq).context("Token: `=`") };
+    (==) => { tok(TokenKind::EqEq).context("Token: `==`") };
+    (=>) => { tok(TokenKind::FatArrow).context("Token: `=>`") };
+    (!) => { tok(TokenKind::Bang).context("Token: `!`") };
+    (!=) => { tok(TokenKind::BangEq).context("Token: `!=`") };
+    (<) => { tok(TokenKind::Lt).context("Token: `<`") };
+    (<=) => { tok(TokenKind::LtEq).context("Token: `<=`") };
+    (<<) => { tok(TokenKind::LtLt).context("Token: `<<`") };
+    (<<=) => { tok(TokenKind::LtLtEq).context("Token: `<<=`") };
+    (>) => { tok(TokenKind::Gt).context("Token: `>`") };
+    (>=) => { tok(TokenKind::GtEq).context("Token: `>=`") };
+    (>>) => { tok(TokenKind::GtGt).context("Token: `>>`") };
+    (>>=) => { tok(TokenKind::GtGtEq).context("Token: `>>=`") };
+    (+) => { tok(TokenKind::Plus).context("Token: `+`") };
+    (+=) => { tok(TokenKind::PlusEq).context("Token: `+=`") };
+    (-) => { tok(TokenKind::Minus).context("Token: `-`") };
+    (-=) => { tok(TokenKind::MinusEq).context("Token: `-=`") };
+    (->) => { tok(TokenKind::Arrow).context("Token: `->`") };
+    (*) => { tok(TokenKind::Asterisk).context("Token: `*`") };
+    (*=) => { tok(TokenKind::AsteriskEq).context("Token: `*=`") };
+    (/) => { tok(TokenKind::Slash).context("Token: `/`") };
+    (/=) => { tok(TokenKind::SlashEq).context("Token: `/=`") };
+    (%) => { tok(TokenKind::Percent).context("Token: `%`") };
+    (%=) => { tok(TokenKind::PercentEq).context("Token: `%=`") };
+    (&) => { tok(TokenKind::Ampersand).context("Token: `&`") };
+    (&&) => { tok(TokenKind::AmpersandAmpersand).context("Token: `&&`") };
+    (&=) => { tok(TokenKind::AmpersandEq).context("Token: `&=`") };
+    (|) => { tok(TokenKind::Pipe).context("Token: `|`") };
+    (||) => { tok(TokenKind::PipePipe).context("Token: `||`") };
+    (|=) => { tok(TokenKind::PipeEq).context("Token: `|=`") };
+    (^) => { tok(TokenKind::Caret).context("Token: `^`") };
+    (^=) => { tok(TokenKind::CaretEq).context("Token: `^=`") };
+    (.) => { tok(TokenKind::Dot).context("Token: `.`") };
+    (..) => { tok(TokenKind::DotDot).context("Token: `..`") };
+    (..=) => { tok(TokenKind::DotDotEq).context("Token: `..=`") };
+    (.*) => { tok(TokenKind::DotAsterisk).context("Token: `.*`") };
+    (.&) => { tok(TokenKind::DotAmpersand).context("Token: `.&`") };
+    (,) => { tok(TokenKind::Comma).context("Token: `,`") };
+    (:) => { tok(TokenKind::Colon).context("Token: `:`") };
+    (;) => { tok(TokenKind::Semicolon).context("Token: `;`") };
+    (?) => { tok(TokenKind::Question).context("Token: `?`") };
+    (#) => { tok(TokenKind::Pound).context("Token: `#`") };
+    ($) => { tok(TokenKind::Dollar).context("Token: `$`") };
+    (@) => { tok(TokenKind::At).context("Token: `@`") };
+    (~) => { tok(TokenKind::Tilde).context("Token: `~`") };
     ('\\') => { compile_error!(TODO: BackSlash) };
     ($($t:tt)*) => {
         compile_error!(concat!("cannot convert \"", stringify!($($t)*), "\" to TokenKind"))
@@ -135,13 +133,17 @@ macro_rules! tok {
 }
 
 pub fn keyword(keyword: &'static str) -> Parser<&'static str> {
-    ident_token().flat_map(move |t, lex| match &lex.get_code()[t.span] {
-        t if t == keyword => Ok(keyword),
-        _ => err!(NotAnKeyword, lex.pos_span()),
-    })
+    ident_token()
+        .flat_map(move |t, lex| match &lex.get_code()[t.span] {
+            t if t == keyword => Ok(keyword),
+            _ => err!(NotAnKeyword, lex.pos_span()),
+        })
+        .context(format!("keyword: `{}`", keyword))
 }
 
-const KEYWORDS: &[&'static str] = &["let", "mut", "rec", "true", "false"];
+/// TODO: "if", "match", "for", "while"
+const KEYWORDS: &[&'static str] =
+    &["let", "mut", "rec", "struct", "union", "enum", "unsafe", "true", "false"];
 
 /// (`p` (,`p`)* )?
 pub fn comma_chain_no_trailing_comma<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
@@ -161,7 +163,7 @@ pub fn comma_chain<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
 #[derive(Debug, Clone)]
 pub enum StmtKind {
     /// `let mut rec <name> `(`: <ty>`)?` `(`= <rhs>`)`;`
-    Let { is_mut: bool, is_rec: bool, name: Ident, ty: Option<Box<Expr>>, kind: LetKind },
+    Let { markers: LetMarkers, ident: Ident, ty: Option<Box<Expr>>, kind: LetKind },
 
     /// `<expr>;`
     Semicolon(Box<Expr>),
@@ -181,42 +183,58 @@ impl From<(StmtKind, Span)> for Stmt {
 }
 
 pub fn stmt() -> Parser<Stmt> {
-    let semicolon = f(expr).and_l(tok!(;)).map(|expr| StmtKind::Semicolon(Box::new(expr)));
-    f(let_).or(semicolon).to_stmt().ws0()
+    let semicolon = expr().and_l(tok!(;)).map(|expr| StmtKind::Semicolon(Box::new(expr)));
+    let_().or(semicolon).to_stmt().ws0()
 }
 
-pub fn let_(lex: Lexer<'_>) -> PResult<'_, StmtKind> {
-    let ty = tok!(:).ws0().and_r_fatal(f(expr));
-    let tail = ws1()
-        .and_r(ident_token())
-        .many1()
+pub fn let_() -> Parser<StmtKind> {
+    let ty = tok!(:).ws0().and_r_fatal(ty()).context("let type");
+
+    keyword("let")
+        .ws1()
+        .and_r_fatal(let_markers())
+        .and_fatal(ident())
         .ws0()
-        .and(opt(ty.ws0()))
-        .and(let_kind().ws0())
-        .and_l(tok!(;))
-        .flat_map(|((idents, ty), kind), lex| {
+        .and_fatal(opt(ty.ws0()))
+        .and_fatal(let_kind().ws0())
+        .and_l_fatal(tok!(;))
+        .map(|(((markers, ident), ty), kind)| {
+            let ty = ty.map(Box::new);
+            StmtKind::Let { markers, ident, ty, kind }
+        })
+        .context("let statement")
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LetMarkers {
+    is_mut: bool,
+    is_rec: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LetMarkerKind {
+    Mut,
+    Rec,
+}
+
+pub fn let_markers() -> Parser<LetMarkers> {
+    keyword("mut")
+        .map(|_| LetMarkerKind::Mut)
+        .or(keyword("rec").map(|_| LetMarkerKind::Rec))
+        .ws1()
+        .many0()
+        .flat_map(|vec, lex| {
             let mut is_mut = false;
             let mut is_rec = false;
-            let mut idents = idents.into_iter();
-            let name = loop {
-                let Some(t) = idents.next() else {
-                    return err!(MissingLetIdent, lex.pos_span());
-                };
-                let text = &lex.get_code()[t.span];
-                match text {
-                    "rec" if !is_rec => is_rec = true,
-                    "mut" if !is_mut => is_mut = true,
-                    "let" | "rec" | "mut" => return err!(DoubleLetMarker(t), lex.pos_span()),
-                    _ => break Ident::try_from_tok(t, &lex)?,
+            for i in vec {
+                match i {
+                    LetMarkerKind::Mut if !is_mut => is_mut = true,
+                    LetMarkerKind::Rec if !is_rec => is_rec = true,
+                    m => return err!(DoubleLetMarker(m), lex.pos_span()),
                 }
-            };
-            if let Some(rem) = Span::multi_join(idents.map(|t| t.span)) {
-                return err!(TooManyLetIdents(rem), lex.pos_span());
             }
-            let ty = ty.map(Box::new);
-            Ok(StmtKind::Let { is_mut, is_rec, name, ty, kind })
-        });
-    keyword("let").and_r_fatal(tail).run(lex)
+            Ok(LetMarkers { is_mut, is_rec })
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -226,11 +244,13 @@ pub enum LetKind {
 }
 
 pub fn let_kind() -> Parser<LetKind> {
-    let init = tok!(=).ws0().and_r_fatal(f(expr));
-    opt(init).map(|a| match a {
-        Some(expr) => LetKind::Init(Box::new(expr)),
-        None => LetKind::Decl,
-    })
+    let init = tok!(=).ws0().and_r_fatal(expr().context("let kind expr"));
+    opt(init)
+        .map(|a| match a {
+            Some(expr) => LetKind::Init(Box::new(expr)),
+            None => LetKind::Decl,
+        })
+        .context("let kind")
 }
 
 #[derive(Debug, Clone)]
@@ -253,10 +273,13 @@ pub enum ExprKind {
     Tuple {
         elements: Vec<Expr>,
     },
+    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
+    /// `-> <type> { <body> }`
     /// `-> <body>`
     Fn {
         params: Vec<(Ident, Option<Type>)>,
+        ret_type: Option<Box<Type>>,
         body: Box<Expr>,
     },
     /// `( <expr> )`
@@ -353,25 +376,14 @@ impl From<(ExprKind, Span)> for Expr {
     }
 }
 
-pub fn expr(lex: Lexer<'_>) -> PResult<'_, Expr> {
-    assign().run(lex)
-    /*
-    let (mut expr, mut lex) =
-        factor().ws0().run(lex).inspect(|e| println!("EXPR VALUE: {:?}", e))?;
-    loop {
-        match expr_extension().ws0().run(lex) {
-            Err(PError { kind: PErrKind::NoInput, .. }) | Ok((ExprTail::None, _)) => {
-                return Ok((expr, lex));
-            },
-            Ok((tail, l)) => {
-                lex = l;
-                expr = tail.into_expr(expr, &lex);
-            },
-            Err(e) => return Err(e),
-            Fatal(e) => return Fatal(e),
-        }
-    }
-    */
+pub fn expr() -> Parser<Expr> {
+    assign().or(rvalue()).context("expression")
+}
+
+pub type Type = Expr;
+
+pub fn ty() -> Parser<Type> {
+    rvalue().context("type")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -427,6 +439,49 @@ pub enum BinOpKind {
     RangeInclusive,
 }
 
+impl BinOpKind {
+    pub fn to_binop_text(self) -> &'static str {
+        match self {
+            BinOpKind::Mul => "*",
+            BinOpKind::Div => "/",
+            BinOpKind::Mod => "%",
+            BinOpKind::Add => "+",
+            BinOpKind::Sub => "-",
+            BinOpKind::ShiftL => "<<",
+            BinOpKind::ShiftR => ">>",
+            BinOpKind::BitAnd => "&",
+            BinOpKind::BitXor => "^",
+            BinOpKind::BitOr => "|",
+            BinOpKind::Eq => "==",
+            BinOpKind::Ne => "!=",
+            BinOpKind::Lt => "<",
+            BinOpKind::Le => "<=",
+            BinOpKind::Gt => ">",
+            BinOpKind::Ge => ">=",
+            BinOpKind::And => "&&",
+            BinOpKind::Or => "||",
+            BinOpKind::Range => "..",
+            BinOpKind::RangeInclusive => "..=",
+        }
+    }
+
+    pub fn to_binop_assign_text(self) -> &'static str {
+        match self {
+            BinOpKind::Mul => "*=",
+            BinOpKind::Div => "/=",
+            BinOpKind::Mod => "%=",
+            BinOpKind::Add => "+=",
+            BinOpKind::Sub => "-=",
+            BinOpKind::ShiftL => "<<=",
+            BinOpKind::ShiftR => ">>=",
+            BinOpKind::BitAnd => "&=",
+            BinOpKind::BitXor => "^=",
+            BinOpKind::BitOr => "|=",
+            k => panic!("Unexpected binop kind: {:?}", k),
+        }
+    }
+}
+
 macro_rules! choose_bin_op {
     ( $first_op:tt : $first_kind:expr $( , $op:tt : $kind:expr )* $(,)? ) => {
         tok!($first_op).map(|_| $first_kind)
@@ -439,7 +494,12 @@ macro_rules! choose_bin_op {
 
 /// for [`ExprKind::Assign`] and [`ExprKind::BinOpAssign`]
 pub fn assign() -> Parser<Expr> {
-    let assign = tok!(=).ws0().and_r_fatal(rvalue()).map(|rhs| (None, rhs));
+    let assign = tok!(=)
+        .context("`=`")
+        .ws0()
+        .and_r_fatal(rvalue())
+        .context("assign")
+        .map(|rhs| (None, rhs));
     let bin_op_assign = choose_bin_op!(
         += : BinOpKind::Add,
         -= : BinOpKind::Sub,
@@ -454,6 +514,7 @@ pub fn assign() -> Parser<Expr> {
     )
     .ws0()
     .and_fatal(rvalue())
+    .context("binop assign")
     .map(|(op, rhs)| (Some(op), rhs));
 
     lvalue()
@@ -475,11 +536,11 @@ pub type LValue = Ident;
 
 /// TODO
 pub fn lvalue() -> Parser<Ident> {
-    ident()
+    ident().context("lvalue")
 }
 
 pub fn rvalue() -> Parser<Expr> {
-    bin_op()
+    bin_op().context("rvalue")
 }
 
 pub fn bin_op() -> Parser<Expr> {
@@ -497,7 +558,7 @@ pub fn bin_op() -> Parser<Expr> {
         };
     }
 
-    let mul_chain = op_chain!(factor() => *: BinOpKind::Mul, /: BinOpKind::Div, %: BinOpKind::Mod);
+    let mul_chain = op_chain!(f(factor) => *: BinOpKind::Mul, /: BinOpKind::Div, %: BinOpKind::Mod);
     let add_chain = op_chain!(mul_chain => +: BinOpKind::Add, -: BinOpKind::Sub);
     let shift_chain = op_chain!(add_chain => <<: BinOpKind::ShiftL, >>: BinOpKind::ShiftR);
     let bit_and_chain = op_chain!(shift_chain => &: BinOpKind::BitAnd);
@@ -527,16 +588,41 @@ pub fn bin_op() -> Parser<Expr> {
     })
 }
 
-pub fn factor() -> Parser<Expr> {
+pub type Factor = Expr;
+
+pub fn factor(lex: Lexer<'_>) -> PResult<'_, Factor> {
+    let (mut factor, mut lex) = factor_start().ws0().context("factor").run(lex)?;
+    loop {
+        match factor_ext().ws0().run(lex) {
+            Err(PError { kind: PErrKind::NoInput, .. }) | Ok((FactorExt::None, _)) => {
+                return Ok((factor, lex));
+            },
+            Ok((ext, l)) => {
+                lex = l;
+                factor = ext.extend(factor, &lex);
+            },
+            Err(e) => return Err(e),
+            Fatal(e) => return Fatal(e),
+        }
+    }
+}
+
+pub fn factor_start() -> Parser<Factor> {
     let ident = ident().map(Ident::into_expr);
-    // `[...]`, `(...)` or `{...}`
-    let group = expr_bracket().or(expr_paren()).or(expr_brace());
+    // `[...]`, `(...)`, `(...) -> ...` or `{...}`
+    let group = expr_bracket().or(expr_paren()).or(block()).context("group");
+    // `-> ...`
+    let no_param_fn = fn_tail().map(|(ret_type, body)| {
+        let ret_type = ret_type.map(Box::new);
+        ExprKind::Fn { params: vec![], ret_type, body: Box::new(body) }
+    });
     let custom_type_def = custom_struct_def()
         .or(custom_union_def())
         .or(custom_enum_def())
-        .or(option_short());
+        .or(option_short())
+        .context("custom_type_def");
 
-    let other = group.or(custom_type_def).or(struct_init());
+    let other = group.or(no_param_fn).or(custom_type_def).or(struct_init());
     ident.or(literal()).or(other.to_expr())
 }
 
@@ -547,75 +633,101 @@ pub fn ident_token() -> Parser<Token> {
 
 /// returns an [`Ident`] but not keywords
 pub fn ident() -> Parser<Ident> {
-    ident_token().flat_map(Ident::try_from_tok)
+    ident_token().flat_map(Ident::try_from_tok).context("ident")
 }
 
 pub fn literal() -> Parser<Expr> {
-    any_tok().flat_map(|t, lex| match t.kind {
-        TokenKind::Literal(l) => {
-            let kind = ExprKind::Literal(l);
-            Ok(Expr { kind, span: t.span })
-        },
-        _ => err!(UnexpectedToken(t), lex.pos_span()),
-    })
+    any_tok()
+        .flat_map(|t, lex| match t.kind {
+            TokenKind::Literal(l) => {
+                let kind = ExprKind::Literal(l);
+                Ok(Expr { kind, span: t.span })
+            },
+            _ => err!(UnexpectedToken(t), lex.pos_span()),
+        })
+        .context("literal")
 }
 
 /// parses an expression starting with `(`
 pub fn expr_paren() -> Parser<ExprKind> {
-    let param = ident().ws0().and(opt(tok!(:).ws0().and_r_fatal(f(expr))));
+    let param = ident().ws0().and(opt(tok!(:).ws0().and_r_fatal(ty()))).context("fn param");
     let params = comma_chain(param).ws0().and_l(tok!(')'));
-    let fn_ = params
-        .ws0()
-        .and_l(tok!(->).ws0())
-        .and_fatal(f(expr))
-        .map(|(params, body)| ExprKind::Fn { params, body: Box::new(body) });
+    let fn_ = params.ws0().and(fn_tail()).map(|(params, (ret_type, body))| {
+        let ret_type = ret_type.map(Box::new);
+        ExprKind::Fn { params, ret_type, body: Box::new(body) }
+    });
 
     // `(<expr>, <expr>, ..., <expr>,)` = Tuple
     // `()` = Tuple
     // `(<expr>)` = Parenthesis
     // `(<expr>,)` = Tuple
-    let tuple_or_paren = comma_chain_no_trailing_comma(f(expr)).and(opt(tok!(,).ws0())).map(
-        |(elements, suffix_comma)| match suffix_comma {
+    let tuple_or_paren = comma_chain_no_trailing_comma(expr())
+        .and(opt(tok!(,).ws0()))
+        .map(|(elements, suffix_comma)| match suffix_comma {
             Some(_) if elements.len() == 1 => {
                 let expr = elements.into_iter().next().map(Box::new).expect("len == 1");
                 ExprKind::Parenthesis { expr }
             },
             _ => ExprKind::Tuple { elements },
-        },
-    );
+        })
+        .and_l_fatal(tok!(')'))
+        .context("( ... )");
 
-    let options = fn_.or(tuple_or_paren);
-    tok!('(').ws0().and_r_fatal(options.ws0()).and_l_fatal(tok!(')'))
+    tok!('(').ws0().and_r_fatal(fn_.or(tuple_or_paren)).ws0()
+}
+
+/// `-> expr`
+/// `-> type { expr }`
+/// Parser returns the type and body as expressions
+pub fn fn_tail() -> Parser<(Option<Expr>, Expr)> {
+    let rhs = ty()
+        .ws0()
+        .and(opt(block().to_expr()))
+        .map(|(ty, block)| {
+            match block {
+                Some(block) => (Some(ty), block),
+                // types can be return values:
+                None => (None, ty),
+                //None => (Some(ty.clone()), ty),
+            }
+        })
+        .or(expr().map(|body| (None, body)))
+        .context("function body");
+    tok!(->).ws0().and_r_fatal(rhs).context("function")
 }
 
 /// parses an expression starting with `{`
-pub fn expr_brace() -> Parser<ExprKind> {
+pub fn block() -> Parser<ExprKind> {
     let stmts = stmt().ws0().many0().map(|stmts| ExprKind::Block { stmts });
-    tok!('{').ws0().and_r_fatal(stmts).and_l_fatal(tok!('}'))
+    tok!('{').ws0().and_r_fatal(stmts).and_l_fatal(tok!('}')).context("{ ... }")
 }
 
 /// parses an expression starting with `[`
 pub fn expr_bracket() -> Parser<ExprKind> {
-    let array_semi = f(expr)
+    let array_semi = expr()
         .and_l(tok!(;).ws0())
-        .and_fatal(f(expr))
+        .and_fatal(expr())
         .map(|(val, count)| ExprKind::ArraySemi { val: Box::new(val), count: Box::new(count) });
-    let array_comma = comma_chain(f(expr)).map(|elements| ExprKind::ArrayComma { elements });
+    let array_comma = comma_chain(expr()).map(|elements| ExprKind::ArrayComma { elements });
     let kind = array_semi.or(array_comma);
-    tok!('[').ws0().and_r_fatal(kind.ws0()).and_l_fatal(tok!(']'))
+    tok!('[')
+        .ws0()
+        .and_r_fatal(kind.ws0())
+        .and_l_fatal(tok!(']'))
+        .context("[ ... ]")
 }
 
 /// `struct { a: int, b: String, c: (u8, u32) }`
 /// `struct(int, String, (u8, u32))`
 pub fn custom_struct_def() -> Parser<ExprKind> {
-    let struct_field = ident().ws0().and_l(tok!(:)).ws0().and_fatal(f(expr));
+    let struct_field = ident().ws0().and_l(tok!(:)).ws0().and_fatal(expr());
     let struct_fields = comma_chain(struct_field);
     let struct_ = tok!('{')
         .and_r_fatal(struct_fields)
         .and_l_fatal(tok!('}'))
         .map(ExprKind::StructDef);
     let tuple_struct = tok!('(')
-        .and_r_fatal(comma_chain(f(expr)))
+        .and_r_fatal(comma_chain(expr()))
         .and_l_fatal(tok!(')'))
         .map(ExprKind::TupleStructDef);
     keyword("struct").ws0().and_r_fatal(struct_.or(tuple_struct))
@@ -637,7 +749,7 @@ pub fn custom_enum_def() -> Parser<ExprKind> {
 /// `MyStruct { a = <expr>, b, }` ?
 pub fn struct_init() -> Parser<ExprKind> {
     // TODO: `:` or `=`
-    let init_field_value = tok!(:).or(tok!(=)).ws0().and_r_fatal(f(expr));
+    let init_field_value = tok!(:).or(tok!(=)).ws0().and_r_fatal(expr());
     let init_field = ident().ws0().and(opt(init_field_value));
     ident()
         .ws0()
@@ -647,29 +759,42 @@ pub fn struct_init() -> Parser<ExprKind> {
         .ws0()
         .and_l_fatal(tok!('}'))
         .map(|(name, fields)| ExprKind::StructInit { name, fields })
+        .context("struct init")
 }
 
 /// `?<ty>`
 pub fn option_short() -> Parser<ExprKind> {
-    tok!(?).ws0().and_r_fatal(ty()).map(Box::new).map(ExprKind::OptionShort)
+    tok!(?)
+        .ws0()
+        .and_r_fatal(ty())
+        .map(Box::new)
+        .map(ExprKind::OptionShort)
+        .context("option short")
 }
 
-// ----------------------
-
+/// Anything that count trail a [`factor`] and extend it.
+///
+/// # Example
+///
+/// * small factor:  `1`
+/// * extension 1:   ` .add`    -> [`FactorTrail::Dot`]
+/// * extension 2:   `     (1)` -> [`FactorTrail::Call`]
+/// * bigger factor: `1.add(1)`
 #[derive(Debug, Clone)]
-pub enum ExprTail {
+pub enum FactorExt {
     None,
 
     Dot(Ident),
     Colon(Box<Expr>),
     CompCall(Vec<Expr>),
     Call(Vec<Expr>),
+    Index(Box<Expr>),
 
     PostOp(PostOpKind),
 }
 
-impl ExprTail {
-    pub fn into_expr(self, lhs: Expr, lex: &Lexer<'_>) -> Expr {
+impl FactorExt {
+    pub fn extend(self, lhs: Factor, lex: &Lexer<'_>) -> Expr {
         let span_start = lhs.span.start;
         let new_expr = |span_end, kind| {
             let span = Span::new(span_start, span_end);
@@ -677,45 +802,106 @@ impl ExprTail {
         };
 
         match self {
-            ExprTail::None => lhs,
+            FactorExt::None => lhs,
 
-            ExprTail::Dot(i) => new_expr(i.span.end, ExprKind::Dot { lhs: Box::new(lhs), rhs: i }),
-            ExprTail::Colon(rhs) => {
+            FactorExt::Dot(i) => new_expr(i.span.end, ExprKind::Dot { lhs: Box::new(lhs), rhs: i }),
+            FactorExt::Colon(rhs) => {
                 new_expr(rhs.span.end, ExprKind::Colon { lhs: Box::new(lhs), rhs })
             },
-            ExprTail::CompCall(args) => {
+            FactorExt::CompCall(args) => {
                 new_expr(lex.get_pos(), ExprKind::CompCall { func: Box::new(lhs), args })
             },
-            ExprTail::Call(args) => {
+            FactorExt::Call(args) => {
                 new_expr(lex.get_pos(), ExprKind::Call { func: Box::new(lhs), args })
             },
 
-            ExprTail::PostOp(kind) => {
+            FactorExt::PostOp(kind) => {
                 new_expr(lex.get_pos(), ExprKind::PostOp { kind, expr: Box::new(lhs) })
+            },
+            FactorExt::Index(idx) => {
+                new_expr(lex.get_pos(), ExprKind::Index { lhs: Box::new(lhs), idx })
             },
         }
     }
 }
 
-pub fn expr_extension() -> Parser<ExprTail> {
-    let expr_end = choice([
+const fn array_concat<T, const N: usize, const M: usize>(arr1: [T; N], arr2: [T; M]) -> [T; N + M] {
+    let mut out: [MaybeUninit<T>; N + M] = MaybeUninit::uninit_array();
+    const_for!(idx in 0..N => {
+        out[idx].write(unsafe { ptr::read(&arr1[idx] as *const T) });
+    });
+    const_for!(idx in 0..M => {
+        out[N + idx].write(unsafe { ptr::read(&arr1[idx] as *const T) });
+    });
+    mem::forget(arr1);
+    mem::forget(arr2);
+    unsafe { MaybeUninit::array_assume_init(out) }
+}
+
+/// All Tokens which could end the factor extension chain.
+pub const FACTOR_END: [char; 2] = ['a', 'b'];
+
+pub fn factor_ext() -> Parser<FactorExt> {
+    let factor_end = choice([
         tok!(')'),
         tok!(']'),
+        tok!('{'),
         tok!('}'),
+        tok!(=),
+        tok!(==),
         tok!(=>),
-        tok!(!),
+        // !
+        tok!(!=),
+        tok!(<),
+        tok!(<=),
+        tok!(<<),
+        tok!(<<=),
+        tok!(>),
+        tok!(>=),
+        tok!(>>),
+        tok!(>>=),
+        tok!(+),
+        tok!(+=),
+        tok!(-),
+        tok!(-=),
+        // ->
+        tok!(*),
+        tok!(*=),
+        tok!(/),
+        tok!(/=),
+        tok!(%),
+        tok!(%=),
+        tok!(&),
+        tok!(&&),
+        tok!(&=),
+        tok!(|),
+        tok!(||),
+        tok!(|=),
+        tok!(^),
+        tok!(^=),
+        tok!(..),
+        tok!(..=),
         tok!(,),
         tok!(;),
         tok!(#),
         tok!($),
         tok!(@),
         tok!(~),
+        // \
+        // `
     ])
-    .map(|_| ExprTail::None);
+    .map(|_| FactorExt::None);
 
-    let more_post_op = try_().or(force()).map(ExprTail::PostOp);
+    let more_post_op = try_().or(force()).map(FactorExt::PostOp);
 
-    dot().or(more_post_op).or(colon()).or(call()).ws0().or(peek(expr_end))
+    dot()
+        .or(more_post_op)
+        .or(colon())
+        .or(call())
+        .or(index())
+        .ws0()
+        .or(peek(factor_end))
+        .context("factor extension")
 }
 
 #[derive(Debug, Clone)]
@@ -737,25 +923,33 @@ pub enum PostOpKind {
 }
 
 /// parses an expression extension starting with `.`
-/// ([`ExprTail::Dot`], [`ExprTail::PostOp`])
-pub fn dot() -> Parser<ExprTail> {
+/// ([`FactorExt::Dot`], [`FactorExt::PostOp`])
+pub fn dot() -> Parser<FactorExt> {
     let addr_of = tok!(&)
         .and_r_fatal(opt(keyword("mut")))
-        .map(|t_mut| if t_mut.is_some() { PostOpKind::AddrMutOf } else { PostOpKind::AddrOf });
-    let deref = tok!(*).map(|_| PostOpKind::Deref);
-    let dot_post_op = addr_of.or(deref).map(ExprTail::PostOp);
-    let member_access = ident().map(ExprTail::Dot);
-    tok!(.).and_r_fatal(dot_post_op.or(ws0().and_r(member_access)))
+        .map(|t_mut| if t_mut.is_some() { PostOpKind::AddrMutOf } else { PostOpKind::AddrOf })
+        .context("factor.&");
+    let deref = tok!(*).map(|_| PostOpKind::Deref).context("factor.&");
+    let dot_post_op = addr_of.or(deref).map(FactorExt::PostOp);
+    let member_access = ident().map(FactorExt::Dot).context("member");
+    tok!(.)
+        .and_r_fatal(dot_post_op.or(ws0().and_r(member_access)))
+        .context("factor.member")
 }
 
 pub fn try_() -> Parser<PostOpKind> {
-    tok!(?).map(|_| PostOpKind::Try)
+    tok!(?).map(|_| PostOpKind::Try).context("try")
 }
 
 pub fn force() -> Parser<PostOpKind> {
-    tok!(!).and_r_fatal(opt(keyword("unsafe"))).map(|t_unsafe| {
-        if t_unsafe.is_some() { PostOpKind::ForceUnsafe } else { PostOpKind::Force }
-    })
+    tok!(!)
+        .and_r_fatal(opt(keyword("unsafe")))
+        .map(
+            |t_unsafe| {
+                if t_unsafe.is_some() { PostOpKind::ForceUnsafe } else { PostOpKind::Force }
+            },
+        )
+        .context("force")
 }
 
 /// `:` [`dot`]
@@ -763,31 +957,38 @@ pub fn force() -> Parser<PostOpKind> {
 /// Note: `1:x.y` = `x.y(1)`
 /// Otherwise: `1:x.y`
 // `            ^^^^^` ERR: "func `1:x` has no prop `y`"
-pub fn colon() -> Parser<ExprTail> {
+pub fn colon() -> Parser<FactorExt> {
     let member_access = ident().ws0().sep_by1(tok!(.)).map_with_lex(|d, lex| {
         let mut idents = d.into_iter();
         let first = idents.next().expect("sep_by1").into_expr();
-        idents
-            .map(ExprTail::Dot)
-            .fold(first, |lhs, dot_rhs| dot_rhs.into_expr(lhs, &lex)) // TODO: reference should be to an older lexer
+        idents.map(FactorExt::Dot).fold(first, |lhs, dot_rhs| dot_rhs.extend(lhs, &lex)) // TODO: reference should be to an older lexer
     });
-    tok!(:).ws0().and_r_fatal(member_access).map(Box::new).map(ExprTail::Colon)
+    tok!(:).ws0().and_r_fatal(member_access).map(Box::new).map(FactorExt::Colon)
 }
 
 /// `<` [`expr`], [`expr`], ..., [`expr`], `>`
-pub fn compcall() -> Parser<ExprTail> {
+pub fn compcall() -> Parser<FactorExt> {
     tok!(<)
-        .and_r_fatal(comma_chain(f(expr)))
+        .and_r_fatal(comma_chain(expr()))
         .and_l_fatal(tok!(>))
-        .map(ExprTail::CompCall)
+        .map(FactorExt::CompCall)
 }
 
 /// `(` [`expr`], [`expr`], ..., [`expr`], `)`
-pub fn call() -> Parser<ExprTail> {
+pub fn call() -> Parser<FactorExt> {
     tok!('(')
-        .and_r_fatal(comma_chain(f(expr)))
+        .and_r_fatal(comma_chain(expr()))
         .and_l_fatal(tok!(')'))
-        .map(ExprTail::Call)
+        .map(FactorExt::Call)
+}
+
+/// `[` [`expr`] `]`
+pub fn index() -> Parser<FactorExt> {
+    tok!('[')
+        .and_r_fatal(expr())
+        .and_l_fatal(tok!(']'))
+        .map(Box::new)
+        .map(FactorExt::Index)
 }
 
 // PostOp { kind: PostOpKind, expr: Box<Expr>, span: Span, },
@@ -815,12 +1016,6 @@ pub fn call() -> Parser<ExprTail> {
 // },
 
 // ----------------------------
-
-pub type Type = Expr;
-
-pub fn ty() -> Parser<Type> {
-    f(expr)
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ident {
@@ -920,6 +1115,10 @@ pub mod debug {
             self.lines.get_mut(self.cur_line).unwrap()
         }
 
+        pub fn get_cur_offset(&self) -> usize {
+            self.cur_offset
+        }
+
         pub fn write(&mut self, text: &str) {
             let offset = self.cur_offset;
             self.get_cur().overwrite(offset, text);
@@ -930,12 +1129,13 @@ pub mod debug {
             self.write(&"-".repeat(len))
         }
 
-        pub fn scope_next_line(&mut self, f: impl FnOnce(&mut Self)) {
+        pub fn scope_next_line<O>(&mut self, f: impl FnOnce(&mut Self) -> O) -> O {
             let state = (self.cur_line, self.cur_offset);
             self.next_line();
-            f(self);
+            let out = f(self);
             self.cur_line = state.0;
             self.cur_offset = state.1;
+            out
         }
 
         pub fn next_line(&mut self) {
@@ -956,12 +1156,13 @@ impl Stmt {
     /// This generates new Code and doesn't read the orignal code!
     pub fn to_text(&self) -> String {
         match &self.kind {
-            StmtKind::Let { is_mut, is_rec, name, ty, kind } => {
+            StmtKind::Let { markers, ident, ty, kind } => {
+                let LetMarkers { is_mut, is_rec } = markers;
                 format!(
                     "let{}{} {}{}{};",
                     if *is_mut { " mut" } else { "" },
                     if *is_rec { " rec" } else { "" },
-                    name.to_text(),
+                    ident.to_text(),
                     ty.as_ref().map(|ty| format!(":{}", ty.to_text())).unwrap_or_default(),
                     if let LetKind::Init(rhs) = kind {
                         format!("={}", rhs.to_text())
@@ -974,19 +1175,19 @@ impl Stmt {
         }
     }
 
-    pub fn print_tree(&self) {
-        let mut lines = TreeLines::default();
+    pub fn write_tree(&self, lines: &mut TreeLines) {
         let len = self.to_text().len();
         match &self.kind {
-            StmtKind::Let { is_mut, is_rec, name, ty, kind } => {
+            StmtKind::Let { markers, ident, ty, kind } => {
+                let LetMarkers { is_mut, is_rec } = markers;
                 lines.write(&format!(
                     "let{}{} ",
                     if *is_mut { " mut" } else { "" },
                     if *is_rec { " rec" } else { "" }
                 ));
 
-                lines.scope_next_line(|l| name.write_tree(l));
-                lines.write(&format!("{}", "-".repeat(name.span.len())));
+                lines.scope_next_line(|l| ident.write_tree(l));
+                lines.write(&format!("{}", "-".repeat(ident.span.len())));
 
                 if let Some(ty) = ty {
                     lines.write(":");
@@ -1005,9 +1206,14 @@ impl Stmt {
                 lines.write(&"-".repeat(len - 1));
                 lines.write(";");
                 lines.next_line();
-                expr.write_tree(&mut lines)
+                expr.write_tree(lines)
             },
         }
+    }
+
+    pub fn print_tree(&self) {
+        let mut lines = TreeLines::default();
+        self.write_tree(&mut lines);
         for l in lines.lines {
             println!("| {}", l.0);
         }
@@ -1046,14 +1252,34 @@ impl Expr {
             ExprKind::Literal(LitKind::Int) => "0".repeat(self.span.len()),
             ExprKind::Literal(LitKind::Float) => "0".repeat(self.span.len()),
             ExprKind::Literal(LitKind::Str) => "0".repeat(self.span.len()),
-            ExprKind::Fn { params, body } => panic!(),
+            ExprKind::Fn { params, ret_type, body } => format!(
+                "({})->{}",
+                params
+                    .iter()
+                    .map(|(ident, ty)| {
+                        let ty =
+                            ty.as_ref().map(|e| format!(":{}", e.to_text())).unwrap_or_default();
+                        format!("{}{}", ident.to_text(), ty)
+                    })
+                    .intersperse(",".to_string())
+                    .collect::<String>(),
+                {
+                    let body = body.to_text();
+                    match ret_type {
+                        Some(ret_type) => format!("{} {{{}}}", ret_type.to_text(), body),
+                        None => body,
+                    }
+                }
+            ),
             ExprKind::StructDef(..) => panic!(),
             ExprKind::StructInit { name, fields } => panic!(),
             ExprKind::TupleStructDef(..) => panic!(),
             ExprKind::Union {} => panic!(),
             ExprKind::Enum {} => panic!(),
             ExprKind::OptionShort(ty) => panic!(),
-            ExprKind::Block { stmts } => panic!(),
+            ExprKind::Block { stmts } => {
+                format!("{{{}}}", stmts.iter().map(|a| a.to_text()).collect::<String>())
+            },
             ExprKind::Dot { lhs, rhs } => {
                 format!("{}.{}", lhs.to_text(), rhs.to_text())
             },
@@ -1072,9 +1298,13 @@ impl Expr {
                     .collect::<String>()
             ),
             ExprKind::PreOp { kind, expr } => panic!(),
-            ExprKind::BinOp { lhs, op, rhs } => panic!(),
+            ExprKind::BinOp { lhs, op, rhs } => {
+                format!("{}{}{}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
+            },
             ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => panic!(),
+            ExprKind::BinOpAssign { lhs, op, rhs } => {
+                format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
+            },
         }
     }
 
@@ -1108,15 +1338,65 @@ impl Expr {
                     .collect::<String>()
             ),
             ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
-            ExprKind::Fn { params, body } => panic!(),
+            */
+            ExprKind::Fn { params, ret_type, body } => {
+                lines.write("(");
+
+                let mut print_param = |first: bool, (ident, ty): &(Ident, Option<Expr>)| {
+                    if !first {
+                        lines.write(",");
+                    }
+                    lines.scope_next_line(|l| ident.write_tree(l));
+                    lines.write_minus(ident.to_text().len());
+                    if let Some(ty) = ty {
+                        lines.write(":");
+                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.write_minus(ty.to_text().len());
+                    }
+                };
+                let mut params = params.iter();
+                if let Some(p) = params.next() {
+                    print_param(true, p);
+                }
+                for p in params {
+                    print_param(false, p);
+                }
+                lines.write(")->");
+                match ret_type {
+                    Some(ret_type) => {
+                        lines.scope_next_line(|l| ret_type.write_tree(l));
+                        lines.write_minus(ret_type.to_text().len());
+                        lines.write("{");
+                        lines.scope_next_line(|l| body.write_tree(l));
+                        lines.write_minus(body.to_text().len());
+                        lines.write("}");
+                    },
+                    None => {
+                        lines.scope_next_line(|l| body.write_tree(l));
+                        lines.write_minus(body.to_text().len());
+                    },
+                }
+            },
+            /*
             ExprKind::StructDef { fields } => panic!(),
             ExprKind::StructInit { fields, span } => panic!(),
             ExprKind::TupleStructDef { fields, span } => panic!(),
             ExprKind::Union { span } => panic!(),
             ExprKind::Enum { span } => panic!(),
             ExprKind::OptionShort { ty, span } => panic!(),
-            ExprKind::Block { stmts } => panic!(),
             */
+            ExprKind::Block { stmts } => {
+                lines.write("{");
+                let start = lines.get_cur_offset();
+                let end = lines.scope_next_line(|l| {
+                    for s in stmts {
+                        s.write_tree(l)
+                    }
+                    l.get_cur_offset()
+                });
+                lines.write_minus(end - start);
+                lines.write("}");
+            },
             ExprKind::Dot { lhs, rhs } => {
                 lines.scope_next_line(|l| lhs.write_tree(l));
                 lines.write_minus(lhs.to_text().len());
@@ -1148,11 +1428,28 @@ impl Expr {
                         .collect::<String>()
                 ));
             },
-            /*
-            ExprKind::PreOp { kind, expr, span } => panic!(),
-            ExprKind::BinOp { lhs, op, rhs } => panic!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => panic!(),
-            */
+            ExprKind::PreOp { kind, expr } => panic!(),
+            ExprKind::BinOp { lhs, op, rhs } => {
+                lines.scope_next_line(|l| lhs.write_tree(l));
+                lines.write_minus(lhs.to_text().len());
+                lines.write(op.to_binop_text());
+                lines.scope_next_line(|l| rhs.write_tree(l));
+                lines.write_minus(rhs.to_text().len());
+            },
+            ExprKind::Assign { lhs, rhs } => {
+                lines.scope_next_line(|l| lhs.write_tree(l));
+                lines.write_minus(lhs.to_text().len());
+                lines.write("=");
+                lines.scope_next_line(|l| rhs.write_tree(l));
+                lines.write_minus(rhs.to_text().len());
+            },
+            ExprKind::BinOpAssign { lhs, op, rhs } => {
+                lines.scope_next_line(|l| lhs.write_tree(l));
+                lines.write_minus(lhs.to_text().len());
+                lines.write(op.to_binop_assign_text());
+                lines.scope_next_line(|l| rhs.write_tree(l));
+                lines.write_minus(rhs.to_text().len());
+            },
             k => panic!("{:?}", k),
         }
     }
@@ -1168,26 +1465,11 @@ mod tests {
         println!("{:?}", code);
         println!(
             "{:?}",
-            (0..code.len()).map(|x| if x % 5 == 0 { '^' } else { ' ' }).collect::<String>()
+            (0..code.len()).map(|x| if x % 5 == 0 { '.' } else { ' ' }).collect::<String>()
         );
-        let res = let_(Lexer::new(code));
+        let res = let_().run(Lexer::new(code));
         match res {
-            Ok(ok) => panic!("OK: {:#?}", ok),
-            Err(e) | Fatal(e) => panic!("{}", e.display(code)),
-        }
-    }
-
-    #[test]
-    fn test_let_2() {
-        let code = " let add = (a, b) -> a + b; ";
-        println!("{:?}", code);
-        println!(
-            "{:?}",
-            (0..code.len()).map(|x| if x % 5 == 0 { '^' } else { ' ' }).collect::<String>()
-        );
-        let res = let_(Lexer::new(code));
-        match res {
-            Ok(ok) => panic!("OK: {:#?}", ok),
+            Ok(ok) => println!("OK: {:#?}", ok),
             Err(e) | Fatal(e) => panic!("{}", e.display(code)),
         }
     }

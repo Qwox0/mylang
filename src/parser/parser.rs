@@ -2,9 +2,10 @@ use super::{
     lexer::{Lexer, Span, Token},
     result_with_fatal::ResultWithFatal::*,
     util::TupleMap0,
-    ws0, ws1, Expr, Stmt,
+    ws0, ws1, Expr, LetMarkerKind, Stmt,
 };
 use crate::parser::result_with_fatal::ResultWithFatal;
+use core::fmt;
 use std::{ops::ControlFlow, rc::Rc};
 
 /// always returns [`Ok`] variant
@@ -16,9 +17,10 @@ macro_rules! always {
 
 macro_rules! err {
     ($kind:ident $( ( $( $field:expr ),* $(,)? ) )? , $span:expr) => {
-        Err(PError { kind: PErrKind::$kind $( ( $($field),* ) )?, span: $span })
+        Err(PError::new(PErrKind::$kind $( ( $($field),* ) )?, $span))
     };
 }
+pub(crate) use err;
 
 #[derive(Debug)]
 pub enum PErrKind {
@@ -30,7 +32,7 @@ pub enum PErrKind {
     MissingLetIdent,
     /// `let mut mut x;`
     /// `        ^^^`
-    DoubleLetMarker(Token),
+    DoubleLetMarker(LetMarkerKind),
     /// `let x x;`
     /// `      ^`
     TooManyLetIdents(Span),
@@ -40,15 +42,43 @@ pub enum PErrKind {
     Tmp(&'static str, Span),
 }
 
-#[derive(Debug)]
 pub struct PError {
     pub kind: PErrKind,
     pub span: Span,
+
+    #[cfg(debug_assertions)]
+    pub context: anyhow::Error,
+}
+
+impl std::fmt::Debug for PError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut f = f.debug_struct("PError");
+        let f = f.field("kind", &self.kind).field("span", &self.span);
+        #[cfg(debug_assertions)]
+        let f = f.field("context", &format!("{:#}", &self.context));
+        f.finish()
+    }
 }
 
 impl PError {
     pub fn new(kind: PErrKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            #[cfg(debug_assertions)]
+            context: anyhow::Error::msg("root"),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn add_context(self, context: impl fmt::Display + Send + Sync + 'static) -> Self {
+        let context = self.context.context(context);
+        Self { context, ..self }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn add_context(self, _context: impl fmt::Display + Send + Sync + 'static) -> Self {
+        self
     }
 }
 
@@ -355,10 +385,12 @@ impl<T: 'static> Parser<T> {
     /// ```
     pub fn sep_by1<Sep: 'static>(self, sep: Parser<Sep>) -> Parser<Vec<T>> {
         Parser::new(move |lex| {
-            let (first, mut lex) = self.run(lex)?;
+            let val = self.clone().context("sep_by value");
+            let sep = sep.clone().context("seperator");
+            let (first, mut lex) = val.run(lex)?;
             let mut vec = vec![first];
             loop {
-                match sep.clone().and_r(self.clone()).run(lex) {
+                match sep.clone().and_r(val.clone()).run(lex) {
                     Ok((t, new_lex)) => {
                         vec.push(t);
                         lex = new_lex;
@@ -502,6 +534,16 @@ impl<T: 'static> Parser<T> {
             res => res,
         })
     }
+
+    //pub fn context(self, context: impl fmt::Display + Send + Sync + 'static) ->
+    // Self {
+    pub fn context(self, context: impl fmt::Display + Send + Sync + Clone + 'static) -> Self {
+        Parser::new(move |lex| match self.run(lex) {
+            Ok(ok) => Ok(ok),
+            Err(e) => Err(e.add_context(context.clone())),
+            Fatal(e) => Fatal(e.add_context(context.clone())),
+        })
+    }
 }
 
 /// ```text
@@ -605,7 +647,6 @@ impl PError {
 
         match self.kind {
             PErrKind::UnexpectedToken(Token { span, .. })
-            | PErrKind::DoubleLetMarker(Token { span, .. })
             | PErrKind::TooManyLetIdents(span)
             | PErrKind::Tmp(_, span) => {
                 let err_start = span.start - line_start;
@@ -617,6 +658,9 @@ impl PError {
             },
             _ => (),
         }
+
+        #[cfg(debug_assertions)]
+        buf.push_str(&format!("\nCONTEXT: {:?}", self.context));
 
         buf
     }
