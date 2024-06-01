@@ -1,6 +1,9 @@
 use crate::parser::LitKind;
 use core::fmt;
-use std::ops::{Index, Range};
+use std::{
+    mem,
+    ops::{Deref, Index, Range},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentType {
@@ -234,10 +237,32 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Code<'a>(pub &'a str);
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Code(pub str);
 
-impl<'a> Index<Span> for Code<'a> {
+impl Code {
+    pub fn new<'c>(code: &'c str) -> &'c Code {
+        // SAFETY: `Code` is identical to `str`
+        unsafe { mem::transmute(code) }
+    }
+}
+
+impl fmt::Display for &Code {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", &self.0)
+    }
+}
+
+impl Deref for Code {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Index<Span> for &Code {
     type Output = str;
 
     fn index(&self, span: Span) -> &Self::Output {
@@ -284,7 +309,7 @@ pub struct Lexer<'c> {
 }
 
 impl<'c> Lexer<'c> {
-    pub fn new(code: &'c str) -> Lexer<'c> {
+    pub fn new(code: &'c Code) -> Lexer<'c> {
         let mut lex = Self { code: Cursor::new(code) };
         if lex.peek().is_some_and(|t| t.kind == TokenKind::Whitespace) {
             lex.advance();
@@ -292,7 +317,7 @@ impl<'c> Lexer<'c> {
         lex
     }
 
-    pub fn get_code(&self) -> Code<'c> {
+    pub fn get_code(&self) -> &'c Code {
         self.code.code
     }
 
@@ -306,6 +331,10 @@ impl<'c> Lexer<'c> {
 
     pub fn span_to(&self, other: Lexer<'_>) -> Span {
         self.pos_span().join(other.pos_span())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.peek().is_none()
     }
 
     pub fn next(&mut self) -> Option<Token> {
@@ -534,13 +563,13 @@ impl<'c> Iterator for Lexer<'c> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor<'c> {
-    code: Code<'c>,
+    code: &'c Code,
     pos: usize,
 }
 
 impl<'c> Cursor<'c> {
-    pub fn new(code: &'c str) -> Cursor<'c> {
-        Cursor { code: Code(code), pos: 0 }
+    pub fn new(code: &'c Code) -> Cursor<'c> {
+        Cursor { code, pos: 0 }
     }
 
     pub fn next(&mut self) -> Option<char> {

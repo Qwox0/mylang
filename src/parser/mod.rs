@@ -6,14 +6,9 @@ use self::{
     result_with_fatal::ResultWithFatal,
 };
 use crate::parser::parser::choice;
-use const_for::const_for;
 use lexer::{Lexer, Span, Token, TokenKind};
 use parser::opt;
 use result_with_fatal::ResultWithFatal::*;
-use std::{
-    mem::{self, MaybeUninit},
-    ptr,
-};
 
 pub mod lexer;
 pub mod parser;
@@ -163,17 +158,24 @@ pub fn comma_chain<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
 #[derive(Debug, Clone)]
 pub enum StmtKind {
     /// `let mut rec <name> `(`: <ty>`)?` `(`= <rhs>`)`;`
-    Let { markers: LetMarkers, ident: Ident, ty: Option<Box<Expr>>, kind: LetKind },
+    Let {
+        markers: LetMarkers,
+        ident: Ident,
+        ty: Option<Box<Expr>>,
+        kind: LetKind,
+    },
 
     /// `<expr>;`
     Semicolon(Box<Expr>),
+
+    Expr(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
 pub struct Stmt {
-    kind: StmtKind,
+    pub kind: StmtKind,
     #[allow(unused)]
-    span: Span,
+    pub span: Span,
 }
 
 impl From<(StmtKind, Span)> for Stmt {
@@ -183,7 +185,9 @@ impl From<(StmtKind, Span)> for Stmt {
 }
 
 pub fn stmt() -> Parser<Stmt> {
-    let semicolon = expr().and_l(tok!(;)).map(|expr| StmtKind::Semicolon(Box::new(expr)));
+    let semicolon = expr().map(Box::new).and(opt(tok!(;))).map(|(expr, semi)| {
+        if semi.is_some() { StmtKind::Semicolon(expr) } else { StmtKind::Expr(expr) }
+    });
     let_().or(semicolon).to_stmt().ws0()
 }
 
@@ -366,8 +370,8 @@ pub enum ExprKind {
 
 #[derive(Debug, Clone)]
 pub struct Expr {
-    kind: ExprKind,
-    span: Span,
+    pub kind: ExprKind,
+    pub span: Span,
 }
 
 impl From<(ExprKind, Span)> for Expr {
@@ -680,7 +684,7 @@ pub fn expr_paren() -> Parser<ExprKind> {
     let tuple_or_paren = comma_chain_no_trailing_comma(expr())
         .and(opt(tok!(,).ws0()))
         .map(|(elements, suffix_comma)| match suffix_comma {
-            Some(_) if elements.len() == 1 => {
+            None if elements.len() == 1 => {
                 let expr = elements.into_iter().next().map(Box::new).expect("len == 1");
                 ExprKind::Parenthesis { expr }
             },
@@ -849,19 +853,6 @@ impl FactorExt {
             },
         }
     }
-}
-
-const fn array_concat<T, const N: usize, const M: usize>(arr1: [T; N], arr2: [T; M]) -> [T; N + M] {
-    let mut out: [MaybeUninit<T>; N + M] = MaybeUninit::uninit_array();
-    const_for!(idx in 0..N => {
-        out[idx].write(unsafe { ptr::read(&arr1[idx] as *const T) });
-    });
-    const_for!(idx in 0..M => {
-        out[N + idx].write(unsafe { ptr::read(&arr1[idx] as *const T) });
-    });
-    mem::forget(arr1);
-    mem::forget(arr2);
-    unsafe { MaybeUninit::array_assume_init(out) }
 }
 
 /// All Tokens which could end the factor extension chain.
@@ -1198,6 +1189,7 @@ impl Stmt {
                 )
             },
             StmtKind::Semicolon(expr) => format!("{};", expr.to_text()),
+            StmtKind::Expr(expr) => expr.to_text(),
         }
     }
 
@@ -1229,11 +1221,11 @@ impl Stmt {
                 }
             },
             StmtKind::Semicolon(expr) => {
+                lines.scope_next_line(|l| expr.write_tree(l));
                 lines.write(&"-".repeat(len - 1));
                 lines.write(";");
-                lines.next_line();
-                expr.write_tree(lines)
             },
+            StmtKind::Expr(expr) => expr.write_tree(lines),
         }
     }
 
@@ -1355,23 +1347,33 @@ impl Expr {
                     .intersperse(",".to_string())
                     .collect::<String>()
             ),
-            ExprKind::Tuple { elements } => format!(
-                "({})",
-                elements
-                    .iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
             */
+            ExprKind::Tuple { elements } => {
+                lines.write("(");
+                for (idx, e) in elements.into_iter().enumerate() {
+                    if idx != 0 {
+                        lines.write(",");
+                    }
+
+                    lines.scope_next_line(|l| e.write_tree(l));
+                    lines.write_minus(e.to_text().len());
+                }
+                lines.write(")");
+            },
+            ExprKind::Parenthesis { expr } => {
+                lines.write("(");
+                lines.scope_next_line(|l| expr.write_tree(l));
+                lines.write_minus(expr.to_text().len());
+                lines.write(")");
+            },
             ExprKind::Fn { params, ret_type, body } => {
                 lines.write("(");
 
-                let mut print_param = |first: bool, (ident, ty): &(Ident, Option<Expr>)| {
-                    if !first {
+                for (idx, (ident, ty)) in params.into_iter().enumerate() {
+                    if idx != 0 {
                         lines.write(",");
                     }
+
                     lines.scope_next_line(|l| ident.write_tree(l));
                     lines.write_minus(ident.to_text().len());
                     if let Some(ty) = ty {
@@ -1379,13 +1381,6 @@ impl Expr {
                         lines.scope_next_line(|l| ty.write_tree(l));
                         lines.write_minus(ty.to_text().len());
                     }
-                };
-                let mut params = params.iter();
-                if let Some(p) = params.next() {
-                    print_param(true, p);
-                }
-                for p in params {
-                    print_param(false, p);
                 }
                 lines.write(")->");
                 match ret_type {
@@ -1484,10 +1479,11 @@ impl Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lexer::Code;
 
     #[test]
     fn test_let_() {
-        let code = " let add = ( a , b : int ) -> a + b; ";
+        let code = Code::new(" let add = ( a , b : int ) -> a + b; ");
         println!("{:?}", code);
         println!(
             "{:?}",

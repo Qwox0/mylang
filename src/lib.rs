@@ -1,15 +1,8 @@
-#![allow(incomplete_features)]
 #![feature(try_trait_v2)]
 #![feature(never_type)]
 #![feature(iter_intersperse)]
 #![feature(control_flow_enum)]
-#![feature(generic_const_exprs)]
-#![feature(maybe_uninit_uninit_array)]
-#![feature(const_maybe_uninit_uninit_array)]
-#![feature(maybe_uninit_array_assume_init)]
-#![feature(const_maybe_uninit_array_assume_init)]
-#![feature(const_maybe_uninit_write)]
-#![feature(const_mut_refs)]
-#![feature(const_refs_to_cell)]
 
+pub mod cli;
+pub mod codegen;
 pub mod parser;

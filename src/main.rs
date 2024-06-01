@@ -1,102 +1,103 @@
-use mylang::parser::{
-    lexer::{Lexer, Token, TokenKind},
-    parser::{PErrKind, PError},
-    result_with_fatal::ResultWithFatal,
-    stmt, Stmt,
+use inkwell::context::Context;
+use mylang::{
+    cli::{Cli, Command, DebugOptions, RunScriptArgs},
+    codegen,
+    parser::{
+        lexer::{Code, Lexer, Token, TokenKind},
+        parser::{PErrKind, PError},
+        result_with_fatal::ResultWithFatal,
+        stmt, ws0, ws1, Stmt, StmtKind,
+    },
 };
-use ResultWithFatal::*;
+use std::{io::Read, path::PathBuf};
 
 fn main() {
-    #[allow(unused)]
-    let code = r#"
-// This is a normal comment
-/* This is also a normal comment */
-//!This is a inner doc comment
-/*! This is also a inner doc comment */
+    let cli = Cli::parse();
 
-/*
-    /*
-        /*
-            Comment in a comment in a comment
-        */
-    */
-*/
+    println!("{:#?}", cli);
 
-// type: `i32 -> i32`
-let square1 = (x: i32) -> i32 {
-    x * x
-};
-let square4 = <T: Mul<T>>(x: T) -> x * x;
-let square9 = x -> x * x; // automatic infer generic
+    match cli.command {
+        Command::RunScript(RunScriptArgs { script }) => {
+            run_script(Code::new(&read_code_file(script)), cli.debug)
+        },
+        Command::Build { build_script } => todo!("`build` command"),
+        Command::Compile { file } => todo!("`compile` command"),
+        Command::Repl {} => todo!("`repl` command"),
+        Command::Check {} => todo!("`check` command"),
+        Command::Clean {} => todo!("`clean` command"),
+    }
+}
 
-let MyStruct = <T> -> struct {
-    x: T,
-};
+fn read_code_file(path: PathBuf) -> String {
+    fn inner(path: PathBuf) -> Result<String, std::io::Error> {
+        let mut buf = String::new();
+        std::fs::File::open(path)?.read_to_string(&mut buf)?;
+        Ok(buf)
+    }
+    inner(path).unwrap_or_else(|e| {
+        Cli::print_help().unwrap();
+        eprintln!("\nERROR: {}", e);
+        std::process::exit(1);
+    })
+}
 
-/// this is the main function
-let main = -> {
-    let mut a = -3.1415;
-    a = a * -1.as<f32>;
-    a += 0.5;
-    let my_char = 'a';
-    let my_str = "hello world";
+fn run_script(code: &Code, debug: Option<DebugOptions>) {
+    println!("+++ CODE START\n\"{}\"\n+++ CODE END", code);
 
-    let a = Some(1);
-    let a = a.map(a -> a + 1).unwrap_or_else(-> 1);
-};
-"#;
-
-    let code = r#"
-let curry = a -> b -> a + b;
-
-let add = (a, b) -> a + b;
-
-    let mut rec a = a.add(1):add(1):String.from_int().len();
-//  let mut rec - = ---------------------------------------;
-//              a   -------------------------------------()
-//                  ---------------------------------.---
-//                  -------------------------------() len
-//                  ---------------:---------------
-//                  ------------(1) ------.--------
-//                  --------:---    String from_int
-//                  -----(1) add
-//                  -.---
-//                  a add
-
-/// this is the main function
-let main = -> {
-    let rec a: int = 1;
-    let mut a = a;
-    let a: u8 = a.add(1);
-};"#;
-    println!("+++ CODE START\n{}\n+++ CODE END", code);
+    if debug == Some(DebugOptions::Tokens) {
+        debug_tokens(code);
+        std::process::exit(0);
+    }
 
     let now = std::time::Instant::now();
-    let res = parse(code);
+    let res = parse_into_vec(code);
     let took = now.elapsed();
 
-    let exprs = res.unwrap_or_else(|e| {
+    let stmts = res.unwrap_or_else(|e| {
         eprintln!("{}", e.display(code));
         panic!("ERROR")
     });
 
-    for e in exprs {
-        println!("{:#?}", e);
-        println!("> {}", e.to_text());
-        e.print_tree();
-        println!("\n");
-    }
-
     println!(
-        "took: {}ms {}us {}ns",
+        "+++ PARSING took: {}ms {}us {}ns",
         took.as_millis(),
         took.as_micros() % 1000,
         took.as_nanos() % 1000
     );
+
+    if debug == Some(DebugOptions::Ast) {
+        for e in stmts {
+            println!("\n{:#?}", e);
+            println!("> {}", e.to_text());
+            e.print_tree();
+        }
+        std::process::exit(0);
+    }
+
+    println!("+++ CODEGEN LLVM START");
+
+    let context = Context::create();
+    let mut compiler = codegen::Compiler::new_module(&context, code, "debug");
+
+    for stmt in stmts {
+        match stmt.kind {
+            StmtKind::Let { markers, ident, ty, kind } => {
+                let f = compiler.compile_let(ident, kind).unwrap();
+                f.print_to_stderr();
+            },
+            StmtKind::Semicolon(_) => todo!(),
+            StmtKind::Expr(expr) => {
+                let out = compiler.compile_repl_expr(&expr).unwrap();
+                out.print_to_stderr();
+                unsafe { out.delete() };
+            },
+        }
+    }
+
     println!("END");
 }
 
-fn debug_lex(code: &str, cer: impl Iterator<Item = Token>) {
+fn debug_lex(code: &Code, cer: impl Iterator<Item = Token>) {
     let mut full = String::new();
     let mut prev_was_ident = false;
 
@@ -118,7 +119,7 @@ fn debug_lex(code: &str, cer: impl Iterator<Item = Token>) {
     println!("+++ full code:\n{}", full);
 }
 
-pub fn debug_tokens(code: &str) {
+pub fn debug_tokens(code: &Code) {
     let lex = Lexer::new(code).filter(|t| {
         !matches!(
             t.kind,
@@ -129,12 +130,18 @@ pub fn debug_tokens(code: &str) {
     debug_lex(code, lex);
 }
 
-pub fn parse(code: &str) -> ResultWithFatal<Vec<Stmt>, PError> {
+pub fn parse_into_vec(code: &Code) -> ResultWithFatal<Vec<Stmt>, PError> {
     //debug_tokens(code);
 
     let mut lex = Lexer::new(code);
 
+    if let ResultWithFatal::Ok((_, new_lex)) = ws0().run(lex) {
+        lex = new_lex;
+    }
+
     let mut stmts = Vec::new();
+
+    use ResultWithFatal::*;
 
     loop {
         match stmt().run(lex) {
@@ -147,5 +154,7 @@ pub fn parse(code: &str) -> ResultWithFatal<Vec<Stmt>, PError> {
             Fatal(e) => return Fatal(e),
         }
     }
+    assert!(lex.is_empty(), "The lexer must parse the entire input!");
+
     Ok(stmts)
 }

@@ -1,5 +1,5 @@
 use super::{
-    lexer::{Lexer, Span, Token},
+    lexer::{Code, Lexer, Span, Token},
     result_with_fatal::ResultWithFatal::*,
     util::TupleMap0,
     ws0, ws1, Expr, LetMarkerKind, Stmt,
@@ -592,7 +592,7 @@ impl<T, P: Parser<T> + Clone> ParserChoice<T> for [P] {
 */
 
 impl PError {
-    pub fn display(&self, code: &str) -> String {
+    pub fn display(&self, code: &Code) -> String {
         let mut buf = String::new();
         buf.push_str(&format!("ERROR: {:?}\n", self));
         /*
