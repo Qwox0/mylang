@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use mylang::{
     cli::{Cli, Command, DebugOptions, RunScriptArgs},
-    codegen::{self, llvm::Compiler},
+    codegen::{self},
     parser::{
         lexer::{Code, Lexer, Token, TokenKind},
         parser::{PErrKind, PError},
@@ -33,8 +33,8 @@ fn main() {
 
             for stmt in stmts {
                 match stmt.kind {
-                    StmtKind::Let { markers, ident, ty, kind } => {
-                        let _f = compiler.compile_let(ident, kind, code.as_ref()).unwrap();
+                    StmtKind::VarDecl { markers, ident, kind } => {
+                        let _f = compiler.compile_var_decl(ident, kind, code.as_ref()).unwrap();
                     },
                     StmtKind::Semicolon(_) => todo!(),
                     StmtKind::Expr(expr) => panic!("top-level expressions are not allowed"),
@@ -75,8 +75,8 @@ fn main() {
 
                 for stmt in parse(code, cli.debug) {
                     match stmt.kind {
-                        StmtKind::Let { markers, ident, ty, kind } => {
-                            let _f = compiler.compile_let(ident, kind, code).unwrap();
+                        StmtKind::VarDecl { markers, ident, kind } => {
+                            let _f = compiler.compile_var_decl(ident, kind, code).unwrap();
                         },
                         StmtKind::Semicolon(_) => todo!(),
                         StmtKind::Expr(expr) => {

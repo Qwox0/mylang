@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use crate::parser::{
-    lexer::Code, BinOpKind, Expr, ExprKind, Ident, LetKind, LitKind, Stmt, StmtKind, Type,
+    lexer::Code, BinOpKind, Expr, ExprKind, Ident, LitKind, Stmt, StmtKind, Type, VarDeclKind,
 };
 use inkwell::{
     builder::{Builder, BuilderError},
@@ -20,10 +20,7 @@ use inkwell::{
     },
     OptimizationLevel,
 };
-use std::{
-    collections::HashMap,
-    mem::{uninitialized, MaybeUninit},
-};
+use std::{collections::HashMap, mem::MaybeUninit};
 
 #[derive(Debug)]
 pub enum CError {
@@ -87,7 +84,7 @@ impl<'ctx> Compiler<'ctx> {
     /// [`FloatValue`]
     pub fn compile_stmt(&self, stmt: &Stmt, code: &Code) -> Result<FloatValue<'_>, CError> {
         match &stmt.kind {
-            StmtKind::Let { markers, ident, ty, kind } => todo!(),
+            StmtKind::VarDecl { markers, ident, kind } => todo!(),
             StmtKind::Semicolon(expr) => todo!(),
             StmtKind::Expr(expr) => self.compile_expr_to_float(&expr, code),
         }
@@ -155,13 +152,16 @@ impl<'ctx> Compiler<'ctx> {
         }
     }
 
-    pub fn compile_let(
+    pub fn compile_var_decl(
         &mut self,
         ident: Ident,
-        let_kind: LetKind,
+        kind: VarDeclKind,
         code: &Code,
     ) -> Result<FunctionValue<'ctx>, CError> {
-        let LetKind::Init(init) = let_kind else { todo!("decl") };
+        let init = match kind {
+            VarDeclKind::WithTy { ty, init } => init.unwrap_or_else(|| todo!("decl")),
+            VarDeclKind::InferTy { init } => init,
+        };
         match init.kind {
             ExprKind::Ident => todo!(),
             ExprKind::Literal(_) => todo!(),
@@ -248,7 +248,7 @@ impl<'ctx> Compiler<'ctx> {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => todo!(),
             ExprKind::Parenthesis { expr } => self.compile_expr_to_float(expr, code),
-            ExprKind::Block { stmts } => todo!(),
+            ExprKind::Block { stmts } => todo!("Block"),
             ExprKind::StructDef(_) => todo!(),
             ExprKind::StructInit { name, fields } => todo!(),
             ExprKind::TupleStructDef(_) => todo!(),

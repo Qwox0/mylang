@@ -2,7 +2,7 @@ use super::{
     lexer::{Code, Lexer, Span, Token},
     result_with_fatal::ResultWithFatal::*,
     util::TupleMap0,
-    ws0, ws1, Expr, LetMarkerKind, Stmt,
+    ws0, ws1, Expr, Stmt, VarDeclMarkerKind,
 };
 use crate::parser::result_with_fatal::ResultWithFatal;
 use core::fmt;
@@ -14,6 +14,7 @@ macro_rules! always {
         f(|lex| Ok(($val, lex)))
     };
 }
+pub(crate) use always;
 
 macro_rules! err {
     ($kind:ident $( ( $( $field:expr ),* $(,)? ) )? , $span:expr) => {
@@ -32,7 +33,7 @@ pub enum PErrKind {
     MissingLetIdent,
     /// `let mut mut x;`
     /// `        ^^^`
-    DoubleLetMarker(LetMarkerKind),
+    DoubleLetMarker(VarDeclMarkerKind),
     /// `let x x;`
     /// `      ^`
     TooManyLetIdents(Span),

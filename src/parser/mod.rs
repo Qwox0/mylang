@@ -2,7 +2,7 @@
 //use self::util::TupleMap0;
 use self::{
     debug::TreeLines,
-    parser::{err, f, peek, PErrKind, PError, PResult, Parser},
+    parser::{always, err, f, peek, PErrKind, PError, PResult, Parser},
     result_with_fatal::ResultWithFatal,
 };
 use crate::parser::parser::choice;
@@ -115,6 +115,7 @@ macro_rules! tok {
     (.&) => { tok(TokenKind::DotAmpersand).context("Token: `.&`") };
     (,) => { tok(TokenKind::Comma).context("Token: `,`") };
     (:) => { tok(TokenKind::Colon).context("Token: `:`") };
+    (:=) => { tok(TokenKind::ColonEq).context("Token: `:=`") };
     (;) => { tok(TokenKind::Semicolon).context("Token: `;`") };
     (?) => { tok(TokenKind::Question).context("Token: `?`") };
     (#) => { tok(TokenKind::Pound).context("Token: `#`") };
@@ -138,7 +139,7 @@ pub fn keyword(keyword: &'static str) -> Parser<&'static str> {
 
 /// TODO: "if", "match", "for", "while"
 const KEYWORDS: &[&'static str] =
-    &["let", "mut", "rec", "struct", "union", "enum", "unsafe", "true", "false"];
+    &["mut", "rec", "struct", "union", "enum", "unsafe", "true", "false"];
 
 /// (`p` (,`p`)* )?
 pub fn comma_chain_no_trailing_comma<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
@@ -157,12 +158,14 @@ pub fn comma_chain<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
 /// [`Expr`] but always returning `()`
 #[derive(Debug, Clone)]
 pub enum StmtKind {
-    /// `let mut rec <name> `(`: <ty>`)?` `(`= <rhs>`)`;`
-    Let {
-        markers: LetMarkers,
+    /// variable declaration (and optional initialization)
+    /// `mut rec <name>: <ty> = <init>;`
+    /// `mut rec <name>: <ty>;`
+    /// `mut rec <name> := <init>;`
+    VarDecl {
+        markers: VarDeclMarkers,
         ident: Ident,
-        ty: Option<Box<Expr>>,
-        kind: LetKind,
+        kind: VarDeclKind,
     },
 
     /// `<expr>;`
@@ -188,73 +191,82 @@ pub fn stmt() -> Parser<Stmt> {
     let semicolon = expr().map(Box::new).and(opt(tok!(;))).map(|(expr, semi)| {
         if semi.is_some() { StmtKind::Semicolon(expr) } else { StmtKind::Expr(expr) }
     });
-    let_().or(semicolon).to_stmt().ws0()
+    var_decl().or(semicolon).to_stmt().ws0()
 }
 
-pub fn let_() -> Parser<StmtKind> {
-    let ty = tok!(:).ws0().and_r_fatal(ty()).context("let type");
-
-    keyword("let")
-        .ws1()
-        .and_r_fatal(let_markers())
-        .and_fatal(ident())
+/// `mut rec <name>: <ty> = <init>;`
+/// `mut rec <name>: <ty>;`
+/// `mut rec <name> := <init>;`
+pub fn var_decl() -> Parser<StmtKind> {
+    let colon = tok!(:)
         .ws0()
-        .and_fatal(opt(ty.ws0()))
-        .and_fatal(let_kind().ws0())
-        .and_l_fatal(tok!(;))
-        .map(|(((markers, ident), ty), kind)| {
-            let ty = ty.map(Box::new);
-            StmtKind::Let { markers, ident, ty, kind }
-        })
-        .context("let statement")
+        .and_r_fatal(ty().ws0())
+        .and(opt(tok!(=).ws0().and_r_fatal(expr())))
+        .map(|(ty, init)| VarDeclKind::WithTy { ty: Box::new(ty), init: init.map(Box::new) })
+        .context("decl with type");
+    let colon_eq = tok!(:=)
+        .ws0()
+        .and_r_fatal(expr())
+        .map(Box::new)
+        .map(|init| VarDeclKind::InferTy { init })
+        .context("decl infer type");
+
+    let after_markers = ident().ws0().and(colon.or(colon_eq)).ws0().and_l(tok!(;));
+
+    let with_markers = var_decl_markers1().and_fatal(after_markers.clone());
+    let without_markers = always!(VarDeclMarkers::default()).and(after_markers);
+    with_markers
+        .or(without_markers)
+        .map(|(markers, (ident, kind))| StmtKind::VarDecl { markers, ident, kind })
+        .context("variable declaration")
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct LetMarkers {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VarDeclMarkers {
     is_mut: bool,
     is_rec: bool,
 }
 
+impl VarDeclMarkers {
+    pub fn is_empty(&self) -> bool {
+        !(self.is_mut || self.is_rec)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-pub enum LetMarkerKind {
+pub enum VarDeclMarkerKind {
     Mut,
     Rec,
 }
 
-pub fn let_markers() -> Parser<LetMarkers> {
-    keyword("mut")
-        .map(|_| LetMarkerKind::Mut)
-        .or(keyword("rec").map(|_| LetMarkerKind::Rec))
-        .ws1()
-        .many0()
-        .flat_map(|vec, lex| {
-            let mut is_mut = false;
-            let mut is_rec = false;
-            for i in vec {
-                match i {
-                    LetMarkerKind::Mut if !is_mut => is_mut = true,
-                    LetMarkerKind::Rec if !is_rec => is_rec = true,
-                    m => return err!(DoubleLetMarker(m), lex.pos_span()),
-                }
+pub fn var_decl_markers1() -> Parser<VarDeclMarkers> {
+    choice([
+        keyword("mut").map(|_| VarDeclMarkerKind::Mut),
+        keyword("rec").map(|_| VarDeclMarkerKind::Rec),
+    ])
+    .ws1()
+    .many1()
+    .flat_map(|vec, lex| {
+        let mut is_mut = false;
+        let mut is_rec = false;
+        for i in vec {
+            match i {
+                VarDeclMarkerKind::Mut if !is_mut => is_mut = true,
+                VarDeclMarkerKind::Rec if !is_rec => is_rec = true,
+                m => return err!(DoubleLetMarker(m), lex.pos_span()),
             }
-            Ok(LetMarkers { is_mut, is_rec })
-        })
+        }
+        Ok(VarDeclMarkers { is_mut, is_rec })
+    })
+    .context("variable declaration markers")
 }
 
 #[derive(Debug, Clone)]
-pub enum LetKind {
-    Decl,
-    Init(Box<Expr>),
-}
-
-pub fn let_kind() -> Parser<LetKind> {
-    let init = tok!(=).ws0().and_r_fatal(expr());
-    opt(init)
-        .map(|a| match a {
-            Some(expr) => LetKind::Init(Box::new(expr)),
-            None => LetKind::Decl,
-        })
-        .context("let kind")
+pub enum VarDeclKind {
+    /// `<name>: <ty> = <init>;`
+    WithTy { ty: Box<Expr>, init: Option<Box<Expr>> },
+    /// `<name> := <init>;`
+    InferTy { init: Box<Expr> },
 }
 
 #[derive(Debug, Clone)]
@@ -1173,19 +1185,19 @@ impl Stmt {
     /// This generates new Code and doesn't read the orignal code!
     pub fn to_text(&self) -> String {
         match &self.kind {
-            StmtKind::Let { markers, ident, ty, kind } => {
-                let LetMarkers { is_mut, is_rec } = markers;
+            StmtKind::VarDecl { markers, ident, kind } => {
+                let VarDeclMarkers { is_mut, is_rec } = markers;
                 format!(
-                    "let{}{} {}{}{};",
-                    if *is_mut { " mut" } else { "" },
-                    if *is_rec { " rec" } else { "" },
+                    "{}{}{}{};",
+                    if *is_mut { "mut " } else { "" },
+                    if *is_rec { "rec " } else { "" },
                     ident.to_text(),
-                    ty.as_ref().map(|ty| format!(":{}", ty.to_text())).unwrap_or_default(),
-                    if let LetKind::Init(rhs) = kind {
-                        format!("={}", rhs.to_text())
-                    } else {
-                        "".to_string()
-                    }
+                    match kind {
+                        VarDeclKind::WithTy { ty, init: Some(init) } =>
+                            format!(": {} = {}", ty.to_text(), init.to_text()),
+                        VarDeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
+                        VarDeclKind::InferTy { init } => format!(" := {}", init.to_text()),
+                    },
                 )
             },
             StmtKind::Semicolon(expr) => format!("{};", expr.to_text()),
@@ -1196,29 +1208,35 @@ impl Stmt {
     pub fn write_tree(&self, lines: &mut TreeLines) {
         let len = self.to_text().len();
         match &self.kind {
-            StmtKind::Let { markers, ident, ty, kind } => {
-                let LetMarkers { is_mut, is_rec } = markers;
+            StmtKind::VarDecl { markers, ident, kind } => {
+                let VarDeclMarkers { is_mut, is_rec } = markers;
                 lines.write(&format!(
-                    "let{}{} ",
-                    if *is_mut { " mut" } else { "" },
-                    if *is_rec { " rec" } else { "" }
+                    "{}{}",
+                    if *is_mut { "mut " } else { "" },
+                    if *is_rec { "rec " } else { "" }
                 ));
 
                 lines.scope_next_line(|l| ident.write_tree(l));
-                lines.write(&format!("{}", "-".repeat(ident.span.len())));
+                lines.write_minus(ident.span.len());
 
-                if let Some(ty) = ty {
-                    lines.write(":");
-                    lines.scope_next_line(|l| ty.write_tree(l));
-                    lines.write(&"-".repeat(ty.to_text().len()));
+                match kind {
+                    VarDeclKind::WithTy { ty, init } => {
+                        lines.write(": ");
+                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.write_minus(ty.span.len());
+                        if let Some(init) = init {
+                            lines.write(": ");
+                            lines.scope_next_line(|l| init.write_tree(l));
+                            lines.write_minus(init.span.len());
+                        }
+                    },
+                    VarDeclKind::InferTy { init } => {
+                        lines.write(" := ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
                 }
-
-                if let LetKind::Init(rhs) = kind {
-                    lines.write("=");
-                    lines.scope_next_line(|l| rhs.write_tree(l));
-                    lines.write(&"-".repeat(rhs.to_text().len()));
-                    lines.write(";");
-                }
+                lines.write(";");
             },
             StmtKind::Semicolon(expr) => {
                 lines.scope_next_line(|l| expr.write_tree(l));
@@ -1483,13 +1501,13 @@ mod tests {
 
     #[test]
     fn test_let_() {
-        let code = Code::new(" let add = ( a , b : int ) -> a + b; ");
+        let code = Code::new(" add := ( a , b : int ) -> a + b; ");
         println!("{:?}", code);
         println!(
             "{:?}",
             (0..code.len()).map(|x| if x % 5 == 0 { '.' } else { ' ' }).collect::<String>()
         );
-        let res = let_().run(Lexer::new(code));
+        let res = var_decl().run(Lexer::new(code));
         match res {
             Ok(ok) => println!("OK: {:#?}", ok),
             Err(e) | Fatal(e) => panic!("{}", e.display(code)),

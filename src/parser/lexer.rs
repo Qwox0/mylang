@@ -125,6 +125,8 @@ pub enum TokenKind {
     Comma,
     /// `:`
     Colon,
+    /// `:=`
+    ColonEq,
     /// `;`
     Semicolon,
     /// `?`
@@ -454,7 +456,10 @@ impl<'c> Lexer<'c> {
                 '&' => TokenKind::DotAmpersand,
             },
             ',' => TokenKind::Comma,
-            ':' => TokenKind::Colon,
+            ':' => maybe_followed_by! {
+                default: TokenKind::Colon,
+                '=' => TokenKind::ColonEq,
+            },
             ';' => TokenKind::Semicolon,
             '?' => TokenKind::Question,
             '#' => TokenKind::Pound,
