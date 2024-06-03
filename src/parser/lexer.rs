@@ -248,6 +248,12 @@ impl Code {
     }
 }
 
+impl AsRef<Code> for String {
+    fn as_ref(&self) -> &Code {
+        Code::new(self)
+    }
+}
+
 impl fmt::Display for &Code {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", &self.0)

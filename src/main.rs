@@ -1,15 +1,18 @@
 use inkwell::context::Context;
 use mylang::{
     cli::{Cli, Command, DebugOptions, RunScriptArgs},
-    codegen,
+    codegen::{self, llvm::Compiler},
     parser::{
         lexer::{Code, Lexer, Token, TokenKind},
         parser::{PErrKind, PError},
         result_with_fatal::ResultWithFatal,
-        stmt, ws0, ws1, Stmt, StmtKind,
+        stmt, ws0, Stmt, StmtKind,
     },
 };
-use std::{io::Read, path::PathBuf};
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 fn main() {
     let cli = Cli::parse();
@@ -18,18 +21,87 @@ fn main() {
 
     match cli.command {
         Command::RunScript(RunScriptArgs { script }) => {
-            run_script(Code::new(&read_code_file(script)), cli.debug)
+            //run_script(Code::new(&read_code_file(script)), cli.debug)
+            let code = read_code_file(&script);
+            let stmts = parse(code.as_ref(), cli.debug);
+
+            let context = Context::create();
+            let mut compiler = codegen::llvm::Compiler::new_module(
+                &context,
+                script.file_stem().expect("has filename").to_str().expect("is valid utf-8"),
+            );
+
+            for stmt in stmts {
+                match stmt.kind {
+                    StmtKind::Let { markers, ident, ty, kind } => {
+                        let _f = compiler.compile_let(ident, kind, code.as_ref()).unwrap();
+                    },
+                    StmtKind::Semicolon(_) => todo!(),
+                    StmtKind::Expr(expr) => panic!("top-level expressions are not allowed"),
+                    /*
+                    StmtKind::Expr(expr) => {
+                        let out = compiler.compile_repl_expr(&expr).unwrap();
+                        out.print_to_stderr();
+                        unsafe { out.delete() };
+                    },
+                    */
+                }
+            }
+
+            if cli.debug == Some(DebugOptions::LlvmIrUnoptimized) {
+                compiler.module.print_to_stderr();
+                std::process::exit(0);
+            }
+
+            compiler.run_passes();
+
+            if cli.debug == Some(DebugOptions::LlvmIrOptimized) {
+                compiler.module.print_to_stderr();
+                std::process::exit(0);
+            }
         },
         Command::Build { build_script } => todo!("`build` command"),
         Command::Compile { file } => todo!("`compile` command"),
-        Command::Repl {} => todo!("`repl` command"),
+        Command::Repl {} => {
+            //todo!("`repl` command");
+            let context = Context::create();
+            let mut compiler = codegen::llvm::Compiler::new_module(&context, "repl");
+            loop {
+                print!("\n> ");
+                std::io::stdout().flush().expect("Could flush stdout");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).expect("Could read line from stdin");
+                let code = line.as_ref();
+
+                for stmt in parse(code, cli.debug) {
+                    match stmt.kind {
+                        StmtKind::Let { markers, ident, ty, kind } => {
+                            let _f = compiler.compile_let(ident, kind, code).unwrap();
+                        },
+                        StmtKind::Semicolon(_) => todo!(),
+                        StmtKind::Expr(expr) => {
+                            match compiler.jit_run_expr(&expr, code) {
+                                Ok(out) => println!("=> {}", out),
+                                Err(err) => panic!("ERROR: {:?}", err),
+                            }
+
+                            /*
+                            let out = compiler.compile_repl_expr(&expr).unwrap();
+                            out.print_to_stderr();
+                            unsafe { out.delete() };
+                            */
+                        },
+                    }
+                }
+            }
+        },
         Command::Check {} => todo!("`check` command"),
         Command::Clean {} => todo!("`clean` command"),
     }
 }
 
-fn read_code_file(path: PathBuf) -> String {
-    fn inner(path: PathBuf) -> Result<String, std::io::Error> {
+fn read_code_file(path: &Path) -> String {
+    fn inner(path: &Path) -> Result<String, std::io::Error> {
         let mut buf = String::new();
         std::fs::File::open(path)?.read_to_string(&mut buf)?;
         Ok(buf)
@@ -41,7 +113,7 @@ fn read_code_file(path: PathBuf) -> String {
     })
 }
 
-fn run_script(code: &Code, debug: Option<DebugOptions>) {
+fn parse(code: &Code, debug: Option<DebugOptions>) -> Vec<Stmt> {
     println!("+++ CODE START\n\"{}\"\n+++ CODE END", code);
 
     if debug == Some(DebugOptions::Tokens) {
@@ -66,7 +138,7 @@ fn run_script(code: &Code, debug: Option<DebugOptions>) {
     );
 
     if debug == Some(DebugOptions::Ast) {
-        for e in stmts {
+        for e in stmts.iter() {
             println!("\n{:#?}", e);
             println!("> {}", e.to_text());
             e.print_tree();
@@ -74,27 +146,7 @@ fn run_script(code: &Code, debug: Option<DebugOptions>) {
         std::process::exit(0);
     }
 
-    println!("+++ CODEGEN LLVM START");
-
-    let context = Context::create();
-    let mut compiler = codegen::Compiler::new_module(&context, code, "debug");
-
-    for stmt in stmts {
-        match stmt.kind {
-            StmtKind::Let { markers, ident, ty, kind } => {
-                let f = compiler.compile_let(ident, kind).unwrap();
-                f.print_to_stderr();
-            },
-            StmtKind::Semicolon(_) => todo!(),
-            StmtKind::Expr(expr) => {
-                let out = compiler.compile_repl_expr(&expr).unwrap();
-                out.print_to_stderr();
-                unsafe { out.delete() };
-            },
-        }
-    }
-
-    println!("END");
+    stmts
 }
 
 fn debug_lex(code: &Code, cer: impl Iterator<Item = Token>) {

@@ -56,6 +56,8 @@ pub struct RunScriptArgs {
 pub enum DebugOptions {
     Tokens,
     Ast,
+    LlvmIrUnoptimized,
+    LlvmIrOptimized,
 }
 
 impl Cli {

@@ -5,10 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-clap = { version = "4.5.4", features = ["derive",
-#"wrap_help"
-] }
+clap = { version = "4.5.4", features = ["derive"] }
 const_for = "0.1.4"
-inkwell = { git = "https://github.com/TheDan64/inkwell", features = ["llvm18-0"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", features = [
+    "llvm18-0",
+] }
 #inkwell = { version = "0.4.0" }
 unicode-xid = "0.2.4"
+
+[features]
+use_ptr_values = []
