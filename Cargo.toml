@@ -2,6 +2,7 @@
 name = "mylang"
 version = "0.1.0"
 edition = "2021"
+default-run = "mylang" # TODO: remove
 
 [dependencies]
 anyhow = "1.0.86"
@@ -12,6 +13,7 @@ inkwell = { git = "https://github.com/TheDan64/inkwell", features = [
 ] }
 #inkwell = { version = "0.4.0" }
 unicode-xid = "0.2.4"
+#llvm-sys = "180"
 
 [features]
 use_ptr_values = []

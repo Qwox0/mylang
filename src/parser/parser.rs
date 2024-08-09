@@ -18,7 +18,7 @@ pub(crate) use always;
 
 macro_rules! err {
     ($kind:ident $( ( $( $field:expr ),* $(,)? ) )? , $span:expr) => {
-        Err(PError::new(PErrKind::$kind $( ( $($field),* ) )?, $span))
+        Err(ParseError::new(PErrKind::$kind $( ( $($field),* ) )?, $span))
     };
 }
 pub(crate) use err;
@@ -28,7 +28,7 @@ pub enum PErrKind {
     NoInput,
     UnexpectedToken(Token),
     NotAnIdent,
-    NotAnKeyword,
+    NotAKeyword,
     /// `let mut = ...`
     MissingLetIdent,
     /// `let mut mut x;`
@@ -41,9 +41,10 @@ pub enum PErrKind {
     NotWasFound,
 
     Tmp(&'static str, Span),
+    TODO,
 }
 
-pub struct PError {
+pub struct ParseError {
     pub kind: PErrKind,
     pub span: Span,
 
@@ -51,9 +52,9 @@ pub struct PError {
     pub context: anyhow::Error,
 }
 
-impl std::fmt::Debug for PError {
+impl std::fmt::Debug for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut f = f.debug_struct("PError");
+        let mut f = f.debug_struct("ParseError");
         let f = f.field("kind", &self.kind).field("span", &self.span);
         #[cfg(debug_assertions)]
         let f = f.field("context", &format!("{:#}", &self.context));
@@ -61,7 +62,7 @@ impl std::fmt::Debug for PError {
     }
 }
 
-impl PError {
+impl ParseError {
     pub fn new(kind: PErrKind, span: Span) -> Self {
         Self {
             kind,
@@ -83,7 +84,7 @@ impl PError {
     }
 }
 
-pub type PResult<'l, T> = ResultWithFatal<(T, Lexer<'l>), PError>;
+pub type PResult<'l, T> = ResultWithFatal<(T, Lexer<'l>), ParseError>;
 
 /// This replaces the Parser trait for functions to reduce the extreme compile
 /// times.
@@ -271,7 +272,7 @@ impl<T: 'static> Parser<T> {
     /// ```
     pub fn flat_map<U: 'static>(
         self,
-        f: impl Fn(T, &Lexer<'_>) -> ResultWithFatal<U, PError> + 'static,
+        f: impl Fn(T, &Lexer<'_>) -> ResultWithFatal<U, ParseError> + 'static,
     ) -> Parser<U> {
         Parser::new(move |lex| self.run(lex).and_then(|(t, lex)| Ok((f(t, &lex)?, lex))))
     }
@@ -569,7 +570,7 @@ pub fn peek<T: 'static>(p: Parser<T>) -> Parser<T> {
 
 pub fn choice<T: 'static, const N: usize>(parsers: [Parser<T>; N]) -> Parser<T> {
     Parser::new(move |lex| {
-        let mut err = PError::new(PErrKind::NoInput, lex.pos_span());
+        let mut err = ParseError::new(PErrKind::NoInput, lex.pos_span());
         for p in parsers.iter() {
             match p.run(lex) {
                 Err(e) => err = e,
@@ -592,7 +593,7 @@ impl<T, P: Parser<T> + Clone> ParserChoice<T> for [P] {
 }
 */
 
-impl PError {
+impl ParseError {
     pub fn display(&self, code: &Code) -> String {
         let mut buf = String::new();
         buf.push_str(&format!("ERROR: {:?}\n", self));

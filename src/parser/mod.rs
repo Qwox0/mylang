@@ -2,44 +2,63 @@
 //use self::util::TupleMap0;
 use self::{
     debug::TreeLines,
-    parser::{always, err, f, peek, PErrKind, PError, PResult, Parser},
+    lexer::Code,
+    parser::{always, err, f, peek, PErrKind, PResult, ParseError, Parser},
     result_with_fatal::ResultWithFatal,
 };
 use crate::parser::parser::choice;
 use lexer::{Lexer, Span, Token, TokenKind};
 use parser::opt;
 use result_with_fatal::ResultWithFatal::*;
+use std::str::FromStr;
 
 pub mod lexer;
 pub mod parser;
 pub mod result_with_fatal;
 mod util;
 
-/*
-#[allow(unused)]
-macro_rules! todo {
-    ($msg:literal, $span:expr) => {
-        return Err(PError::Tmp(String::leak(format!("TODO: {}", $msg)), $span))
-    };
+#[derive(Clone)]
+pub struct StmtIter<'c> {
+    lex: Lexer<'c>,
 }
-*/
 
-//pub type PResult<'l, T> = ResultWithFatal<(T, Lexer<'l>), PError>;
-/*
-pub trait ParserOption<T>: Parser<Option<T>> {
-    fn replace_opt_val<U>(self, other: Parser<U>) -> Parser<Option<U>> {
-        move |lex| {
-            let (t, lex) = self(lex)?;
-            Ok(match t {
-                Some(_) => other(lex)?.map0(Some),
-                None => (None, lex),
-            })
-        }
+impl<'c> Iterator for StmtIter<'c> {
+    type Item = ResultWithFatal<Expr, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use ResultWithFatal::*;
+        Some(match stmt().run(self.lex) {
+            Ok((stmt, l)) => {
+                self.lex = l;
+                Ok(stmt)
+            },
+            Err(ParseError { kind: PErrKind::NoInput, .. }) => return None,
+            Err(e) => Err(e),
+            Fatal(e) => Fatal(e),
+        })
     }
 }
 
-impl<T, P: Parser<Option<T>>> ParserOption<T> for P {}
-*/
+impl<'c> StmtIter<'c> {
+    /// Parses top-level items until the end of the [`Code`] or until an
+    /// [`PError`] occurs.
+    pub fn parse(code: &'c Code) -> Self {
+        let mut lex = Lexer::new(code);
+        if let ResultWithFatal::Ok((_, new_lex)) = ws0().run(lex) {
+            lex = new_lex;
+        }
+        Self { lex }
+    }
+}
+
+/// A top-level item
+pub struct Item<'c> {
+    pub markers: DeclMarkers,
+    pub ident: Ident,
+    pub ty: Option<Box<Expr>>,
+    pub value: Box<Expr>,
+    pub code: &'c Code,
+}
 
 /// no whitespace skipping after the token
 pub fn tok_matches(f: impl Fn(&TokenKind) -> bool + 'static) -> Parser<Token> {
@@ -115,6 +134,7 @@ macro_rules! tok {
     (.&) => { tok(TokenKind::DotAmpersand).context("Token: `.&`") };
     (,) => { tok(TokenKind::Comma).context("Token: `,`") };
     (:) => { tok(TokenKind::Colon).context("Token: `:`") };
+    (::) => { tok(TokenKind::ColonColon).context("Token: `::`") };
     (:=) => { tok(TokenKind::ColonEq).context("Token: `:=`") };
     (;) => { tok(TokenKind::Semicolon).context("Token: `;`") };
     (?) => { tok(TokenKind::Question).context("Token: `?`") };
@@ -128,18 +148,69 @@ macro_rules! tok {
     };
 }
 
-pub fn keyword(keyword: &'static str) -> Parser<&'static str> {
+pub fn any_keyword() -> Parser<Keyword> {
     ident_token()
-        .flat_map(move |t, lex| match &lex.get_code()[t.span] {
-            t if t == keyword => Ok(keyword),
-            _ => err!(NotAnKeyword, lex.pos_span()),
+        .flat_map(move |t, lex| {
+            ResultWithFatal::from_res(
+                lex.get_code()[t.span].parse().map_err(|e| ParseError::new(e, lex.pos_span())),
+            )
         })
-        .context(format!("keyword: `{}`", keyword))
+        .context("any_keyword")
 }
 
-/// TODO: "if", "match", "for", "while"
-const KEYWORDS: &[&'static str] =
-    &["mut", "rec", "struct", "union", "enum", "unsafe", "true", "false"];
+pub fn keyword(keyword: Keyword) -> Parser<Keyword> {
+    let text = keyword.as_str();
+    ident_token()
+        .flat_map(move |t, lex| match &lex.get_code()[t.span] {
+            t if t == text => Ok(keyword),
+            _ => err!(NotAKeyword, lex.pos_span()),
+        })
+        .context(format!("keyword: {:?}", keyword))
+}
+
+macro_rules! keywords {
+    ( $($enum_variant:ident = $text:literal),* $(,)? ) => {
+        #[derive(Debug, Clone, Copy)]
+        pub enum Keyword {
+            $($enum_variant),*
+        }
+
+        impl FromStr for Keyword {
+            type Err = PErrKind;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($text => Result::Ok(Keyword::$enum_variant),)*
+                    _ => Result::Err(PErrKind::NotAKeyword)
+                }
+            }
+        }
+
+        impl Keyword {
+            fn as_str(self) -> &'static str {
+                match self {
+                    $(Keyword::$enum_variant => $text,)*
+                }
+            }
+        }
+    };
+}
+
+keywords! {
+    Mut = "mut",
+    Rec = "rec",
+    Struct = "struct",
+    Union = "union",
+    Enum = "enum",
+    Unsafe = "unsafe",
+    True = "true",
+    False = "false",
+    If = "if",
+    Else = "else",
+    Match = "match",
+    For = "for",
+    While = "while",
+}
 
 /// (`p` (,`p`)* )?
 pub fn comma_chain_no_trailing_comma<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
@@ -155,18 +226,10 @@ pub fn comma_chain<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
 
 // -----------------------
 
+/*
 /// [`Expr`] but always returning `()`
 #[derive(Debug, Clone)]
 pub enum StmtKind {
-    /// variable declaration (and optional initialization)
-    /// `mut rec <name>: <ty> = <init>;`
-    /// `mut rec <name>: <ty>;`
-    /// `mut rec <name> := <init>;`
-    VarDecl {
-        markers: VarDeclMarkers,
-        ident: Ident,
-        kind: VarDeclKind,
-    },
 
     /// `<expr>;`
     Semicolon(Box<Expr>),
@@ -191,82 +254,140 @@ pub fn stmt() -> Parser<Stmt> {
     let semicolon = expr().map(Box::new).and(opt(tok!(;))).map(|(expr, semi)| {
         if semi.is_some() { StmtKind::Semicolon(expr) } else { StmtKind::Expr(expr) }
     });
-    var_decl().or(semicolon).to_stmt().ws0()
+    decl().or(semicolon).to_stmt().ws0()
+}
+*/
+
+pub type Stmt = Expr;
+
+fn wrap_semicolons((mut expr, semicolons): (Expr, Vec<Token>)) -> Expr {
+    for semicolon in semicolons {
+        let span = expr.span.join(semicolon.span);
+        expr = Expr { kind: ExprKind::Semicolon(Box::new(expr)), span };
+    }
+    expr
 }
 
-/// `mut rec <name>: <ty> = <init>;`
-/// `mut rec <name>: <ty>;`
-/// `mut rec <name> := <init>;`
-pub fn var_decl() -> Parser<StmtKind> {
+pub fn stmt() -> Parser<Expr> {
+    decl()
+        .to_expr()
+        .or(expr())
+        .ws0()
+        .and(tok!(;).ws0().many1())
+        .map(wrap_semicolons)
+        .context("stmt")
+}
+
+/// `mut rec <name>: <ty> = <init>`
+/// `mut rec <name>: <ty>`
+/// `mut rec <name> := <init>`
+///
+/// `mut rec <name>: <ty> : <init>`
+/// `mut rec <name> :: <init>`
+pub fn decl() -> Parser<ExprKind> {
+    enum Init {
+        Init(Box<Expr>),
+        Const(Box<Expr>),
+    }
+
+    let eq_init = tok!(=).ws0().and_r_fatal(expr()).map(Box::new).map(Init::Init);
+    let colon_init = tok!(:).ws0().and_r_fatal(expr()).map(Box::new).map(Init::Const);
     let colon = tok!(:)
         .ws0()
-        .and_r_fatal(ty().ws0())
-        .and(opt(tok!(=).ws0().and_r_fatal(expr())))
-        .map(|(ty, init)| VarDeclKind::WithTy { ty: Box::new(ty), init: init.map(Box::new) })
+        .and_r_fatal(ty().ws0().map(Box::new))
+        .and(opt(eq_init.or(colon_init)))
+        .map(|(ty, init)| match init {
+            Some(Init::Init(e)) => DeclKind::WithTy { ty, init: Some(e) },
+            Some(Init::Const(init)) => DeclKind::Const { ty: Some(ty), init },
+            None => DeclKind::WithTy { ty, init: None },
+        })
         .context("decl with type");
     let colon_eq = tok!(:=)
         .ws0()
         .and_r_fatal(expr())
-        .map(Box::new)
-        .map(|init| VarDeclKind::InferTy { init })
+        .map(|init| DeclKind::InferTy { init: Box::new(init) })
+        .context("decl infer type");
+    let colon_colon = tok!(::)
+        .ws0()
+        .and_r_fatal(expr())
+        .map(|init| DeclKind::Const { ty: None, init: Box::new(init) })
         .context("decl infer type");
 
-    let after_markers = ident().ws0().and(colon.or(colon_eq)).ws0().and_l(tok!(;));
+    let after_markers = ident().ws0().and(colon.or(colon_eq).or(colon_colon));
 
     let with_markers = var_decl_markers1().and_fatal(after_markers.clone());
-    let without_markers = always!(VarDeclMarkers::default()).and(after_markers);
+    let without_markers = always!(DeclMarkers::default()).and(after_markers);
     with_markers
         .or(without_markers)
-        .map(|(markers, (ident, kind))| StmtKind::VarDecl { markers, ident, kind })
+        .map(|(markers, (ident, kind))| ExprKind::Decl { markers, ident, kind })
         .context("variable declaration")
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct VarDeclMarkers {
+pub struct DeclMarkers {
+    is_pub: bool,
     is_mut: bool,
     is_rec: bool,
 }
 
-impl VarDeclMarkers {
+impl DeclMarkers {
     pub fn is_empty(&self) -> bool {
-        !(self.is_mut || self.is_rec)
+        !(self.is_pub || self.is_mut || self.is_rec)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum VarDeclMarkerKind {
+    Pub,
     Mut,
     Rec,
 }
 
-pub fn var_decl_markers1() -> Parser<VarDeclMarkers> {
+pub fn var_decl_markers1() -> Parser<DeclMarkers> {
     choice([
-        keyword("mut").map(|_| VarDeclMarkerKind::Mut),
-        keyword("rec").map(|_| VarDeclMarkerKind::Rec),
+        keyword(Keyword::Mut).map(|_| VarDeclMarkerKind::Mut),
+        keyword(Keyword::Rec).map(|_| VarDeclMarkerKind::Rec),
     ])
     .ws1()
     .many1()
     .flat_map(|vec, lex| {
+        let mut is_pub = false;
         let mut is_mut = false;
         let mut is_rec = false;
         for i in vec {
             match i {
+                VarDeclMarkerKind::Pub if !is_pub => is_pub = true,
                 VarDeclMarkerKind::Mut if !is_mut => is_mut = true,
                 VarDeclMarkerKind::Rec if !is_rec => is_rec = true,
                 m => return err!(DoubleLetMarker(m), lex.pos_span()),
             }
         }
-        Ok(VarDeclMarkers { is_mut, is_rec })
+        Ok(DeclMarkers { is_pub, is_mut, is_rec })
     })
     .context("variable declaration markers")
 }
 
 #[derive(Debug, Clone)]
-pub enum VarDeclKind {
+pub enum DeclKind {
+    /// `<name>: <ty>;`
     /// `<name>: <ty> = <init>;`
     WithTy { ty: Box<Expr>, init: Option<Box<Expr>> },
     /// `<name> := <init>;`
     InferTy { init: Box<Expr> },
+
+    /// `<name>: <ty> : <init>;`
+    /// `<name> :: <init>;`
+    Const { ty: Option<Box<Expr>>, init: Box<Expr> },
+}
+
+impl DeclKind {
+    pub fn into_ty_val(self) -> (Option<Box<Expr>>, Option<Box<Expr>>) {
+        match self {
+            DeclKind::WithTy { ty, init } => (Some(ty), init),
+            DeclKind::InferTy { init } => (None, Some(init)),
+            DeclKind::Const { ty, init } => (ty, Some(init)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -304,7 +425,7 @@ pub enum ExprKind {
     },
     /// `{ <stmt>`*` }`
     Block {
-        stmts: Vec<Stmt>,
+        stmts: Vec<Expr>,
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
@@ -329,11 +450,6 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Ident,
     },
-    /// [`dot`] : [`dot`]
-    Colon {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
-    },
     /// examples: `<expr>?`, `<expr>.*`
     PostOp {
         kind: PostOpKind,
@@ -345,11 +461,13 @@ pub enum ExprKind {
         idx: Box<Expr>,
     },
 
+    /*
     /// `<func> < <params> >`
     CompCall {
         func: Box<Expr>,
         args: Vec<Expr>,
     },
+    */
     /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
     Call {
         func: Box<Expr>,
@@ -378,6 +496,26 @@ pub enum ExprKind {
         op: BinOpKind,
         rhs: Box<Expr>,
     },
+
+    /// variable declaration (and optional initialization)
+    /// `mut rec <name>: <ty>`
+    /// `mut rec <name>: <ty> = <init>`
+    /// `mut rec <name> := <init>`
+    /// `mut rec <name>: <ty> : <init>`
+    /// `mut rec <name> :: <init>`
+    Decl {
+        markers: DeclMarkers,
+        ident: Ident,
+        kind: DeclKind,
+    },
+
+    If {
+        condition: Box<Expr>,
+        then_body: Box<Expr>,
+        else_body: Option<Box<Expr>>,
+    },
+
+    Semicolon(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -392,14 +530,25 @@ impl From<(ExprKind, Span)> for Expr {
     }
 }
 
+/// doesn't parse `;`!
 pub fn expr() -> Parser<Expr> {
-    assign().or(rvalue()).context("expression")
+    /*if_().or(assign())*/ assign().or(rvalue()).context("expression")
 }
 
 pub type Type = Expr;
 
 pub fn ty() -> Parser<Type> {
     rvalue().context("type")
+}
+
+pub fn if_() -> Parser<Expr> {
+    let expr_parser = ws1().and_r(expr().map(Box::new));
+    keyword(Keyword::If)
+        .and_r_fatal(expr_parser.clone())
+        .and_fatal(expr_parser.clone())
+        .and(opt(ws1().and(keyword(Keyword::Else)).and_r_fatal(expr_parser)))
+        .map(|((condition, then_body), else_body)| ExprKind::If { condition, then_body, else_body })
+        .to_expr()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -610,7 +759,7 @@ pub fn factor(lex: Lexer<'_>) -> PResult<'_, Factor> {
     let (mut factor, mut lex) = factor_start().ws0().context("factor").run(lex)?;
     loop {
         match factor_ext().ws0().run(lex) {
-            Err(PError { kind: PErrKind::NoInput, .. }) | Ok((FactorExt::None, _)) => {
+            Err(ParseError { kind: PErrKind::NoInput, .. }) | Ok((FactorExt::None, _)) => {
                 return Ok((factor, lex));
             },
             Ok((ext, l)) => {
@@ -740,7 +889,21 @@ pub fn tail_function() -> Parser<ExprKind> {
 
 /// parses an expression starting with `{`
 pub fn block() -> Parser<ExprKind> {
-    let stmts = stmt().ws0().many0().map(|stmts| ExprKind::Block { stmts });
+    let item = decl().to_expr().or(expr()).context("block item");
+    let stmts = item
+        .clone()
+        .ws0()
+        .and(tok!(;).ws0().many1())
+        .map(wrap_semicolons)
+        .many0()
+        .and(opt(item.and(tok!(;).ws0().many0()).map(wrap_semicolons)))
+        .ws0()
+        .map(|(mut stmts, ret_expr)| {
+            if let Some(ret_expr) = ret_expr {
+                stmts.push(ret_expr);
+            }
+            ExprKind::Block { stmts }
+        });
     tok!('{').ws0().and_r_fatal(stmts).and_l_fatal(tok!('}')).context("{ ... }")
 }
 
@@ -772,19 +935,19 @@ pub fn custom_struct_def() -> Parser<ExprKind> {
         .and_r_fatal(comma_chain(expr()))
         .and_l_fatal(tok!(')'))
         .map(ExprKind::TupleStructDef);
-    keyword("struct").ws0().and_r_fatal(struct_.or(tuple_struct))
+    keyword(Keyword::Struct).ws0().and_r_fatal(struct_.or(tuple_struct))
 }
 
 /// TODO
 pub fn custom_union_def() -> Parser<ExprKind> {
     let union_ = f(|lex| Ok((ExprKind::Union {}, lex)));
-    keyword("union").ws0().and_r_fatal(union_)
+    keyword(Keyword::Union).ws0().and_r_fatal(union_)
 }
 
 /// TODO
 pub fn custom_enum_def() -> Parser<ExprKind> {
     let enum_ = f(|lex| Ok((ExprKind::Enum {}, lex)));
-    keyword("enum").ws0().and_r_fatal(enum_)
+    keyword(Keyword::Enum).ws0().and_r_fatal(enum_)
 }
 
 /// `MyStruct { a: <expr>, b, }` or
@@ -827,8 +990,8 @@ pub enum FactorExt {
     None,
 
     Dot(Ident),
-    Colon(Box<Expr>),
-    CompCall(Vec<Expr>),
+    //Colon(Box<Expr>),
+    //CompCall(Vec<Expr>),
     Call(Vec<Expr>),
     Index(Box<Expr>),
 
@@ -847,12 +1010,14 @@ impl FactorExt {
             FactorExt::None => lhs,
 
             FactorExt::Dot(i) => new_expr(i.span.end, ExprKind::Dot { lhs: Box::new(lhs), rhs: i }),
+            /*
             FactorExt::Colon(rhs) => {
                 new_expr(rhs.span.end, ExprKind::Colon { lhs: Box::new(lhs), rhs })
             },
             FactorExt::CompCall(args) => {
                 new_expr(lex.get_pos(), ExprKind::CompCall { func: Box::new(lhs), args })
             },
+            */
             FactorExt::Call(args) => {
                 new_expr(lex.get_pos(), ExprKind::Call { func: Box::new(lhs), args })
             },
@@ -955,7 +1120,7 @@ pub enum PostOpKind {
 /// ([`FactorExt::Dot`], [`FactorExt::PostOp`])
 pub fn dot() -> Parser<FactorExt> {
     let addr_of = tok!(&)
-        .and_r_fatal(opt(keyword("mut")))
+        .and_r_fatal(opt(keyword(Keyword::Mut)))
         .map(|t_mut| if t_mut.is_some() { PostOpKind::AddrMutOf } else { PostOpKind::AddrOf })
         .context("factor.&");
     let deref = tok!(*).map(|_| PostOpKind::Deref).context("factor.&");
@@ -972,7 +1137,7 @@ pub fn try_() -> Parser<PostOpKind> {
 
 pub fn force() -> Parser<PostOpKind> {
     tok!(!)
-        .and_r_fatal(opt(keyword("unsafe")))
+        .and_r_fatal(opt(keyword(Keyword::Unsafe)))
         .map(
             |t_unsafe| {
                 if t_unsafe.is_some() { PostOpKind::ForceUnsafe } else { PostOpKind::Force }
@@ -987,20 +1152,26 @@ pub fn force() -> Parser<PostOpKind> {
 /// Otherwise: `1:x.y`
 // `            ^^^^^` ERR: "func `1:x` has no prop `y`"
 pub fn colon() -> Parser<FactorExt> {
+    Parser::new(|l| err!(TODO, l.pos_span()))
+    /*
     let member_access = ident().ws0().sep_by1(tok!(.)).map_with_lex(|d, lex| {
         let mut idents = d.into_iter();
         let first = idents.next().expect("sep_by1").into_expr();
         idents.map(FactorExt::Dot).fold(first, |lhs, dot_rhs| dot_rhs.extend(lhs, &lex)) // TODO: reference should be to an older lexer
     });
     tok!(:).ws0().and_r_fatal(member_access).map(Box::new).map(FactorExt::Colon)
+    */
 }
 
 /// `<` [`expr`], [`expr`], ..., [`expr`], `>`
 pub fn compcall() -> Parser<FactorExt> {
+    Parser::new(|l| err!(TODO, l.pos_span()))
+    /*
     tok!(<)
         .and_r_fatal(comma_chain(expr()))
         .and_l_fatal(tok!(>))
         .map(FactorExt::CompCall)
+        */
 }
 
 /// `(` [`expr`], [`expr`], ..., [`expr`], `)`
@@ -1052,8 +1223,8 @@ pub struct Ident {
 }
 
 impl Ident {
-    pub fn try_from_tok(t: Token, lex: &Lexer<'_>) -> ResultWithFatal<Ident, PError> {
-        if KEYWORDS.contains(&&lex.get_code()[t.span]) {
+    pub fn try_from_tok(t: Token, lex: &Lexer<'_>) -> ResultWithFatal<Ident, ParseError> {
+        if Keyword::from_str(&&lex.get_code()[t.span]).is_ok() {
             return err!(NotAnIdent, lex.pos_span());
         }
         Ok(Ident { span: t.span })
@@ -1181,22 +1352,27 @@ pub mod debug {
     }
 }
 
+/*
 impl Stmt {
     /// This generates new Code and doesn't read the orignal code!
     pub fn to_text(&self) -> String {
         match &self.kind {
-            StmtKind::VarDecl { markers, ident, kind } => {
-                let VarDeclMarkers { is_mut, is_rec } = markers;
+            StmtKind::Decl { markers, ident, kind } => {
+                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
                 format!(
-                    "{}{}{}{};",
+                    "{}{}{}{}{};",
+                    if *is_pub { "pub " } else { "" },
                     if *is_mut { "mut " } else { "" },
                     if *is_rec { "rec " } else { "" },
                     ident.to_text(),
                     match kind {
-                        VarDeclKind::WithTy { ty, init: Some(init) } =>
+                        DeclKind::WithTy { ty, init: Some(init) } =>
                             format!(": {} = {}", ty.to_text(), init.to_text()),
-                        VarDeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
-                        VarDeclKind::InferTy { init } => format!(" := {}", init.to_text()),
+                        DeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
+                        DeclKind::InferTy { init } => format!(" := {}", init.to_text()),
+                        DeclKind::Const { ty: Some(ty), init } =>
+                            format!(": {} : {}", ty.to_text(), init.to_text()),
+                        DeclKind::Const { ty: None, init } => format!(" :: {}", init.to_text()),
                     },
                 )
             },
@@ -1208,10 +1384,11 @@ impl Stmt {
     pub fn write_tree(&self, lines: &mut TreeLines) {
         let len = self.to_text().len();
         match &self.kind {
-            StmtKind::VarDecl { markers, ident, kind } => {
-                let VarDeclMarkers { is_mut, is_rec } = markers;
+            StmtKind::Decl { markers, ident, kind } => {
+                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
                 lines.write(&format!(
-                    "{}{}",
+                    "{}{}{}",
+                    if *is_pub { "pub " } else { "" },
                     if *is_mut { "mut " } else { "" },
                     if *is_rec { "rec " } else { "" }
                 ));
@@ -1220,18 +1397,31 @@ impl Stmt {
                 lines.write_minus(ident.span.len());
 
                 match kind {
-                    VarDeclKind::WithTy { ty, init } => {
+                    DeclKind::WithTy { ty, init } => {
                         lines.write(": ");
                         lines.scope_next_line(|l| ty.write_tree(l));
                         lines.write_minus(ty.span.len());
                         if let Some(init) = init {
-                            lines.write(": ");
+                            lines.write(" = ");
                             lines.scope_next_line(|l| init.write_tree(l));
                             lines.write_minus(init.span.len());
                         }
                     },
-                    VarDeclKind::InferTy { init } => {
+                    DeclKind::InferTy { init } => {
                         lines.write(" := ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
+                    DeclKind::Const { ty: Some(ty), init } => {
+                        lines.write(": ");
+                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.write_minus(ty.span.len());
+                        lines.write(" : ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
+                    DeclKind::Const { ty: None, init } => {
+                        lines.write(" :: ");
                         lines.scope_next_line(|l| init.write_tree(l));
                         lines.write_minus(init.span.len());
                     },
@@ -1255,6 +1445,7 @@ impl Stmt {
         }
     }
 }
+*/
 
 impl Expr {
     /// This generates new Code and doesn't read the orignal code!
@@ -1319,12 +1510,10 @@ impl Expr {
             ExprKind::Dot { lhs, rhs } => {
                 format!("{}.{}", lhs.to_text(), rhs.to_text())
             },
-            ExprKind::Colon { lhs, rhs } => {
-                format!("{}:{}", lhs.to_text(), rhs.to_text())
-            },
+            //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(), rhs.to_text()) },
             ExprKind::PostOp { kind, expr } => panic!(),
             ExprKind::Index { lhs, idx } => panic!(),
-            ExprKind::CompCall { func, args } => panic!(),
+            //ExprKind::CompCall { func, args } => panic!(),
             ExprKind::Call { func, args } => format!(
                 "{}({})",
                 func.to_text(),
@@ -1341,6 +1530,37 @@ impl Expr {
             ExprKind::BinOpAssign { lhs, op, rhs } => {
                 format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
             },
+            ExprKind::If { condition, then_body, else_body } => {
+                format!(
+                    "if {} {{ {} }}{}",
+                    condition.to_text(),
+                    then_body.to_text(),
+                    else_body
+                        .as_ref()
+                        .map(|e| format!(" else {}", e.to_text()))
+                        .unwrap_or_default()
+                )
+            },
+            ExprKind::Decl { markers, ident, kind } => {
+                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                format!(
+                    "{}{}{}{}{};",
+                    if *is_pub { "pub " } else { "" },
+                    if *is_mut { "mut " } else { "" },
+                    if *is_rec { "rec " } else { "" },
+                    ident.to_text(),
+                    match kind {
+                        DeclKind::WithTy { ty, init: Some(init) } =>
+                            format!(": {} = {}", ty.to_text(), init.to_text()),
+                        DeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
+                        DeclKind::InferTy { init } => format!(" := {}", init.to_text()),
+                        DeclKind::Const { ty: Some(ty), init } =>
+                            format!(": {} : {}", ty.to_text(), init.to_text()),
+                        DeclKind::Const { ty: None, init } => format!(" :: {}", init.to_text()),
+                    },
+                )
+            },
+            ExprKind::Semicolon(expr) => format!("{}", expr.to_text()),
         }
     }
 
@@ -1443,6 +1663,7 @@ impl Expr {
                 lines.scope_next_line(|l| rhs.write_tree(l));
                 lines.write_minus(rhs.span.len());
             },
+            /*
             ExprKind::Colon { lhs, rhs } => {
                 lines.scope_next_line(|l| lhs.write_tree(l));
                 lines.write_minus(lhs.to_text().len());
@@ -1450,7 +1671,6 @@ impl Expr {
                 lines.scope_next_line(|l| rhs.write_tree(l));
                 lines.write_minus(rhs.span.len());
             },
-            /*
             ExprKind::PostOp { kind, expr, span } => panic!(),
             ExprKind::Index { lhs, idx, span } => panic!(),
             ExprKind::CompCall { func, args } => panic!(),
@@ -1489,7 +1709,79 @@ impl Expr {
                 lines.scope_next_line(|l| rhs.write_tree(l));
                 lines.write_minus(rhs.to_text().len());
             },
+            ExprKind::If { condition, then_body, else_body } => {
+                lines.write("if ");
+                lines.scope_next_line(|l| condition.write_tree(l));
+                lines.write_minus(condition.to_text().len());
+                lines.write("{");
+                lines.scope_next_line(|l| then_body.write_tree(l));
+                lines.write_minus(then_body.to_text().len());
+                if let Some(else_body) = else_body {
+                    lines.write("} else ");
+                    lines.scope_next_line(|l| else_body.write_tree(l));
+                    lines.write_minus(else_body.to_text().len());
+                }
+            },
+            ExprKind::Decl { markers, ident, kind } => {
+                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                lines.write(&format!(
+                    "{}{}{}",
+                    if *is_pub { "pub " } else { "" },
+                    if *is_mut { "mut " } else { "" },
+                    if *is_rec { "rec " } else { "" }
+                ));
+
+                lines.scope_next_line(|l| ident.write_tree(l));
+                lines.write_minus(ident.span.len());
+
+                match kind {
+                    DeclKind::WithTy { ty, init } => {
+                        lines.write(": ");
+                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.write_minus(ty.span.len());
+                        if let Some(init) = init {
+                            lines.write(" = ");
+                            lines.scope_next_line(|l| init.write_tree(l));
+                            lines.write_minus(init.span.len());
+                        }
+                    },
+                    DeclKind::InferTy { init } => {
+                        lines.write(" := ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
+                    DeclKind::Const { ty: Some(ty), init } => {
+                        lines.write(": ");
+                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.write_minus(ty.span.len());
+                        lines.write(" : ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
+                    DeclKind::Const { ty: None, init } => {
+                        lines.write(" :: ");
+                        lines.scope_next_line(|l| init.write_tree(l));
+                        lines.write_minus(init.span.len());
+                    },
+                }
+                lines.write(";");
+            },
+            ExprKind::Semicolon(expr) => {
+                let len = self.to_text().len();
+                lines.scope_next_line(|l| expr.write_tree(l));
+                lines.write_minus(len - 1);
+                lines.write(";");
+            },
+
             k => panic!("{:?}", k),
+        }
+    }
+
+    pub fn print_tree(&self) {
+        let mut lines = TreeLines::default();
+        self.write_tree(&mut lines);
+        for l in lines.lines {
+            println!("| {}", l.0);
         }
     }
 }
@@ -1507,7 +1799,7 @@ mod tests {
             "{:?}",
             (0..code.len()).map(|x| if x % 5 == 0 { '.' } else { ' ' }).collect::<String>()
         );
-        let res = var_decl().run(Lexer::new(code));
+        let res = decl().run(Lexer::new(code));
         match res {
             Ok(ok) => println!("OK: {:#?}", ok),
             Err(e) | Fatal(e) => panic!("{}", e.display(code)),

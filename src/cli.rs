@@ -44,6 +44,8 @@ pub enum Command {
     Repl {},
     Check {},
     Clean {},
+
+    Dev {},
 }
 
 #[derive(clap::Args, Debug)]
@@ -58,6 +60,7 @@ pub enum DebugOptions {
     Ast,
     LlvmIrUnoptimized,
     LlvmIrOptimized,
+    ReplExpr,
 }
 
 impl Cli {

@@ -125,6 +125,8 @@ pub enum TokenKind {
     Comma,
     /// `:`
     Colon,
+    /// `::`
+    ColonColon,
     /// `:=`
     ColonEq,
     /// `;`
@@ -251,6 +253,12 @@ impl Code {
 }
 
 impl AsRef<Code> for String {
+    fn as_ref(&self) -> &Code {
+        Code::new(self)
+    }
+}
+
+impl AsRef<Code> for str {
     fn as_ref(&self) -> &Code {
         Code::new(self)
     }
@@ -458,6 +466,7 @@ impl<'c> Lexer<'c> {
             ',' => TokenKind::Comma,
             ':' => maybe_followed_by! {
                 default: TokenKind::Colon,
+                ':' => TokenKind::ColonColon,
                 '=' => TokenKind::ColonEq,
             },
             ';' => TokenKind::Semicolon,
