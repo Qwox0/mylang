@@ -1,3 +1,5 @@
+#![feature(test)]
+
 use inkwell::context::Context;
 use mylang::{
     cli::{Cli, Command, RunScriptArgs},
@@ -235,4 +237,52 @@ main :: -> {
 
     let out = compiler.jit_run_fn("main").expect("has main function");
     println!("main returned {}", out);
+}
+
+#[cfg(test)]
+mod benches {
+    extern crate test;
+
+    use super::*;
+    use test::*;
+
+    /// old: 11ms  <- so bad
+    #[bench]
+    fn bench_parse(b: &mut Bencher) {
+        b.iter(|| {
+            let code = "
+test :: x -> 1+2+x;
+main :: -> test(1) + test(2);
+//main :: -> if true test(1) else test(2);
+/*
+main :: -> {
+    a := test(1);
+    b := test(2);
+    a + b
+};
+*/
+";
+            let code = code.as_ref();
+            let mut stmts = StmtIter::parse(code);
+            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+        })
+    }
+
+    /// old: 23ms  <- so bad
+    #[bench]
+    fn bench_parse2(b: &mut Bencher) {
+        b.iter(|| {
+            let code = "
+test :: x -> {
+    a := (x + 3 * 2) * x + 1;
+    b := x * 2 * x;
+    a + b
+};
+main :: -> test(10);
+";
+            let code = code.as_ref();
+            let mut stmts = StmtIter::parse(code);
+            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+        })
+    }
 }
