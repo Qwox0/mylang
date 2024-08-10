@@ -2,9 +2,9 @@
 
 use inkwell::context::Context;
 use mylang::{
-    cli::{Cli, Command, RunScriptArgs},
-    codegen::{self, llvm::jit::Jit},
-    parser::{lexer::Code, result_with_fatal::ResultWithFatal, Item, StmtIter},
+    cli::Cli,
+    codegen::{self},
+    parser::{result_with_fatal::ResultWithFatal, StmtIter},
 };
 use std::{
     io::{Read, Write},
@@ -160,30 +160,32 @@ fn read_code_file(path: &Path) -> String {
 fn dev() {
     const DEBUG_AST: bool = true;
 
+    let alloc = bumpalo::Bump::new();
+
     let code = "
 test :: x -> 1+2+x;
 main :: -> test(1) + test(2);
 //main :: -> if true test(1) else test(2);
-/*
-main :: -> {
-    a := test(1);
-    b := test(2);
-    a + b
-};
-*/
+//main :: -> {
+//    a := test(1);
+//    b := test(2);
+//    a + b
+//};
 ";
+    //let code = "a + b * c * d + e * f ";
+
     let code = code.as_ref();
-    let stmts = StmtIter::parse(code);
+    let stmts = StmtIter::parse(code, &alloc);
 
     if DEBUG_AST {
         for s in stmts.clone() {
             match s {
                 ResultWithFatal::Ok(s) => {
-                    println!("{:?}", s);
-                    s.print_tree()
+                    println!("\nstmt: {:?}", s);
+                    unsafe { s.as_ref().print_tree(code) };
                 },
                 ResultWithFatal::Err(e) | ResultWithFatal::Fatal(e) => {
-                    eprintln!("ERROR: {:?}", e);
+                    eprintln!("\nERROR: {:?}", e);
                     break;
                 },
             }
@@ -195,9 +197,11 @@ main :: -> {
 
     for pres in stmts {
         let expr = pres.unwrap_or_else(|e| panic!("ERROR: {:?}", e));
+
         compiler
-            .compile_top_level(&expr, code)
+            .compile_top_level(unsafe { expr.as_ref() }, code)
             .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
+
         /*
             match stmt.kind {
                     StmtKind::VarDecl { markers, ident, kind } => {
@@ -247,9 +251,11 @@ mod benches {
     use test::*;
 
     /// old: 11ms  <- so bad
+    /// new: 3000ns  (3667x faster)
     #[bench]
     fn bench_parse(b: &mut Bencher) {
         b.iter(|| {
+            let alloc = bumpalo::Bump::new();
             let code = "
 test :: x -> 1+2+x;
 main :: -> test(1) + test(2);
@@ -263,15 +269,17 @@ main :: -> {
 */
 ";
             let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code);
+            let mut stmts = StmtIter::parse(code, &alloc);
             while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
         })
     }
 
     /// old: 23ms  <- so bad
+    /// new: 3900ns  (5987x faster)
     #[bench]
     fn bench_parse2(b: &mut Bencher) {
         b.iter(|| {
+            let alloc = bumpalo::Bump::new();
             let code = "
 test :: x -> {
     a := (x + 3 * 2) * x + 1;
@@ -281,7 +289,7 @@ test :: x -> {
 main :: -> test(10);
 ";
             let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code);
+            let mut stmts = StmtIter::parse(code, &alloc);
             while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
         })
     }

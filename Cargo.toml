@@ -6,6 +6,7 @@ default-run = "mylang" # TODO: remove
 
 [dependencies]
 anyhow = "1.0.86"
+bumpalo = "3.16.0"
 clap = { version = "4.5.4", features = ["derive"] }
 const_for = "0.1.4"
 inkwell = { git = "https://github.com/TheDan64/inkwell", features = [

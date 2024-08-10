@@ -1,394 +1,17 @@
-//use self::debug::TreeLines;
-//use self::util::TupleMap0;
-use self::{
-    debug::TreeLines,
-    lexer::Code,
-    parser::{always, err, f, peek, PErrKind, PResult, ParseError, Parser},
-    result_with_fatal::ResultWithFatal,
-};
-use crate::parser::parser::choice;
-use lexer::{Lexer, Span, Token, TokenKind};
-use parser::opt;
-use result_with_fatal::ResultWithFatal::*;
-use std::str::FromStr;
+use core::range::Range;
+use debug::TreeLines;
+pub use error::*;
+use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
+use parser_helper::Parser;
+use result_with_fatal::ResultWithFatal::{self, *};
+use std::{ops::ControlFlow, ptr::NonNull, str::FromStr};
+use util::{Join, OptionExt};
 
+pub mod error;
 pub mod lexer;
-pub mod parser;
+pub mod parser_helper;
 pub mod result_with_fatal;
 mod util;
-
-#[derive(Clone)]
-pub struct StmtIter<'c> {
-    lex: Lexer<'c>,
-}
-
-impl<'c> Iterator for StmtIter<'c> {
-    type Item = ResultWithFatal<Expr, ParseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        use ResultWithFatal::*;
-        Some(match stmt().run(self.lex) {
-            Ok((stmt, l)) => {
-                self.lex = l;
-                Ok(stmt)
-            },
-            Err(ParseError { kind: PErrKind::NoInput, .. }) => return None,
-            Err(e) => Err(e),
-            Fatal(e) => Fatal(e),
-        })
-    }
-}
-
-impl<'c> StmtIter<'c> {
-    /// Parses top-level items until the end of the [`Code`] or until an
-    /// [`PError`] occurs.
-    pub fn parse(code: &'c Code) -> Self {
-        let mut lex = Lexer::new(code);
-        if let ResultWithFatal::Ok((_, new_lex)) = ws0().run(lex) {
-            lex = new_lex;
-        }
-        Self { lex }
-    }
-}
-
-/// A top-level item
-pub struct Item<'c> {
-    pub markers: DeclMarkers,
-    pub ident: Ident,
-    pub ty: Option<Box<Expr>>,
-    pub value: Box<Expr>,
-    pub code: &'c Code,
-}
-
-/// no whitespace skipping after the token
-pub fn tok_matches(f: impl Fn(&TokenKind) -> bool + 'static) -> Parser<Token> {
-    Parser::new(move |lex| {
-        match lex.peek() {
-            Some(t) if f(&t.kind) => Ok((t, lex.advanced())),
-            //Some(t) => Err(PError::UnexpectedToken(t)),
-            Some(t) => err!(UnexpectedToken(t), lex.pos_span()),
-            None => err!(NoInput, lex.pos_span()),
-        }
-    })
-}
-
-pub fn ws0() -> Parser<Vec<Token>> {
-    tok_matches(|t| t.is_ignored()).many0()
-}
-
-pub fn ws1() -> Parser<Vec<Token>> {
-    tok_matches(|t| t.is_ignored()).many1().context("ws1")
-}
-
-pub fn any_tok() -> Parser<Token> {
-    tok_matches(|_| true)
-}
-
-pub fn tok(kind: TokenKind) -> Parser<Token> {
-    tok_matches(move |lex| *lex == kind)
-}
-
-macro_rules! tok {
-    ('(') => { tok(TokenKind::OpenParenthesis).context("Token: `(`") };
-    (')') => { tok(TokenKind::CloseParenthesis).context("Token: `)`") };
-    ('[') => { tok(TokenKind::OpenBracket).context("Token: `[`") };
-    (']') => { tok(TokenKind::CloseBracket).context("Token: `]`") };
-    ('{') => { tok(TokenKind::OpenBrace).context("Token: `{`") };
-    ('}') => { tok(TokenKind::CloseBrace).context("Token: `}`") };
-    (=) => { tok(TokenKind::Eq).context("Token: `=`") };
-    (==) => { tok(TokenKind::EqEq).context("Token: `==`") };
-    (=>) => { tok(TokenKind::FatArrow).context("Token: `=>`") };
-    (!) => { tok(TokenKind::Bang).context("Token: `!`") };
-    (!=) => { tok(TokenKind::BangEq).context("Token: `!=`") };
-    (<) => { tok(TokenKind::Lt).context("Token: `<`") };
-    (<=) => { tok(TokenKind::LtEq).context("Token: `<=`") };
-    (<<) => { tok(TokenKind::LtLt).context("Token: `<<`") };
-    (<<=) => { tok(TokenKind::LtLtEq).context("Token: `<<=`") };
-    (>) => { tok(TokenKind::Gt).context("Token: `>`") };
-    (>=) => { tok(TokenKind::GtEq).context("Token: `>=`") };
-    (>>) => { tok(TokenKind::GtGt).context("Token: `>>`") };
-    (>>=) => { tok(TokenKind::GtGtEq).context("Token: `>>=`") };
-    (+) => { tok(TokenKind::Plus).context("Token: `+`") };
-    (+=) => { tok(TokenKind::PlusEq).context("Token: `+=`") };
-    (-) => { tok(TokenKind::Minus).context("Token: `-`") };
-    (-=) => { tok(TokenKind::MinusEq).context("Token: `-=`") };
-    (->) => { tok(TokenKind::Arrow).context("Token: `->`") };
-    (*) => { tok(TokenKind::Asterisk).context("Token: `*`") };
-    (*=) => { tok(TokenKind::AsteriskEq).context("Token: `*=`") };
-    (/) => { tok(TokenKind::Slash).context("Token: `/`") };
-    (/=) => { tok(TokenKind::SlashEq).context("Token: `/=`") };
-    (%) => { tok(TokenKind::Percent).context("Token: `%`") };
-    (%=) => { tok(TokenKind::PercentEq).context("Token: `%=`") };
-    (&) => { tok(TokenKind::Ampersand).context("Token: `&`") };
-    (&&) => { tok(TokenKind::AmpersandAmpersand).context("Token: `&&`") };
-    (&=) => { tok(TokenKind::AmpersandEq).context("Token: `&=`") };
-    (|) => { tok(TokenKind::Pipe).context("Token: `|`") };
-    (||) => { tok(TokenKind::PipePipe).context("Token: `||`") };
-    (|=) => { tok(TokenKind::PipeEq).context("Token: `|=`") };
-    (^) => { tok(TokenKind::Caret).context("Token: `^`") };
-    (^=) => { tok(TokenKind::CaretEq).context("Token: `^=`") };
-    (.) => { tok(TokenKind::Dot).context("Token: `.`") };
-    (..) => { tok(TokenKind::DotDot).context("Token: `..`") };
-    (..=) => { tok(TokenKind::DotDotEq).context("Token: `..=`") };
-    (.*) => { tok(TokenKind::DotAsterisk).context("Token: `.*`") };
-    (.&) => { tok(TokenKind::DotAmpersand).context("Token: `.&`") };
-    (,) => { tok(TokenKind::Comma).context("Token: `,`") };
-    (:) => { tok(TokenKind::Colon).context("Token: `:`") };
-    (::) => { tok(TokenKind::ColonColon).context("Token: `::`") };
-    (:=) => { tok(TokenKind::ColonEq).context("Token: `:=`") };
-    (;) => { tok(TokenKind::Semicolon).context("Token: `;`") };
-    (?) => { tok(TokenKind::Question).context("Token: `?`") };
-    (#) => { tok(TokenKind::Pound).context("Token: `#`") };
-    ($) => { tok(TokenKind::Dollar).context("Token: `$`") };
-    (@) => { tok(TokenKind::At).context("Token: `@`") };
-    (~) => { tok(TokenKind::Tilde).context("Token: `~`") };
-    ('\\') => { compile_error!(TODO: BackSlash) };
-    ($($t:tt)*) => {
-        compile_error!(concat!("cannot convert \"", stringify!($($t)*), "\" to TokenKind"))
-    };
-}
-
-pub fn any_keyword() -> Parser<Keyword> {
-    ident_token()
-        .flat_map(move |t, lex| {
-            ResultWithFatal::from_res(
-                lex.get_code()[t.span].parse().map_err(|e| ParseError::new(e, lex.pos_span())),
-            )
-        })
-        .context("any_keyword")
-}
-
-pub fn keyword(keyword: Keyword) -> Parser<Keyword> {
-    let text = keyword.as_str();
-    ident_token()
-        .flat_map(move |t, lex| match &lex.get_code()[t.span] {
-            t if t == text => Ok(keyword),
-            _ => err!(NotAKeyword, lex.pos_span()),
-        })
-        .context(format!("keyword: {:?}", keyword))
-}
-
-macro_rules! keywords {
-    ( $($enum_variant:ident = $text:literal),* $(,)? ) => {
-        #[derive(Debug, Clone, Copy)]
-        pub enum Keyword {
-            $($enum_variant),*
-        }
-
-        impl FromStr for Keyword {
-            type Err = PErrKind;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                match s {
-                    $($text => Result::Ok(Keyword::$enum_variant),)*
-                    _ => Result::Err(PErrKind::NotAKeyword)
-                }
-            }
-        }
-
-        impl Keyword {
-            fn as_str(self) -> &'static str {
-                match self {
-                    $(Keyword::$enum_variant => $text,)*
-                }
-            }
-        }
-    };
-}
-
-keywords! {
-    Mut = "mut",
-    Rec = "rec",
-    Struct = "struct",
-    Union = "union",
-    Enum = "enum",
-    Unsafe = "unsafe",
-    True = "true",
-    False = "false",
-    If = "if",
-    Else = "else",
-    Match = "match",
-    For = "for",
-    While = "while",
-}
-
-/// (`p` (,`p`)* )?
-pub fn comma_chain_no_trailing_comma<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
-    p.ws0().sep_by0(tok!(,).ws0())
-}
-
-/// (`p` (,`p`)* `,`? )?
-/// this function parses expression until a seperator token of `close` is
-/// reached. the `close` token is not consumed!
-pub fn comma_chain<T: 'static>(p: Parser<T>) -> Parser<Vec<T>> {
-    comma_chain_no_trailing_comma(p).and_l(opt(tok!(,)))
-}
-
-// -----------------------
-
-/*
-/// [`Expr`] but always returning `()`
-#[derive(Debug, Clone)]
-pub enum StmtKind {
-
-    /// `<expr>;`
-    Semicolon(Box<Expr>),
-
-    Expr(Box<Expr>),
-}
-
-#[derive(Debug, Clone)]
-pub struct Stmt {
-    pub kind: StmtKind,
-    #[allow(unused)]
-    pub span: Span,
-}
-
-impl From<(StmtKind, Span)> for Stmt {
-    fn from((kind, span): (StmtKind, Span)) -> Self {
-        Stmt { kind, span }
-    }
-}
-
-pub fn stmt() -> Parser<Stmt> {
-    let semicolon = expr().map(Box::new).and(opt(tok!(;))).map(|(expr, semi)| {
-        if semi.is_some() { StmtKind::Semicolon(expr) } else { StmtKind::Expr(expr) }
-    });
-    decl().or(semicolon).to_stmt().ws0()
-}
-*/
-
-pub type Stmt = Expr;
-
-fn wrap_semicolons((mut expr, semicolons): (Expr, Vec<Token>)) -> Expr {
-    for semicolon in semicolons {
-        let span = expr.span.join(semicolon.span);
-        expr = Expr { kind: ExprKind::Semicolon(Box::new(expr)), span };
-    }
-    expr
-}
-
-pub fn stmt() -> Parser<Expr> {
-    decl()
-        .to_expr()
-        .or(expr())
-        .ws0()
-        .and(tok!(;).ws0().many1())
-        .map(wrap_semicolons)
-        .context("stmt")
-}
-
-/// `mut rec <name>: <ty> = <init>`
-/// `mut rec <name>: <ty>`
-/// `mut rec <name> := <init>`
-///
-/// `mut rec <name>: <ty> : <init>`
-/// `mut rec <name> :: <init>`
-pub fn decl() -> Parser<ExprKind> {
-    enum Init {
-        Init(Box<Expr>),
-        Const(Box<Expr>),
-    }
-
-    let eq_init = tok!(=).ws0().and_r_fatal(expr()).map(Box::new).map(Init::Init);
-    let colon_init = tok!(:).ws0().and_r_fatal(expr()).map(Box::new).map(Init::Const);
-    let colon = tok!(:)
-        .ws0()
-        .and_r_fatal(ty().ws0().map(Box::new))
-        .and(opt(eq_init.or(colon_init)))
-        .map(|(ty, init)| match init {
-            Some(Init::Init(e)) => DeclKind::WithTy { ty, init: Some(e) },
-            Some(Init::Const(init)) => DeclKind::Const { ty: Some(ty), init },
-            None => DeclKind::WithTy { ty, init: None },
-        })
-        .context("decl with type");
-    let colon_eq = tok!(:=)
-        .ws0()
-        .and_r_fatal(expr())
-        .map(|init| DeclKind::InferTy { init: Box::new(init) })
-        .context("decl infer type");
-    let colon_colon = tok!(::)
-        .ws0()
-        .and_r_fatal(expr())
-        .map(|init| DeclKind::Const { ty: None, init: Box::new(init) })
-        .context("decl infer type");
-
-    let after_markers = ident().ws0().and(colon.or(colon_eq).or(colon_colon));
-
-    let with_markers = var_decl_markers1().and_fatal(after_markers.clone());
-    let without_markers = always!(DeclMarkers::default()).and(after_markers);
-    with_markers
-        .or(without_markers)
-        .map(|(markers, (ident, kind))| ExprKind::Decl { markers, ident, kind })
-        .context("variable declaration")
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DeclMarkers {
-    is_pub: bool,
-    is_mut: bool,
-    is_rec: bool,
-}
-
-impl DeclMarkers {
-    pub fn is_empty(&self) -> bool {
-        !(self.is_pub || self.is_mut || self.is_rec)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum VarDeclMarkerKind {
-    Pub,
-    Mut,
-    Rec,
-}
-
-pub fn var_decl_markers1() -> Parser<DeclMarkers> {
-    choice([
-        keyword(Keyword::Mut).map(|_| VarDeclMarkerKind::Mut),
-        keyword(Keyword::Rec).map(|_| VarDeclMarkerKind::Rec),
-    ])
-    .ws1()
-    .many1()
-    .flat_map(|vec, lex| {
-        let mut is_pub = false;
-        let mut is_mut = false;
-        let mut is_rec = false;
-        for i in vec {
-            match i {
-                VarDeclMarkerKind::Pub if !is_pub => is_pub = true,
-                VarDeclMarkerKind::Mut if !is_mut => is_mut = true,
-                VarDeclMarkerKind::Rec if !is_rec => is_rec = true,
-                m => return err!(DoubleLetMarker(m), lex.pos_span()),
-            }
-        }
-        Ok(DeclMarkers { is_pub, is_mut, is_rec })
-    })
-    .context("variable declaration markers")
-}
-
-#[derive(Debug, Clone)]
-pub enum DeclKind {
-    /// `<name>: <ty>;`
-    /// `<name>: <ty> = <init>;`
-    WithTy { ty: Box<Expr>, init: Option<Box<Expr>> },
-    /// `<name> := <init>;`
-    InferTy { init: Box<Expr> },
-
-    /// `<name>: <ty> : <init>;`
-    /// `<name> :: <init>;`
-    Const { ty: Option<Box<Expr>>, init: Box<Expr> },
-}
-
-impl DeclKind {
-    pub fn into_ty_val(self) -> (Option<Box<Expr>>, Option<Box<Expr>>) {
-        match self {
-            DeclKind::WithTy { ty, init } => (Some(ty), init),
-            DeclKind::InferTy { init } => (None, Some(init)),
-            DeclKind::Const { ty, init } => (ty, Some(init)),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
@@ -398,8 +21,8 @@ pub enum ExprKind {
     /// `[<val>; <count>]`
     /// both for types and literals
     ArraySemi {
-        val: Box<Expr>,
-        count: Box<Expr>,
+        val: NonNull<Expr>,
+        count: NonNull<Expr>,
     },
     /// `[<expr>, <expr>, ..., <expr>,]`
     ArrayComma {
@@ -416,26 +39,21 @@ pub enum ExprKind {
     /// `-> <body>`
     Fn {
         params: Vec<(Ident, Option<Type>)>,
-        ret_type: Option<Box<Type>>,
-        body: Box<Expr>,
+        ret_type: Option<NonNull<Type>>,
+        body: NonNull<Expr>,
     },
     /// `( <expr> )`
     Parenthesis {
-        expr: Box<Expr>,
+        expr: NonNull<Expr>,
     },
     /// `{ <stmt>`*` }`
     Block {
-        stmts: Vec<Expr>,
+        stmts: Vec<NonNull<Expr>>,
+        has_trailing_semicolon: bool,
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
     StructDef(Vec<(Ident, Type)>),
-    /// `MyStruct { a: <expr>, b, }` or
-    /// `MyStruct { a = <expr>, b, }` ?
-    StructInit {
-        name: Ident,
-        fields: Vec<(Ident, Option<Expr>)>,
-    },
     /// `struct(...)`
     TupleStructDef(Vec<Type>),
     /// `union { ... }`
@@ -443,79 +61,96 @@ pub enum ExprKind {
     /// `enum { ... }`
     Enum {},
     /// `?<ty>`
-    OptionShort(Box<Expr>),
+    OptionShort(NonNull<Expr>),
+
+    /// `alloc(MyStruct) { a = <expr>, b, }`
+    Initializer {
+        lhs: NonNull<Expr>,
+        fields: Vec<(Ident, Option<Expr>)>,
+    },
 
     /// [`expr`] . [`expr`]
     Dot {
-        lhs: Box<Expr>,
+        lhs: NonNull<Expr>,
         rhs: Ident,
     },
     /// examples: `<expr>?`, `<expr>.*`
     PostOp {
+        expr: NonNull<Expr>,
         kind: PostOpKind,
-        expr: Box<Expr>,
     },
     /// `<lhs> [ <idx> ]`
     Index {
-        lhs: Box<Expr>,
-        idx: Box<Expr>,
+        lhs: NonNull<Expr>,
+        idx: NonNull<Expr>,
     },
 
     /*
     /// `<func> < <params> >`
     CompCall {
-        func: Box<Expr>,
+        func: NonNull<Expr>,
         args: Vec<Expr>,
     },
     */
     /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
     Call {
-        func: Box<Expr>,
-        args: Vec<Expr>,
+        func: NonNull<Expr>,
+        args: Vec<NonNull<Expr>>,
     },
 
     /// examples: `&<expr>`, `- <expr>`
     PreOp {
         kind: PreOpKind,
-        expr: Box<Expr>,
+        expr: NonNull<Expr>,
     },
     /// `<lhs> op <lhs>`
     BinOp {
-        lhs: Box<Expr>,
+        lhs: NonNull<Expr>,
         op: BinOpKind,
-        rhs: Box<Expr>,
+        rhs: NonNull<Expr>,
     },
     /// `<lhs> = <lhs>`
     Assign {
-        lhs: Box<LValue>,
-        rhs: Box<Expr>,
+        //lhs: NonNull<LValue>,
+        lhs: NonNull<Expr>,
+        rhs: NonNull<Expr>,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
-        lhs: Box<LValue>,
+        //lhs: NonNull<LValue>,
+        lhs: NonNull<Expr>,
         op: BinOpKind,
-        rhs: Box<Expr>,
+        rhs: NonNull<Expr>,
     },
 
     /// variable declaration (and optional initialization)
     /// `mut rec <name>: <ty>`
     /// `mut rec <name>: <ty> = <init>`
     /// `mut rec <name> := <init>`
+    VarDecl {
+        markers: DeclMarkers,
+        //ident: Ident,
+        ident: NonNull<Expr>,
+        kind: VarDeclKind,
+    },
+
     /// `mut rec <name>: <ty> : <init>`
     /// `mut rec <name> :: <init>`
-    Decl {
+    ConstDecl {
         markers: DeclMarkers,
-        ident: Ident,
-        kind: DeclKind,
+        //ident: Ident,
+        ident: NonNull<Expr>,
+        ty: Option<NonNull<Expr>>,
+        init: NonNull<Expr>,
     },
 
     If {
-        condition: Box<Expr>,
-        then_body: Box<Expr>,
-        else_body: Option<Box<Expr>>,
+        condition: NonNull<Expr>,
+        then_body: NonNull<Expr>,
+        else_body: Option<NonNull<Expr>>,
     },
 
-    Semicolon(Box<Expr>),
+    Semicolon(NonNull<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -530,25 +165,477 @@ impl From<(ExprKind, Span)> for Expr {
     }
 }
 
-/// doesn't parse `;`!
-pub fn expr() -> Parser<Expr> {
-    /*if_().or(assign())*/ assign().or(rvalue()).context("expression")
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Self { kind, span }
+    }
 }
 
 pub type Type = Expr;
 
-pub fn ty() -> Parser<Type> {
-    rvalue().context("type")
+#[derive(Debug, Clone)]
+pub struct ExprParser<'code, 'alloc> {
+    lex: Lexer<'code>,
+    alloc: &'alloc bumpalo::Bump,
 }
 
-pub fn if_() -> Parser<Expr> {
-    let expr_parser = ws1().and_r(expr().map(Box::new));
-    keyword(Keyword::If)
-        .and_r_fatal(expr_parser.clone())
-        .and_fatal(expr_parser.clone())
-        .and(opt(ws1().and(keyword(Keyword::Else)).and_r_fatal(expr_parser)))
-        .map(|((condition, then_body), else_body)| ExprKind::If { condition, then_body, else_body })
-        .to_expr()
+// methods may advance the parser even on error
+// resetting is done by the callee
+impl<'code, 'alloc> ExprParser<'code, 'alloc> {
+    pub fn new(lex: Lexer<'code>, alloc: &'alloc bumpalo::Bump) -> ExprParser<'code, 'alloc> {
+        Self { lex, alloc }
+    }
+
+    pub fn top_level_item(&mut self) -> ParseResult<NonNull<Expr>> {
+        let res = self.expr().map_nonfatal_err(|err| {
+            if let ParseErrorKind::NoInput = err.kind {
+                ParseError { kind: ParseErrorKind::Finished, ..err }
+            } else {
+                err
+            }
+        });
+        self.lex.advance_if(|t| t.kind == TokenKind::Semicolon);
+        res
+    }
+
+    pub fn expr(&mut self) -> ParseResult<NonNull<Expr>> {
+        self.expr_(0).context("expression")
+    }
+
+    pub fn expr_(&mut self, min_binop_precedence: usize) -> ParseResult<NonNull<Expr>> {
+        self.ws0();
+        let mut lhs = self.value().context("expr lhs")?;
+        loop {
+            match self.op_chain(lhs, min_binop_precedence) {
+                Ok(node) => lhs = node,
+                Err(ParseError { kind: ParseErrorKind::Finished, .. }) => return Ok(lhs),
+                err => return err.context("op chain element"),
+            };
+        }
+    }
+
+    pub fn op_chain(
+        &mut self,
+        lhs: NonNull<Expr>,
+        min_binop_precedence: usize,
+    ) -> ParseResult<NonNull<Expr>> {
+        self.ws0();
+        let Some(Token { kind, span }) = self.lex.peek() else {
+            return err!(Finished, self.lex.pos_span());
+        };
+
+        let op = match FollowingOperator::new(kind) {
+            None => return err!(Finished, span),
+            Some(FollowingOperator::BinOp(binop)) if binop.precedence() <= min_binop_precedence => {
+                return err!(Finished, span);
+            },
+            Some(op) => op,
+        };
+        self.lex.advance();
+
+        macro_rules! expr {
+            ($kind:ident, $span:expr) => {
+                Expr::new(ExprKind::$kind, $span)
+            };
+            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr ) => {
+                Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, $span)
+            };
+        }
+
+        let expr = match op {
+            FollowingOperator::Dot => {
+                let rhs = todo!("dot rhs");
+                expr!(Dot { lhs, rhs }, span.join(rhs.span))
+            },
+            FollowingOperator::Call => {
+                let mut args = Vec::new();
+                let closing_paren_span = loop {
+                    self.ws0();
+                    if let Some(closing_paren) =
+                        self.lex.next_if(|t| t.kind == TokenKind::CloseParenthesis)
+                    {
+                        break closing_paren.span;
+                    }
+                    args.push(self.expr()?);
+                    self.ws0();
+                    match self.next_tok() {
+                        Ok(Token { kind: TokenKind::CloseParenthesis, span }) => break span,
+                        Ok(Token { kind: TokenKind::Comma, .. }) => continue,
+                        Ok(Token { kind, span }) => {
+                            return Fatal(err!(x UnexpectedToken2(kind),span))
+                                .context("expect ',' or ')'");
+                        },
+                        Err(e) | Fatal(e) => return Fatal(e),
+                    };
+                };
+                expr!(Call { func: lhs, args }, span.join(closing_paren_span))
+            },
+            FollowingOperator::Index => {
+                let idx = self.expr().into_fatal()?;
+                let close = self.tok(TokenKind::CloseBracket).into_fatal()?;
+                expr!(Index { lhs, idx }, span.join(close.span))
+            },
+            FollowingOperator::Initializer => {
+                let fields = todo!();
+                let close = self.tok(TokenKind::CloseBrace).into_fatal()?;
+                expr!(Initializer { lhs, fields }, span.join(close.span))
+            },
+            FollowingOperator::SingleArgFn => {
+                let lhs = unsafe { lhs.as_ref() };
+                let Expr { kind: ExprKind::Ident, span } = lhs else {
+                    panic!("SingleArgFn: unknown rhs")
+                };
+                let span = *span;
+                let param = Ident { span };
+                return self.function_tail(vec![(param, None)], span);
+            },
+            FollowingOperator::PostOp(kind) => {
+                expr!(PostOp { expr: lhs, kind }, span)
+            },
+            FollowingOperator::BinOp(op) => {
+                let rhs = self.expr_(op.precedence())?;
+                let span = unsafe { lhs.as_ref().span.join(rhs.as_ref().span) };
+                expr!(BinOp { lhs, op, rhs }, span)
+            },
+            FollowingOperator::Assign => {
+                let rhs = self.expr()?;
+                expr!(Assign { lhs, rhs }, span)
+            },
+            FollowingOperator::BinOpAssign(op) => {
+                let rhs = self.expr()?;
+                expr!(BinOpAssign { lhs, op, rhs }, span)
+            },
+            FollowingOperator::VarDecl => {
+                let markers = DeclMarkers::default();
+                let init = self.expr().context(":= init")?;
+                expr!(VarDecl { markers, ident: lhs, kind: VarDeclKind::InferTy { init } }, span)
+            },
+            FollowingOperator::ConstDecl => {
+                let markers = DeclMarkers::default();
+                let init = self.expr().context(":: init")?;
+                expr!(ConstDecl { markers, ident: lhs, ty: None, init }, span)
+            },
+            FollowingOperator::TypedDecl => {
+                let markers = DeclMarkers::default();
+                let ty = self.expr().context("decl type")?;
+                let t = self.lex.peek().ok_or_fatal(err!(x NoInput, self.lex.pos_span()))?;
+                match t.kind {
+                    TokenKind::Eq => {
+                        self.lex.advance();
+                        let init = Some(self.expr().context(": ty = init")?);
+                        expr!(
+                            VarDecl { markers, ident: lhs, kind: VarDeclKind::WithTy { ty, init } },
+                            span
+                        )
+                    },
+                    TokenKind::Colon => {
+                        self.lex.advance();
+                        let init = self.expr().context(": ty : init")?;
+                        expr!(ConstDecl { markers, ident: lhs, ty: Some(ty), init }, span)
+                    },
+                    TokenKind::Semicolon => expr!(
+                        VarDecl {
+                            markers,
+                            ident: lhs,
+                            kind: VarDeclKind::WithTy { ty, init: None }
+                        },
+                        span
+                    ),
+                    kind => return Fatal(err!(x UnexpectedToken2(kind), t.span)),
+                }
+                /*
+                let eq = self.next_tok().context("decl : or =")?;
+                let init = self.expr()?;
+                */
+            },
+        };
+        self.alloc(expr)
+    }
+
+    /// anything which has higher precedence than any operator
+    pub fn value(&mut self) -> ParseResult<NonNull<Expr>> {
+        let Token { kind, span } = self.next_tok()?;
+
+        macro_rules! expr {
+            ($kind:ident) => {
+                Expr::new(ExprKind::$kind, span)
+            };
+            ($kind:ident ( $( $val:expr ),* $(,)? ) ) => {
+                Expr::new(ExprKind::$kind($($val),*), span)
+            };
+            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } ) => {
+                Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, span)
+            };
+            ($kind:ident, $span:expr) => {
+                Expr::new(ExprKind::$kind, $span)
+            };
+            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr ) => {
+                Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, $span)
+            };
+        }
+
+        let expr = match kind {
+            TokenKind::Ident => expr!(Ident),
+            //TokenKind::Keyword(_) => todo!("//TokenKind::Keyword(_)"),
+            TokenKind::Literal(l) => expr!(Literal(l)),
+            TokenKind::OpenParenthesis => {
+                let expr = self.expr().context("(...)")?;
+                let close_p =
+                    self.tok(TokenKind::CloseParenthesis).into_fatal().context("(...)")?;
+                expr!(Parenthesis { expr }, span.join(close_p.span))
+            },
+            TokenKind::OpenBracket => {
+                self.expr().into_fatal().context("[...]")?;
+                self.ws0();
+                let Ok(Token { kind, span }) = self.next_tok() else {
+                    return err!(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
+                        .context("[...]");
+                };
+                todo!();
+            },
+            TokenKind::OpenBrace => return self.block(span),
+            TokenKind::Bang => todo!("TokenKind::Bang"),
+            TokenKind::Plus => todo!("TokenKind::Plus"),
+            TokenKind::Minus => todo!("TokenKind::Minus"),
+            TokenKind::Arrow => return self.function_tail(vec![], span),
+            TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
+            TokenKind::Ampersand => todo!("TokenKind::Ampersand"),
+            TokenKind::Pipe => todo!("TokenKind::Pipe"),
+            TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
+            TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
+            TokenKind::Caret => todo!("TokenKind::Caret"),
+            TokenKind::CaretEq => todo!("TokenKind::CaretEq"),
+            TokenKind::Dot => todo!("TokenKind::Dot"),
+            TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
+            TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
+            TokenKind::Comma => todo!("TokenKind::Comma"),
+            TokenKind::Colon => todo!("TokenKind::Colon"),
+            TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
+            TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
+            TokenKind::Pound => todo!("TokenKind::Pound"),
+            TokenKind::Dollar => todo!("TokenKind::Dollar"),
+            TokenKind::At => todo!("TokenKind::At"),
+            TokenKind::Tilde => todo!("TokenKind::Tilde"),
+            TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
+            TokenKind::BackTick => todo!("TokenKind::BackTick"),
+            t => return err!(UnexpectedToken2(t), span),
+        };
+        self.alloc(expr)
+    }
+
+    /// parsing starts behind ->
+    pub fn function_tail(
+        &mut self,
+        params: Vec<(Ident, Option<Expr>)>,
+        start_span: Span,
+    ) -> ParseResult<NonNull<Expr>> {
+        let expr = self.expr().into_fatal().context("fn body")?;
+        let (ret_type, body) =
+            if let Some(brace) = self.lex.next_if(|t| t.kind == TokenKind::OpenBrace) {
+                (Some(expr), self.block(brace.span).context("fn body")?)
+            } else {
+                (None, expr)
+            };
+        self.alloc(Expr::new(
+            ExprKind::Fn { params, ret_type, body },
+            start_span.join(unsafe { body.as_ref().span }),
+        ))
+    }
+
+    /// parses block context and '}', doesn't parse the '{'
+    pub fn block(&mut self, open_brace_span: Span) -> ParseResult<NonNull<Expr>> {
+        let mut stmts = Vec::new();
+        let (has_trailing_semicolon, closing_brace_span) = loop {
+            self.ws0();
+            if let Some(closing_brace) = self.lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
+                break (true, closing_brace.span);
+            }
+            stmts.push(self.expr()?);
+            self.ws0();
+            match self.next_tok() {
+                Ok(Token { kind: TokenKind::CloseBrace, span }) => break (false, span),
+                Ok(Token { kind: TokenKind::Semicolon, .. }) => continue,
+                Ok(Token { kind, span }) => {
+                    return Fatal(err!(x UnexpectedToken2(kind),span)).context("expect ';' or '}'");
+                },
+                Err(e) | Fatal(e) => return Fatal(e),
+            };
+        };
+        self.alloc(Expr::new(
+            ExprKind::Block { stmts, has_trailing_semicolon },
+            open_brace_span.join(closing_brace_span),
+        ))
+    }
+
+    /// 0+ whitespace
+    pub fn ws0(&mut self) {
+        self.lex.advance_while(|t| t.kind.is_whitespace());
+    }
+
+    /// 1+ whitespace
+    pub fn ws1(&mut self) -> ParseResult<()> {
+        self.tok_where(|t| t.kind.is_whitespace())?;
+        self.ws0();
+        Ok(())
+    }
+
+    pub fn tok(&mut self, tok: TokenKind) -> ParseResult<Token> {
+        self.tok_where(|t| t.kind == tok)
+    }
+
+    pub fn tok_where(&mut self, cond: impl FnOnce(Token) -> bool) -> ParseResult<Token> {
+        let t = self.next_tok()?;
+        if cond(t) {
+            Ok(t)
+        } else {
+            err!(UnexpectedToken2(t.kind), self.lex.pos_span())
+        }
+    }
+
+    #[inline]
+    pub fn next_tok(&mut self) -> ParseResult<Token> {
+        self.lex.next().ok_or_nonfatal(err!(x NoInput, self.lex.pos_span()))
+    }
+
+    // helpers:
+
+    pub fn alloc<T>(&self, val: T) -> ParseResult<NonNull<T>> {
+        match self.alloc.try_alloc(val) {
+            Result::Ok(ok) => Ok(NonNull::from(ok)),
+            Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
+        }
+    }
+
+    pub fn get_pos(&self) -> usize {
+        self.lex.get_pos()
+    }
+
+    pub fn set_pos(&mut self, pos: usize) {
+        self.lex.set_pos(pos);
+    }
+
+    pub fn get_text(&self, range: Range<usize>) -> &str {
+        &self.lex.get_code().0[range]
+    }
+
+    pub fn advance_if_ok<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        let pos = self.get_pos();
+        let res = f(self);
+        if res.is_any_err() {
+            self.set_pos(pos);
+        }
+        res
+    }
+}
+
+pub enum FollowingOperator {
+    /// a.b
+    /// `^`
+    Dot,
+    /// a(b)
+    /// `^`
+    Call,
+    /// a[b]
+    /// `^`
+    Index,
+
+    /// `alloc(MyStruct) { a = 1, b = "asdf" }`
+    /// `                ^`
+    Initializer,
+
+    /// `arg -> ...`
+    /// `    ^^`
+    SingleArgFn,
+
+    /// `a op`
+    /// `  ^^`
+    PostOp(PostOpKind),
+
+    /// `a op b`
+    /// `  ^^`
+    BinOp(BinOpKind),
+
+    /// `a = b`
+    /// `  ^`
+    Assign,
+    /// `a op= b`
+    /// `  ^^^`
+    BinOpAssign(BinOpKind),
+
+    /// `a := b`
+    /// `  ^^`
+    VarDecl,
+    /// `a :: b`
+    /// `  ^^`
+    ConstDecl,
+    /// `a: ty = b` or `a: ty = b`
+    /// ` ^`         `   ^`
+    TypedDecl,
+}
+
+impl FollowingOperator {
+    pub fn new(token_kind: TokenKind) -> Option<FollowingOperator> {
+        Some(match token_kind {
+            TokenKind::Ident => todo!("TokenKind::Ident"),
+            TokenKind::Keyword(_) => todo!("TokenKind::Keyword(_)"),
+            TokenKind::Literal(_) => todo!("TokenKind::Literal(_)"),
+            TokenKind::OpenParenthesis => FollowingOperator::Call,
+            TokenKind::OpenBracket => FollowingOperator::Index,
+            TokenKind::OpenBrace => FollowingOperator::Initializer,
+            TokenKind::Eq => FollowingOperator::Assign,
+            TokenKind::EqEq => FollowingOperator::BinOp(BinOpKind::Eq),
+            TokenKind::FatArrow => todo!("TokenKind::FatArrow"),
+            TokenKind::Bang => todo!("TokenKind::Bang"),
+            TokenKind::BangEq => FollowingOperator::BinOp(BinOpKind::Ne),
+            TokenKind::Lt => FollowingOperator::BinOp(BinOpKind::Lt),
+            TokenKind::LtEq => FollowingOperator::BinOp(BinOpKind::Le),
+            TokenKind::LtLt => FollowingOperator::BinOp(BinOpKind::ShiftL),
+            TokenKind::LtLtEq => FollowingOperator::BinOpAssign(BinOpKind::ShiftL),
+            TokenKind::Gt => FollowingOperator::BinOp(BinOpKind::Gt),
+            TokenKind::GtEq => FollowingOperator::BinOp(BinOpKind::Ge),
+            TokenKind::GtGt => FollowingOperator::BinOp(BinOpKind::ShiftR),
+            TokenKind::GtGtEq => FollowingOperator::BinOpAssign(BinOpKind::ShiftR),
+            TokenKind::Plus => FollowingOperator::BinOp(BinOpKind::Add),
+            TokenKind::PlusEq => FollowingOperator::BinOpAssign(BinOpKind::Add),
+            TokenKind::Minus => FollowingOperator::BinOp(BinOpKind::Sub),
+            TokenKind::MinusEq => FollowingOperator::BinOpAssign(BinOpKind::Sub),
+            TokenKind::Arrow => FollowingOperator::SingleArgFn,
+            TokenKind::Asterisk => FollowingOperator::BinOp(BinOpKind::Mul),
+            TokenKind::AsteriskEq => FollowingOperator::BinOpAssign(BinOpKind::Mul),
+            TokenKind::Slash => FollowingOperator::BinOp(BinOpKind::Div),
+            TokenKind::SlashEq => FollowingOperator::BinOpAssign(BinOpKind::Div),
+            TokenKind::Percent => FollowingOperator::BinOp(BinOpKind::Mod),
+            TokenKind::PercentEq => FollowingOperator::BinOpAssign(BinOpKind::Mod),
+            TokenKind::Ampersand => FollowingOperator::BinOp(BinOpKind::BitAnd),
+            TokenKind::AmpersandAmpersand => FollowingOperator::BinOp(BinOpKind::And),
+            TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
+            TokenKind::Pipe => todo!("pipe/bitor"),
+            TokenKind::PipePipe => FollowingOperator::BinOp(BinOpKind::Or),
+            TokenKind::PipeEq => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
+            TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),
+            TokenKind::CaretEq => FollowingOperator::BinOpAssign(BinOpKind::BitXor),
+            TokenKind::Dot => FollowingOperator::Dot,
+            TokenKind::DotDot => FollowingOperator::BinOp(BinOpKind::Range),
+            TokenKind::DotDotEq => FollowingOperator::BinOp(BinOpKind::RangeInclusive),
+            TokenKind::DotAsterisk => FollowingOperator::PostOp(PostOpKind::Deref),
+            TokenKind::DotAmpersand => FollowingOperator::PostOp(PostOpKind::AddrOf),
+            TokenKind::Colon => FollowingOperator::TypedDecl,
+            TokenKind::ColonColon => FollowingOperator::ConstDecl,
+            TokenKind::ColonEq => FollowingOperator::VarDecl,
+            //TokenKind::Semicolon => todo!("TokenKind::Semicolon"),
+            TokenKind::Question => FollowingOperator::PostOp(PostOpKind::Try),
+            TokenKind::Pound => todo!("TokenKind::Pound"),
+            TokenKind::Dollar => todo!("TokenKind::Dollar"),
+            TokenKind::At => todo!("TokenKind::At"),
+            TokenKind::Tilde => todo!("TokenKind::Tilde"),
+            TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
+            TokenKind::BackTick => todo!("TokenKind::BackTick"),
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -605,6 +692,26 @@ pub enum BinOpKind {
 }
 
 impl BinOpKind {
+    pub fn precedence(self) -> usize {
+        match self {
+            BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod => 11,
+            BinOpKind::Add | BinOpKind::Sub => 10,
+            BinOpKind::ShiftL | BinOpKind::ShiftR => 9,
+            BinOpKind::BitAnd => 8,
+            BinOpKind::BitXor => 7,
+            BinOpKind::BitOr => 6,
+            BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::Lt
+            | BinOpKind::Le
+            | BinOpKind::Gt
+            | BinOpKind::Ge => 5,
+            BinOpKind::And => 4,
+            BinOpKind::Or => 3,
+            BinOpKind::Range | BinOpKind::RangeInclusive => 2,
+        }
+    }
+
     pub fn to_binop_text(self) -> &'static str {
         match self {
             BinOpKind::Mul => "*",
@@ -647,457 +754,6 @@ impl BinOpKind {
     }
 }
 
-macro_rules! choose_bin_op {
-    ( $first_op:tt : $first_kind:expr $( , $op:tt : $kind:expr )* $(,)? ) => {
-        tok!($first_op).map(|_| $first_kind)
-        $(
-            .or(tok!($op).map(|_| $kind))
-        )*
-        .ws0()
-    };
-}
-
-/// for [`ExprKind::Assign`] and [`ExprKind::BinOpAssign`]
-pub fn assign() -> Parser<Expr> {
-    let assign = tok!(=)
-        .context("`=`")
-        .ws0()
-        .and_r_fatal(rvalue())
-        .context("assign")
-        .map(|rhs| (None, rhs));
-    let bin_op_assign = choose_bin_op!(
-        += : BinOpKind::Add,
-        -= : BinOpKind::Sub,
-        *= : BinOpKind::Mul,
-        /= : BinOpKind::Div,
-        %= : BinOpKind::Mod,
-        <<= : BinOpKind::ShiftL,
-        >>= : BinOpKind::ShiftR,
-        &= : BinOpKind::BitAnd,
-        ^= : BinOpKind::BitXor,
-        |= : BinOpKind::BitOr,
-    )
-    .ws0()
-    .and_fatal(rvalue())
-    .context("binop assign")
-    .map(|(op, rhs)| (Some(op), rhs));
-
-    lvalue()
-        .ws0()
-        .and(assign.or(bin_op_assign))
-        .map(|(lhs, (op, rhs))| {
-            let lhs = Box::new(lhs);
-            let rhs = Box::new(rhs);
-            match op {
-                None => ExprKind::Assign { lhs, rhs },
-                Some(op) => ExprKind::BinOpAssign { lhs, op, rhs },
-            }
-        })
-        .to_expr()
-}
-
-/// TODO
-pub type LValue = Ident;
-
-/// TODO
-pub fn lvalue() -> Parser<Ident> {
-    ident().context("lvalue")
-}
-
-pub fn rvalue() -> Parser<Expr> {
-    bin_op().context("rvalue")
-}
-
-pub fn bin_op() -> Parser<Expr> {
-    fn reduce_bin_op(lhs: Expr, op: BinOpKind, rhs: Expr) -> Expr {
-        let span = lhs.span.join(rhs.span);
-        let lhs = Box::new(lhs);
-        let rhs = Box::new(rhs);
-        let kind = ExprKind::BinOp { lhs, op, rhs };
-        Expr { kind, span }
-    }
-
-    macro_rules! op_chain {
-        ( $sub_term:expr => $( $op:tt : $kind:expr ),+ $(,)? ) => {
-            $sub_term.ws0().sep_reduce1(choose_bin_op!($( $op : $kind ),+), reduce_bin_op)
-        };
-    }
-
-    let mul_chain = op_chain!(f(factor) => *: BinOpKind::Mul, /: BinOpKind::Div, %: BinOpKind::Mod);
-    let add_chain = op_chain!(mul_chain => +: BinOpKind::Add, -: BinOpKind::Sub);
-    let shift_chain = op_chain!(add_chain => <<: BinOpKind::ShiftL, >>: BinOpKind::ShiftR);
-    let bit_and_chain = op_chain!(shift_chain => &: BinOpKind::BitAnd);
-    let bit_xor_chain = op_chain!(bit_and_chain => ^: BinOpKind::BitXor);
-    let bit_or_chain = op_chain!(bit_xor_chain => ^: BinOpKind::BitOr);
-    let cmp_chain = op_chain!(bit_or_chain =>
-        == : BinOpKind::Eq,
-        != : BinOpKind::Ne,
-        < : BinOpKind::Lt,
-        <= : BinOpKind::Le,
-        > : BinOpKind::Gt,
-        >= : BinOpKind::Ge,
-    );
-    let and_chain = op_chain!(cmp_chain => &&: BinOpKind::And);
-    let or_chain = op_chain!(and_chain => &&: BinOpKind::Or);
-
-    let range_tail = choose_bin_op!(..: BinOpKind::Range, ..= : BinOpKind::RangeInclusive)
-        .and_fatal(or_chain.clone());
-
-    or_chain.and(opt(range_tail)).map(|(lhs, range_tail)| match range_tail {
-        Some((range, rhs)) => {
-            let span = lhs.span.join(rhs.span);
-            let kind = ExprKind::BinOp { lhs: Box::new(lhs), op: range, rhs: Box::new(rhs) };
-            Expr { kind, span }
-        },
-        None => lhs,
-    })
-}
-
-pub type Factor = Expr;
-
-pub fn factor(lex: Lexer<'_>) -> PResult<'_, Factor> {
-    let (mut factor, mut lex) = factor_start().ws0().context("factor").run(lex)?;
-    loop {
-        match factor_ext().ws0().run(lex) {
-            Err(ParseError { kind: PErrKind::NoInput, .. }) | Ok((FactorExt::None, _)) => {
-                return Ok((factor, lex));
-            },
-            Ok((ext, l)) => {
-                lex = l;
-                factor = ext.extend(factor, &lex);
-            },
-            Err(e) => return Err(e),
-            Fatal(e) => return Fatal(e),
-        }
-    }
-}
-
-pub fn factor_start() -> Parser<Factor> {
-    // `[...]`, `(...)`, `(...) -> ...` or `{...}`
-    let group = expr_bracket().or(expr_paren()).or(block()).context("group");
-    // `-> ...`
-    let special_fn = tail_function();
-    let custom_type_def = custom_struct_def()
-        .or(custom_union_def())
-        .or(custom_enum_def())
-        .or(option_short())
-        .context("custom_type_def");
-
-    let other = group.or(special_fn).or(custom_type_def).or(struct_init());
-    factor_start_ident().or(literal()).or(other.to_expr())
-}
-
-/// returns an [`Ident`] or a keyword
-pub fn ident_token() -> Parser<Token> {
-    tok(TokenKind::Ident)
-}
-
-/// returns an [`Ident`] but not keywords
-pub fn ident() -> Parser<Ident> {
-    ident_token().flat_map(Ident::try_from_tok).context("ident")
-}
-
-/// parses an expression starting with an [`ident`]
-pub fn factor_start_ident() -> Parser<Expr> {
-    ident()
-        .ws0()
-        .and_fatal(opt(fn_tail().context("one param fn")))
-        .map(|(ident, fn_)| match fn_ {
-            Some((ret_type, body)) => {
-                let span = ident.span.join(body.span);
-                let kind = ExprKind::Fn {
-                    params: vec![(ident, None)],
-                    ret_type: ret_type.map(Box::new),
-                    body: Box::new(body),
-                };
-                Expr { kind, span }
-            },
-            None => ident.into_expr(),
-        })
-        .context("ident")
-}
-
-pub fn literal() -> Parser<Expr> {
-    any_tok()
-        .flat_map(|t, lex| match t.kind {
-            TokenKind::Literal(l) => {
-                let kind = ExprKind::Literal(l);
-                Ok(Expr { kind, span: t.span })
-            },
-            _ => err!(UnexpectedToken(t), lex.pos_span()),
-        })
-        .context("literal")
-}
-
-/// parses an expression starting with `(`
-pub fn expr_paren() -> Parser<ExprKind> {
-    let param = ident().ws0().and(opt(tok!(:).ws0().and_r_fatal(ty()))).context("fn param");
-    let params = comma_chain(param).ws0().and_l(tok!(')'));
-    let fn_ = params.ws0().and(fn_tail()).map(|(params, (ret_type, body))| {
-        let ret_type = ret_type.map(Box::new);
-        ExprKind::Fn { params, ret_type, body: Box::new(body) }
-    });
-
-    // `(<expr>, <expr>, ..., <expr>,)` = Tuple
-    // `()` = Tuple
-    // `(<expr>)` = Parenthesis
-    // `(<expr>,)` = Tuple
-    let tuple_or_paren = comma_chain_no_trailing_comma(expr())
-        .and(opt(tok!(,).ws0()))
-        .map(|(elements, suffix_comma)| match suffix_comma {
-            None if elements.len() == 1 => {
-                let expr = elements.into_iter().next().map(Box::new).expect("len == 1");
-                ExprKind::Parenthesis { expr }
-            },
-            _ => ExprKind::Tuple { elements },
-        })
-        .and_l_fatal(tok!(')'))
-        .context("( ... )");
-
-    tok!('(').ws0().and_r_fatal(fn_.or(tuple_or_paren)).ws0()
-}
-
-/// `-> expr`
-/// `-> type { expr }`
-/// Parser returns the type and body as expressions
-pub fn fn_tail() -> Parser<(Option<Expr>, Expr)> {
-    let rhs = ty()
-        .ws0()
-        .and(opt(block().to_expr()))
-        .map(|(ty, block)| {
-            match block {
-                Some(block) => (Some(ty), block),
-                // types can be return values:
-                None => (None, ty),
-                //None => (Some(ty.clone()), ty),
-            }
-        })
-        .or(expr().map(|body| (None, body)))
-        .context("function body");
-    tok!(->).ws0().and_r_fatal(rhs).context("function")
-}
-
-/// `-> { ... }`
-pub fn tail_function() -> Parser<ExprKind> {
-    fn_tail()
-        .map(|(ret_type, body)| {
-            let ret_type = ret_type.map(Box::new);
-            ExprKind::Fn { params: vec![], ret_type, body: Box::new(body) }
-        })
-        .context("tail function")
-}
-
-/// parses an expression starting with `{`
-pub fn block() -> Parser<ExprKind> {
-    let item = decl().to_expr().or(expr()).context("block item");
-    let stmts = item
-        .clone()
-        .ws0()
-        .and(tok!(;).ws0().many1())
-        .map(wrap_semicolons)
-        .many0()
-        .and(opt(item.and(tok!(;).ws0().many0()).map(wrap_semicolons)))
-        .ws0()
-        .map(|(mut stmts, ret_expr)| {
-            if let Some(ret_expr) = ret_expr {
-                stmts.push(ret_expr);
-            }
-            ExprKind::Block { stmts }
-        });
-    tok!('{').ws0().and_r_fatal(stmts).and_l_fatal(tok!('}')).context("{ ... }")
-}
-
-/// parses an expression starting with `[`
-pub fn expr_bracket() -> Parser<ExprKind> {
-    let array_semi = expr()
-        .and_l(tok!(;).ws0())
-        .and_fatal(expr())
-        .map(|(val, count)| ExprKind::ArraySemi { val: Box::new(val), count: Box::new(count) });
-    let array_comma = comma_chain(expr()).map(|elements| ExprKind::ArrayComma { elements });
-    let kind = array_semi.or(array_comma);
-    tok!('[')
-        .ws0()
-        .and_r_fatal(kind.ws0())
-        .and_l_fatal(tok!(']'))
-        .context("[ ... ]")
-}
-
-/// `struct { a: int, b: String, c: (u8, u32) }`
-/// `struct(int, String, (u8, u32))`
-pub fn custom_struct_def() -> Parser<ExprKind> {
-    let struct_field = ident().ws0().and_l(tok!(:)).ws0().and_fatal(expr());
-    let struct_fields = comma_chain(struct_field);
-    let struct_ = tok!('{')
-        .and_r_fatal(struct_fields)
-        .and_l_fatal(tok!('}'))
-        .map(ExprKind::StructDef);
-    let tuple_struct = tok!('(')
-        .and_r_fatal(comma_chain(expr()))
-        .and_l_fatal(tok!(')'))
-        .map(ExprKind::TupleStructDef);
-    keyword(Keyword::Struct).ws0().and_r_fatal(struct_.or(tuple_struct))
-}
-
-/// TODO
-pub fn custom_union_def() -> Parser<ExprKind> {
-    let union_ = f(|lex| Ok((ExprKind::Union {}, lex)));
-    keyword(Keyword::Union).ws0().and_r_fatal(union_)
-}
-
-/// TODO
-pub fn custom_enum_def() -> Parser<ExprKind> {
-    let enum_ = f(|lex| Ok((ExprKind::Enum {}, lex)));
-    keyword(Keyword::Enum).ws0().and_r_fatal(enum_)
-}
-
-/// `MyStruct { a: <expr>, b, }` or
-/// `MyStruct { a = <expr>, b, }` ?
-pub fn struct_init() -> Parser<ExprKind> {
-    // TODO: `:` or `=`
-    let init_field_value = tok!(:).or(tok!(=)).ws0().and_r_fatal(expr());
-    let init_field = ident().ws0().and(opt(init_field_value));
-    ident()
-        .ws0()
-        .and_l(tok!('{'))
-        .ws0()
-        .and_fatal(init_field.many0())
-        .ws0()
-        .and_l_fatal(tok!('}'))
-        .map(|(name, fields)| ExprKind::StructInit { name, fields })
-        .context("struct init")
-}
-
-/// `?<ty>`
-pub fn option_short() -> Parser<ExprKind> {
-    tok!(?)
-        .ws0()
-        .and_r_fatal(ty())
-        .map(Box::new)
-        .map(ExprKind::OptionShort)
-        .context("option short")
-}
-
-/// Anything that count trail a [`factor`] and extend it.
-///
-/// # Example
-///
-/// * small factor:  `1`
-/// * extension 1:   ` .add`    -> [`FactorTrail::Dot`]
-/// * extension 2:   `     (1)` -> [`FactorTrail::Call`]
-/// * bigger factor: `1.add(1)`
-#[derive(Debug, Clone)]
-pub enum FactorExt {
-    None,
-
-    Dot(Ident),
-    //Colon(Box<Expr>),
-    //CompCall(Vec<Expr>),
-    Call(Vec<Expr>),
-    Index(Box<Expr>),
-
-    PostOp(PostOpKind),
-}
-
-impl FactorExt {
-    pub fn extend(self, lhs: Factor, lex: &Lexer<'_>) -> Expr {
-        let span_start = lhs.span.start;
-        let new_expr = |span_end, kind| {
-            let span = Span::new(span_start, span_end);
-            Expr { kind, span }
-        };
-
-        match self {
-            FactorExt::None => lhs,
-
-            FactorExt::Dot(i) => new_expr(i.span.end, ExprKind::Dot { lhs: Box::new(lhs), rhs: i }),
-            /*
-            FactorExt::Colon(rhs) => {
-                new_expr(rhs.span.end, ExprKind::Colon { lhs: Box::new(lhs), rhs })
-            },
-            FactorExt::CompCall(args) => {
-                new_expr(lex.get_pos(), ExprKind::CompCall { func: Box::new(lhs), args })
-            },
-            */
-            FactorExt::Call(args) => {
-                new_expr(lex.get_pos(), ExprKind::Call { func: Box::new(lhs), args })
-            },
-
-            FactorExt::PostOp(kind) => {
-                new_expr(lex.get_pos(), ExprKind::PostOp { kind, expr: Box::new(lhs) })
-            },
-            FactorExt::Index(idx) => {
-                new_expr(lex.get_pos(), ExprKind::Index { lhs: Box::new(lhs), idx })
-            },
-        }
-    }
-}
-
-/// All Tokens which could end the factor extension chain.
-pub const FACTOR_END: [char; 2] = ['a', 'b'];
-
-pub fn factor_ext() -> Parser<FactorExt> {
-    let factor_end = choice([
-        tok!(')'),
-        tok!(']'),
-        tok!('{'),
-        tok!('}'),
-        tok!(=),
-        tok!(==),
-        tok!(=>),
-        // !
-        tok!(!=),
-        tok!(<),
-        tok!(<=),
-        tok!(<<),
-        tok!(<<=),
-        tok!(>),
-        tok!(>=),
-        tok!(>>),
-        tok!(>>=),
-        tok!(+),
-        tok!(+=),
-        tok!(-),
-        tok!(-=),
-        // ->
-        tok!(*),
-        tok!(*=),
-        tok!(/),
-        tok!(/=),
-        tok!(%),
-        tok!(%=),
-        tok!(&),
-        tok!(&&),
-        tok!(&=),
-        tok!(|),
-        tok!(||),
-        tok!(|=),
-        tok!(^),
-        tok!(^=),
-        tok!(..),
-        tok!(..=),
-        tok!(,),
-        tok!(;),
-        tok!(#),
-        tok!($),
-        tok!(@),
-        tok!(~),
-        // \
-        // `
-    ])
-    .map(|_| FactorExt::None);
-
-    let more_post_op = try_().or(force()).map(FactorExt::PostOp);
-
-    dot()
-        .or(more_post_op)
-        .or(colon())
-        .or(call())
-        .or(index())
-        .ws0()
-        .or(peek(factor_end))
-        .context("factor extension")
-}
-
 #[derive(Debug, Clone)]
 pub enum PostOpKind {
     /// `<expr>.&`
@@ -1116,106 +772,69 @@ pub enum PostOpKind {
     // TypeOf,
 }
 
-/// parses an expression extension starting with `.`
-/// ([`FactorExt::Dot`], [`FactorExt::PostOp`])
-pub fn dot() -> Parser<FactorExt> {
-    let addr_of = tok!(&)
-        .and_r_fatal(opt(keyword(Keyword::Mut)))
-        .map(|t_mut| if t_mut.is_some() { PostOpKind::AddrMutOf } else { PostOpKind::AddrOf })
-        .context("factor.&");
-    let deref = tok!(*).map(|_| PostOpKind::Deref).context("factor.&");
-    let dot_post_op = addr_of.or(deref).map(FactorExt::PostOp);
-    let member_access = ident().map(FactorExt::Dot).context("member");
-    tok!(.)
-        .and_r_fatal(dot_post_op.or(ws0().and_r(member_access)))
-        .context("factor.member")
+#[derive(Debug, Clone)]
+pub struct StmtIter<'code, 'alloc> {
+    parser: ExprParser<'code, 'alloc>,
 }
 
-pub fn try_() -> Parser<PostOpKind> {
-    tok!(?).map(|_| PostOpKind::Try).context("try")
+impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
+    type Item = ResultWithFatal<NonNull<Expr>, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.parser.top_level_item() {
+            Err(ParseError { kind: ParseErrorKind::Finished, .. }) => return None,
+            res => Some(res),
+        }
+    }
 }
 
-pub fn force() -> Parser<PostOpKind> {
-    tok!(!)
-        .and_r_fatal(opt(keyword(Keyword::Unsafe)))
-        .map(
-            |t_unsafe| {
-                if t_unsafe.is_some() { PostOpKind::ForceUnsafe } else { PostOpKind::Force }
-            },
-        )
-        .context("force")
+impl<'code, 'alloc> StmtIter<'code, 'alloc> {
+    /// Parses top-level items until the end of the [`Code`] or until an
+    /// [`PError`] occurs.
+    pub fn parse(code: &'code Code, alloc: &'alloc bumpalo::Bump) -> Self {
+        let mut parser = ExprParser::new(Lexer::new(code), alloc);
+        parser.ws0();
+        Self { parser }
+    }
 }
 
-/// `:` [`dot`]
-///
-/// Note: `1:x.y` = `x.y(1)`
-/// Otherwise: `1:x.y`
-// `            ^^^^^` ERR: "func `1:x` has no prop `y`"
-pub fn colon() -> Parser<FactorExt> {
-    Parser::new(|l| err!(TODO, l.pos_span()))
-    /*
-    let member_access = ident().ws0().sep_by1(tok!(.)).map_with_lex(|d, lex| {
-        let mut idents = d.into_iter();
-        let first = idents.next().expect("sep_by1").into_expr();
-        idents.map(FactorExt::Dot).fold(first, |lhs, dot_rhs| dot_rhs.extend(lhs, &lex)) // TODO: reference should be to an older lexer
-    });
-    tok!(:).ws0().and_r_fatal(member_access).map(Box::new).map(FactorExt::Colon)
-    */
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeclMarkers {
+    is_pub: bool,
+    is_mut: bool,
+    is_rec: bool,
 }
 
-/// `<` [`expr`], [`expr`], ..., [`expr`], `>`
-pub fn compcall() -> Parser<FactorExt> {
-    Parser::new(|l| err!(TODO, l.pos_span()))
-    /*
-    tok!(<)
-        .and_r_fatal(comma_chain(expr()))
-        .and_l_fatal(tok!(>))
-        .map(FactorExt::CompCall)
-        */
+impl DeclMarkers {
+    pub fn is_empty(&self) -> bool {
+        !(self.is_pub || self.is_mut || self.is_rec)
+    }
 }
 
-/// `(` [`expr`], [`expr`], ..., [`expr`], `)`
-pub fn call() -> Parser<FactorExt> {
-    tok!('(')
-        .and_r_fatal(comma_chain(expr()))
-        .and_l_fatal(tok!(')'))
-        .map(FactorExt::Call)
+#[derive(Debug, Clone, Copy)]
+pub enum VarDeclMarkerKind {
+    Pub,
+    Mut,
+    Rec,
 }
 
-/// `[` [`expr`] `]`
-pub fn index() -> Parser<FactorExt> {
-    tok!('[')
-        .and_r_fatal(expr())
-        .and_l_fatal(tok!(']'))
-        .map(Box::new)
-        .map(FactorExt::Index)
+#[derive(Debug, Clone)]
+pub enum VarDeclKind {
+    /// `<name>: <ty>;`
+    /// `<name>: <ty> = <init>;`
+    WithTy { ty: NonNull<Expr>, init: Option<NonNull<Expr>> },
+    /// `<name> := <init>;`
+    InferTy { init: NonNull<Expr> },
 }
 
-// PostOp { kind: PostOpKind, expr: Box<Expr>, span: Span, },
-// /// `<lhs> [ <idx> ]`
-// Index { lhs: Box<Expr>, idx: Box<Expr>, span: Span, },
-// ----------------------
-// /// examples: `<expr>?`, `<expr>.*`
-// PostOp {
-//     kind: PostOpKind,
-//     expr: Box<ExprKind>,
-//     span: Span,
-// },
-// /// `<lhs> [ <idx> ]`
-// Index {
-//     lhs: Box<ExprKind>,
-//     idx: Box<ExprKind>,
-//     span: Span,
-// },
-
-// /// `<func> < <params> >`
-// CompCall {
-//     func: Box<ExprKind>,
-//     params: Vec<ExprKind>,
-//     span: Span,
-// },
-
-// ----------------------------
+impl VarDeclKind {
+    pub fn into_ty_val(self) -> (Option<NonNull<Expr>>, Option<NonNull<Expr>>) {
+        match self {
+            VarDeclKind::WithTy { ty, init } => (Some(ty), init),
+            VarDeclKind::InferTy { init } => (None, Some(init)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ident {
@@ -1232,14 +851,6 @@ impl Ident {
 
     pub fn into_expr(self) -> Expr {
         Expr { kind: ExprKind::Ident, span: self.span }
-    }
-
-    pub fn to_text(&self) -> String {
-        "X".repeat(self.span.len())
-    }
-
-    pub fn write_tree(&self, lines: &mut TreeLines) {
-        lines.write(&self.to_text());
     }
 }
 
@@ -1352,457 +963,439 @@ pub mod debug {
     }
 }
 
-/*
-impl Stmt {
-    /// This generates new Code and doesn't read the orignal code!
-    pub fn to_text(&self) -> String {
-        match &self.kind {
-            StmtKind::Decl { markers, ident, kind } => {
-                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                format!(
-                    "{}{}{}{}{};",
-                    if *is_pub { "pub " } else { "" },
-                    if *is_mut { "mut " } else { "" },
-                    if *is_rec { "rec " } else { "" },
-                    ident.to_text(),
-                    match kind {
-                        DeclKind::WithTy { ty, init: Some(init) } =>
-                            format!(": {} = {}", ty.to_text(), init.to_text()),
-                        DeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
-                        DeclKind::InferTy { init } => format!(" := {}", init.to_text()),
-                        DeclKind::Const { ty: Some(ty), init } =>
-                            format!(": {} : {}", ty.to_text(), init.to_text()),
-                        DeclKind::Const { ty: None, init } => format!(" :: {}", init.to_text()),
-                    },
-                )
-            },
-            StmtKind::Semicolon(expr) => format!("{};", expr.to_text()),
-            StmtKind::Expr(expr) => expr.to_text(),
-        }
-    }
-
-    pub fn write_tree(&self, lines: &mut TreeLines) {
-        let len = self.to_text().len();
-        match &self.kind {
-            StmtKind::Decl { markers, ident, kind } => {
-                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                lines.write(&format!(
-                    "{}{}{}",
-                    if *is_pub { "pub " } else { "" },
-                    if *is_mut { "mut " } else { "" },
-                    if *is_rec { "rec " } else { "" }
-                ));
-
-                lines.scope_next_line(|l| ident.write_tree(l));
-                lines.write_minus(ident.span.len());
-
-                match kind {
-                    DeclKind::WithTy { ty, init } => {
-                        lines.write(": ");
-                        lines.scope_next_line(|l| ty.write_tree(l));
-                        lines.write_minus(ty.span.len());
-                        if let Some(init) = init {
-                            lines.write(" = ");
-                            lines.scope_next_line(|l| init.write_tree(l));
-                            lines.write_minus(init.span.len());
-                        }
-                    },
-                    DeclKind::InferTy { init } => {
-                        lines.write(" := ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                    DeclKind::Const { ty: Some(ty), init } => {
-                        lines.write(": ");
-                        lines.scope_next_line(|l| ty.write_tree(l));
-                        lines.write_minus(ty.span.len());
-                        lines.write(" : ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                    DeclKind::Const { ty: None, init } => {
-                        lines.write(" :: ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                }
-                lines.write(";");
-            },
-            StmtKind::Semicolon(expr) => {
-                lines.scope_next_line(|l| expr.write_tree(l));
-                lines.write(&"-".repeat(len - 1));
-                lines.write(";");
-            },
-            StmtKind::Expr(expr) => expr.write_tree(lines),
-        }
-    }
-
-    pub fn print_tree(&self) {
-        let mut lines = TreeLines::default();
-        self.write_tree(&mut lines);
-        for l in lines.lines {
-            println!("| {}", l.0);
-        }
-    }
-}
-*/
-
 impl Expr {
     /// This generates new Code and doesn't read the orignal code!
-    pub fn to_text(&self) -> String {
-        #[allow(unused)]
-        match &self.kind {
-            ExprKind::Ident => "X".repeat(self.span.len()),
-            ExprKind::ArraySemi { val, count } => {
-                format!("[{};{}]", val.to_text(), count.to_text())
-            },
-            ExprKind::ArrayComma { elements } => format!(
-                "[{}]",
-                elements
-                    .iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            ExprKind::Tuple { elements } => format!(
-                "({})",
-                elements
-                    .iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
-            ExprKind::Literal(LitKind::Bool) => "0".repeat(self.span.len()),
-            ExprKind::Literal(LitKind::Char) => "0".repeat(self.span.len()),
-            ExprKind::Literal(LitKind::BChar) => "0".repeat(self.span.len()),
-            ExprKind::Literal(LitKind::Int) => "0".repeat(self.span.len()),
-            ExprKind::Literal(LitKind::Float) => "0".repeat(self.span.len()),
-            ExprKind::Literal(LitKind::Str) => "0".repeat(self.span.len()),
-            ExprKind::Fn { params, ret_type, body } => format!(
-                "({})->{}",
-                params
-                    .iter()
-                    .map(|(ident, ty)| {
-                        let ty =
-                            ty.as_ref().map(|e| format!(":{}", e.to_text())).unwrap_or_default();
-                        format!("{}{}", ident.to_text(), ty)
-                    })
-                    .intersperse(",".to_string())
-                    .collect::<String>(),
-                {
-                    let body = body.to_text();
-                    match ret_type {
-                        Some(ret_type) => format!("{} {{{}}}", ret_type.to_text(), body),
-                        None => body,
-                    }
-                }
-            ),
-            ExprKind::StructDef(..) => panic!(),
-            ExprKind::StructInit { name, fields } => panic!(),
-            ExprKind::TupleStructDef(..) => panic!(),
-            ExprKind::Union {} => panic!(),
-            ExprKind::Enum {} => panic!(),
-            ExprKind::OptionShort(ty) => panic!(),
-            ExprKind::Block { stmts } => {
-                format!("{{{}}}", stmts.iter().map(|a| a.to_text()).collect::<String>())
-            },
-            ExprKind::Dot { lhs, rhs } => {
-                format!("{}.{}", lhs.to_text(), rhs.to_text())
-            },
-            //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(), rhs.to_text()) },
-            ExprKind::PostOp { kind, expr } => panic!(),
-            ExprKind::Index { lhs, idx } => panic!(),
-            //ExprKind::CompCall { func, args } => panic!(),
-            ExprKind::Call { func, args } => format!(
-                "{}({})",
-                func.to_text(),
-                args.iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            ExprKind::PreOp { kind, expr } => panic!(),
-            ExprKind::BinOp { lhs, op, rhs } => {
-                format!("{}{}{}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
-            },
-            ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => {
-                format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
-            },
-            ExprKind::If { condition, then_body, else_body } => {
-                format!(
-                    "if {} {{ {} }}{}",
-                    condition.to_text(),
-                    then_body.to_text(),
-                    else_body
-                        .as_ref()
-                        .map(|e| format!(" else {}", e.to_text()))
-                        .unwrap_or_default()
-                )
-            },
-            ExprKind::Decl { markers, ident, kind } => {
-                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                format!(
-                    "{}{}{}{}{};",
-                    if *is_pub { "pub " } else { "" },
-                    if *is_mut { "mut " } else { "" },
-                    if *is_rec { "rec " } else { "" },
-                    ident.to_text(),
-                    match kind {
-                        DeclKind::WithTy { ty, init: Some(init) } =>
-                            format!(": {} = {}", ty.to_text(), init.to_text()),
-                        DeclKind::WithTy { ty, init: None } => format!(": {}", ty.to_text()),
-                        DeclKind::InferTy { init } => format!(" := {}", init.to_text()),
-                        DeclKind::Const { ty: Some(ty), init } =>
-                            format!(": {} : {}", ty.to_text(), init.to_text()),
-                        DeclKind::Const { ty: None, init } => format!(" :: {}", init.to_text()),
-                    },
-                )
-            },
-            ExprKind::Semicolon(expr) => format!("{}", expr.to_text()),
-        }
-    }
-
-    pub fn write_tree(&self, lines: &mut TreeLines) {
-        match &self.kind {
-            ExprKind::Ident
-            | ExprKind::Literal(LitKind::Bool)
-            | ExprKind::Literal(LitKind::Char)
-            | ExprKind::Literal(LitKind::BChar)
-            | ExprKind::Literal(LitKind::Int)
-            | ExprKind::Literal(LitKind::Float)
-            | ExprKind::Literal(LitKind::Str) => lines.write(&self.to_text()),
-            /*
-            ExprKind::ArrayShort { val, count } => {
-                format!("[{};{}]", val.to_text(), count.to_text())
-            },
-            ExprKind::ArrayInit { elements } => format!(
-                "[{}]",
-                elements
-                    .iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            */
-            ExprKind::Tuple { elements } => {
-                lines.write("(");
-                for (idx, e) in elements.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    lines.scope_next_line(|l| e.write_tree(l));
-                    lines.write_minus(e.to_text().len());
-                }
-                lines.write(")");
-            },
-            ExprKind::Parenthesis { expr } => {
-                lines.write("(");
-                lines.scope_next_line(|l| expr.write_tree(l));
-                lines.write_minus(expr.to_text().len());
-                lines.write(")");
-            },
-            ExprKind::Fn { params, ret_type, body } => {
-                lines.write("(");
-
-                for (idx, (ident, ty)) in params.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    lines.scope_next_line(|l| ident.write_tree(l));
-                    lines.write_minus(ident.to_text().len());
-                    if let Some(ty) = ty {
-                        lines.write(":");
-                        lines.scope_next_line(|l| ty.write_tree(l));
-                        lines.write_minus(ty.to_text().len());
-                    }
-                }
-                lines.write(")->");
-                match ret_type {
-                    Some(ret_type) => {
-                        lines.scope_next_line(|l| ret_type.write_tree(l));
-                        lines.write_minus(ret_type.to_text().len());
-                        lines.write("{");
-                        lines.scope_next_line(|l| body.write_tree(l));
-                        lines.write_minus(body.to_text().len());
-                        lines.write("}");
-                    },
-                    None => {
-                        lines.scope_next_line(|l| body.write_tree(l));
-                        lines.write_minus(body.to_text().len());
-                    },
-                }
-            },
-            /*
-            ExprKind::StructDef { fields } => panic!(),
-            ExprKind::StructInit { fields, span } => panic!(),
-            ExprKind::TupleStructDef { fields, span } => panic!(),
-            ExprKind::Union { span } => panic!(),
-            ExprKind::Enum { span } => panic!(),
-            ExprKind::OptionShort { ty, span } => panic!(),
-            */
-            ExprKind::Block { stmts } => {
-                lines.write("{");
-                let start = lines.get_cur_offset();
-                let end = lines.scope_next_line(|l| {
-                    for s in stmts {
-                        s.write_tree(l)
-                    }
-                    l.get_cur_offset()
-                });
-                lines.write_minus(end - start);
-                lines.write("}");
-            },
-            ExprKind::Dot { lhs, rhs } => {
-                lines.scope_next_line(|l| lhs.write_tree(l));
-                lines.write_minus(lhs.to_text().len());
-                lines.write(".");
-                lines.scope_next_line(|l| rhs.write_tree(l));
-                lines.write_minus(rhs.span.len());
-            },
-            /*
-            ExprKind::Colon { lhs, rhs } => {
-                lines.scope_next_line(|l| lhs.write_tree(l));
-                lines.write_minus(lhs.to_text().len());
-                lines.write(":");
-                lines.scope_next_line(|l| rhs.write_tree(l));
-                lines.write_minus(rhs.span.len());
-            },
-            ExprKind::PostOp { kind, expr, span } => panic!(),
-            ExprKind::Index { lhs, idx, span } => panic!(),
-            ExprKind::CompCall { func, args } => panic!(),
-            */
-            ExprKind::Call { func, args } => {
-                lines.scope_next_line(|l| func.write_tree(l));
-                lines.write_minus(func.to_text().len());
-                lines.write("(");
-                lines.write(&format!(
-                    "{})",
-                    args.iter()
-                        .map(|e| e.to_text())
+    pub fn to_text(&self, code: &Code) -> String {
+        unsafe {
+            #[allow(unused)]
+            match &self.kind {
+                ExprKind::Ident => code[self.span].to_string(),
+                ExprKind::ArraySemi { val, count } => {
+                    format!("[{};{}]", val.as_ref().to_text(code), count.as_ref().to_text(code))
+                },
+                ExprKind::ArrayComma { elements } => format!(
+                    "[{}]",
+                    elements
+                        .iter()
+                        .map(|e| e.to_text(code))
                         .intersperse(",".to_string())
                         .collect::<String>()
-                ));
-            },
-            ExprKind::PreOp { kind, expr } => panic!(),
-            ExprKind::BinOp { lhs, op, rhs } => {
-                lines.scope_next_line(|l| lhs.write_tree(l));
-                lines.write_minus(lhs.to_text().len());
-                lines.write(op.to_binop_text());
-                lines.scope_next_line(|l| rhs.write_tree(l));
-                lines.write_minus(rhs.to_text().len());
-            },
-            ExprKind::Assign { lhs, rhs } => {
-                lines.scope_next_line(|l| lhs.write_tree(l));
-                lines.write_minus(lhs.to_text().len());
-                lines.write("=");
-                lines.scope_next_line(|l| rhs.write_tree(l));
-                lines.write_minus(rhs.to_text().len());
-            },
-            ExprKind::BinOpAssign { lhs, op, rhs } => {
-                lines.scope_next_line(|l| lhs.write_tree(l));
-                lines.write_minus(lhs.to_text().len());
-                lines.write(op.to_binop_assign_text());
-                lines.scope_next_line(|l| rhs.write_tree(l));
-                lines.write_minus(rhs.to_text().len());
-            },
-            ExprKind::If { condition, then_body, else_body } => {
-                lines.write("if ");
-                lines.scope_next_line(|l| condition.write_tree(l));
-                lines.write_minus(condition.to_text().len());
-                lines.write("{");
-                lines.scope_next_line(|l| then_body.write_tree(l));
-                lines.write_minus(then_body.to_text().len());
-                if let Some(else_body) = else_body {
-                    lines.write("} else ");
-                    lines.scope_next_line(|l| else_body.write_tree(l));
-                    lines.write_minus(else_body.to_text().len());
-                }
-            },
-            ExprKind::Decl { markers, ident, kind } => {
-                let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                lines.write(&format!(
-                    "{}{}{}",
-                    if *is_pub { "pub " } else { "" },
-                    if *is_mut { "mut " } else { "" },
-                    if *is_rec { "rec " } else { "" }
-                ));
-
-                lines.scope_next_line(|l| ident.write_tree(l));
-                lines.write_minus(ident.span.len());
-
-                match kind {
-                    DeclKind::WithTy { ty, init } => {
-                        lines.write(": ");
-                        lines.scope_next_line(|l| ty.write_tree(l));
-                        lines.write_minus(ty.span.len());
-                        if let Some(init) = init {
-                            lines.write(" = ");
-                            lines.scope_next_line(|l| init.write_tree(l));
-                            lines.write_minus(init.span.len());
+                ),
+                ExprKind::Tuple { elements } => format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(|e| e.to_text(code))
+                        .intersperse(",".to_string())
+                        .collect::<String>()
+                ),
+                ExprKind::Parenthesis { expr } => format!("({})", expr.as_ref().to_text(code)),
+                ExprKind::Literal(_) => code[self.span].to_string(),
+                ExprKind::Fn { params, ret_type, body } => format!(
+                    "({})->{}",
+                    params
+                        .iter()
+                        .map(|(ident, ty)| {
+                            let ty = ty
+                                .as_ref()
+                                .map(|e| format!(":{}", e.to_text(code)))
+                                .unwrap_or_default();
+                            format!("{}{}", &code[ident.span], ty)
+                        })
+                        .intersperse(",".to_string())
+                        .collect::<String>(),
+                    {
+                        let body = body.as_ref().to_text(code);
+                        match ret_type {
+                            Some(ret_type) => {
+                                format!("{} {{{}}}", ret_type.as_ref().to_text(code), body)
+                            },
+                            None => body,
                         }
-                    },
-                    DeclKind::InferTy { init } => {
-                        lines.write(" := ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                    DeclKind::Const { ty: Some(ty), init } => {
+                    }
+                ),
+                ExprKind::StructDef(..) => panic!(),
+                ExprKind::TupleStructDef(..) => panic!(),
+                ExprKind::Union {} => panic!(),
+                ExprKind::Enum {} => panic!(),
+                ExprKind::OptionShort(ty) => panic!(),
+                ExprKind::Initializer { lhs, fields } => panic!(),
+                ExprKind::Block { stmts, has_trailing_semicolon } => {
+                    format!(
+                        "{{{}{}}}",
+                        String::join(";", stmts.iter().map(|a| a.as_ref().to_text(code))),
+                        if *has_trailing_semicolon { ";" } else { "" }
+                    )
+                },
+                ExprKind::Dot { lhs, rhs } => {
+                    format!("{}.{}", lhs.as_ref().to_text(code), &code[rhs.span])
+                },
+                //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.as_ref().to_text(code),
+                // rhs.as_ref().to_text(code)) },
+                ExprKind::PostOp { kind, expr } => panic!(),
+                ExprKind::Index { lhs, idx } => panic!(),
+                //ExprKind::CompCall { func, args } => panic!(),
+                ExprKind::Call { func, args } => format!(
+                    "{}({})",
+                    func.as_ref().to_text(code),
+                    args.iter()
+                        .map(|e| e.as_ref().to_text(code))
+                        .intersperse(",".to_string())
+                        .collect::<String>()
+                ),
+                ExprKind::PreOp { kind, expr } => panic!(),
+                ExprKind::BinOp { lhs, op, rhs } => {
+                    format!(
+                        "{}{}{}",
+                        lhs.as_ref().to_text(code),
+                        op.to_binop_text(),
+                        rhs.as_ref().to_text(code)
+                    )
+                },
+                ExprKind::Assign { lhs, rhs } => todo!("ExprKind::Assign"),
+                ExprKind::BinOpAssign { lhs, op, rhs } => {
+                    format!(
+                        "{}{}{}",
+                        lhs.as_ref().to_text(code),
+                        op.to_binop_assign_text(),
+                        rhs.as_ref().to_text(code)
+                    )
+                },
+                ExprKind::If { condition, then_body, else_body } => {
+                    format!(
+                        "if {} {{ {} }}{}",
+                        condition.as_ref().to_text(code),
+                        then_body.as_ref().to_text(code),
+                        else_body
+                            .as_ref()
+                            .map(|e| format!(" else {}", e.as_ref().to_text(code)))
+                            .unwrap_or_default()
+                    )
+                },
+                ExprKind::VarDecl { markers, ident, kind } => {
+                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                    format!(
+                        "{}{}{}{}{}",
+                        if *is_pub { "pub " } else { "" },
+                        if *is_mut { "mut " } else { "" },
+                        if *is_rec { "rec " } else { "" },
+                        unsafe { ident.as_ref().to_text(code) },
+                        match kind {
+                            VarDeclKind::WithTy { ty, init: Some(init) } => format!(
+                                ": {} = {}",
+                                ty.as_ref().to_text(code),
+                                init.as_ref().to_text(code)
+                            ),
+                            VarDeclKind::WithTy { ty, init: None } =>
+                                format!(": {}", ty.as_ref().to_text(code)),
+                            VarDeclKind::InferTy { init } =>
+                                format!(" := {}", init.as_ref().to_text(code)),
+                            // VarDeclKind::Const { ty: Some(ty), init } =>
+                            //     format!(": {} : {}", ty.as_ref().to_text(code),
+                            // init.as_ref().to_text(code)),
+                            // VarDeclKind::Const { ty: None, init } =>
+                            //     format!(" :: {}", init.as_ref().to_text(code)),
+                        },
+                    )
+                },
+                ExprKind::ConstDecl { markers, ident, ty, init } => {
+                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                    format!(
+                        "{}{}{}{}{}",
+                        if *is_pub { "pub " } else { "" },
+                        if *is_mut { "mut " } else { "" },
+                        if *is_rec { "rec " } else { "" },
+                        unsafe { ident.as_ref().to_text(code) },
+                        if let Some(ty) = ty {
+                            format!(
+                                ": {} : {}",
+                                ty.as_ref().to_text(code),
+                                init.as_ref().to_text(code)
+                            )
+                        } else {
+                            format!(" :: {}", init.as_ref().to_text(code))
+                        }
+                    )
+                },
+                ExprKind::Semicolon(expr) => format!("{}", expr.as_ref().to_text(code)),
+            }
+        }
+    }
+
+    pub fn write_tree(&self, lines: &mut TreeLines, code: &Code) {
+        unsafe {
+            match &self.kind {
+                ExprKind::Ident
+                | ExprKind::Literal(LitKind::Bool)
+                | ExprKind::Literal(LitKind::Char)
+                | ExprKind::Literal(LitKind::BChar)
+                | ExprKind::Literal(LitKind::Int)
+                | ExprKind::Literal(LitKind::Float)
+                | ExprKind::Literal(LitKind::Str) => lines.write(&self.to_text(code)),
+                /*
+                ExprKind::ArrayShort { val, count } => {
+                    format!("[{};{}]", val.to_text(code), count.to_text(code))
+                },
+                ExprKind::ArrayInit { elements } => format!(
+                    "[{}]",
+                    elements
+                        .iter()
+                        .map(|e| e.to_text(code))
+                        .intersperse(",".to_string())
+                        .collect::<String>()
+                ),
+                */
+                ExprKind::Tuple { elements } => {
+                    lines.write("(");
+                    for (idx, e) in elements.into_iter().enumerate() {
+                        if idx != 0 {
+                            lines.write(",");
+                        }
+
+                        lines.scope_next_line(|l| e.write_tree(l, code));
+                        lines.write_minus(e.to_text(code).len());
+                    }
+                    lines.write(")");
+                },
+                ExprKind::Parenthesis { expr } => {
+                    lines.write("(");
+                    lines.scope_next_line(|l| expr.as_ref().write_tree(l, code));
+                    lines.write_minus(expr.as_ref().to_text(code).len());
+                    lines.write(")");
+                },
+                ExprKind::Fn { params, ret_type, body } => {
+                    let body = body.as_ref();
+                    lines.write("(");
+
+                    for (idx, (ident, ty)) in params.into_iter().enumerate() {
+                        if idx != 0 {
+                            lines.write(",");
+                        }
+
+                        lines.scope_next_line(|l| l.write(&code[ident.span]));
+                        lines.write_minus(ident.span.len());
+                        if let Some(ty) = ty {
+                            lines.write(":");
+                            lines.scope_next_line(|l| ty.write_tree(l, code));
+                            lines.write_minus(ty.to_text(code).len());
+                        }
+                    }
+                    lines.write(")->");
+                    match ret_type {
+                        Some(ret_type) => {
+                            let ret_type = ret_type.as_ref();
+                            lines.scope_next_line(|l| ret_type.write_tree(l, code));
+                            lines.write_minus(ret_type.to_text(code).len());
+                            lines.write("{");
+                            lines.scope_next_line(|l| body.write_tree(l, code));
+                            lines.write_minus(body.to_text(code).len());
+                            lines.write("}");
+                        },
+                        None => {
+                            lines.scope_next_line(|l| body.write_tree(l, code));
+                            lines.write_minus(body.to_text(code).len());
+                        },
+                    }
+                },
+                /*
+                ExprKind::StructDef { fields } => panic!(),
+                ExprKind::StructInit { fields, span } => panic!(),
+                ExprKind::TupleStructDef { fields, span } => panic!(),
+                ExprKind::Union { span } => panic!(),
+                ExprKind::Enum { span } => panic!(),
+                ExprKind::OptionShort { ty, span } => panic!(),
+                */
+                ExprKind::Block { stmts, has_trailing_semicolon } => {
+                    lines.write("{");
+                    let len = stmts.len();
+                    for (idx, s) in stmts.iter().enumerate() {
+                        lines.scope_next_line(|l| s.as_ref().write_tree(l, code));
+                        lines.write_minus(s.as_ref().to_text(code).len());
+                        if idx + 1 < len || *has_trailing_semicolon {
+                            lines.write(";");
+                        }
+                    }
+                    lines.write("}");
+                },
+                ExprKind::Dot { lhs, rhs } => {
+                    let lhs = lhs.as_ref();
+                    lines.scope_next_line(|l| lhs.write_tree(l, code));
+                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write(".");
+                    lines.scope_next_line(|l| l.write(&code[rhs.span]));
+                    lines.write_minus(rhs.span.len());
+                },
+                /*
+                ExprKind::Colon { lhs, rhs } => {
+                    lines.scope_next_line(|l| lhs.write_tree(l, code));
+                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write(":");
+                    lines.scope_next_line(|l| rhs.write_tree(l, code));
+                    lines.write_minus(rhs.span.len());
+                },
+                ExprKind::PostOp { kind, expr, span } => panic!(),
+                ExprKind::Index { lhs, idx, span } => panic!(),
+                ExprKind::CompCall { func, args } => panic!(),
+                */
+                ExprKind::Call { func, args } => {
+                    let func = func.as_ref();
+                    lines.scope_next_line(|l| func.write_tree(l, code));
+                    lines.write_minus(func.to_text(code).len());
+                    lines.write("(");
+                    lines.write(&format!(
+                        "{})",
+                        args.iter()
+                            .map(|e| e.as_ref().to_text(code))
+                            .intersperse(",".to_string())
+                            .collect::<String>()
+                    ));
+                },
+                ExprKind::PreOp { kind, expr } => panic!(),
+                ExprKind::BinOp { lhs, op, rhs } => {
+                    let lhs = lhs.as_ref();
+                    let rhs = rhs.as_ref();
+                    lines.scope_next_line(|l| lhs.write_tree(l, code));
+                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write(op.to_binop_text());
+                    lines.scope_next_line(|l| rhs.write_tree(l, code));
+                    lines.write_minus(rhs.to_text(code).len());
+                },
+                ExprKind::Assign { lhs, rhs } => {
+                    let lhs = lhs.as_ref();
+                    let rhs = rhs.as_ref();
+                    lines.scope_next_line(|l| lhs.write_tree(l, code));
+                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write("=");
+                    lines.scope_next_line(|l| rhs.write_tree(l, code));
+                    lines.write_minus(rhs.to_text(code).len());
+                },
+                ExprKind::BinOpAssign { lhs, op, rhs } => {
+                    let lhs = lhs.as_ref();
+                    let rhs = rhs.as_ref();
+                    lines.scope_next_line(|l| lhs.write_tree(l, code));
+                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write(op.to_binop_assign_text());
+                    lines.scope_next_line(|l| rhs.write_tree(l, code));
+                    lines.write_minus(rhs.to_text(code).len());
+                },
+                ExprKind::If { condition, then_body, else_body } => {
+                    let condition = condition.as_ref();
+                    let then_body = then_body.as_ref();
+                    lines.write("if ");
+                    lines.scope_next_line(|l| condition.write_tree(l, code));
+                    lines.write_minus(condition.to_text(code).len());
+                    lines.write("{");
+                    lines.scope_next_line(|l| then_body.write_tree(l, code));
+                    lines.write_minus(then_body.to_text(code).len());
+                    if let Some(else_body) = else_body {
+                        let else_body = else_body.as_ref();
+                        lines.write("} else ");
+                        lines.scope_next_line(|l| else_body.write_tree(l, code));
+                        lines.write_minus(else_body.to_text(code).len());
+                    }
+                },
+                ExprKind::VarDecl { markers, ident, kind } => {
+                    let ident = ident.as_ref();
+                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                    lines.write(&format!(
+                        "{}{}{}",
+                        if *is_pub { "pub " } else { "" },
+                        if *is_mut { "mut " } else { "" },
+                        if *is_rec { "rec " } else { "" }
+                    ));
+
+                    lines.scope_next_line(|l| ident.write_tree(l, code));
+                    lines.write_minus(ident.span.len());
+
+                    match kind {
+                        VarDeclKind::WithTy { ty, init } => {
+                            let ty = ty.as_ref();
+                            lines.write(": ");
+                            lines.scope_next_line(|l| ty.write_tree(l, code));
+                            lines.write_minus(ty.span.len());
+                            if let Some(init) = init {
+                                let init = init.as_ref();
+                                lines.write(" = ");
+                                lines.scope_next_line(|l| init.write_tree(l, code));
+                                lines.write_minus(init.span.len());
+                            }
+                        },
+                        VarDeclKind::InferTy { init } => {
+                            let init = init.as_ref();
+                            lines.write(" := ");
+                            lines.scope_next_line(|l| init.write_tree(l, code));
+                            lines.write_minus(init.to_text(code).len());
+                        },
+                        /*
+                        VarDeclKind::Const { ty: Some(ty), init } => {
+                            lines.write(": ");
+                            lines.scope_next_line(|l| ty.write_tree(l, code));
+                            lines.write_minus(ty.span.len());
+                            lines.write(" : ");
+                            lines.scope_next_line(|l| init.write_tree(l, code));
+                            lines.write_minus(init.span.len());
+                        },
+                        VarDeclKind::Const { ty: None, init } => {
+                            lines.write(" :: ");
+                            lines.scope_next_line(|l| init.write_tree(l, code));
+                            lines.write_minus(init.span.len());
+                        },
+                        */
+                    }
+                },
+                ExprKind::ConstDecl { markers, ident, ty, init } => {
+                    let ident = ident.as_ref();
+                    let init = init.as_ref();
+                    let init_len = init.to_text(code).len();
+                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
+                    lines.write(&format!(
+                        "{}{}{}",
+                        if *is_pub { "pub " } else { "" },
+                        if *is_mut { "mut " } else { "" },
+                        if *is_rec { "rec " } else { "" }
+                    ));
+
+                    lines.scope_next_line(|l| ident.write_tree(l, code));
+                    lines.write_minus(ident.span.len());
+
+                    if let Some(ty) = ty {
+                        let ty = ty.as_ref();
                         lines.write(": ");
-                        lines.scope_next_line(|l| ty.write_tree(l));
+                        lines.scope_next_line(|l| ty.write_tree(l, code));
                         lines.write_minus(ty.span.len());
                         lines.write(" : ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                    DeclKind::Const { ty: None, init } => {
+                        lines.scope_next_line(|l| init.write_tree(l, code));
+                        lines.write_minus(init_len);
+                    } else {
                         lines.write(" :: ");
-                        lines.scope_next_line(|l| init.write_tree(l));
-                        lines.write_minus(init.span.len());
-                    },
-                }
-                lines.write(";");
-            },
-            ExprKind::Semicolon(expr) => {
-                let len = self.to_text().len();
-                lines.scope_next_line(|l| expr.write_tree(l));
-                lines.write_minus(len - 1);
-                lines.write(";");
-            },
+                        lines.scope_next_line(|l| init.write_tree(l, code));
+                        lines.write_minus(init_len);
+                    }
+                    /*
+                       if let Some(ty) = ty {
+                           format!(": {} : {}", ty.as_ref().to_text(code), init.as_ref().to_text(code))
+                       } else {
+                           format!(" :: {}", init.as_ref().to_text(code))
+                       }
+                    */
+                },
+                ExprKind::Semicolon(expr) => {
+                    let len = self.to_text(code).len();
+                    lines.scope_next_line(|l| expr.as_ref().write_tree(l, code));
+                    lines.write_minus(len - 1);
+                    lines.write(";");
+                },
 
-            k => panic!("{:?}", k),
+                k => panic!("{:?}", k),
+            }
         }
     }
 
-    pub fn print_tree(&self) {
+    pub fn print_tree(&self, code: &Code) {
         let mut lines = TreeLines::default();
-        self.write_tree(&mut lines);
+        self.write_tree(&mut lines, code);
         for l in lines.lines {
             println!("| {}", l.0);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lexer::Code;
-
-    #[test]
-    fn test_let_() {
-        let code = Code::new(" add := ( a , b : int ) -> a + b; ");
-        println!("{:?}", code);
-        println!(
-            "{:?}",
-            (0..code.len()).map(|x| if x % 5 == 0 { '.' } else { ' ' }).collect::<String>()
-        );
-        let res = decl().run(Lexer::new(code));
-        match res {
-            Ok(ok) => println!("OK: {:#?}", ok),
-            Err(e) | Fatal(e) => panic!("{}", e.display(code)),
         }
     }
 }

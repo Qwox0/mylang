@@ -1,3 +1,4 @@
+use super::util::OptionExt;
 use core::fmt;
 use std::ops::{ControlFlow, FromResidual, Try};
 use ResultWithFatal::*;
@@ -76,6 +77,29 @@ impl<T, E> ResultWithFatal<T, E> {
         }
     }
 
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Ok(_))
+    }
+
+    pub fn is_any_err(&self) -> bool {
+        matches!(self, Err(_) | Fatal(_))
+    }
+
+    pub fn is_nonfatal_err(&self) -> bool {
+        matches!(self, Err(_))
+    }
+
+    pub fn is_fatal_err(&self) -> bool {
+        matches!(self, Fatal(_))
+    }
+
+    pub fn into_fatal(self) -> Self {
+        match self {
+            Err(err) => Fatal(err),
+            res => res,
+        }
+    }
+
     /// ```text
     /// | self          | output        |
     /// |:-------------:|:-------------:|
@@ -88,6 +112,14 @@ impl<T, E> ResultWithFatal<T, E> {
         match self {
             Ok(t) => Ok(f(t)),
             Err(e) => Err(e),
+            Fatal(e) => Fatal(e),
+        }
+    }
+
+    pub fn map_nonfatal_err(self, f: impl FnOnce(E) -> E) -> ResultWithFatal<T, E> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(f(e)),
             Fatal(e) => Fatal(e),
         }
     }

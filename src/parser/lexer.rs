@@ -1,8 +1,9 @@
-use crate::parser::LitKind;
-use core::fmt;
+use crate::parser::{parser_helper::Parser, LitKind};
+use core::{fmt, range::Range};
 use std::{
     mem,
-    ops::{Deref, Index, Range},
+    ops::{Deref, Index},
+    str::FromStr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub enum TokenKind {
 
     /// `let`, `my_var`, `MyStruct`, `_`
     Ident,
+
+    Keyword(Keyword),
 
     /// Note: Bool literals are Idents
     Literal(LitKind),
@@ -150,8 +153,70 @@ pub enum TokenKind {
     Unknown,
 }
 
+macro_rules! tk {
+    ('(') => { TokenKind::OpenParenthesis };
+    (')') => { TokenKind::CloseParenthesis };
+    ('[') => { TokenKind::OpenBracket };
+    (']') => { TokenKind::CloseBracket };
+    ('{') => { TokenKind::OpenBrace };
+    ('}') => { TokenKind::CloseBrace };
+    (=) => { TokenKind::Eq };
+    (==) => { TokenKind::EqEq };
+    (=>) => { TokenKind::FatArrow };
+    (!) => { TokenKind::Bang };
+    (!=) => { TokenKind::BangEq };
+    (<) => { TokenKind::Lt };
+    (<=) => { TokenKind::LtEq };
+    (<<) => { TokenKind::LtLt };
+    (<<=) => { TokenKind::LtLtEq };
+    (>) => { TokenKind::Gt };
+    (>=) => { TokenKind::GtEq };
+    (>>) => { TokenKind::GtGt };
+    (>>=) => { TokenKind::GtGtEq };
+    (+) => { TokenKind::Plus };
+    (+=) => { TokenKind::PlusEq };
+    (-) => { TokenKind::Minus };
+    (-=) => { TokenKind::MinusEq };
+    (->) => { TokenKind::Arrow };
+    (*) => { TokenKind::Asterisk };
+    (*=) => { TokenKind::AsteriskEq };
+    (/) => { TokenKind::Slash };
+    (/=) => { TokenKind::SlashEq };
+    (%) => { TokenKind::Percent };
+    (%=) => { TokenKind::PercentEq };
+    (&) => { TokenKind::Ampersand };
+    (&&) => { TokenKind::AmpersandAmpersand };
+    (&=) => { TokenKind::AmpersandEq };
+    (|) => { TokenKind::Pipe };
+    (||) => { TokenKind::PipePipe };
+    (|=) => { TokenKind::PipeEq };
+    (^) => { TokenKind::Caret };
+    (^=) => { TokenKind::CaretEq };
+    (.) => { TokenKind::Dot };
+    (..) => { TokenKind::DotDot };
+    (..=) => { TokenKind::DotDotEq };
+    (.*) => { TokenKind::DotAsterisk };
+    (.&) => { TokenKind::DotAmpersand };
+    (,) => { TokenKind::Comma };
+    (:) => { TokenKind::Colon };
+    (::) => { TokenKind::ColonColon };
+    (:=) => { TokenKind::ColonEq };
+    (;) => { TokenKind::Semicolon };
+    (?) => { TokenKind::Question };
+    (#) => { TokenKind::Pound };
+    ($) => { TokenKind::Dollar };
+    (@) => { TokenKind::At };
+    (~) => { TokenKind::Tilde };
+    ('\\') => { compile_error!(TODO: BackSlash) };
+    ($($t:tt)*) => {
+        compile_error!(concat!("cannot convert \"", stringify!($($t)*), "\" to TokenKind"))
+    };
+}
+use super::ParseErrorKind;
+pub(crate) use tk;
+
 impl TokenKind {
-    pub fn is_ignored(&self) -> bool {
+    pub fn is_whitespace(&self) -> bool {
         match self {
             TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_) => true,
             _ => false,
@@ -171,6 +236,50 @@ impl Token {
     pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
         Self { kind, span: Span::from(span) }
     }
+}
+
+macro_rules! keywords {
+    ( $($enum_variant:ident = $text:literal),* $(,)? ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Keyword {
+            $($enum_variant),*
+        }
+
+        impl FromStr for Keyword {
+            type Err = ParseErrorKind;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($text => Result::Ok(Keyword::$enum_variant),)*
+                    _ => Result::Err(ParseErrorKind::NotAKeyword)
+                }
+            }
+        }
+
+        impl Keyword {
+            fn as_str(self) -> &'static str {
+                match self {
+                    $(Keyword::$enum_variant => $text,)*
+                }
+            }
+        }
+    };
+}
+
+keywords! {
+    Mut = "mut",
+    Rec = "rec",
+    Struct = "struct",
+    Union = "union",
+    Enum = "enum",
+    Unsafe = "unsafe",
+    True = "true",
+    False = "false",
+    If = "if",
+    Else = "else",
+    Match = "match",
+    For = "for",
+    While = "while",
 }
 
 /// byte range offset for a [`Code`].
@@ -231,7 +340,7 @@ impl From<Range<usize>> for Span {
 
 impl From<Span> for Range<usize> {
     fn from(span: Span) -> Self {
-        span.start..span.end
+        (span.start..span.end).into()
     }
 }
 
@@ -333,12 +442,19 @@ impl<'c> Lexer<'c> {
         lex
     }
 
+    #[inline]
     pub fn get_code(&self) -> &'c Code {
         self.code.code
     }
 
+    #[inline]
     pub fn get_pos(&self) -> usize {
         self.code.pos
+    }
+
+    #[inline]
+    pub fn set_pos(&mut self, pos: usize) {
+        unsafe { self.code.set_pos(pos) }
     }
 
     pub fn pos_span(&self) -> Span {
@@ -349,11 +465,91 @@ impl<'c> Lexer<'c> {
         self.pos_span().join(other.pos_span())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.peek().is_none()
+    pub fn advanced(mut self) -> Self {
+        self.advance();
+        self
     }
 
-    pub fn next(&mut self) -> Option<Token> {
+    fn string_literal(&mut self) -> TokenKind {
+        while !matches!(self.code.next(), Some('"' | '\n')) {}
+        // TODO: check for invalid literal
+        TokenKind::Literal(LitKind::Str)
+    }
+
+    fn bchar_literal(&mut self) -> TokenKind {
+        while !matches!(self.code.next(), Some('\'' | '\n')) {}
+        // TODO: check for invalid literal
+        TokenKind::Literal(LitKind::BChar)
+    }
+
+    fn char_literal(&mut self) -> TokenKind {
+        while !matches!(self.code.next(), Some('\'' | '\n')) {}
+        // TODO: check for invalid literal
+        TokenKind::Literal(LitKind::Char)
+    }
+
+    fn num_literal(&mut self) -> TokenKind {
+        self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
+        match self.code.peek().zip(self.code.peek2()) {
+            // an integer might be followed by a range operator `..` or a method `1.foo()`
+            Some(('.', c)) if c != '.' && !is_id_start(c) => {
+                self.code.advance();
+                self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
+                TokenKind::Literal(LitKind::Float)
+            },
+            _ => TokenKind::Literal(LitKind::Int),
+        }
+    }
+
+    fn line_comment(&mut self) -> TokenKind {
+        let comment_type = match self.code.peek() {
+            Some('!') => CommentType::DocInner,
+            Some('/') => CommentType::DocOuter,
+            _ => CommentType::Comment,
+        };
+        while !matches!(self.code.next(), None | Some('\n')) {}
+        TokenKind::LineComment(comment_type)
+    }
+
+    fn block_comment(&mut self) -> TokenKind {
+        let comment_type = match self.code.peek() {
+            Some('!') => CommentType::DocInner,
+            // `/**/` => CommentType::Comment
+            Some('*') if self.code.peek2() != Some('/') => CommentType::DocOuter,
+            _ => CommentType::Comment,
+        };
+
+        let mut depth: usize = 1;
+        while let Some(c) = self.code.next() {
+            match c {
+                '/' if self.code.advance_if(|c| c == '*') => depth += 1,
+                '*' if self.code.advance_if(|c| c == '/') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                },
+                _ => (),
+            }
+        }
+
+        TokenKind::BlockComment(comment_type)
+    }
+
+    fn ident(&mut self, start: usize) -> TokenKind {
+        self.code.advance_while(is_id_continue);
+        self.get_code().0[start..self.code.pos]
+            .parse::<Keyword>()
+            .map(TokenKind::Keyword)
+            .unwrap_or(TokenKind::Ident)
+    }
+}
+
+impl<'c> Parser for Lexer<'c> {
+    type Item = Token;
+    type PeekedItem = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
         /// peeks at the next char, matches the patterns and advances `self` if
         /// needed. the `default` value is returns if no pattern matches
         /// the peeked char
@@ -478,101 +674,22 @@ impl<'c> Lexer<'c> {
             '\\' => todo!("BackSlash"),
 
             'b' => maybe_followed_by! {
-                default: self.ident(),
+                default: self.ident(start),
                 '\'' => self.bchar_literal()
             },
-            c if is_id_start(c) => self.ident(),
+            c if is_id_start(c) => self.ident(start),
 
             _ => TokenKind::Unknown,
         };
-        Some(Token::new(kind, start..self.code.pos))
+        Some(Token::new(kind, (start..self.code.pos).into()))
     }
 
-    pub fn peek(&self) -> Option<Token> {
+    fn peek(&self) -> Option<Self::PeekedItem> {
         self.clone().next()
-    }
-
-    pub fn advance(&mut self) {
-        self.next();
-    }
-
-    pub fn advanced(mut self) -> Self {
-        self.advance();
-        self
-    }
-
-    fn string_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('"' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::Str)
-    }
-
-    fn bchar_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('\'' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::BChar)
-    }
-
-    fn char_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('\'' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::Char)
-    }
-
-    fn num_literal(&mut self) -> TokenKind {
-        self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-        match self.code.peek().zip(self.code.peek2()) {
-            // an integer might be followed by a range operator `..` or a method `1.foo()`
-            Some(('.', c)) if c != '.' && !is_id_start(c) => {
-                self.code.advance();
-                self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-                TokenKind::Literal(LitKind::Float)
-            },
-            _ => TokenKind::Literal(LitKind::Int),
-        }
-    }
-
-    fn line_comment(&mut self) -> TokenKind {
-        let comment_type = match self.code.peek() {
-            Some('!') => CommentType::DocInner,
-            Some('/') => CommentType::DocOuter,
-            _ => CommentType::Comment,
-        };
-        while !matches!(self.code.next(), None | Some('\n')) {}
-        TokenKind::LineComment(comment_type)
-    }
-
-    fn block_comment(&mut self) -> TokenKind {
-        let comment_type = match self.code.peek() {
-            Some('!') => CommentType::DocInner,
-            // `/**/` => CommentType::Comment
-            Some('*') if self.code.peek2() != Some('/') => CommentType::DocOuter,
-            _ => CommentType::Comment,
-        };
-
-        let mut depth: usize = 1;
-        while let Some(c) = self.code.next() {
-            match c {
-                '/' if self.code.advance_if(|c| c == '*') => depth += 1,
-                '*' if self.code.advance_if(|c| c == '/') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                },
-                _ => (),
-            }
-        }
-
-        TokenKind::BlockComment(comment_type)
-    }
-
-    fn ident(&mut self) -> TokenKind {
-        self.code.advance_while(is_id_continue);
-        TokenKind::Ident
     }
 }
 
+/*
 impl<'c> Iterator for Lexer<'c> {
     type Item = Token;
 
@@ -580,6 +697,7 @@ impl<'c> Iterator for Lexer<'c> {
         self.next()
     }
 }
+*/
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor<'c> {
@@ -592,18 +710,8 @@ impl<'c> Cursor<'c> {
         Cursor { code, pos: 0 }
     }
 
-    pub fn next(&mut self) -> Option<char> {
-        let c = self.peek();
-        self.advance();
-        c
-    }
-
     pub fn get_rem(self) -> &'c str {
         &self.code.0[self.pos..]
-    }
-
-    pub fn peek(self) -> Option<char> {
-        self.get_rem().chars().next()
     }
 
     fn peek2(&self) -> Option<char> {
@@ -617,18 +725,34 @@ impl<'c> Cursor<'c> {
         self.pos += offset + 1;
     }
 
-    /// Advances the inner [`Chars`] [`Iterator`] while a condition is true.
-    fn advance_while(&mut self, mut f: impl FnMut(char) -> bool) {
-        while self.peek().is_some_and(&mut f) {
-            self.advance();
-        }
+    pub unsafe fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
     }
 
-    fn advance_if(&mut self, mut f: impl FnMut(char) -> bool) -> bool {
-        let do_advance = self.peek().is_some_and(&mut f);
-        if do_advance {
-            self.advance();
+    pub fn set_pos_checked(&mut self, pos: usize) -> bool {
+        let is_valid = pos < self.code.len() && self.code.0.is_char_boundary(pos);
+        if is_valid {
+            self.pos = pos;
         }
-        do_advance
+        is_valid
+    }
+}
+
+impl<'c> Parser for Cursor<'c> {
+    type Item = char;
+    type PeekedItem = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut i = self.get_rem().char_indices();
+        let (_, char) = i.next()?;
+        self.pos = match i.next() {
+            Some((offset, _)) => self.pos + offset,
+            None => self.code.0.len(),
+        };
+        Some(char)
+    }
+
+    fn peek(&self) -> Option<Self::PeekedItem> {
+        self.get_rem().chars().next()
     }
 }

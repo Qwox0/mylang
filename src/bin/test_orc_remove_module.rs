@@ -10,7 +10,7 @@ use inkwell::{
     values::FunctionValue,
     OptimizationLevel,
 };
-use std::mem::{self, MaybeUninit};
+use std::mem;
 
 fn create_my_fn_proto<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> FunctionValue<'ctx> {
     let ret_type = context.f64_type();

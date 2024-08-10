@@ -3,6 +3,8 @@
 #![feature(iter_intersperse)]
 #![feature(control_flow_enum)]
 #![feature(type_changing_struct_update)]
+#![feature(new_range_api)]
+#![feature(ptr_as_ref_unchecked)]
 
 pub mod cli;
 pub mod codegen;
