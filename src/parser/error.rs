@@ -1,4 +1,4 @@
-use super::lexer::TokenKind;
+use super::{lexer::TokenKind, DeclMarkerKind};
 use crate::parser::{lexer::Span, result_with_fatal::ResultWithFatal};
 use core::fmt;
 
@@ -11,6 +11,7 @@ pub enum ParseErrorKind {
     MissingToken(TokenKind),
     NotAKeyword,
     NotAnIdent,
+    DuplicateDeclMarker(DeclMarkerKind),
     AllocErr(bumpalo::AllocErr),
 
     Finished,

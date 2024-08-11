@@ -4,7 +4,7 @@ use inkwell::context::Context;
 use mylang::{
     cli::Cli,
     codegen::{self},
-    parser::{result_with_fatal::ResultWithFatal, StmtIter},
+    parser::{lexer::Lexer, parser_helper::Parser, result_with_fatal::ResultWithFatal, StmtIter},
 };
 use std::{
     io::{Read, Write},
@@ -158,14 +158,15 @@ fn read_code_file(path: &Path) -> String {
 }
 
 fn dev() {
+    const DEBUG_TOKENS: bool = true;
     const DEBUG_AST: bool = true;
 
     let alloc = bumpalo::Bump::new();
 
     let code = "
-test :: x -> 1+2+x;
-main :: -> test(1) + test(2);
-//main :: -> if true test(1) else test(2);
+pub test :: x -> 1+2*x;
+//main :: -> test(1) + test(2);
+main :: -> if false test(1) else test(2);
 //main :: -> {
 //    a := test(1);
 //    b := test(2);
@@ -176,6 +177,13 @@ main :: -> test(1) + test(2);
 
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);
+
+    if DEBUG_TOKENS {
+        let mut lex = Lexer::new(code);
+        while let Some(t) = lex.next() {
+            println!("{:?}", t)
+        }
+    }
 
     if DEBUG_AST {
         for s in stmts.clone() {
@@ -275,7 +283,7 @@ main :: -> {
     }
 
     /// old: 23ms  <- so bad
-    /// new: 3900ns  (5987x faster)
+    /// new: 3900ns  (5897x faster)
     #[bench]
     fn bench_parse2(b: &mut Bencher) {
         b.iter(|| {

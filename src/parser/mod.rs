@@ -5,7 +5,7 @@ use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::Parser;
 use result_with_fatal::ResultWithFatal::{self, *};
 use std::{ops::ControlFlow, ptr::NonNull, str::FromStr};
-use util::{Join, OptionExt};
+use util::{Join, MyOptionTranspose, OptionExt};
 
 pub mod error;
 pub mod lexer;
@@ -17,6 +17,8 @@ mod util;
 pub enum ExprKind {
     Ident,
     Literal(LitKind),
+    /// `true`, `false`
+    BoolLit(bool),
 
     /// `[<val>; <count>]`
     /// both for types and literals
@@ -315,39 +317,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let init = self.expr().context(":: init")?;
                 expr!(ConstDecl { markers, ident: lhs, ty: None, init }, span)
             },
-            FollowingOperator::TypedDecl => {
-                let markers = DeclMarkers::default();
-                let ty = self.expr().context("decl type")?;
-                let t = self.lex.peek().ok_or_fatal(err!(x NoInput, self.lex.pos_span()))?;
-                match t.kind {
-                    TokenKind::Eq => {
-                        self.lex.advance();
-                        let init = Some(self.expr().context(": ty = init")?);
-                        expr!(
-                            VarDecl { markers, ident: lhs, kind: VarDeclKind::WithTy { ty, init } },
-                            span
-                        )
-                    },
-                    TokenKind::Colon => {
-                        self.lex.advance();
-                        let init = self.expr().context(": ty : init")?;
-                        expr!(ConstDecl { markers, ident: lhs, ty: Some(ty), init }, span)
-                    },
-                    TokenKind::Semicolon => expr!(
-                        VarDecl {
-                            markers,
-                            ident: lhs,
-                            kind: VarDeclKind::WithTy { ty, init: None }
-                        },
-                        span
-                    ),
-                    kind => return Fatal(err!(x UnexpectedToken2(kind), t.span)),
-                }
-                /*
-                let eq = self.next_tok().context("decl : or =")?;
-                let init = self.expr()?;
-                */
-            },
+            FollowingOperator::TypedDecl => return self.typed_decl(DeclMarkers::default(), lhs),
         };
         self.alloc(expr)
     }
@@ -376,8 +346,82 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
         let expr = match kind {
             TokenKind::Ident => expr!(Ident),
+            TokenKind::Keyword(Keyword::Mut)
+            | TokenKind::Keyword(Keyword::Rec)
+            | TokenKind::Keyword(Keyword::Pub) => {
+                let mut markers = DeclMarkers::default();
+                let mut t = Token { kind, span };
+
+                macro_rules! set_marker {
+                    ($variant:ident $field:ident) => {
+                        if markers.$field {
+                            return err!(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
+                        } else {
+                            markers.$field = true
+                        }
+                    };
+                }
+
+                let ident = loop {
+                    match t.kind {
+                        TokenKind::Ident => break Expr::new(ExprKind::Ident, t.span), /* break Ident { span: t.span }, */
+                        TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
+                        TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
+                        TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
+                        t => {
+                            return err!(UnexpectedToken2(t), span)
+                                .into_fatal()
+                                .context("expected decl marker or ident");
+                        },
+                    }
+                    self.ws1();
+                    t = self.next_tok().context("missing decl ident")?;
+                };
+                let ident = self.alloc(ident)?;
+                self.ws0();
+
+                let decl = self.next_tok().context("expected ':', ':=' or '::'")?;
+                match decl.kind {
+                    TokenKind::Colon => return self.typed_decl(markers, ident),
+                    TokenKind::ColonEq => {
+                        let init = self.expr().context(":= init")?;
+                        expr!(VarDecl { markers, ident, kind: VarDeclKind::InferTy { init } }, span)
+                    },
+                    TokenKind::ColonColon => {
+                        let init = self.expr().context(":: init")?;
+                        expr!(ConstDecl { markers, ident, ty: None, init }, span)
+                    },
+                    t => {
+                        return err!(UnexpectedToken2(t), decl.span)
+                            .into_fatal()
+                            .context("expected decl marker or ident");
+                    },
+                }
+            },
+            TokenKind::Keyword(Keyword::Struct) => todo!("struct"),
+            TokenKind::Keyword(Keyword::Union) => todo!("union"),
+            TokenKind::Keyword(Keyword::Enum) => todo!("enum"),
+            TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
+            TokenKind::Keyword(Keyword::If) => {
+                let condition = self.expr().into_fatal().context("if condition")?;
+                let then_body = self.expr().into_fatal().context("then body")?;
+                self.ws0();
+                let else_body = self
+                    .lex
+                    .peek()
+                    .filter(|t| t.kind == TokenKind::Keyword(Keyword::Else))
+                    .inspect(|_| self.lex.advance())
+                    .map(|_| self.expr().into_fatal().context("else body"))
+                    .transpose()?;
+                expr!(If { condition, then_body, else_body }, span)
+            },
+            TokenKind::Keyword(Keyword::Else) => todo!("else"),
+            TokenKind::Keyword(Keyword::Match) => todo!("match"),
+            TokenKind::Keyword(Keyword::For) => todo!("for"),
+            TokenKind::Keyword(Keyword::While) => todo!("while"),
             //TokenKind::Keyword(_) => todo!("//TokenKind::Keyword(_)"),
             TokenKind::Literal(l) => expr!(Literal(l)),
+            TokenKind::BoolLit(b) => expr!(BoolLit(b)),
             TokenKind::OpenParenthesis => {
                 let expr = self.expr().context("(...)")?;
                 let close_p =
@@ -465,6 +509,39 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             ExprKind::Block { stmts, has_trailing_semicolon },
             open_brace_span.join(closing_brace_span),
         ))
+    }
+
+    /// starts parsing after the colon:
+    /// `mut a: int = 0;`
+    /// `      ^`
+    pub fn typed_decl(
+        &mut self,
+        markers: DeclMarkers,
+        ident: NonNull<Expr>,
+    ) -> ParseResult<NonNull<Expr>> {
+        let ty = self.expr().context("decl type")?;
+        let t = self.lex.peek().ok_or_fatal(err!(x NoInput, self.lex.pos_span()))?;
+        let expr = match t.kind {
+            TokenKind::Eq => {
+                self.lex.advance();
+                let init = Some(self.expr().context(": ty = init")?);
+                Expr::new(
+                    ExprKind::VarDecl { markers, ident, kind: VarDeclKind::WithTy { ty, init } },
+                    t.span, // TODO
+                )
+            },
+            TokenKind::Colon => {
+                self.lex.advance();
+                let init = self.expr().context(": ty : init")?;
+                Expr::new(ExprKind::ConstDecl { markers, ident, ty: Some(ty), init }, t.span) // TODO
+            },
+            TokenKind::Semicolon => Expr::new(
+                ExprKind::VarDecl { markers, ident, kind: VarDeclKind::WithTy { ty, init: None } },
+                t.span, // TODO
+            ),
+            kind => return Fatal(err!(x UnexpectedToken2(kind), t.span)),
+        };
+        self.alloc(expr)
     }
 
     /// 0+ whitespace
@@ -579,9 +656,9 @@ pub enum FollowingOperator {
 impl FollowingOperator {
     pub fn new(token_kind: TokenKind) -> Option<FollowingOperator> {
         Some(match token_kind {
-            TokenKind::Ident => todo!("TokenKind::Ident"),
-            TokenKind::Keyword(_) => todo!("TokenKind::Keyword(_)"),
-            TokenKind::Literal(_) => todo!("TokenKind::Literal(_)"),
+            //TokenKind::Ident => todo!("TokenKind::Ident"),
+            //TokenKind::Keyword(_) => todo!("TokenKind::Keyword(_)"),
+            //TokenKind::Literal(_) => todo!("TokenKind::Literal(_)"),
             TokenKind::OpenParenthesis => FollowingOperator::Call,
             TokenKind::OpenBracket => FollowingOperator::Index,
             TokenKind::OpenBrace => FollowingOperator::Initializer,
@@ -811,8 +888,8 @@ impl DeclMarkers {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum VarDeclMarkerKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclMarkerKind {
     Pub,
     Mut,
     Rec,
@@ -876,8 +953,6 @@ pub enum PreOpKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LitKind {
-    /// `true`, `false`
-    Bool,
     /// `'a'`
     Char,
     /// `b'a'`
@@ -990,7 +1065,7 @@ impl Expr {
                         .collect::<String>()
                 ),
                 ExprKind::Parenthesis { expr } => format!("({})", expr.as_ref().to_text(code)),
-                ExprKind::Literal(_) => code[self.span].to_string(),
+                ExprKind::Literal(_) | ExprKind::BoolLit(_) => code[self.span].to_string(),
                 ExprKind::Fn { params, ret_type, body } => format!(
                     "({})->{}",
                     params
@@ -1063,7 +1138,7 @@ impl Expr {
                 },
                 ExprKind::If { condition, then_body, else_body } => {
                     format!(
-                        "if {} {{ {} }}{}",
+                        "if {} {}{}",
                         condition.as_ref().to_text(code),
                         then_body.as_ref().to_text(code),
                         else_body
@@ -1126,12 +1201,12 @@ impl Expr {
         unsafe {
             match &self.kind {
                 ExprKind::Ident
-                | ExprKind::Literal(LitKind::Bool)
                 | ExprKind::Literal(LitKind::Char)
                 | ExprKind::Literal(LitKind::BChar)
                 | ExprKind::Literal(LitKind::Int)
                 | ExprKind::Literal(LitKind::Float)
-                | ExprKind::Literal(LitKind::Str) => lines.write(&self.to_text(code)),
+                | ExprKind::Literal(LitKind::Str)
+                | ExprKind::BoolLit(_) => lines.write(&self.to_text(code)),
                 /*
                 ExprKind::ArrayShort { val, count } => {
                     format!("[{};{}]", val.to_text(code), count.to_text(code))
@@ -1284,12 +1359,12 @@ impl Expr {
                     lines.write("if ");
                     lines.scope_next_line(|l| condition.write_tree(l, code));
                     lines.write_minus(condition.to_text(code).len());
-                    lines.write("{");
+                    lines.write(" ");
                     lines.scope_next_line(|l| then_body.write_tree(l, code));
                     lines.write_minus(then_body.to_text(code).len());
                     if let Some(else_body) = else_body {
                         let else_body = else_body.as_ref();
-                        lines.write("} else ");
+                        lines.write(" else ");
                         lines.scope_next_line(|l| else_body.write_tree(l, code));
                         lines.write_minus(else_body.to_text(code).len());
                     }

@@ -21,6 +21,19 @@ impl<T> OptionExt<T> for Option<T> {
     }
 }
 
+pub trait MyOptionTranspose<T, E> {
+    fn transpose(self) -> ResultWithFatal<Option<T>, E>;
+}
+
+impl<T, E> MyOptionTranspose<T, E> for Option<ResultWithFatal<T, E>> {
+    fn transpose(self) -> ResultWithFatal<Option<T>, E> {
+        match self {
+            Some(res) => res.map(Some),
+            None => ResultWithFatal::Ok(None),
+        }
+    }
+}
+
 pub trait Join {
     type Item: ?Sized;
 

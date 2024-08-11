@@ -8,6 +8,7 @@ use crate::{
     },
 };
 use inkwell::{
+    basic_block::BasicBlock,
     builder::{Builder, BuilderError},
     context::Context,
     execution_engine::{ExecutionEngine, FunctionLookupError},
@@ -24,7 +25,7 @@ use inkwell::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValueEnum, FloatValue,
         FunctionValue, PointerValue,
     },
-    OptimizationLevel,
+    FloatPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
@@ -94,6 +95,9 @@ pub struct Compiler<'ctx, 'c, 'i> {
 
     //items: HashMap<String, Item<'i>>,
     items: PhantomData<&'i ()>,
+
+    /// the current fn being compiled
+    cur_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
@@ -111,6 +115,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             variables: HashMap::new(),
             //items: HashMap::new(),
             items: PhantomData,
+            cur_fn: None,
         }
     }
 
@@ -170,7 +175,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, &params, unsafe { body.as_ref() }, code).map(|_| ())
+                self.compile_fn(name, &params, *body, code).map(|_| ())
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -194,6 +199,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::VarDecl { markers, ident, kind } => todo!(),
             ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
             ExprKind::Semicolon(_) => todo!(),
+            _ => todo!(),
         }
     }
 
@@ -223,12 +229,14 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         &mut self,
         name: &str,
         params: &[(Ident, Option<Expr>)],
-        body: &Expr,
+        body: NonNull<Expr>,
         code: &Code,
     ) -> Result<FunctionValue<'ctx>, CError> {
         let func = self.compile_prototype(name, params, code, &self.module);
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
+
+        self.cur_fn = Some(func);
 
         self.variables.reserve(params.len());
 
@@ -257,6 +265,150 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         } else {
             unsafe { func.delete() };
             Err(CError::InvalidGeneratedFunction)
+        }
+    }
+
+    pub fn compile_expr_to_float(
+        &mut self,
+        expr: NonNull<Expr>,
+        code: &Code,
+    ) -> Result<FloatValue<'ctx>, CError> {
+        let expr = unsafe { expr.as_ref() };
+        match &expr.kind {
+            ExprKind::Ident => {
+                let name = &code[expr.span];
+                // TODO: ident which is not a variable
+                let Some(var) = self.variables.get(name) else {
+                    return Err(CError::UnknownIdent(Box::from(name)));
+                };
+
+                #[cfg(feature = "use_ptr_values")]
+                let f = self.build_load(*var, name).into_float_value();
+                #[cfg(not(feature = "use_ptr_values"))]
+                let f = var.into_float_value();
+
+                Ok(f)
+            },
+            ExprKind::Literal(LitKind::Int | LitKind::Float) => {
+                let s = &code[expr.span];
+                Ok(self.context.f64_type().const_float_from_string(s))
+            },
+            &ExprKind::BoolLit(bool) => {
+                Ok(self.context.f64_type().const_float(if bool { 1.0 } else { 0.0 }))
+            },
+            ExprKind::Literal(_) => todo!(),
+            ExprKind::ArraySemi { val, count } => todo!(),
+            ExprKind::ArrayComma { elements } => todo!(),
+            ExprKind::Tuple { elements } => todo!(),
+            ExprKind::Fn { params, ret_type, body } => todo!(),
+            ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr, code),
+            ExprKind::Block { stmts, .. } => todo!("Block"),
+            ExprKind::StructDef(_) => todo!(),
+            ExprKind::TupleStructDef(_) => todo!(),
+            ExprKind::Union {} => todo!(),
+            ExprKind::Enum {} => todo!(),
+            ExprKind::OptionShort(_) => todo!(),
+            ExprKind::Initializer { lhs, fields } => panic!(),
+            ExprKind::Dot { lhs, rhs } => todo!(),
+            //ExprKind::Colon { lhs, rhs } => todo!(),
+            ExprKind::PostOp { kind, expr } => todo!(),
+            ExprKind::Index { lhs, idx } => todo!(),
+            //ExprKind::CompCall { func, args } => todo!(),
+            ExprKind::Call { func, args } => {
+                let func = unsafe { func.as_ref() };
+                if !matches!(func.kind, ExprKind::Ident) {
+                    todo!("non ident function call")
+                }
+
+                let func = &code[func.span];
+                let func = self.get_function(func)?;
+                let expected_arg_count = func.count_params();
+                if expected_arg_count as usize != args.len() {
+                    return Err(CError::MismatchedArgCount {
+                        expected: expected_arg_count,
+                        got: args.len(),
+                    });
+                }
+
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.compile_expr_to_float(*arg, code).map(Into::into))
+                    .collect::<Result<Vec<BasicMetadataValueEnum>, _>>()?;
+
+                match self.builder.build_call(func, &args, "calltmp")?.try_as_basic_value().left() {
+                    Some(v) => Ok(v.into_float_value()),
+                    None => Err(CError::InvalidCallProduced),
+                }
+            },
+            ExprKind::PreOp { kind, expr } => todo!(),
+            &ExprKind::BinOp { lhs, op, rhs } => {
+                let lhs = self.compile_expr_to_float(lhs, code)?;
+                let rhs = self.compile_expr_to_float(rhs, code)?;
+                match op {
+                    BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "tmpMul")?),
+                    BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "tmpDiv")?),
+                    BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "tmpMod")?),
+                    BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "tmpAdd")?),
+                    BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "tmpSub")?),
+                    BinOpKind::ShiftL => todo!(),
+                    BinOpKind::ShiftR => todo!(),
+                    BinOpKind::BitAnd => todo!(),
+                    BinOpKind::BitXor => todo!(),
+                    BinOpKind::BitOr => todo!(),
+                    BinOpKind::Eq => todo!(),
+                    BinOpKind::Ne => todo!(),
+                    BinOpKind::Lt => todo!(),
+                    BinOpKind::Le => todo!(),
+                    BinOpKind::Gt => todo!(),
+                    BinOpKind::Ge => todo!(),
+                    BinOpKind::And => todo!(),
+                    BinOpKind::Or => todo!(),
+                    BinOpKind::Range => todo!(),
+                    BinOpKind::RangeInclusive => todo!(),
+                }
+            },
+            ExprKind::Assign { lhs, rhs } => todo!(),
+            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
+            &ExprKind::If { condition, then_body, else_body } => {
+                let func = self.cur_fn.unwrap();
+                let zero = self.context.f64_type().const_float(0.0);
+
+                let condition = self.compile_expr_to_float(condition, code)?;
+                let condition = self.builder.build_float_compare(
+                    FloatPredicate::ONE,
+                    condition,
+                    zero,
+                    "ifcond",
+                )?;
+
+                let mut then_bb = self.context.append_basic_block(func, "then");
+                let mut else_bb = self.context.append_basic_block(func, "else");
+                let merge_bb = self.context.append_basic_block(func, "ifmerge");
+
+                self.builder.build_conditional_branch(condition, then_bb, else_bb)?;
+
+                self.builder.position_at_end(then_bb);
+                let then_val = self.compile_expr_to_float(then_body, code)?;
+                self.builder.build_unconditional_branch(merge_bb)?;
+                then_bb = self.builder.get_insert_block().expect("has block");
+
+                self.builder.position_at_end(else_bb);
+                let else_val = if let Some(else_body) = else_body {
+                    self.compile_expr_to_float(else_body, code)?
+                } else {
+                    self.context.f64_type().const_zero()
+                };
+                self.builder.build_unconditional_branch(merge_bb)?;
+                else_bb = self.builder.get_insert_block().expect("has block");
+
+                self.builder.position_at_end(merge_bb);
+                let phi = self.builder.build_phi(self.context.f64_type(), "iftmp")?;
+                phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
+                Ok(phi.as_basic_value().into_float_value())
+            },
+            ExprKind::VarDecl { markers, ident, kind } => todo!(),
+            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
+            ExprKind::Semicolon(_) => todo!(),
         }
     }
 
@@ -292,7 +444,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             return Ok(func);
         };
 
-        let (value, code): (Expr, &Code) = todo!("get_fn");
+        let (value, code): (Expr, &Code) = todo!("undefined function");
         /*
         let Some(Item { markers, ident, ty, value, code }) = self.items.get(name) else {
             return Err(CError::UnknownFn(Box::from(name)));
@@ -373,7 +525,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
                 let n = code[ident.span].to_string();
-                self.compile_fn(&n, &params, unsafe { body.as_ref() }, code)
+                self.compile_fn(&n, &params, *body, code)
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -397,6 +549,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::VarDecl { markers, ident, kind } => todo!(),
             ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
             ExprKind::Semicolon(_) => todo!(),
+            _ => todo!(),
         }
     }
 
@@ -438,7 +591,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
     pub fn compile_repl_expr(
         &mut self,
-        expr: &Expr,
+        expr: NonNull<Expr>,
         code: &Code,
         debug: Option<DebugOptions>,
     ) -> Result<(), CError> {
@@ -454,114 +607,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
     pub fn build_load(&self, ptr: PointerValue<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
         self.builder.build_load(self.context.f64_type(), ptr, name).unwrap()
-    }
-
-    pub fn compile_expr_to_float(
-        &mut self,
-        expr: &Expr,
-        code: &Code,
-    ) -> Result<FloatValue<'ctx>, CError> {
-        match &expr.kind {
-            ExprKind::Ident => {
-                let name = &code[expr.span];
-                // TODO: ident which is not a variable
-                let Some(var) = self.variables.get(name) else {
-                    return Err(CError::UnknownIdent(Box::from(name)));
-                };
-
-                #[cfg(feature = "use_ptr_values")]
-                let f = self.build_load(*var, name).into_float_value();
-                #[cfg(not(feature = "use_ptr_values"))]
-                let f = var.into_float_value();
-
-                Ok(f)
-            },
-            ExprKind::Literal(LitKind::Int | LitKind::Float) => {
-                let s = &code[expr.span];
-                Ok(self.context.f64_type().const_float_from_string(s))
-            },
-            ExprKind::Literal(_) => todo!(),
-            ExprKind::ArraySemi { val, count } => todo!(),
-            ExprKind::ArrayComma { elements } => todo!(),
-            ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn { params, ret_type, body } => todo!(),
-            ExprKind::Parenthesis { expr } => {
-                self.compile_expr_to_float(unsafe { expr.as_ref() }, code)
-            },
-            ExprKind::Block { stmts, .. } => todo!("Block"),
-            ExprKind::StructDef(_) => todo!(),
-            ExprKind::TupleStructDef(_) => todo!(),
-            ExprKind::Union {} => todo!(),
-            ExprKind::Enum {} => todo!(),
-            ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Initializer { lhs, fields } => panic!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
-            //ExprKind::Colon { lhs, rhs } => todo!(),
-            ExprKind::PostOp { kind, expr } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
-            //ExprKind::CompCall { func, args } => todo!(),
-            ExprKind::Call { func, args } => {
-                let func = unsafe { func.as_ref() };
-                if !matches!(func.kind, ExprKind::Ident) {
-                    todo!("non ident function call")
-                }
-
-                let func = &code[func.span];
-                let func = self.get_function(func)?;
-                let expected_arg_count = func.count_params();
-                if expected_arg_count as usize != args.len() {
-                    return Err(CError::MismatchedArgCount {
-                        expected: expected_arg_count,
-                        got: args.len(),
-                    });
-                }
-
-                let args = args
-                    .into_iter()
-                    .map(|arg| {
-                        self.compile_expr_to_float(unsafe { arg.as_ref() }, code).map(Into::into)
-                    })
-                    .collect::<Result<Vec<BasicMetadataValueEnum>, _>>()?;
-
-                match self.builder.build_call(func, &args, "calltmp")?.try_as_basic_value().left() {
-                    Some(v) => Ok(v.into_float_value()),
-                    None => Err(CError::InvalidCallProduced),
-                }
-            },
-            ExprKind::PreOp { kind, expr } => todo!(),
-            ExprKind::BinOp { lhs, op, rhs } => {
-                let lhs = self.compile_expr_to_float(unsafe { lhs.as_ref() }, code)?;
-                let rhs = self.compile_expr_to_float(unsafe { rhs.as_ref() }, code)?;
-                match op {
-                    BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "tmpMul")?),
-                    BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "tmpDiv")?),
-                    BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "tmpMod")?),
-                    BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "tmpAdd")?),
-                    BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "tmpSub")?),
-                    BinOpKind::ShiftL => todo!(),
-                    BinOpKind::ShiftR => todo!(),
-                    BinOpKind::BitAnd => todo!(),
-                    BinOpKind::BitXor => todo!(),
-                    BinOpKind::BitOr => todo!(),
-                    BinOpKind::Eq => todo!(),
-                    BinOpKind::Ne => todo!(),
-                    BinOpKind::Lt => todo!(),
-                    BinOpKind::Le => todo!(),
-                    BinOpKind::Gt => todo!(),
-                    BinOpKind::Ge => todo!(),
-                    BinOpKind::And => todo!(),
-                    BinOpKind::Or => todo!(),
-                    BinOpKind::Range => todo!(),
-                    BinOpKind::RangeInclusive => todo!(),
-                }
-            },
-            ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            ExprKind::If { condition, then_body, else_body } => todo!(),
-            ExprKind::VarDecl { markers, ident, kind } => todo!(),
-            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
-            ExprKind::Semicolon(_) => todo!(),
-        }
     }
 
     /// Creates a new stack allocation instruction in the entry block of the

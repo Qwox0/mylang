@@ -17,22 +17,27 @@ pub enum CommentType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    /// see [`is_whitespace`]
+pub enum Whitespace {
     Whitespace,
 
     /// `// ...`
     LineComment(CommentType),
     /// `/* ... */`
     BlockComment(CommentType),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    /// see [`is_whitespace`]
+    Whitespace(Whitespace),
 
     /// `let`, `my_var`, `MyStruct`, `_`
     Ident,
 
     Keyword(Keyword),
 
-    /// Note: Bool literals are Idents
     Literal(LitKind),
+    BoolLit(bool),
 
     /// `(`
     OpenParenthesis,
@@ -217,10 +222,7 @@ pub(crate) use tk;
 
 impl TokenKind {
     pub fn is_whitespace(&self) -> bool {
-        match self {
-            TokenKind::Whitespace | TokenKind::LineComment(_) | TokenKind::BlockComment(_) => true,
-            _ => false,
-        }
+        matches!(self, TokenKind::Whitespace(_))
     }
 }
 
@@ -269,12 +271,11 @@ macro_rules! keywords {
 keywords! {
     Mut = "mut",
     Rec = "rec",
+    Pub = "pub",
     Struct = "struct",
     Union = "union",
     Enum = "enum",
     Unsafe = "unsafe",
-    True = "true",
-    False = "false",
     If = "if",
     Else = "else",
     Match = "match",
@@ -436,7 +437,7 @@ pub struct Lexer<'c> {
 impl<'c> Lexer<'c> {
     pub fn new(code: &'c Code) -> Lexer<'c> {
         let mut lex = Self { code: Cursor::new(code) };
-        if lex.peek().is_some_and(|t| t.kind == TokenKind::Whitespace) {
+        if lex.peek().is_some_and(|t| t.kind.is_whitespace()) {
             lex.advance();
         }
         lex
@@ -508,7 +509,7 @@ impl<'c> Lexer<'c> {
             _ => CommentType::Comment,
         };
         while !matches!(self.code.next(), None | Some('\n')) {}
-        TokenKind::LineComment(comment_type)
+        TokenKind::Whitespace(Whitespace::LineComment(comment_type))
     }
 
     fn block_comment(&mut self) -> TokenKind {
@@ -533,15 +534,16 @@ impl<'c> Lexer<'c> {
             }
         }
 
-        TokenKind::BlockComment(comment_type)
+        TokenKind::Whitespace(Whitespace::BlockComment(comment_type))
     }
 
-    fn ident(&mut self, start: usize) -> TokenKind {
+    fn ident_like(&mut self, start: usize) -> TokenKind {
         self.code.advance_while(is_id_continue);
-        self.get_code().0[start..self.code.pos]
-            .parse::<Keyword>()
-            .map(TokenKind::Keyword)
-            .unwrap_or(TokenKind::Ident)
+        match &self.get_code().0[start..self.code.pos] {
+            "true" => TokenKind::BoolLit(true),
+            "false" => TokenKind::BoolLit(false),
+            s => s.parse::<Keyword>().map(TokenKind::Keyword).unwrap_or(TokenKind::Ident),
+        }
     }
 }
 
@@ -572,7 +574,7 @@ impl<'c> Parser for Lexer<'c> {
         let kind = match self.code.next()? {
             w if is_whitespace(w) => {
                 self.code.advance_while(is_whitespace);
-                TokenKind::Whitespace
+                TokenKind::Whitespace(Whitespace::Whitespace)
             },
             '"' => self.string_literal(),
             '\'' => self.char_literal(),
@@ -674,10 +676,10 @@ impl<'c> Parser for Lexer<'c> {
             '\\' => todo!("BackSlash"),
 
             'b' => maybe_followed_by! {
-                default: self.ident(start),
+                default: self.ident_like(start),
                 '\'' => self.bchar_literal()
             },
-            c if is_id_start(c) => self.ident(start),
+            c if is_id_start(c) => self.ident_like(start),
 
             _ => TokenKind::Unknown,
         };
