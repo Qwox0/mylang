@@ -4,7 +4,8 @@ use self::jit::Jit;
 use crate::{
     cli::DebugOptions,
     parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, Type, VarDeclKind,
+        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, Type,
+        VarDeclKind,
     },
 };
 use inkwell::{
@@ -293,8 +294,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 let s = &code[expr.span];
                 Ok(self.context.f64_type().const_float_from_string(s))
             },
-            &ExprKind::BoolLit(bool) => {
-                Ok(self.context.f64_type().const_float(if bool { 1.0 } else { 0.0 }))
+            ExprKind::BoolLit(bool) => {
+                Ok(self.context.f64_type().const_float(if *bool { 1.0 } else { 0.0 }))
             },
             ExprKind::Literal(_) => todo!(),
             ExprKind::ArraySemi { val, count } => todo!(),
@@ -340,10 +341,19 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     None => Err(CError::InvalidCallProduced),
                 }
             },
-            ExprKind::PreOp { kind, expr } => todo!(),
-            &ExprKind::BinOp { lhs, op, rhs } => {
-                let lhs = self.compile_expr_to_float(lhs, code)?;
-                let rhs = self.compile_expr_to_float(rhs, code)?;
+            ExprKind::PreOp { kind, expr } => {
+                let expr = self.compile_expr_to_float(*expr, code)?;
+                match kind {
+                    PreOpKind::AddrOf => todo!(),
+                    PreOpKind::AddrMutOf => todo!(),
+                    PreOpKind::Deref => todo!(),
+                    PreOpKind::Not => todo!(),
+                    PreOpKind::Neg => Ok(self.builder.build_float_neg(expr, "tmpNeg")?),
+                }
+            },
+            ExprKind::BinOp { lhs, op, rhs } => {
+                let lhs = self.compile_expr_to_float(*lhs, code)?;
+                let rhs = self.compile_expr_to_float(*rhs, code)?;
                 match op {
                     BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "tmpMul")?),
                     BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "tmpDiv")?),
@@ -369,11 +379,13 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             },
             ExprKind::Assign { lhs, rhs } => todo!(),
             ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            &ExprKind::If { condition, then_body, else_body } => {
+            ExprKind::VarDecl { markers, ident, kind } => todo!(),
+            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
+            ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap();
                 let zero = self.context.f64_type().const_float(0.0);
 
-                let condition = self.compile_expr_to_float(condition, code)?;
+                let condition = self.compile_expr_to_float(*condition, code)?;
                 let condition = self.builder.build_float_compare(
                     FloatPredicate::ONE,
                     condition,
@@ -388,13 +400,13 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 self.builder.build_conditional_branch(condition, then_bb, else_bb)?;
 
                 self.builder.position_at_end(then_bb);
-                let then_val = self.compile_expr_to_float(then_body, code)?;
+                let then_val = self.compile_expr_to_float(*then_body, code)?;
                 self.builder.build_unconditional_branch(merge_bb)?;
                 then_bb = self.builder.get_insert_block().expect("has block");
 
                 self.builder.position_at_end(else_bb);
                 let else_val = if let Some(else_body) = else_body {
-                    self.compile_expr_to_float(else_body, code)?
+                    self.compile_expr_to_float(*else_body, code)?
                 } else {
                     self.context.f64_type().const_zero()
                 };
@@ -406,8 +418,11 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
                 Ok(phi.as_basic_value().into_float_value())
             },
-            ExprKind::VarDecl { markers, ident, kind } => todo!(),
-            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
+            ExprKind::Match { val, else_body } => todo!(),
+            ExprKind::For {} => todo!(),
+            ExprKind::While { condition, body } => todo!(),
+            ExprKind::Catch { lhs } => todo!(),
+            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Semicolon(_) => todo!(),
         }
     }

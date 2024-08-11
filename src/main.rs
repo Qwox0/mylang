@@ -165,9 +165,9 @@ fn dev() {
 
     let code = "
 pub test :: x -> 1+2*x;
-pub add :: (a, b) -> a + b;
+pub sub :: (a, b) -> -b + a;
 //main :: -> test(1) + test(2);
-main :: -> if false test(1) else add(2, 10);
+main :: -> false | if test(1) else (10 | sub(3));
 //main :: -> {
 //    a := test(1);
 //    b := test(2);

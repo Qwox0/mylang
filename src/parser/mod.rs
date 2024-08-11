@@ -66,7 +66,7 @@ pub enum ExprKind {
     /// `alloc(MyStruct) { a = <expr>, b, }`
     Initializer {
         lhs: NonNull<Expr>,
-        fields: Vec<(Ident, Option<Expr>)>,
+        fields: Vec<(Ident, Option<NonNull<Expr>>)>,
     },
 
     /// [`expr`] . [`expr`]
@@ -144,10 +144,40 @@ pub enum ExprKind {
         init: NonNull<Expr>,
     },
 
+    /// `if <cond> <then>` (`else <else>`)
     If {
         condition: NonNull<Expr>,
         then_body: NonNull<Expr>,
         else_body: Option<NonNull<Expr>>,
+    },
+    /// `match <val> <body>` (`else <else>`)
+    Match {
+        val: NonNull<Expr>,
+        // TODO
+        else_body: Option<NonNull<Expr>>,
+    },
+
+    For {
+        // TODO
+    },
+    /// `while <cond> <body>`
+    While {
+        condition: NonNull<Expr>,
+        body: NonNull<Expr>,
+    },
+
+    /// `lhs catch ...`
+    Catch {
+        lhs: NonNull<Expr>,
+        // TODO
+    },
+
+    /// `lhs | rhs`
+    /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
+    /// `lhs | while ...` are inlined during parsing
+    Pipe {
+        lhs: NonNull<Expr>,
+        // TODO
     },
 
     Semicolon(NonNull<Expr>),
@@ -217,7 +247,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     pub fn op_chain(
         &mut self,
         lhs: NonNull<Expr>,
-        min_binop_precedence: usize,
+        min_precedence: usize,
     ) -> ParseResult<NonNull<Expr>> {
         self.ws0();
         let Some(Token { kind, span }) = self.lex.peek() else {
@@ -226,7 +256,10 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
         let op = match FollowingOperator::new(kind) {
             None => return err!(Finished, span),
-            Some(FollowingOperator::BinOp(binop)) if binop.precedence() <= min_binop_precedence => {
+            Some(FollowingOperator::BinOp(binop)) if binop.precedence() <= min_precedence => {
+                return err!(Finished, span);
+            },
+            Some(FollowingOperator::Pipe) if PIPE_PRECEDENCE <= min_precedence => {
                 return err!(Finished, span);
             },
             Some(op) => op,
@@ -244,37 +277,45 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
         let expr = match op {
             FollowingOperator::Dot => {
-                let rhs = todo!("dot rhs");
+                self.ws0();
+                let rhs = self.ident().context("dot rhs")?;
                 expr!(Dot { lhs, rhs }, span.join(rhs.span))
             },
-            FollowingOperator::Call => {
-                let mut args = Vec::new();
-                let closing_paren_span = loop {
-                    self.ws0();
-                    if let Some(closing_paren) =
-                        self.lex.next_if(|t| t.kind == TokenKind::CloseParenthesis)
-                    {
-                        break closing_paren.span;
-                    }
-                    args.push(self.expr()?);
-                    self.ws0();
-                    match self.next_tok()? {
-                        Token { kind: TokenKind::CloseParenthesis, span } => break span,
-                        Token { kind: TokenKind::Comma, .. } => continue,
-                        Token { kind, span } => {
-                            return err!(UnexpectedToken2(kind), span).context("expect ',' or ')'");
-                        },
-                    };
-                };
-                expr!(Call { func: lhs, args }, span.join(closing_paren_span))
-            },
+            FollowingOperator::Call => return self.call(lhs, span, Vec::new()),
             FollowingOperator::Index => {
                 let idx = self.expr()?;
                 let close = self.tok(TokenKind::CloseBracket)?;
                 expr!(Index { lhs, idx }, span.join(close.span))
             },
             FollowingOperator::Initializer => {
-                let fields = todo!();
+                let mut fields = Vec::new();
+                loop {
+                    self.ws0();
+                    if self.lex.advance_if(|t| t.kind == TokenKind::CloseBrace) {
+                        break;
+                    }
+                    let ident = self.ident().context("dot rhs")?;
+                    let mut t = self.next_tok().context("expected '=', ',' or '}'")?;
+
+                    let init = if t.kind == TokenKind::Eq {
+                        let init = self.expr().context("init expr")?;
+                        self.ws0();
+                        t = self.next_tok()?;
+                        Some(init)
+                    } else {
+                        None
+                    };
+                    fields.push((ident, init));
+
+                    match t.kind {
+                        TokenKind::Comma => continue,
+                        TokenKind::CloseBrace => break,
+                        k => {
+                            return err!(UnexpectedToken2(k), t.span)
+                                .context("expected '=', ',' or '}'");
+                        },
+                    }
+                }
                 let close = self.tok(TokenKind::CloseBrace)?;
                 expr!(Initializer { lhs, fields }, span.join(close.span))
             },
@@ -314,6 +355,41 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 expr!(ConstDecl { markers, ident: lhs, ty: None, init }, span)
             },
             FollowingOperator::TypedDecl => return self.typed_decl(DeclMarkers::default(), lhs),
+            FollowingOperator::Pipe => {
+                self.ws0();
+                let t = self.lex.peek().ok_or(err!(x NoInput, span))?;
+                return match t.kind {
+                    TokenKind::Keyword(Keyword::If) => {
+                        self.lex.advance();
+                        self.if_after_cond(lhs, span).context("if")
+                    },
+                    TokenKind::Keyword(Keyword::Match) => {
+                        self.lex.advance();
+                        todo!("match")
+                    },
+                    TokenKind::Keyword(Keyword::For) => {
+                        self.lex.advance();
+                        todo!("for")
+                    },
+                    TokenKind::Keyword(Keyword::While) => {
+                        self.lex.advance();
+                        let body = self.expr().context("while body")?;
+                        self.alloc(expr!(While { condition: lhs, body }, t.span))
+                    },
+                    TokenKind::Ident => {
+                        self.lex.advance();
+                        let func = self.alloc(Expr::new(ExprKind::Ident, t.span))?;
+                        let open_paren = self
+                            .tok(TokenKind::OpenParenthesis)
+                            .context("pipe call: expect '('")?;
+                        self.call(func, open_paren.span, vec![lhs])
+                    },
+                    k => {
+                        return err!(UnexpectedToken2(k), t.span)
+                            .context("expected fn call, 'if', 'match', 'for' or 'while'");
+                    },
+                };
+            },
         };
         self.alloc(expr)
     }
@@ -329,11 +405,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             ($kind:ident ( $( $val:expr ),* $(,)? ) ) => {
                 Expr::new(ExprKind::$kind($($val),*), span)
             };
-            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } ) => {
-                Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, span)
-            };
-            ($kind:ident, $span:expr) => {
-                Expr::new(ExprKind::$kind, $span)
+            ($kind:ident ( $( $val:expr ),* $(,)? ), $span:expr ) => {
+                Expr::new(ExprKind::$kind($($val),*), $span)
             };
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr ) => {
                 Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, $span)
@@ -369,7 +442,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                                 .context("expected decl marker or ident");
                         },
                     }
-                    self.ws1();
+                    self.ws1()?;
                     t = self.next_tok().context("missing decl ident")?;
                 };
                 let ident = self.alloc(ident)?;
@@ -398,21 +471,32 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.expr().context("if condition")?;
-                let then_body = self.expr().context("then body")?;
+                return self.if_after_cond(condition, span).context("if");
+            },
+            //TokenKind::Keyword(Keyword::Else) => todo!("else"),
+            TokenKind::Keyword(Keyword::Match) => {
+                let val = self.expr().context("match value")?;
+                todo!("match body");
                 self.ws0();
                 let else_body = self
                     .lex
-                    .peek()
-                    .filter(|t| t.kind == TokenKind::Keyword(Keyword::Else))
-                    .inspect(|_| self.lex.advance())
-                    .map(|_| self.expr().context("else body"))
+                    .next_if(|t| t.kind == TokenKind::Keyword(Keyword::Else))
+                    .map(|_else| {
+                        self.ws1()?;
+                        self.expr().context("match else body")
+                    })
                     .transpose()?;
-                expr!(If { condition, then_body, else_body }, span)
+                expr!(Match { val, else_body }, span)
             },
-            TokenKind::Keyword(Keyword::Else) => todo!("else"),
-            TokenKind::Keyword(Keyword::Match) => todo!("match"),
-            TokenKind::Keyword(Keyword::For) => todo!("for"),
-            TokenKind::Keyword(Keyword::While) => todo!("while"),
+            TokenKind::Keyword(Keyword::For) => {
+                todo!("for");
+                expr!(For {}, span)
+            },
+            TokenKind::Keyword(Keyword::While) => {
+                let condition = self.expr().context("while condition")?;
+                let body = self.expr().context("while body")?;
+                expr!(While { condition, body }, span)
+            },
             //TokenKind::Keyword(_) => todo!("//TokenKind::Keyword(_)"),
             TokenKind::Literal(l) => expr!(Literal(l)),
             TokenKind::BoolLit(b) => expr!(BoolLit(b)),
@@ -515,24 +599,34 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 todo!();
             },
             TokenKind::OpenBrace => return self.block(span),
-            TokenKind::Bang => todo!("TokenKind::Bang"),
+            TokenKind::Bang => {
+                let expr = self.expr_(usize::MAX).context("! expr")?;
+                expr!(PreOp { kind: PreOpKind::Not, expr }, span)
+            },
             TokenKind::Plus => todo!("TokenKind::Plus"),
-            TokenKind::Minus => todo!("TokenKind::Minus"),
+            TokenKind::Minus => {
+                let expr = self.expr_(usize::MAX).context("- expr")?;
+                expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
+            },
             TokenKind::Arrow => return self.function_tail(vec![], span),
             TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
             TokenKind::Ampersand => todo!("TokenKind::Ampersand"),
-            TokenKind::Pipe => todo!("TokenKind::Pipe"),
-            TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
-            TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
-            TokenKind::Caret => todo!("TokenKind::Caret"),
-            TokenKind::CaretEq => todo!("TokenKind::CaretEq"),
+            //TokenKind::Pipe => todo!("TokenKind::Pipe"),
+            //TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
+            //TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
+            //TokenKind::Caret => todo!("TokenKind::Caret"),
+            //TokenKind::CaretEq => todo!("TokenKind::CaretEq"),
             TokenKind::Dot => todo!("TokenKind::Dot"),
-            TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
-            TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
-            TokenKind::Comma => todo!("TokenKind::Comma"),
+            //TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
+            //TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
+            //TokenKind::Comma => todo!("TokenKind::Comma"),
             TokenKind::Colon => todo!("TokenKind::Colon"),
-            TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
-            TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
+            //TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
+            //TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
+            TokenKind::Question => {
+                let ty = self.expr().expect("type after ?");
+                expr!(OptionShort(ty), span.join(unsafe { ty.as_ref().span }))
+            },
             TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
@@ -560,6 +654,56 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
         self.alloc(Expr::new(
             ExprKind::Fn { params, ret_type, body },
             start_span.join(unsafe { body.as_ref().span }),
+        ))
+    }
+
+    pub fn if_after_cond(
+        &mut self,
+        condition: NonNull<Expr>,
+        start_span: Span,
+    ) -> ParseResult<NonNull<Expr>> {
+        let then_body = self.expr().context("then body")?;
+        self.ws0();
+        let else_body = self
+            .lex
+            .peek()
+            .filter(|t| t.kind == TokenKind::Keyword(Keyword::Else))
+            .inspect(|_| self.lex.advance())
+            .map(|_| self.expr().context("else body"))
+            .transpose()?;
+        self.alloc(Expr::new(
+            ExprKind::If { condition, then_body, else_body },
+            start_span, // TODO
+        ))
+    }
+
+    /// `... ( ... )`
+    /// `     ^` starts here
+    pub fn call(
+        &mut self,
+        func: NonNull<Expr>,
+        open_paren_span: Span,
+        mut args: Vec<NonNull<Expr>>,
+    ) -> ParseResult<NonNull<Expr>> {
+        let closing_paren_span = loop {
+            self.ws0();
+            if let Some(closing_paren) = self.lex.next_if(|t| t.kind == TokenKind::CloseParenthesis)
+            {
+                break closing_paren.span;
+            }
+            args.push(self.expr()?);
+            self.ws0();
+            match self.next_tok()? {
+                Token { kind: TokenKind::CloseParenthesis, span } => break span,
+                Token { kind: TokenKind::Comma, .. } => continue,
+                Token { kind, span } => {
+                    return err!(UnexpectedToken2(kind), span).context("expect ',' or ')'");
+                },
+            };
+        };
+        self.alloc(Expr::new(
+            ExprKind::Call { func, args },
+            open_paren_span.join(closing_paren_span),
         ))
     }
 
@@ -619,6 +763,12 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
         };
         self.alloc(expr)
     }
+
+    pub fn ident(&mut self) -> ParseResult<Ident> {
+        self.tok(TokenKind::Ident).map(|t| Ident { span: t.span })
+    }
+
+    // -------
 
     /// 0+ whitespace
     pub fn ws0(&mut self) {
@@ -723,6 +873,8 @@ pub enum FollowingOperator {
     /// `a: ty = b` or `a: ty = b`
     /// ` ^`         `   ^`
     TypedDecl,
+
+    Pipe,
 }
 
 impl FollowingOperator {
@@ -761,7 +913,9 @@ impl FollowingOperator {
             TokenKind::Ampersand => FollowingOperator::BinOp(BinOpKind::BitAnd),
             TokenKind::AmpersandAmpersand => FollowingOperator::BinOp(BinOpKind::And),
             TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
-            TokenKind::Pipe => todo!("pipe/bitor"),
+            TokenKind::Pipe => FollowingOperator::Pipe, /* TODO: find a solution for pipe vs */
+            // bitor (currently bitand, bitxor and
+            // bitor are ignored)
             TokenKind::PipePipe => FollowingOperator::BinOp(BinOpKind::Or),
             TokenKind::PipeEq => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
             TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),
@@ -812,7 +966,8 @@ pub enum BinOpKind {
     /// `^`, `^=`
     BitXor,
 
-    /// `|`, `|=`
+    /// TODO: find a solution for pipe vs bitor (currently bitand, bitxor and
+    /// bitor are ignored) `|`, `|=`
     BitOr,
 
     /// `==`
@@ -839,6 +994,8 @@ pub enum BinOpKind {
     /// `..=`
     RangeInclusive,
 }
+
+const PIPE_PRECEDENCE: usize = 1;
 
 impl BinOpKind {
     pub fn precedence(self) -> usize {
@@ -1190,7 +1347,17 @@ impl Expr {
                         .intersperse(",".to_string())
                         .collect::<String>()
                 ),
-                ExprKind::PreOp { kind, expr } => panic!(),
+                ExprKind::PreOp { kind, expr } => format!(
+                    "{}{}",
+                    match kind {
+                        PreOpKind::AddrOf => "&",
+                        PreOpKind::AddrMutOf => "&mut ",
+                        PreOpKind::Deref => "*",
+                        PreOpKind::Not => "!",
+                        PreOpKind::Neg => "- ",
+                    },
+                    expr.as_ref().to_text(code)
+                ),
                 ExprKind::BinOp { lhs, op, rhs } => {
                     format!(
                         "{}{}{}",
@@ -1206,17 +1373,6 @@ impl Expr {
                         lhs.as_ref().to_text(code),
                         op.to_binop_assign_text(),
                         rhs.as_ref().to_text(code)
-                    )
-                },
-                ExprKind::If { condition, then_body, else_body } => {
-                    format!(
-                        "if {} {}{}",
-                        condition.as_ref().to_text(code),
-                        then_body.as_ref().to_text(code),
-                        else_body
-                            .as_ref()
-                            .map(|e| format!(" else {}", e.as_ref().to_text(code)))
-                            .unwrap_or_default()
                     )
                 },
                 ExprKind::VarDecl { markers, ident, kind } => {
@@ -1264,6 +1420,22 @@ impl Expr {
                         }
                     )
                 },
+                ExprKind::If { condition, then_body, else_body } => {
+                    format!(
+                        "if {} {}{}",
+                        condition.as_ref().to_text(code),
+                        then_body.as_ref().to_text(code),
+                        else_body
+                            .as_ref()
+                            .map(|e| format!(" else {}", e.as_ref().to_text(code)))
+                            .unwrap_or_default()
+                    )
+                },
+                ExprKind::Match { val, else_body } => todo!(),
+                ExprKind::For {} => todo!(),
+                ExprKind::While { condition, body } => todo!(),
+                ExprKind::Catch { lhs } => todo!(),
+                ExprKind::Pipe { lhs } => todo!(),
                 ExprKind::Semicolon(expr) => format!("{}", expr.as_ref().to_text(code)),
             }
         }
@@ -1398,7 +1570,18 @@ impl Expr {
                             .collect::<String>()
                     ));
                 },
-                ExprKind::PreOp { kind, expr } => panic!(),
+                ExprKind::PreOp { kind, expr } => {
+                    let expr = expr.as_ref();
+                    lines.write(match kind {
+                        PreOpKind::AddrOf => "&",
+                        PreOpKind::AddrMutOf => "&mut ",
+                        PreOpKind::Deref => "*",
+                        PreOpKind::Not => "!",
+                        PreOpKind::Neg => "- ",
+                    });
+                    lines.scope_next_line(|l| expr.write_tree(l, code));
+                    lines.write_minus(expr.to_text(code).len());
+                },
                 ExprKind::BinOp { lhs, op, rhs } => {
                     let lhs = lhs.as_ref();
                     let rhs = rhs.as_ref();
