@@ -1,5 +1,5 @@
 use super::{lexer::TokenKind, DeclMarkerKind};
-use crate::parser::{lexer::Span, result_with_fatal::ResultWithFatal};
+use crate::parser::lexer::Span;
 use core::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,23 +73,21 @@ impl ParseError {
     }
 }
 
-pub type ParseResult<T> = ResultWithFatal<T, ParseError>;
+pub type ParseResult<T> = Result<T, ParseError>;
 
-impl<T> ParseResult<T> {
-    pub fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
-        match self {
-            ResultWithFatal::Err(err) => ResultWithFatal::Err(err.add_context(context)),
-            ResultWithFatal::Fatal(err) => ResultWithFatal::Fatal(err.add_context(context)),
-            ok => ok,
-        }
+pub trait MyContext {
+    fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self;
+    fn with_context<C>(self, f: impl FnOnce() -> C) -> Self
+    where C: std::fmt::Display + Send + Sync + 'static;
+}
+
+impl<T> MyContext for ParseResult<T> {
+    fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
+        self.map_err(|err| err.add_context(context))
     }
 
-    pub fn with_context<C>(self, f: impl FnOnce() -> C) -> Self
+    fn with_context<C>(self, f: impl FnOnce() -> C) -> Self
     where C: std::fmt::Display + Send + Sync + 'static {
-        match self {
-            ResultWithFatal::Err(err) => ResultWithFatal::Err(err.add_context(f())),
-            ResultWithFatal::Fatal(err) => ResultWithFatal::Fatal(err.add_context(f())),
-            ok => ok,
-        }
+        self.map_err(|err| err.add_context(f()))
     }
 }

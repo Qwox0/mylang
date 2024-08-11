@@ -206,7 +206,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_prototype(
         &self,
         name: &str,
-        params: &[(Ident, Option<Expr>)],
+        params: &[(Ident, Option<NonNull<Expr>>)],
         code: &Code,
         module: &Module<'ctx>,
     ) -> FunctionValue<'ctx> {
@@ -228,7 +228,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_fn(
         &mut self,
         name: &str,
-        params: &[(Ident, Option<Expr>)],
+        params: &[(Ident, Option<NonNull<Expr>>)],
         body: NonNull<Expr>,
         code: &Code,
     ) -> Result<FunctionValue<'ctx>, CError> {

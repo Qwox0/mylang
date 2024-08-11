@@ -4,7 +4,7 @@ use inkwell::context::Context;
 use mylang::{
     cli::Cli,
     codegen::{self},
-    parser::{lexer::Lexer, parser_helper::Parser, result_with_fatal::ResultWithFatal, StmtIter},
+    parser::{lexer::Lexer, parser_helper::Parser, StmtIter},
 };
 use std::{
     io::{Read, Write},
@@ -165,8 +165,9 @@ fn dev() {
 
     let code = "
 pub test :: x -> 1+2*x;
+pub add :: (a, b) -> a + b;
 //main :: -> test(1) + test(2);
-main :: -> if false test(1) else test(2);
+main :: -> if false test(1) else add(2, 10);
 //main :: -> {
 //    a := test(1);
 //    b := test(2);
@@ -188,11 +189,11 @@ main :: -> if false test(1) else test(2);
     if DEBUG_AST {
         for s in stmts.clone() {
             match s {
-                ResultWithFatal::Ok(s) => {
+                Ok(s) => {
                     println!("\nstmt: {:?}", s);
                     unsafe { s.as_ref().print_tree(code) };
                 },
-                ResultWithFatal::Err(e) | ResultWithFatal::Fatal(e) => {
+                Err(e) => {
                     eprintln!("\nERROR: {:?}", e);
                     break;
                 },

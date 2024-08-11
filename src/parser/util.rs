@@ -1,39 +1,3 @@
-#![allow(unused)]
-
-use crate::parser::result_with_fatal::ResultWithFatal;
-use std::{
-    convert::Infallible,
-    ops::{ControlFlow, FromResidual},
-};
-
-pub trait OptionExt<T>: Sized {
-    fn ok_or_nonfatal<E>(self, err: E) -> ResultWithFatal<T, E>;
-    fn ok_or_fatal<E>(self, err: E) -> ResultWithFatal<T, E>;
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn ok_or_nonfatal<E>(self, err: E) -> ResultWithFatal<T, E> {
-        self.map(ResultWithFatal::Ok).unwrap_or(ResultWithFatal::Err(err))
-    }
-
-    fn ok_or_fatal<E>(self, err: E) -> ResultWithFatal<T, E> {
-        self.map(ResultWithFatal::Ok).unwrap_or(ResultWithFatal::Fatal(err))
-    }
-}
-
-pub trait MyOptionTranspose<T, E> {
-    fn transpose(self) -> ResultWithFatal<Option<T>, E>;
-}
-
-impl<T, E> MyOptionTranspose<T, E> for Option<ResultWithFatal<T, E>> {
-    fn transpose(self) -> ResultWithFatal<Option<T>, E> {
-        match self {
-            Some(res) => res.map(Some),
-            None => ResultWithFatal::Ok(None),
-        }
-    }
-}
-
 pub trait Join {
     type Item: ?Sized;
 
