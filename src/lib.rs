@@ -5,6 +5,9 @@
 #![feature(type_changing_struct_update)]
 #![feature(new_range_api)]
 #![feature(ptr_as_ref_unchecked)]
+#![feature(unsigned_is_multiple_of)]
+
+#![allow(unused)]
 
 pub mod cli;
 pub mod codegen;

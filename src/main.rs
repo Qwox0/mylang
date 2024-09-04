@@ -1,9 +1,20 @@
 #![feature(test)]
+#![allow(unused)]
 
-use inkwell::context::Context;
+use inkwell::{
+    context::Context,
+    data_layout::DataLayout,
+    llvm_sys::target::LLVM_InitializeAllTargetInfos,
+    module::Module,
+    passes::PassManager,
+    targets::{
+        CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine, TargetTriple,
+    },
+    OptimizationLevel,
+};
 use mylang::{
     cli::Cli,
-    codegen::{self},
+    codegen::{self, llvm::Compiler},
     parser::{lexer::Lexer, parser_helper::Parser, StmtIter},
 };
 use std::{
@@ -158,8 +169,10 @@ fn read_code_file(path: &Path) -> String {
 }
 
 fn dev() {
-    const DEBUG_TOKENS: bool = true;
+    const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = true;
+    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
+    const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
 
     let alloc = bumpalo::Bump::new();
 
@@ -167,19 +180,21 @@ fn dev() {
 pub test :: x -> 1+2*x;
 pub sub :: (a, b) -> -b + a;
 //main :: -> test(1) + test(2);
-main :: -> false | if test(1) else (10 | sub(3));
+mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
+// factorial :: x -> x == 0 | if 1 else x * factorial(x-1);
+// mymain :: -> factorial(10) == 3628800;
 //main :: -> {
 //    a := test(1);
 //    b := test(2);
 //    a + b
 //};
 ";
-    //let code = "a + b * c * d + e * f ";
 
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);
 
     if DEBUG_TOKENS {
+        println!("\n### Tokens:" );
         let mut lex = Lexer::new(code);
         while let Some(t) = lex.next() {
             println!("{:?}", t)
@@ -187,14 +202,15 @@ main :: -> false | if test(1) else (10 | sub(3));
     }
 
     if DEBUG_AST {
+        println!("\n### AST Nodes:" );
         for s in stmts.clone() {
             match s {
                 Ok(s) => {
-                    println!("\nstmt: {:?}", s);
+                    println!("stmt @ {:?}", s);
                     unsafe { s.as_ref().print_tree(code) };
                 },
                 Err(e) => {
-                    eprintln!("\nERROR: {:?}", e);
+                    eprintln!("ERROR: {:?}", e);
                     break;
                 },
             }
@@ -246,8 +262,41 @@ main :: -> false | if test(1) else (10 | sub(3));
     }
     println!("");
 
-    compiler.run_passes_debug(None);
+    enum ExecutionVariant {
+        ObjectCode,
+        Jit,
+    }
 
+    const EXE_VAR: ExecutionVariant = ExecutionVariant::ObjectCode;
+
+    let target_machine = Compiler::init_target_machine();
+
+    if DEBUG_LLVM_IR_UNOPTIMIZED {
+        println!("\n### Unoptimized LLVM IR:" );
+        compiler.module.print_to_stderr();
+    }
+
+    compiler.run_passes(&target_machine);
+
+    if DEBUG_LLVM_IR_OPTIMIZED {
+        println!("\n### Optimized LLVM IR:" );
+        compiler.module.print_to_stderr();
+    }
+
+    match EXE_VAR {
+        ExecutionVariant::ObjectCode => compile(&compiler.module, &target_machine),
+        ExecutionVariant::Jit => run_with_jit(compiler),
+    }
+}
+
+fn compile(module: &Module, target_machine: &TargetMachine) {
+    let filename = "target/output.o";
+    target_machine
+        .write_to_file(module, inkwell::targets::FileType::Object, Path::new(filename))
+        .unwrap();
+}
+
+fn run_with_jit(mut compiler: Compiler) {
     let out = compiler.jit_run_fn("main").expect("has main function");
     println!("main returned {}", out);
 }
@@ -296,6 +345,21 @@ test :: x -> {
     a + b
 };
 main :: -> test(10);
+";
+            let code = code.as_ref();
+            let mut stmts = StmtIter::parse(code, &alloc);
+            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+        })
+    }
+
+    #[bench]
+    fn bench_parse3(b: &mut Bencher) {
+        b.iter(|| {
+            let alloc = bumpalo::Bump::new();
+            let code = "
+pub test :: x -> 1+2*x;
+pub sub :: (a, b) -> -b + a;
+main :: -> false | if test(1) else (10 | sub(3));
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);

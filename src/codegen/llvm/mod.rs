@@ -4,8 +4,7 @@ use self::jit::Jit;
 use crate::{
     cli::DebugOptions,
     parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, Type,
-        VarDeclKind,
+        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, VarDeclKind,
     },
 };
 use inkwell::{
@@ -17,7 +16,8 @@ use inkwell::{
         prelude::{LLVMPassManagerRef, LLVMValueRef},
         LLVMPassManager,
     },
-    module::Module,
+    module::{Linkage, Module},
+    object_file::ObjectFile,
     passes::{PassBuilderOptions, PassManager},
     support::LLVMString,
     targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
@@ -176,7 +176,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, &params, *body, code).map(|_| ())
+                self.compile_fn(name, unsafe { params.as_ref() }, *body, code).map(|_| ())
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -217,7 +217,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             .map(|(name, ty)| BasicMetadataTypeEnum::FloatType(self.context.f64_type()))
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
-        let fn_val = module.add_function(name, fn_type, None);
+        let fn_val = module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
             param.set_name(&code[params[idx].0.span])
@@ -309,6 +309,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Union {} => todo!(),
             ExprKind::Enum {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
+            ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs, fields } => panic!(),
             ExprKind::Dot { lhs, rhs } => todo!(),
             //ExprKind::Colon { lhs, rhs } => todo!(),
@@ -331,12 +332,12 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     });
                 }
 
-                let args = args
+                let args = unsafe { args.as_ref() }
                     .into_iter()
                     .map(|arg| self.compile_expr_to_float(*arg, code).map(Into::into))
                     .collect::<Result<Vec<BasicMetadataValueEnum>, _>>()?;
 
-                match self.builder.build_call(func, &args, "calltmp")?.try_as_basic_value().left() {
+                match self.builder.build_call(func, &args, "call")?.try_as_basic_value().left() {
                     Some(v) => Ok(v.into_float_value()),
                     None => Err(CError::InvalidCallProduced),
                 }
@@ -348,29 +349,54 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     PreOpKind::AddrMutOf => todo!(),
                     PreOpKind::Deref => todo!(),
                     PreOpKind::Not => todo!(),
-                    PreOpKind::Neg => Ok(self.builder.build_float_neg(expr, "tmpNeg")?),
+                    PreOpKind::Neg => Ok(self.builder.build_float_neg(expr, "neg")?),
                 }
             },
             ExprKind::BinOp { lhs, op, rhs } => {
                 let lhs = self.compile_expr_to_float(*lhs, code)?;
                 let rhs = self.compile_expr_to_float(*rhs, code)?;
+                let a = 1.0 <= 2.0;
                 match op {
-                    BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "tmpMul")?),
-                    BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "tmpDiv")?),
-                    BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "tmpMod")?),
-                    BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "tmpAdd")?),
-                    BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "tmpSub")?),
+                    BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "mul")?),
+                    BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "div")?),
+                    BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "mod")?),
+                    BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "add")?),
+                    BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "sub")?),
                     BinOpKind::ShiftL => todo!(),
                     BinOpKind::ShiftR => todo!(),
                     BinOpKind::BitAnd => todo!(),
                     BinOpKind::BitXor => todo!(),
                     BinOpKind::BitOr => todo!(),
-                    BinOpKind::Eq => todo!(),
-                    BinOpKind::Ne => todo!(),
-                    BinOpKind::Lt => todo!(),
-                    BinOpKind::Le => todo!(),
-                    BinOpKind::Gt => todo!(),
-                    BinOpKind::Ge => todo!(),
+                    BinOpKind::Eq => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
+                    BinOpKind::Ne => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::ONE, lhs, rhs, "ne")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
+                    BinOpKind::Lt => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::OLT, lhs, rhs, "lt")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
+                    BinOpKind::Le => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::OLE, lhs, rhs, "le")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
+                    BinOpKind::Gt => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::OGT, lhs, rhs, "gt")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
+                    BinOpKind::Ge => Ok(self.builder.build_signed_int_to_float(
+                        self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?,
+                        self.context.f64_type(),
+                        "floatcast",
+                    )?),
                     BinOpKind::And => todo!(),
                     BinOpKind::Or => todo!(),
                     BinOpKind::Range => todo!(),
@@ -414,15 +440,27 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 else_bb = self.builder.get_insert_block().expect("has block");
 
                 self.builder.position_at_end(merge_bb);
-                let phi = self.builder.build_phi(self.context.f64_type(), "iftmp")?;
+                let phi = self.builder.build_phi(self.context.f64_type(), "ifexpr")?;
                 phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
+
+                self.module.print_to_stderr();
+
                 Ok(phi.as_basic_value().into_float_value())
             },
             ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For {} => todo!(),
+            ExprKind::For { source, iter_var, body } => todo!(),
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Return { expr } => {
+                if let Some(expr) = expr {
+                    let val = self.compile_expr_to_float(*expr, code)?;
+                    self.builder.build_return(Some(&val))?;
+                } else {
+                    self.builder.build_return(None)?;
+                }
+                Ok(self.context.f64_type().const_zero()) // TODO: type `never`
+            },
             ExprKind::Semicolon(_) => todo!(),
         }
     }
@@ -481,7 +519,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         let body = body.clone();
 
         //self.compile_fn(name, &params, &body, code)
-        Ok(self.compile_prototype(name, &params, code, &self.module))
+        Ok(self.compile_prototype(name, unsafe { params.as_ref() }, code, &self.module))
     }
 
     /*
@@ -540,7 +578,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
                 let n = code[ident.span].to_string();
-                self.compile_fn(&n, &params, *body, code)
+                self.compile_fn(&n, unsafe { params.as_ref() }, *body, code)
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -653,16 +691,53 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             */
     }
 
-    pub fn run_passes(&self) {
-        run_passes_on(&self.module)
+    pub fn init_target_machine() -> TargetMachine {
+        Target::initialize_all(&InitializationConfig::default());
+
+        let target_triple: Option<&str> = None;
+        let target_triple = if let Some(s) = target_triple {
+            todo!()
+        } else {
+            TargetMachine::get_default_triple()
+        };
+        let target = Target::from_triple(&target_triple).unwrap();
+
+        let cpu = "generic";
+        let features = "";
+        target
+            .create_target_machine(
+                &target_triple,
+                cpu,
+                features,
+                OptimizationLevel::Default,
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .unwrap()
     }
 
-    pub fn run_passes_debug(&self, debug: Option<DebugOptions>) {
+    /// <https://github.com/TheDan64/inkwell/blob/5c9f7fcbb0a667f7391b94beb65f1a670ad13221/examples/kaleidoscope/main.rs#L82-L109>
+    pub fn run_passes(&self, target_machine: &TargetMachine) {
+        let passes: &[&str] = &[
+            "instcombine",
+            "reassociate",
+            "gvn",
+            "simplifycfg",
+            // "basic-aa",
+            "mem2reg",
+        ];
+
+        self.module
+            .run_passes(passes.join(",").as_str(), target_machine, PassBuilderOptions::create())
+            .unwrap();
+    }
+
+    pub fn run_passes_debug(&self, target_machine: &TargetMachine, debug: Option<DebugOptions>) {
         if debug == Some(DebugOptions::LlvmIrUnoptimized) {
             self.module.print_to_stderr();
         }
 
-        self.run_passes();
+        self.run_passes(target_machine);
 
         if debug == Some(DebugOptions::LlvmIrOptimized) {
             self.module.print_to_stderr();
@@ -670,32 +745,4 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     }
 }
 
-/// <https://github.com/TheDan64/inkwell/blob/5c9f7fcbb0a667f7391b94beb65f1a670ad13221/examples/kaleidoscope/main.rs#L82-L109>
-fn run_passes_on(module: &Module) {
-    Target::initialize_all(&InitializationConfig::default());
-    let target_triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&target_triple).unwrap();
-    let target_machine = target
-        .create_target_machine(
-            &target_triple,
-            "generic",
-            "",
-            OptimizationLevel::None,
-            RelocMode::PIC,
-            CodeModel::Default,
-        )
-        .unwrap();
-
-    let passes: &[&str] = &[
-        "instcombine",
-        "reassociate",
-        "gvn",
-        "simplifycfg",
-        // "basic-aa",
-        "mem2reg",
-    ];
-
-    module
-        .run_passes(passes.join(",").as_str(), &target_machine, PassBuilderOptions::create())
-        .unwrap();
-}
+fn run_passes_on(module: &Module) {}

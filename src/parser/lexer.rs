@@ -129,6 +129,8 @@ pub enum TokenKind {
     DotAsterisk,
     /// `.&`
     DotAmpersand,
+    /// `.{`
+    DotOpenBrace,
     /// `,`
     Comma,
     /// `:`
@@ -276,11 +278,15 @@ keywords! {
     Union = "union",
     Enum = "enum",
     Unsafe = "unsafe",
+    // Extern = "extern",
     If = "if",
     Else = "else",
     Match = "match",
     For = "for",
     While = "while",
+    Return = "return",
+    Break = "break",
+    Continue = "continue",
 }
 
 /// byte range offset for a [`Code`].
