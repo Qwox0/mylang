@@ -15,7 +15,11 @@ use inkwell::{
 use mylang::{
     cli::Cli,
     codegen::{self, llvm::Compiler},
-    parser::{lexer::Lexer, parser_helper::Parser, StmtIter},
+    parser::{
+        lexer::{Lexer, Span},
+        parser_helper::Parser,
+        StmtIter,
+    },
 };
 use std::{
     io::{Read, Write},
@@ -178,23 +182,24 @@ fn dev() {
 
     let code = "
 pub test :: x -> 1+2*x;
-pub sub :: (a, b) -> -b + a;
+pub sub :: (a, mut b) -> -b + a;
 //main :: -> test(1) + test(2);
-mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
+//mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
 // factorial :: x -> x == 0 | if 1 else x * factorial(x-1);
 // mymain :: -> factorial(10) == 3628800;
-//main :: -> {
-//    a := test(1);
-//    b := test(2);
-//    a + b
-//};
+mymain :: -> {
+    mut a := test(1);
+    // a = 100;
+    b := test(2);
+    a + b
+};
 ";
 
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);
 
     if DEBUG_TOKENS {
-        println!("\n### Tokens:" );
+        println!("\n### Tokens:");
         let mut lex = Lexer::new(code);
         while let Some(t) = lex.next() {
             println!("{:?}", t)
@@ -202,7 +207,7 @@ mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
     }
 
     if DEBUG_AST {
-        println!("\n### AST Nodes:" );
+        println!("\n### AST Nodes:");
         for s in stmts.clone() {
             match s {
                 Ok(s) => {
@@ -211,6 +216,17 @@ mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
                 },
                 Err(e) => {
                     eprintln!("ERROR: {:?}", e);
+                    const VIEW_SIZE: usize = 20;
+                    let view_start = e.span.start.saturating_sub(VIEW_SIZE);
+                    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE));
+                    let newline_count =
+                        code[Span::new(view_start, e.span.start)].lines().skip(1).count();
+                    eprintln!("  {:?}", &code[view]);
+                    eprintln!(
+                        "  {}{}",
+                        " ".repeat(VIEW_SIZE + newline_count + 1),
+                        "^".repeat(e.span.len())
+                    );
                     break;
                 },
             }
@@ -272,14 +288,14 @@ mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
     let target_machine = Compiler::init_target_machine();
 
     if DEBUG_LLVM_IR_UNOPTIMIZED {
-        println!("\n### Unoptimized LLVM IR:" );
+        println!("\n### Unoptimized LLVM IR:");
         compiler.module.print_to_stderr();
     }
 
     compiler.run_passes(&target_machine);
 
     if DEBUG_LLVM_IR_OPTIMIZED {
-        println!("\n### Optimized LLVM IR:" );
+        println!("\n### Optimized LLVM IR:");
         compiler.module.print_to_stderr();
     }
 

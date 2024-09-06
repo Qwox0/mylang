@@ -4,7 +4,8 @@ use self::jit::Jit;
 use crate::{
     cli::DebugOptions,
     parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, VarDeclKind,
+        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, FnParam, Ident, LitKind, PreOpKind,
+        VarDeclKind,
     },
 };
 use inkwell::{
@@ -29,8 +30,10 @@ use inkwell::{
     FloatPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
+use symbol_table::*;
 
 pub mod jit;
+mod symbol_table;
 
 const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
 
@@ -61,6 +64,7 @@ impl From<FunctionLookupError> for CError {
         CError::FunctionLookupError(e)
     }
 }
+type CompileResult<T> = Result<T, CError>;
 
 pub trait Codegen {}
 
@@ -89,10 +93,7 @@ pub struct Compiler<'ctx, 'c, 'i> {
     pub module: Module<'ctx>,
     code: &'c Code,
 
-    #[cfg(feature = "use_ptr_values")]
-    variables: HashMap<String, PointerValue<'ctx>>,
-    #[cfg(not(feature = "use_ptr_values"))]
-    variables: HashMap<String, AnyValueEnum<'ctx>>,
+    symbols: SymbolTable<'ctx>,
 
     //items: HashMap<String, Item<'i>>,
     items: PhantomData<&'i ()>,
@@ -113,8 +114,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             builder,
             module,
             code,
-            variables: HashMap::new(),
-            //items: HashMap::new(),
+            symbols: SymbolTable::default(),
             items: PhantomData,
             cur_fn: None,
         }
@@ -145,10 +145,9 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         jit.add_module(module);
     }
 
-    pub fn compile_top_level(&mut self, expr: &Expr, code: &Code) -> Result<(), CError> {
+    pub fn compile_top_level(&mut self, expr: &Expr, code: &Code) -> CompileResult<()> {
         match &expr.kind {
             ExprKind::ConstDecl { markers, ident, ty, init } => {
-                let ident = unsafe { ident.as_ref() };
                 let init = unsafe { init.as_ref() };
                 let name = code[ident.span].to_string();
                 // if self.items.contains_key(&name) {
@@ -168,7 +167,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         ty: &Option<NonNull<Expr>>,
         init: &Expr,
         code: &Code,
-    ) -> Result<(), CError> {
+    ) -> CompileResult<()> {
         match &init.kind {
             ExprKind::Ident => todo!(),
             ExprKind::Literal(_) => todo!(),
@@ -207,20 +206,22 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_prototype(
         &self,
         name: &str,
-        params: &[(Ident, Option<NonNull<Expr>>)],
+        params: &[FnParam],
         code: &Code,
         module: &Module<'ctx>,
     ) -> FunctionValue<'ctx> {
         let ret_type = self.context.f64_type();
         let args_types = params
             .iter()
-            .map(|(name, ty)| BasicMetadataTypeEnum::FloatType(self.context.f64_type()))
+            .map(|FnParam { is_mut, ident, ty }| {
+                BasicMetadataTypeEnum::FloatType(self.context.f64_type())
+            })
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
         let fn_val = module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
-            param.set_name(&code[params[idx].0.span])
+            param.set_name(&code[params[idx].ident.span])
         }
 
         fn_val
@@ -229,38 +230,38 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_fn(
         &mut self,
         name: &str,
-        params: &[(Ident, Option<NonNull<Expr>>)],
+        params: &[FnParam],
         body: NonNull<Expr>,
         code: &Code,
-    ) -> Result<FunctionValue<'ctx>, CError> {
+    ) -> CompileResult<FunctionValue<'ctx>> {
+        self.symbols.open_scope();
         let func = self.compile_prototype(name, params, code, &self.module);
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
         self.cur_fn = Some(func);
 
-        self.variables.reserve(params.len());
+        self.symbols.reserve(params.len());
 
-        for (idx, param) in func.get_param_iter().enumerate() {
-            let pname = &code[params[idx].0.span];
-
-            #[cfg(feature = "use_ptr_values")]
-            {
-                let alloca = self.create_entry_block_alloca(func, pname);
-                self.builder.build_store(alloca, param)?;
-                self.variables.insert(pname.to_string(), alloca);
-            }
-
-            #[cfg(not(feature = "use_ptr_values"))]
-            {
-                let alloca = param.as_any_value_enum();
-                self.variables.insert(pname.to_string(), alloca);
-            }
+        for (param, param_def) in func.get_param_iter().zip(params) {
+            let pname = &code[param_def.ident.span];
+            self.symbols.insert(
+                pname.to_string(),
+                if param_def.is_mut {
+                    let alloca = self.create_entry_block_alloca(func, pname);
+                    self.builder.build_store(alloca, param)?;
+                    LocalVariable::Stack(alloca)
+                } else {
+                    let reg_val = param.as_any_value_enum();
+                    LocalVariable::Register(reg_val)
+                },
+            );
         }
 
         let body = self.compile_expr_to_float(body, code)?;
         self.builder.build_return(Some(&body))?;
 
+        self.symbols.close_scope();
         if func.verify(true) {
             Ok(func)
         } else {
@@ -273,20 +274,20 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         &mut self,
         expr: NonNull<Expr>,
         code: &Code,
-    ) -> Result<FloatValue<'ctx>, CError> {
+    ) -> CompileResult<FloatValue<'ctx>> {
         let expr = unsafe { expr.as_ref() };
         match &expr.kind {
             ExprKind::Ident => {
                 let name = &code[expr.span];
                 // TODO: ident which is not a variable
-                let Some(var) = self.variables.get(name) else {
+                let Some(var) = self.symbols.get(name) else {
                     return Err(CError::UnknownIdent(Box::from(name)));
                 };
 
-                #[cfg(feature = "use_ptr_values")]
-                let f = self.build_load(*var, name).into_float_value();
-                #[cfg(not(feature = "use_ptr_values"))]
-                let f = var.into_float_value();
+                let f = match var {
+                    LocalVariable::Stack(ptr) => self.build_load(*ptr, name).into_float_value(),
+                    LocalVariable::Register(reg) => reg.into_float_value(),
+                };
 
                 Ok(f)
             },
@@ -303,7 +304,22 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => todo!(),
             ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr, code),
-            ExprKind::Block { stmts, .. } => todo!("Block"),
+            ExprKind::Block { stmts, has_trailing_semicolon } => {
+                self.symbols.open_scope();
+                let Some((last, stmts)) = stmts.split_last() else {
+                    return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
+                };
+                for s in stmts {
+                    let _ = self.compile_expr_to_float(*s, code)?;
+                }
+                let out = self.compile_expr_to_float(*last, code)?;
+                self.symbols.close_scope();
+                Ok(if *has_trailing_semicolon {
+                    self.context.f64_type().const_float(0.0) // TODO: return void
+                } else {
+                    out
+                })
+            },
             ExprKind::StructDef(_) => todo!(),
             ExprKind::TupleStructDef(_) => todo!(),
             ExprKind::Union {} => todo!(),
@@ -405,7 +421,28 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             },
             ExprKind::Assign { lhs, rhs } => todo!(),
             ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            ExprKind::VarDecl { markers, ident, kind } => todo!(),
+            ExprKind::VarDecl { markers, ident, kind } => {
+                let var_name = &code[ident.span];
+                let is_mut = markers.is_mut;
+                let init = kind.get_init();
+                let v = if !is_mut && let Some(init) = init {
+                    let init = self.compile_expr_to_float(*init, code)?.as_any_value_enum();
+                    LocalVariable::Register(init)
+                } else {
+                    let stack_var =
+                        self.builder.build_alloca(self.context.f64_type(), &var_name)?;
+                    if let Some(init) = init {
+                        let init = self.compile_expr_to_float(*init, code)?;
+                        self.builder.build_store(stack_var, init)?;
+                    }
+                    LocalVariable::Stack(stack_var)
+                };
+                let old = self.symbols.insert(var_name.to_string(), v);
+                if old.is_some() {
+                    println!("LOG: {} was shadowed in the same scope", var_name);
+                }
+                Ok(self.context.f64_type().const_zero()) // TODO: void
+            },
             ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
             ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap();
@@ -468,7 +505,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     // -----------------------
 
     /*
-    pub fn add_item(&mut self, item: Item<'i>) -> Result<(), CError> {
+    pub fn add_item(&mut self, item: Item<'i>) -> CompileResult<()> {
         let name = item.code[item.ident.span].to_string();
         if self.items.contains_key(&name) {
             return Err(CError::RedefinedItem(name.into_boxed_str()));
@@ -481,7 +518,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
     /// if `stmt` is an [`Expr`] then this function returns the evaluated
     /// [`FloatValue`]
-    pub fn compile_stmt(&mut self, stmt: &Expr, code: &Code) -> Result<FloatValue<'_>, CError> {
+    pub fn compile_stmt(&mut self, stmt: &Expr, code: &Code) -> CompileResult<FloatValue<'_>> {
         todo!()
         /*
         match &stmt.kind {
@@ -492,7 +529,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         */
     }
 
-    pub fn get_function(&mut self, name: &str) -> Result<FunctionValue<'ctx>, CError> {
+    pub fn get_function(&mut self, name: &str) -> CompileResult<FunctionValue<'ctx>> {
         if let Some(func) = self.module.get_function(name) {
             return Ok(func);
         };
@@ -523,7 +560,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     }
 
     /*
-    pub fn compile_item(&mut self, item: &Item<'i>) -> Result<FunctionValue<'ctx>, CError> {
+    pub fn compile_item(&mut self, item: &Item<'i>) -> CompileResult<FunctionValue<'ctx>> {
         let code = item.code;
         match &item.value.kind {
             ExprKind::Ident => todo!(),
@@ -564,7 +601,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         ident: Ident,
         kind: VarDeclKind,
         code: &Code,
-    ) -> Result<FunctionValue<'ctx>, CError> {
+    ) -> CompileResult<FunctionValue<'ctx>> {
         let init = match kind {
             VarDeclKind::WithTy { ty, init } => init.unwrap_or_else(|| todo!("decl")),
             VarDeclKind::InferTy { init } => init,
@@ -606,7 +643,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         }
     }
 
-    pub fn jit_run_fn(&mut self, fn_name: &str) -> Result<f64, CError> {
+    pub fn jit_run_fn(&mut self, fn_name: &str) -> CompileResult<f64> {
         match self.module.create_jit_execution_engine(OptimizationLevel::None) {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> f64>(fn_name)?.call() })
@@ -621,7 +658,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         expr: &Expr,
         code: &Code,
         debug: Option<DebugOptions>,
-    ) -> Result<f64, CError> {
+    ) -> CompileResult<f64> {
         const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
         let func = self.compile_fn(REPL_EXPR_ANON_FN_NAME, &[], expr, code)?;
 
@@ -647,7 +684,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         expr: NonNull<Expr>,
         code: &Code,
         debug: Option<DebugOptions>,
-    ) -> Result<(), CError> {
+    ) -> CompileResult<()> {
         let func = self.compile_fn(REPL_EXPR_ANON_FN_NAME, &[], expr, code)?;
 
         // self.run_passes_debug(debug);
@@ -731,18 +768,10 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             .run_passes(passes.join(",").as_str(), target_machine, PassBuilderOptions::create())
             .unwrap();
     }
-
-    pub fn run_passes_debug(&self, target_machine: &TargetMachine, debug: Option<DebugOptions>) {
-        if debug == Some(DebugOptions::LlvmIrUnoptimized) {
-            self.module.print_to_stderr();
-        }
-
-        self.run_passes(target_machine);
-
-        if debug == Some(DebugOptions::LlvmIrOptimized) {
-            self.module.print_to_stderr();
-        }
-    }
 }
 
-fn run_passes_on(module: &Module) {}
+#[derive(Debug)]
+enum LocalVariable<'ctx> {
+    Stack(PointerValue<'ctx>),
+    Register(AnyValueEnum<'ctx>),
+}

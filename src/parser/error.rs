@@ -1,4 +1,7 @@
-use super::{lexer::TokenKind, DeclMarkerKind};
+use super::{
+    lexer::{Token, TokenKind},
+    DeclMarkerKind,
+};
 use crate::parser::lexer::Span;
 use core::fmt;
 
@@ -6,8 +9,7 @@ use core::fmt;
 pub enum ParseErrorKind {
     Unimplemented,
     NoInput,
-    UnexpectedToken { expected: TokenKind, got: TokenKind },
-    UnexpectedToken2(TokenKind),
+    UnexpectedToken(TokenKind),
     MissingToken(TokenKind),
     NotAKeyword,
     NotAnIdent,
@@ -25,6 +27,28 @@ pub struct ParseError {
     pub context: anyhow::Error,
 }
 
+macro_rules! err_impl {
+    ($kind:ident, $span:expr) => {
+        ParseError::new(ParseErrorKind::$kind , $span)
+    };
+    ($kind:ident ( $( $field:expr ),* $(,)? ), $span:expr) => {
+        ParseError::new(ParseErrorKind::$kind ( $($field),* ) , $span)
+    };
+    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } , $span:expr) => {
+        ParseError::new(ParseErrorKind::$kind { $($field $(: $val)?),* }, $span)
+    };
+}
+pub(crate) use err_impl;
+
+macro_rules! err {
+    (x $($t:tt)*) => {
+        err_impl!($($t)*)
+    };
+    ($($t:tt)*) => {
+        Err(err_impl!($($t)*))
+    };
+}
+/*
 macro_rules! err {
     (x $kind:ident, $span:expr) => {
         ParseError::new(ParseErrorKind::$kind , $span)
@@ -39,6 +63,7 @@ macro_rules! err {
         Err(err!(x $($t)*))
     };
 }
+*/
 pub(crate) use err;
 
 impl std::fmt::Debug for ParseError {
@@ -57,8 +82,12 @@ impl ParseError {
             kind,
             span,
             #[cfg(debug_assertions)]
-            context: anyhow::Error::msg("root"),
+            context: anyhow::Error::msg("ERROR"),
         }
+    }
+
+    pub fn unexpected_token(t: Token) -> Result<!, ParseError>{
+        Err(ParseError::new(ParseErrorKind::UnexpectedToken(t.kind), t.span))
     }
 
     #[cfg(debug_assertions)]
