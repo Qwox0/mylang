@@ -419,7 +419,19 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     BinOpKind::RangeInclusive => todo!(),
                 }
             },
-            ExprKind::Assign { lhs, rhs } => todo!(),
+            ExprKind::Assign { lhs, rhs } => {
+                let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
+                let var_name = &code[lhs.span];
+                match self.symbols.get(var_name) {
+                    Some(&LocalVariable::Stack(stack_var)) => {
+                        let rhs = self.compile_expr_to_float(*rhs, code)?;
+                        self.builder.build_store(stack_var, rhs)?;
+                    },
+                    Some(LocalVariable::Register(_)) => panic!("cannot assign to register"),
+                    None => panic!("undefined variable: '{}'", var_name),
+                }
+                Ok(self.context.f64_type().const_zero()) // TODO: void
+            },
             ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
             ExprKind::VarDecl { markers, ident, kind } => {
                 let var_name = &code[ident.span];
@@ -439,7 +451,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 };
                 let old = self.symbols.insert(var_name.to_string(), v);
                 if old.is_some() {
-                    println!("LOG: {} was shadowed in the same scope", var_name);
+                    println!("LOG: '{}' was shadowed in the same scope", var_name);
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
@@ -746,26 +758,25 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 &target_triple,
                 cpu,
                 features,
-                OptimizationLevel::Default,
+                OptimizationLevel::Aggressive,
                 RelocMode::PIC,
                 CodeModel::Default,
             )
             .unwrap()
     }
 
-    /// <https://github.com/TheDan64/inkwell/blob/5c9f7fcbb0a667f7391b94beb65f1a670ad13221/examples/kaleidoscope/main.rs#L82-L109>
-    pub fn run_passes(&self, target_machine: &TargetMachine) {
-        let passes: &[&str] = &[
-            "instcombine",
-            "reassociate",
-            "gvn",
-            "simplifycfg",
-            // "basic-aa",
-            "mem2reg",
-        ];
+    pub fn run_passes(&self, target_machine: &TargetMachine, level: u8) {
+        assert!((0..=3).contains(&level));
+        let passes = format!("default<O{}>", level);
+
+        // TODO: custom passes:
+        //let passes = format!(
+        //   "module(cgscc(inline),function({}))",
+        //   ["instcombine", "reassociate", "gvn", "simplifycfg",
+        //"mem2reg",].join(","), );
 
         self.module
-            .run_passes(passes.join(",").as_str(), target_machine, PassBuilderOptions::create())
+            .run_passes(&passes, target_machine, PassBuilderOptions::create())
             .unwrap();
     }
 }

@@ -177,6 +177,7 @@ fn dev() {
     const DEBUG_AST: bool = true;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
+    const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
 
     let alloc = bumpalo::Bump::new();
 
@@ -189,7 +190,8 @@ pub sub :: (a, mut b) -> -b + a;
 // mymain :: -> factorial(10) == 3628800;
 mymain :: -> {
     mut a := test(1);
-    // a = 100;
+    mut a := 10;
+    a = 100;
     b := test(2);
     a + b
 };
@@ -292,7 +294,7 @@ mymain :: -> {
         compiler.module.print_to_stderr();
     }
 
-    compiler.run_passes(&target_machine);
+    compiler.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
 
     if DEBUG_LLVM_IR_OPTIMIZED {
         println!("\n### Optimized LLVM IR:");

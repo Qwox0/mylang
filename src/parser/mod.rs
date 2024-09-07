@@ -1436,7 +1436,9 @@ impl Expr {
                         rhs.as_ref().to_text(code)
                     )
                 },
-                ExprKind::Assign { lhs, rhs } => todo!("ExprKind::Assign"),
+                ExprKind::Assign { lhs, rhs } => {
+                    format!("{}={}", lhs.as_ref().to_text(code), rhs.as_ref().to_text(code))
+                },
                 ExprKind::BinOpAssign { lhs, op, rhs } => {
                     format!(
                         "{}{}{}",
