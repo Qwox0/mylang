@@ -1,3 +1,5 @@
+use crate::scratch_pool::ScratchPool;
+use bumpalo::Bump;
 use core::range::Range;
 use debug::TreeLines;
 pub use error::*;
@@ -11,7 +13,7 @@ pub mod lexer;
 pub mod parser_helper;
 mod util;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
     Ident,
     Literal(LitKind),
@@ -26,19 +28,19 @@ pub enum ExprKind {
     },
     /// `[<expr>, <expr>, ..., <expr>,]`
     ArrayComma {
-        elements: Box<[Expr]>,
+        elements: NonNull<[Expr]>,
     },
     /// `(<expr>, <expr>, ..., <expr>,)`
     /// both for types and literals
     Tuple {
-        elements: Box<[Expr]>,
+        elements: NonNull<[Expr]>,
     },
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
     /// `-> <type> { <body> }`
     /// `-> <body>`
     Fn {
-        params: Box<[FnParam]>,
+        params: NonNull<[FnParam]>,
         ret_type: Option<NonNull<Expr>>,
         body: NonNull<Expr>,
     },
@@ -48,14 +50,14 @@ pub enum ExprKind {
     },
     /// `{ <stmt>`*` }`
     Block {
-        stmts: Box<[NonNull<Expr>]>,
+        stmts: NonNull<[NonNull<Expr>]>,
         has_trailing_semicolon: bool,
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(Box<[(Ident, Expr)]>),
+    StructDef(NonNull<[(Ident, Expr)]>),
     /// `struct(...)`
-    TupleStructDef(Box<[Expr]>),
+    TupleStructDef(NonNull<[Expr]>),
     /// `union { ... }`
     Union {},
     /// `enum { ... }`
@@ -71,7 +73,7 @@ pub enum ExprKind {
     /// `alloc(MyStruct).{ a = <expr>, b, }`
     Initializer {
         lhs: Option<NonNull<Expr>>,
-        fields: Box<[(Ident, Option<NonNull<Expr>>)]>,
+        fields: NonNull<[(Ident, Option<NonNull<Expr>>)]>,
     },
 
     /// [`expr`] . [`expr`]
@@ -100,7 +102,7 @@ pub enum ExprKind {
     /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
     Call {
         func: NonNull<Expr>,
-        args: Box<[NonNull<Expr>]>,
+        args: NonNull<[NonNull<Expr>]>,
     },
 
     /// examples: `&<expr>`, `- <expr>`
@@ -305,14 +307,14 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let rhs = self.ident().context("dot rhs")?;
                 expr!(Dot { lhs, rhs }, span.join(rhs.span))
             },
-            FollowingOperator::Call => return self.call(lhs, span, Vec::new()),
+            FollowingOperator::Call => return self.call(lhs, span, ScratchPool::new()),
             FollowingOperator::Index => {
                 let idx = self.expr()?;
                 let close = self.tok(TokenKind::CloseBracket)?;
                 expr!(Index { lhs, idx }, span.join(close.span))
             },
             FollowingOperator::Initializer => {
-                let mut fields = Vec::new();
+                let mut fields = ScratchPool::new();
                 loop {
                     self.ws0();
                     if self.lex.advance_if(|t| t.kind == TokenKind::CloseBrace) {
@@ -337,7 +339,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                     }
                 }
                 let close = self.tok(TokenKind::CloseBrace)?;
-                let fields = fields.into_boxed_slice();
+                let fields = self.clone_slice_from_scratch_pool(fields)?;
                 expr!(Initializer { lhs: Some(lhs), fields }, span.join(close.span))
             },
             FollowingOperator::SingleArgNoParenFn => {
@@ -345,8 +347,15 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let Expr { kind: ExprKind::Ident, span: param_span } = lhs else {
                     panic!("SingleArgFn: unknown rhs")
                 };
-                let param = FnParam { is_mut: false, ident: Ident { span: *param_span }, ty: None };
-                return self.function_tail(Box::new([param]), span);
+                let param = FnParam {
+                    is_mut: false,
+                    ident: Ident { span: *param_span },
+                    ty: None,
+                    default: None,
+                };
+                let mut params =
+                    self.clone_slice_from_scratch_pool(ScratchPool::new_with_first_val(param))?;
+                return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
                 expr!(PostOp { expr: lhs, kind }, span)
@@ -403,7 +412,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                         let open_paren = self
                             .tok(TokenKind::OpenParenthesis)
                             .context("pipe call: expect '('")?;
-                        self.call(func, open_paren.span, vec![lhs])
+                        let mut args = ScratchPool::new_with_first_val(lhs);
+                        self.call(func, open_paren.span, args)
                     },
                     _ => ParseError::unexpected_token(t)
                         .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
@@ -533,54 +543,31 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             TokenKind::OpenParenthesis => {
                 self.ws0();
                 // TODO: currently no tuples allowed!
-                return match self.lex.peek() {
-                    // () -> ...
-                    Some(Token { kind: TokenKind::CloseParenthesis, .. }) => {
-                        self.lex.advance();
-                        self.ws0();
-                        self.tok(TokenKind::Arrow).context("'->'")?;
-                        self.function_tail(Box::new([]), span)
+                // () -> ...
+                if self.lex.advance_if(|t| t.kind == TokenKind::CloseParenthesis) {
+                    self.ws0();
+                    self.tok(TokenKind::Arrow).context("'->'")?;
+                    return self.function_tail(self.alloc_empty_slice(), span);
+                }
+                let start_pos = self.lex.get_pos();
+                let first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
+                let t = self.ws0_and_next_tok().context("missing ')'")?;
+                self.ws0();
+                return match t.kind {
+                    // (expr)
+                    TokenKind::CloseParenthesis
+                        if !self.lex.peek().is_some_and(|t| t.kind == TokenKind::Arrow) =>
+                    {
+                        return self
+                            .alloc(expr!(Parenthesis { expr: first_expr }, span.join(t.span)));
                     },
-                    // ( ( (mut)? ident (:ty)? ),* ) -> ...
-                    Some(Token { kind: TokenKind::Keyword(Keyword::Mut), .. }) => {
+                    // (expr) -> ...
+                    // (params...) -> ...
+                    TokenKind::CloseParenthesis | TokenKind::Comma => {
+                        self.lex.set_pos(start_pos); // TODO: maybe no resetting in the future
                         self.function_with_params(span)
                     },
-                    // (ident) -> ...
-                    // (ident)
-                    Some(Token { kind: TokenKind::Ident, span: i_span }) => {
-                        let start_pos = self.lex.get_pos();
-                        self.lex.advance();
-                        self.ws0();
-
-                        let t = self.lex.next().unwrap();
-                        match t.kind {
-                            TokenKind::CloseParenthesis => {
-                                if self.lex.advance_if(|t| t.kind == TokenKind::Arrow) {
-                                    let ident = Ident { span: i_span };
-                                    let param = FnParam { is_mut: false, ident, ty: None };
-                                    self.function_tail(Box::new([param]), span)
-                                } else {
-                                    let expr = self.alloc(expr!(Ident, i_span))?;
-                                    self.alloc(expr!(Parenthesis { expr }, span.join(t.span)))
-                                }
-                            },
-                            TokenKind::Colon | TokenKind::Comma => {
-                                self.lex.set_pos(start_pos); // TODO: maybe no resetting in the future
-                                self.function_with_params(span)
-                            },
-                            //k => err!(UnexpectedToken2(k), t.span),
-                            k => panic!(),
-                        }
-                    },
-                    // (expr)
-                    Some(_) => {
-                        let expr = self.expr().context("expr in (...)")?;
-                        let close_p = self.tok(TokenKind::CloseParenthesis).context("(expr)")?;
-                        self.alloc(expr!(Parenthesis { expr }, span.join(close_p.span)))
-                    },
-                    None => {
-                        err!(MissingToken(TokenKind::CloseParenthesis), self.lex.pos_span())
-                    },
+                    _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
                 };
             },
             TokenKind::OpenBracket => {
@@ -601,7 +588,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let expr = self.expr_(usize::MAX).context("- expr")?;
                 expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
             },
-            TokenKind::Arrow => return self.function_tail(Box::new([]), span),
+            TokenKind::Arrow => return self.function_tail(self.alloc_empty_slice(), span),
             TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
             TokenKind::Ampersand => todo!("TokenKind::Ampersand"),
             //TokenKind::Pipe => todo!("TokenKind::Pipe"),
@@ -638,22 +625,27 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
     /// parsing starts after the '(' and expects at least one parameter
     pub fn function_with_params(&mut self, open_paren_span: Span) -> ParseResult<NonNull<Expr>> {
-        let mut params = Vec::new();
+        let mut params = ScratchPool::new();
         loop {
             self.ws0();
             let is_mut = self.lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
             self.ws0();
             let ident = self.ident().context("param ident")?;
+            let mut ty = None;
+            let mut default = None;
             let mut t = self.ws0_and_next_tok()?;
-            let ty = if t.kind == TokenKind::Colon {
-                let ty = self.expr().context("param type")?;
+            if t.kind == TokenKind::Colon {
+                ty.insert(self.expr().context("param type")?);
                 t = self.ws0_and_next_tok()?;
-                Some(ty)
-            } else {
-                None
-            };
-            params.push(FnParam { is_mut, ident, ty });
-
+                if t.kind == TokenKind::Eq {
+                    default.insert(self.expr().context("param default value")?);
+                    t = self.ws0_and_next_tok()?;
+                }
+            } else if t.kind == TokenKind::ColonEq {
+                default.insert(self.expr().context("param default value")?);
+                t = self.ws0_and_next_tok()?;
+            }
+            params.push(FnParam { is_mut, ident, ty, default });
             match t.kind {
                 TokenKind::Comma => {
                     if self.lex.advance_if(is_close_paren) {
@@ -662,18 +654,19 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                     continue;
                 },
                 TokenKind::CloseParenthesis => break,
-                _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
+                _ => ParseError::unexpected_token(t).context("expected ':', ':=', ',' or ')'")?,
             }
         }
         self.ws0();
         self.tok(TokenKind::Arrow).context("'->'")?;
-        self.function_tail(params.into_boxed_slice(), open_paren_span)
+        let params = self.clone_slice_from_scratch_pool(params)?;
+        self.function_tail(params, open_paren_span)
     }
 
     /// parsing starts after the '->'
     pub fn function_tail(
         &mut self,
-        params: Box<[FnParam]>,
+        params: NonNull<[FnParam]>,
         start_span: Span,
     ) -> ParseResult<NonNull<Expr>> {
         let expr = self.expr().context("fn body")?;
@@ -713,7 +706,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
         &mut self,
         func: NonNull<Expr>,
         open_paren_span: Span,
-        mut args: Vec<NonNull<Expr>>,
+        mut args: ScratchPool<NonNull<Expr>>,
     ) -> ParseResult<NonNull<Expr>> {
         let closing_paren_span = loop {
             self.ws0();
@@ -727,15 +720,16 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 t => ParseError::unexpected_token(t).context("expect ',' or ')'"),
             };
         };
+        let args = self.clone_slice_from_scratch_pool(args)?;
         self.alloc(Expr::new(
-            ExprKind::Call { func, args: args.into_boxed_slice() },
+            ExprKind::Call { func, args },
             open_paren_span.join(closing_paren_span),
         ))
     }
 
     /// parses block context and '}', doesn't parse the '{'
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<NonNull<Expr>> {
-        let mut stmts = Vec::new();
+        let mut stmts = ScratchPool::new();
         let (has_trailing_semicolon, closing_brace_span) = loop {
             self.ws0();
             if let Some(closing_brace) = self.lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
@@ -748,7 +742,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 t => ParseError::unexpected_token(t).context("expect ';' or '}'"),
             };
         };
-        let stmts = stmts.into_boxed_slice();
+        //let stmts = self.alloc_slice(&stmts)?;
+        let stmts = self.clone_slice_from_scratch_pool(stmts)?;
         self.alloc(Expr::new(
             ExprKind::Block { stmts, has_trailing_semicolon },
             open_brace_span.join(closing_brace_span),
@@ -830,7 +825,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     // helpers:
 
     #[inline]
-    pub fn alloc<T>(&self, val: T) -> ParseResult<NonNull<T>> {
+    fn alloc<T>(&self, val: T) -> ParseResult<NonNull<T>> {
         match self.alloc.try_alloc(val) {
             Result::Ok(ok) => Ok(NonNull::from(ok)),
             Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
@@ -841,7 +836,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     ///
     /// see [`bumpalo::Bump::alloc_slice_copy`]
     #[inline]
-    pub fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<NonNull<[T]>> {
+    fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<NonNull<[T]>> {
         let layout = core::alloc::Layout::for_value(slice);
         let dst = self
             .alloc
@@ -853,6 +848,21 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             core::ptr::copy_nonoverlapping(slice.as_ptr(), dst.as_ptr(), slice.len());
             core::slice::from_raw_parts_mut(dst.as_ptr(), slice.len())
         }))
+    }
+
+    #[inline]
+    fn clone_slice_from_scratch_pool<T: Clone>(
+        &self,
+        scratch_pool: ScratchPool<T>,
+    ) -> ParseResult<NonNull<[T]>> {
+        scratch_pool
+            .clone_to_slice_in_bump(&self.alloc)
+            .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))
+    }
+
+    #[inline]
+    fn alloc_empty_slice<T>(&self) -> NonNull<[T]> {
+        unsafe { NonNull::from(&[]) }
     }
 
     pub fn get_pos(&self) -> usize {
@@ -1109,7 +1119,7 @@ impl BinOpKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PostOpKind {
     /// `<expr>.&`
     AddrOf,
@@ -1173,7 +1183,7 @@ pub enum DeclMarkerKind {
     Rec,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum VarDeclKind {
     /// `<name>: <ty>;`
     /// `<name>: <ty> = <init>;`
@@ -1215,14 +1225,15 @@ pub struct Pattern {
     span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FnParam {
     pub is_mut: bool,
     pub ident: Ident,
     pub ty: Option<NonNull<Expr>>,
+    pub default: Option<NonNull<Expr>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PreOpKind {
     /// `& <expr>`
     AddrOf,
@@ -1363,12 +1374,24 @@ impl Expr {
                     params
                         .as_ref()
                         .iter()
-                        .map(|FnParam { is_mut, ident, ty }| {
-                            let ty = ty
-                                .as_ref()
-                                .map(|e| format!(":{}", e.as_ref().to_text(code)))
-                                .unwrap_or_default();
-                            format!("{}{}{}", mut_marker(is_mut), &code[ident.span], ty)
+                        .map(|FnParam { is_mut, ident, ty, default }| {
+                            let a = match (ty, default) {
+                                (Some(ty), Some(default)) => {
+                                    format!(
+                                        ":{}={}",
+                                        ty.as_ref().to_text(code),
+                                        default.as_ref().to_text(code)
+                                    )
+                                },
+                                (None, Some(default)) => {
+                                    format!(":={}", default.as_ref().to_text(code))
+                                },
+                                (Some(ty), None) => {
+                                    format!(":{}", ty.as_ref().to_text(code),)
+                                },
+                                (None, None) => String::default(),
+                            };
+                            format!("{}{}{}", mut_marker(is_mut), &code[ident.span], a)
                         })
                         .intersperse(",".to_string())
                         .collect::<String>(),
@@ -1563,7 +1586,7 @@ impl Expr {
                     let body = body.as_ref();
                     lines.write("(");
 
-                    for (idx, FnParam { is_mut, ident, ty }) in
+                    for (idx, FnParam { is_mut, ident, ty, default }) in
                         params.as_ref().into_iter().enumerate()
                     {
                         if idx != 0 {
@@ -1575,11 +1598,30 @@ impl Expr {
                         }
                         lines.scope_next_line(|l| l.write(&code[ident.span]));
                         lines.write_minus(ident.span.len());
-                        if let Some(ty) = ty {
-                            let ty = ty.as_ref();
-                            lines.write(":");
-                            lines.scope_next_line(|l| ty.write_tree(l, code));
-                            lines.write_minus(ty.to_text(code).len());
+                        match (ty, default) {
+                            (Some(ty), Some(default)) => {
+                                let ty = ty.as_ref();
+                                let default = default.as_ref();
+                                lines.write(":");
+                                lines.scope_next_line(|l| ty.write_tree(l, code));
+                                lines.write_minus(ty.to_text(code).len());
+                                lines.write("=");
+                                lines.scope_next_line(|l| default.write_tree(l, code));
+                                lines.write_minus(default.to_text(code).len());
+                            },
+                            (None, Some(default)) => {
+                                let default = default.as_ref();
+                                lines.write(":=");
+                                lines.scope_next_line(|l| default.write_tree(l, code));
+                                lines.write_minus(default.to_text(code).len());
+                            },
+                            (Some(ty), None) => {
+                                let ty = ty.as_ref();
+                                lines.write(":");
+                                lines.scope_next_line(|l| ty.write_tree(l, code));
+                                lines.write_minus(ty.to_text(code).len());
+                            },
+                            (None, None) => {},
                         }
                     }
                     lines.write(")->");

@@ -16,14 +16,16 @@ use mylang::{
     cli::Cli,
     codegen::{self, llvm::Compiler},
     parser::{
-        lexer::{Lexer, Span},
+        lexer::{Code, Lexer, Span},
         parser_helper::Parser,
-        StmtIter,
+        ParseError, StmtIter,
     },
 };
 use std::{
     io::{Read, Write},
     path::Path,
+    ptr::NonNull,
+    time::Instant,
 };
 
 fn main() {
@@ -172,6 +174,16 @@ fn read_code_file(path: &Path) -> String {
     })
 }
 
+fn display_parse_error(e: ParseError, code: &Code) {
+    eprintln!("ERROR: {:?}", e);
+    const VIEW_SIZE: usize = 20;
+    let view_start = e.span.start.saturating_sub(VIEW_SIZE);
+    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE));
+    let newline_count = code[Span::new(view_start, e.span.start)].lines().skip(1).count();
+    eprintln!("  {:?}", &code[view]);
+    eprintln!("  {}{}", " ".repeat(VIEW_SIZE + newline_count + 1), "^".repeat(e.span.len()));
+}
+
 fn dev() {
     const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = true;
@@ -182,8 +194,11 @@ fn dev() {
     let alloc = bumpalo::Bump::new();
 
     let code = "
-pub test :: x -> 1+2*x;
-pub sub :: (a, mut b) -> -b + a;
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
+};
+pub sub :: (a, b) -> -b + a;
 //main :: -> test(1) + test(2);
 //mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
 // factorial :: x -> x == 0 | if 1 else x * factorial(x-1);
@@ -192,7 +207,7 @@ mymain :: -> {
     mut a := test(1);
     mut a := 10;
     a = 100;
-    b := test(2);
+    b := test(1);
     a + b
 };
 ";
@@ -217,68 +232,34 @@ mymain :: -> {
                     unsafe { s.as_ref().print_tree(code) };
                 },
                 Err(e) => {
-                    eprintln!("ERROR: {:?}", e);
-                    const VIEW_SIZE: usize = 20;
-                    let view_start = e.span.start.saturating_sub(VIEW_SIZE);
-                    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE));
-                    let newline_count =
-                        code[Span::new(view_start, e.span.start)].lines().skip(1).count();
-                    eprintln!("  {:?}", &code[view]);
-                    eprintln!(
-                        "  {}{}",
-                        " ".repeat(VIEW_SIZE + newline_count + 1),
-                        "^".repeat(e.span.len())
-                    );
+                    display_parse_error(e, code);
                     break;
                 },
             }
         }
     }
 
+
+    let frontend_start = Instant::now();
     let context = Context::create();
     let mut compiler = codegen::llvm::Compiler::new_module(&context, "dev", code);
 
     for pres in stmts {
-        let expr = pres.unwrap_or_else(|e| panic!("ERROR: {:?}", e));
+        let expr = pres.unwrap_or_else(|e| {
+            display_parse_error(e, code);
+            panic!("Parse Error");
+        });
 
         compiler
             .compile_top_level(unsafe { expr.as_ref() }, code)
             .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
-
-        /*
-            match stmt.kind {
-                    StmtKind::VarDecl { markers, ident, kind } => {
-                        let (ty, Some(value)) = kind.into_ty_val() else {
-                            eprintln!("top-level item needs initialization");
-                            break
-                        };
-                        compiler
-                            .add_item(Item { markers, ident, ty, value, code })
-                            .unwrap_or_else(|e| panic!("ERROR: {:?}", e))
-                    },
-                    StmtKind::Semicolon(expr) | // => todo!(),
-                    StmtKind::Expr(expr) => {
-                        panic!("top-level expressions are not allowed")
-
-                        /*
-                        match compiler.jit_run_expr(&expr, code, cli.debug) {
-                            Ok(out) => println!("=> {}", out),
-                            Err(err) => {
-                                eprintln!("ERROR: {:?}", err);
-                                break;
-                            },
-                        }
-                        */
-                    },
-                }
-        */
     }
+    let frontend_duration = frontend_start.elapsed();
 
     print!("functions:");
     for a in compiler.module.get_functions() {
         print!("{:?},", a.get_name());
     }
-    println!("");
 
     enum ExecutionVariant {
         ObjectCode,
@@ -294,7 +275,9 @@ mymain :: -> {
         compiler.module.print_to_stderr();
     }
 
+    let backend_start = Instant::now();
     compiler.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
+    let backend_duration = backend_start.elapsed();
 
     if DEBUG_LLVM_IR_OPTIMIZED {
         println!("\n### Optimized LLVM IR:");
@@ -305,6 +288,11 @@ mymain :: -> {
         ExecutionVariant::ObjectCode => compile(&compiler.module, &target_machine),
         ExecutionVariant::Jit => run_with_jit(compiler),
     }
+
+    println!("\n### Compilation time");
+    println!("  Frontend:     {:<10?} (Lever, Parser, LLVM IR codegen)", frontend_duration);
+    println!("  LLVM Backend: {:<10?} (LLVM pass pipeline)", backend_duration);
+    println!("  Total:        {:?}", frontend_duration + backend_duration);
 }
 
 fn compile(module: &Module, target_machine: &TargetMachine) {
@@ -319,6 +307,29 @@ fn run_with_jit(mut compiler: Compiler) {
     println!("main returned {}", out);
 }
 
+/// old (Vec<T> -> Box<[T]>)
+/// ```
+/// test benches::bench_parse  ... bench:       2,918.07 ns/iter (+/- 963.54)
+/// test benches::bench_parse2 ... bench:       4,241.97 ns/iter (+/- 670.58)
+/// test benches::bench_parse3 ... bench:       4,715.20 ns/iter (+/- 2,430.77)
+/// test benches::bench_parse4 ... bench:       7,072.83 ns/iter (+/- 560.36)
+/// ```
+///
+/// Vec<T> -> clone to alloc
+/// ```
+/// test benches::bench_parse  ... bench:       2,764.31 ns/iter (+/- 485.16)
+/// test benches::bench_parse2 ... bench:       3,931.87 ns/iter (+/- 269.52)
+/// test benches::bench_parse3 ... bench:       4,251.83 ns/iter (+/- 110.45)
+/// test benches::bench_parse4 ... bench:       6,729.51 ns/iter (+/- 535.07)
+/// ```
+///
+/// scratchpool -> clone to alloc
+/// ```
+/// test benches::bench_parse  ... bench:       2,898.31 ns/iter (+/- 229.93)
+/// test benches::bench_parse2 ... bench:       4,115.37 ns/iter (+/- 397.96)
+/// test benches::bench_parse3 ... bench:       4,569.32 ns/iter (+/- 537.69)
+/// test benches::bench_parse4 ... bench:       6,576.30 ns/iter (+/- 638.84)
+/// ```
 #[cfg(test)]
 mod benches {
     extern crate test;
@@ -378,6 +389,27 @@ main :: -> test(10);
 pub test :: x -> 1+2*x;
 pub sub :: (a, b) -> -b + a;
 main :: -> false | if test(1) else (10 | sub(3));
+";
+            let code = code.as_ref();
+            let mut stmts = StmtIter::parse(code, &alloc);
+            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+        })
+    }
+
+    #[bench]
+    fn bench_parse4(b: &mut Bencher) {
+        b.iter(|| {
+            let alloc = bumpalo::Bump::new();
+            let code = "
+pub test :: (x := 2) -> 1+2*x;
+pub sub :: (a, mut b) -> -b + a;
+mymain :: -> {
+    mut a := test(1);
+    mut a := 10;
+    a = 100;
+    b := test(2);
+    a + b
+};
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);

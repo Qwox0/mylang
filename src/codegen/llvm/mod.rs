@@ -213,7 +213,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         let ret_type = self.context.f64_type();
         let args_types = params
             .iter()
-            .map(|FnParam { is_mut, ident, ty }| {
+            .map(|FnParam { is_mut, ident, ty, default }| {
                 BasicMetadataTypeEnum::FloatType(self.context.f64_type())
             })
             .collect::<Vec<_>>();
@@ -250,10 +250,10 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 if param_def.is_mut {
                     let alloca = self.create_entry_block_alloca(func, pname);
                     self.builder.build_store(alloca, param)?;
-                    LocalVariable::Stack(alloca)
+                    Symbol::Stack(alloca)
                 } else {
                     let reg_val = param.as_any_value_enum();
-                    LocalVariable::Register(reg_val)
+                    Symbol::Register(reg_val)
                 },
             );
         }
@@ -285,8 +285,11 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 };
 
                 let f = match var {
-                    LocalVariable::Stack(ptr) => self.build_load(*ptr, name).into_float_value(),
-                    LocalVariable::Register(reg) => reg.into_float_value(),
+                    Symbol::Stack(ptr) => self
+                        .builder
+                        .build_load(self.context.f64_type(), *ptr, name)?
+                        .into_float_value(),
+                    Symbol::Register(reg) => reg.into_float_value(),
                 };
 
                 Ok(f)
@@ -306,6 +309,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr, code),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 self.symbols.open_scope();
+                let stmts = unsafe { stmts.as_ref()};
                 let Some((last, stmts)) = stmts.split_last() else {
                     return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
                 };
@@ -338,8 +342,9 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     todo!("non ident function call")
                 }
 
-                let func = &code[func.span];
-                let func = self.get_function(func)?;
+                let func_name = &code[func.span];
+                let f = self.symbols.get(func_name);
+                let func = self.get_function(func_name)?;
                 let expected_arg_count = func.count_params();
                 if expected_arg_count as usize != args.len() {
                     return Err(CError::MismatchedArgCount {
@@ -371,75 +376,46 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::BinOp { lhs, op, rhs } => {
                 let lhs = self.compile_expr_to_float(*lhs, code)?;
                 let rhs = self.compile_expr_to_float(*rhs, code)?;
-                let a = 1.0 <= 2.0;
-                match op {
-                    BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "mul")?),
-                    BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "div")?),
-                    BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "mod")?),
-                    BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "add")?),
-                    BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "sub")?),
-                    BinOpKind::ShiftL => todo!(),
-                    BinOpKind::ShiftR => todo!(),
-                    BinOpKind::BitAnd => todo!(),
-                    BinOpKind::BitXor => todo!(),
-                    BinOpKind::BitOr => todo!(),
-                    BinOpKind::Eq => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::Ne => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::ONE, lhs, rhs, "ne")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::Lt => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::OLT, lhs, rhs, "lt")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::Le => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::OLE, lhs, rhs, "le")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::Gt => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::OGT, lhs, rhs, "gt")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::Ge => Ok(self.builder.build_signed_int_to_float(
-                        self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?,
-                        self.context.f64_type(),
-                        "floatcast",
-                    )?),
-                    BinOpKind::And => todo!(),
-                    BinOpKind::Or => todo!(),
-                    BinOpKind::Range => todo!(),
-                    BinOpKind::RangeInclusive => todo!(),
-                }
+                self.build_float_binop(lhs, rhs, *op)
             },
             ExprKind::Assign { lhs, rhs } => {
                 let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
                 let var_name = &code[lhs.span];
                 match self.symbols.get(var_name) {
-                    Some(&LocalVariable::Stack(stack_var)) => {
+                    Some(&Symbol::Stack(stack_var)) => {
                         let rhs = self.compile_expr_to_float(*rhs, code)?;
                         self.builder.build_store(stack_var, rhs)?;
                     },
-                    Some(LocalVariable::Register(_)) => panic!("cannot assign to register"),
+                    Some(Symbol::Register(_)) => panic!("cannot assign to register"),
                     None => panic!("undefined variable: '{}'", var_name),
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
-            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
+            ExprKind::BinOpAssign { lhs, op, rhs } => {
+                let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
+                let var_name = &code[lhs.span];
+                match self.symbols.get(var_name) {
+                    Some(&Symbol::Stack(stack_var)) => {
+                        let lhs = self
+                            .builder
+                            .build_load(self.context.f64_type(), stack_var, "tmp")?
+                            .into_float_value();
+                        let rhs = self.compile_expr_to_float(*rhs, code)?;
+                        let binop_res = self.build_float_binop(lhs, rhs, *op)?;
+                        self.builder.build_store(stack_var, binop_res)?;
+                    },
+                    Some(Symbol::Register(_)) => panic!("cannot assign to register"),
+                    None => panic!("undefined variable: '{}'", var_name),
+                }
+                Ok(self.context.f64_type().const_zero()) // TODO: void
+            },
             ExprKind::VarDecl { markers, ident, kind } => {
                 let var_name = &code[ident.span];
                 let is_mut = markers.is_mut;
                 let init = kind.get_init();
                 let v = if !is_mut && let Some(init) = init {
                     let init = self.compile_expr_to_float(*init, code)?.as_any_value_enum();
-                    LocalVariable::Register(init)
+                    Symbol::Register(init)
                 } else {
                     let stack_var =
                         self.builder.build_alloca(self.context.f64_type(), &var_name)?;
@@ -447,7 +423,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                         let init = self.compile_expr_to_float(*init, code)?;
                         self.builder.build_store(stack_var, init)?;
                     }
-                    LocalVariable::Stack(stack_var)
+                    Symbol::Stack(stack_var)
                 };
                 let old = self.symbols.insert(var_name.to_string(), v);
                 if old.is_some() {
@@ -707,8 +683,58 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         Ok(())
     }
 
-    pub fn build_load(&self, ptr: PointerValue<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
-        self.builder.build_load(self.context.f64_type(), ptr, name).unwrap()
+    pub fn build_float_binop(
+        &mut self,
+        lhs: FloatValue<'ctx>,
+        rhs: FloatValue<'ctx>,
+        op: BinOpKind,
+    ) -> CompileResult<FloatValue<'ctx>> {
+        match op {
+            BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "mul")?),
+            BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "div")?),
+            BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "mod")?),
+            BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "add")?),
+            BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "sub")?),
+            BinOpKind::ShiftL => todo!(),
+            BinOpKind::ShiftR => todo!(),
+            BinOpKind::BitAnd => todo!(),
+            BinOpKind::BitXor => todo!(),
+            BinOpKind::BitOr => todo!(),
+            BinOpKind::Eq => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::Ne => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::ONE, lhs, rhs, "ne")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::Lt => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::OLT, lhs, rhs, "lt")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::Le => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::OLE, lhs, rhs, "le")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::Gt => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::OGT, lhs, rhs, "gt")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::Ge => Ok(self.builder.build_signed_int_to_float(
+                self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?,
+                self.context.f64_type(),
+                "floatcast",
+            )?),
+            BinOpKind::And => todo!(),
+            BinOpKind::Or => todo!(),
+            BinOpKind::Range => todo!(),
+            BinOpKind::RangeInclusive => todo!(),
+        }
     }
 
     /// Creates a new stack allocation instruction in the entry block of the
@@ -782,7 +808,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 }
 
 #[derive(Debug)]
-enum LocalVariable<'ctx> {
+enum Symbol<'ctx> {
     Stack(PointerValue<'ctx>),
     Register(AnyValueEnum<'ctx>),
 }

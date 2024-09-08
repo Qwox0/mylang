@@ -7,9 +7,9 @@
 #![feature(ptr_as_ref_unchecked)]
 #![feature(unsigned_is_multiple_of)]
 #![feature(let_chains)]
-
 #![allow(unused)]
 
 pub mod cli;
 pub mod codegen;
 pub mod parser;
+mod scratch_pool;
