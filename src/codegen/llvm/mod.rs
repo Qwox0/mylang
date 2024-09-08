@@ -4,8 +4,8 @@ use self::jit::Jit;
 use crate::{
     cli::DebugOptions,
     parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, FnParam, Ident, LitKind, PreOpKind,
-        VarDeclKind,
+        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, FnParam, Ident, LitKind, ParseError,
+        PreOpKind, StmtIter, VarDeclKind,
     },
 };
 use inkwell::{
@@ -39,9 +39,10 @@ const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
 
 #[derive(Debug)]
 pub enum CError {
+    ParseError(ParseError),
     BuilderError(BuilderError),
     InvalidGeneratedFunction,
-    MismatchedArgCount { expected: u32, got: usize },
+    MismatchedArgCount { expected: usize, got: usize },
     InvalidCallProduced,
     FunctionLookupError(FunctionLookupError),
 
@@ -114,7 +115,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             builder,
             module,
             code,
-            symbols: SymbolTable::default(),
+            symbols: SymbolTable::with_one_scope(),
             items: PhantomData,
             cur_fn: None,
         }
@@ -143,6 +144,23 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn move_module_to(&mut self, jit: &mut Jit<'ctx>) {
         let module = self.take_module();
         jit.add_module(module);
+    }
+
+    pub fn compile_module(
+        context: &'ctx Context,
+        stmts: StmtIter,
+        module_name: &str,
+        code: &Code,
+    ) -> CompileResult<CodegenModule<'ctx>> {
+        let mut compiler = Compiler::new_module(&context, module_name, code);
+        for pres in stmts {
+            let expr = pres.map_err(CError::ParseError)?;
+
+            compiler
+                .compile_top_level(unsafe { expr.as_ref() }, code)
+                .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
+        }
+        Ok(CodegenModule(compiler.module))
     }
 
     pub fn compile_top_level(&mut self, expr: &Expr, code: &Code) -> CompileResult<()> {
@@ -175,7 +193,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, unsafe { params.as_ref() }, *body, code).map(|_| ())
+                self.compile_fn(name, *params, *body, code).map(|_| ())
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -204,25 +222,27 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     }
 
     pub fn compile_prototype(
-        &self,
+        &mut self,
         name: &str,
-        params: &[FnParam],
+        params: NonNull<[FnParam]>,
         code: &Code,
-        module: &Module<'ctx>,
     ) -> FunctionValue<'ctx> {
         let ret_type = self.context.f64_type();
-        let args_types = params
+        let params_ref = unsafe { params.as_ref() };
+        let args_types = params_ref
             .iter()
             .map(|FnParam { is_mut, ident, ty, default }| {
                 BasicMetadataTypeEnum::FloatType(self.context.f64_type())
             })
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
-        let fn_val = module.add_function(name, fn_type, Some(Linkage::External));
+        let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
-            param.set_name(&code[params[idx].ident.span])
+            param.set_name(&code[params_ref[idx].ident.span])
         }
+
+        self.symbols.insert(name.to_string(), Symbol::Function { params, val: fn_val });
 
         fn_val
     }
@@ -230,17 +250,18 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_fn(
         &mut self,
         name: &str,
-        params: &[FnParam],
+        params: NonNull<[FnParam]>,
         body: NonNull<Expr>,
         code: &Code,
     ) -> CompileResult<FunctionValue<'ctx>> {
-        self.symbols.open_scope();
-        let func = self.compile_prototype(name, params, code, &self.module);
+        let func = self.compile_prototype(name, params, code);
+        let params = unsafe { params.as_ref() };
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
         self.cur_fn = Some(func);
 
+        self.symbols.open_scope();
         self.symbols.reserve(params.len());
 
         for (param, param_def) in func.get_param_iter().zip(params) {
@@ -290,6 +311,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                         .build_load(self.context.f64_type(), *ptr, name)?
                         .into_float_value(),
                     Symbol::Register(reg) => reg.into_float_value(),
+                    _ => todo!(),
                 };
 
                 Ok(f)
@@ -309,7 +331,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr, code),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 self.symbols.open_scope();
-                let stmts = unsafe { stmts.as_ref()};
+                let stmts = unsafe { stmts.as_ref() };
                 let Some((last, stmts)) = stmts.split_last() else {
                     return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
                 };
@@ -343,19 +365,23 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 }
 
                 let func_name = &code[func.span];
-                let f = self.symbols.get(func_name);
-                let func = self.get_function(func_name)?;
-                let expected_arg_count = func.count_params();
-                if expected_arg_count as usize != args.len() {
-                    return Err(CError::MismatchedArgCount {
-                        expected: expected_arg_count,
-                        got: args.len(),
-                    });
-                }
-
-                let args = unsafe { args.as_ref() }
-                    .into_iter()
-                    .map(|arg| self.compile_expr_to_float(*arg, code).map(Into::into))
+                let (params, func) = match self.symbols.get(func_name) {
+                    Some(Symbol::Function { params, val }) => (params, *val),
+                    Some(_) => panic!("cannot call a non function"), // TODO
+                    None => return Err(CError::UnknownFn(func_name.to_string().into_boxed_str())),
+                };
+                let expected_arg_count = params.len();
+                let args = unsafe { args.as_ref() };
+                let args = unsafe { params.as_ref() }
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, param)| match args.get(idx).or(param.default.as_ref()) {
+                        Some(&arg) => self.compile_expr_to_float(arg, code).map(Into::into),
+                        None => Err(CError::MismatchedArgCount {
+                            expected: expected_arg_count,
+                            got: args.len(),
+                        }),
+                    })
                     .collect::<Result<Vec<BasicMetadataValueEnum>, _>>()?;
 
                 match self.builder.build_call(func, &args, "call")?.try_as_basic_value().left() {
@@ -387,6 +413,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                         self.builder.build_store(stack_var, rhs)?;
                     },
                     Some(Symbol::Register(_)) => panic!("cannot assign to register"),
+                    Some(Symbol::Function { .. }) => panic!("cannot assign to function"),
                     None => panic!("undefined variable: '{}'", var_name),
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
@@ -405,6 +432,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                         self.builder.build_store(stack_var, binop_res)?;
                     },
                     Some(Symbol::Register(_)) => panic!("cannot assign to register"),
+                    Some(Symbol::Function { .. }) => panic!("cannot assign to function"),
                     None => panic!("undefined variable: '{}'", var_name),
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
@@ -544,7 +572,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         let body = body.clone();
 
         //self.compile_fn(name, &params, &body, code)
-        Ok(self.compile_prototype(name, unsafe { params.as_ref() }, code, &self.module))
+        Ok(self.compile_prototype(name, params, code))
     }
 
     /*
@@ -603,7 +631,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
                 let n = code[ident.span].to_string();
-                self.compile_fn(&n, unsafe { params.as_ref() }, *body, code)
+                self.compile_fn(&n, *params, *body, code)
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -628,15 +656,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
             ExprKind::Semicolon(_) => todo!(),
             _ => todo!(),
-        }
-    }
-
-    pub fn jit_run_fn(&mut self, fn_name: &str) -> CompileResult<f64> {
-        match self.module.create_jit_execution_engine(OptimizationLevel::None) {
-            Ok(jit) => {
-                Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> f64>(fn_name)?.call() })
-            },
-            Err(err) => Err(CError::CouldntCreateJit(err)),
         }
     }
 
@@ -666,22 +685,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         out
     }
     */
-
-    pub fn compile_repl_expr(
-        &mut self,
-        expr: NonNull<Expr>,
-        code: &Code,
-        debug: Option<DebugOptions>,
-    ) -> CompileResult<()> {
-        let func = self.compile_fn(REPL_EXPR_ANON_FN_NAME, &[], expr, code)?;
-
-        // self.run_passes_debug(debug);
-
-        if debug == Some(DebugOptions::ReplExpr) {
-            func.print_to_stderr();
-        }
-        Ok(())
-    }
 
     pub fn build_float_binop(
         &mut self,
@@ -790,7 +793,11 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             )
             .unwrap()
     }
+}
 
+pub struct CodegenModule<'ctx>(Module<'ctx>);
+
+impl<'ctx> CodegenModule<'ctx> {
     pub fn run_passes(&self, target_machine: &TargetMachine, level: u8) {
         assert!((0..=3).contains(&level));
         let passes = format!("default<O{}>", level);
@@ -801,9 +808,30 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         //   ["instcombine", "reassociate", "gvn", "simplifycfg",
         //"mem2reg",].join(","), );
 
-        self.module
+        self.0
             .run_passes(&passes, target_machine, PassBuilderOptions::create())
             .unwrap();
+    }
+
+    pub fn jit_run_fn(&mut self, fn_name: &str) -> CompileResult<f64> {
+        match self.0.create_jit_execution_engine(OptimizationLevel::None) {
+            Ok(jit) => {
+                Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> f64>(fn_name)?.call() })
+            },
+            Err(err) => Err(CError::CouldntCreateJit(err)),
+        }
+    }
+
+    pub fn get_functions(&self) -> inkwell::module::FunctionIterator {
+        self.0.get_functions()
+    }
+
+    pub fn print_to_stderr(&self) {
+        self.0.print_to_stderr()
+    }
+
+    pub fn get_inner(&self) -> &Module<'ctx> {
+        &self.0
     }
 }
 
@@ -811,4 +839,9 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 enum Symbol<'ctx> {
     Stack(PointerValue<'ctx>),
     Register(AnyValueEnum<'ctx>),
+    Function {
+        /// TODO: think of a better way to store the fn definition
+        params: NonNull<[FnParam]>,
+        val: FunctionValue<'ctx>,
+    },
 }

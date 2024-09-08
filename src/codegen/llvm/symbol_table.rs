@@ -1,10 +1,14 @@
 use super::Symbol;
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SymbolTable<'ctx>(Vec<HashMap<String, Symbol<'ctx>>>);
 
 impl<'ctx> SymbolTable<'ctx> {
+    pub fn with_one_scope() -> SymbolTable<'ctx> {
+        SymbolTable(vec![HashMap::new()])
+    }
+
     pub fn open_scope(&mut self) {
         self.0.push(HashMap::new())
     }
@@ -22,11 +26,7 @@ impl<'ctx> SymbolTable<'ctx> {
         self.get_last_mut().reserve(additional)
     }
 
-    pub fn insert(
-        &mut self,
-        name: String,
-        value: Symbol<'ctx>,
-    ) -> Option<Symbol<'ctx>> {
+    pub fn insert(&mut self, name: String, value: Symbol<'ctx>) -> Option<Symbol<'ctx>> {
         self.get_last_mut().insert(name, value)
     }
 

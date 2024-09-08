@@ -14,7 +14,10 @@ use inkwell::{
 };
 use mylang::{
     cli::Cli,
-    codegen::{self, llvm::Compiler},
+    codegen::{
+        self,
+        llvm::{CodegenModule, Compiler},
+    },
     parser::{
         lexer::{Code, Lexer, Span},
         parser_helper::Parser,
@@ -207,7 +210,7 @@ mymain :: -> {
     mut a := test(1);
     mut a := 10;
     a = 100;
-    b := test(1);
+    b := test();
     a + b
 };
 ";
@@ -239,26 +242,37 @@ mymain :: -> {
         }
     }
 
-
     let frontend_start = Instant::now();
     let context = Context::create();
-    let mut compiler = codegen::llvm::Compiler::new_module(&context, "dev", code);
-
-    for pres in stmts {
-        let expr = pres.unwrap_or_else(|e| {
-            display_parse_error(e, code);
-            panic!("Parse Error");
+    let module = codegen::llvm::Compiler::compile_module(&context, stmts, "dev", code)
+        .unwrap_or_else(|err| match err {
+            codegen::llvm::CError::ParseError(e) => {
+                display_parse_error(e, code);
+                panic!("Parse ERROR")
+            },
+            e => panic!("Compile ERROR: {:?}", e),
         });
-
-        compiler
-            .compile_top_level(unsafe { expr.as_ref() }, code)
-            .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
-    }
     let frontend_duration = frontend_start.elapsed();
 
     print!("functions:");
-    for a in compiler.module.get_functions() {
+    for a in module.get_functions() {
         print!("{:?},", a.get_name());
+    }
+
+    let target_machine = Compiler::init_target_machine();
+
+    if DEBUG_LLVM_IR_UNOPTIMIZED {
+        println!("\n### Unoptimized LLVM IR:");
+        module.print_to_stderr();
+    }
+
+    let backend_start = Instant::now();
+    module.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
+    let backend_duration = backend_start.elapsed();
+
+    if DEBUG_LLVM_IR_OPTIMIZED {
+        println!("\n### Optimized LLVM IR:");
+        module.print_to_stderr();
     }
 
     enum ExecutionVariant {
@@ -267,26 +281,9 @@ mymain :: -> {
     }
 
     const EXE_VAR: ExecutionVariant = ExecutionVariant::ObjectCode;
-
-    let target_machine = Compiler::init_target_machine();
-
-    if DEBUG_LLVM_IR_UNOPTIMIZED {
-        println!("\n### Unoptimized LLVM IR:");
-        compiler.module.print_to_stderr();
-    }
-
-    let backend_start = Instant::now();
-    compiler.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
-    let backend_duration = backend_start.elapsed();
-
-    if DEBUG_LLVM_IR_OPTIMIZED {
-        println!("\n### Optimized LLVM IR:");
-        compiler.module.print_to_stderr();
-    }
-
     match EXE_VAR {
-        ExecutionVariant::ObjectCode => compile(&compiler.module, &target_machine),
-        ExecutionVariant::Jit => run_with_jit(compiler),
+        ExecutionVariant::ObjectCode => compile(module.get_inner(), &target_machine),
+        ExecutionVariant::Jit => run_with_jit(module),
     }
 
     println!("\n### Compilation time");
@@ -302,8 +299,8 @@ fn compile(module: &Module, target_machine: &TargetMachine) {
         .unwrap();
 }
 
-fn run_with_jit(mut compiler: Compiler) {
-    let out = compiler.jit_run_fn("main").expect("has main function");
+fn run_with_jit(mut module: CodegenModule) {
+    let out = module.jit_run_fn("main").expect("has main function");
     println!("main returned {}", out);
 }
 
