@@ -10,6 +10,7 @@ pub trait Parser {
         self.peek().is_none()
     }
 
+    #[inline]
     fn advance(&mut self) {
         self.next();
     }
@@ -21,11 +22,13 @@ pub trait Parser {
         }
     }
 
+    #[inline]
     fn next_if(&mut self, mut f: impl FnMut(Self::PeekedItem) -> bool) -> Option<Self::Item> {
         if self.peek().is_some_and(&mut f) { self.next() } else { None }
     }
 
-    fn advance_if(&mut self, mut f: impl FnMut(Self::PeekedItem) -> bool) -> bool {
+    #[inline]
+    fn advance_if(&mut self, f: impl FnMut(Self::PeekedItem) -> bool) -> bool {
         self.next_if(f).is_some()
     }
 }

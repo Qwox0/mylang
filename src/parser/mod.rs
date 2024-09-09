@@ -1,5 +1,4 @@
 use crate::scratch_pool::ScratchPool;
-use bumpalo::Bump;
 use core::range::Range;
 use debug::TreeLines;
 pub use error::*;
@@ -40,7 +39,7 @@ pub enum ExprKind {
     /// `-> <type> { <body> }`
     /// `-> <body>`
     Fn {
-        params: NonNull<[FnParam]>,
+        params: NonNull<[VarDecl]>,
         ret_type: Option<NonNull<Expr>>,
         body: NonNull<Expr>,
     },
@@ -55,13 +54,11 @@ pub enum ExprKind {
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(NonNull<[(Ident, Expr)]>),
-    /// `struct(...)`
-    TupleStructDef(NonNull<[Expr]>),
-    /// `union { ... }`
-    Union {},
+    StructDef(NonNull<[VarDecl]>),
+    /// `union { a: int, b: String, c: (u8, u32) }`
+    UnionDef(NonNull<[VarDecl]>),
     /// `enum { ... }`
-    Enum {},
+    EnumDef {},
     /// `?<ty>`
     OptionShort(NonNull<Expr>),
     /// `*<ty>`
@@ -133,23 +130,10 @@ pub enum ExprKind {
     /// variable declaration (and optional initialization)
     /// `mut rec <name>: <ty>`
     /// `mut rec <name>: <ty> = <init>`
-    /// `mut rec <name> := <init>`
-    VarDecl {
-        markers: DeclMarkers,
-        ident: Ident,
-        //ident: NonNull<Expr>,
-        kind: VarDeclKind,
-    },
-
     /// `mut rec <name>: <ty> : <init>`
+    /// `mut rec <name> := <init>`
     /// `mut rec <name> :: <init>`
-    ConstDecl {
-        markers: DeclMarkers,
-        ident: Ident,
-        //ident: NonNull<Expr>,
-        ty: Option<NonNull<Expr>>,
-        init: NonNull<Expr>,
-    },
+    VarDecl(VarDecl),
 
     // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
     // ExternDecl {
@@ -296,6 +280,9 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             ($kind:ident, $span:expr) => {
                 Expr::new(ExprKind::$kind, $span)
             };
+            ($kind:ident($( $val:expr ),* $(,)?), $span:expr ) => {
+                Expr::new(ExprKind::$kind($($val),*), $span)
+            };
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr ) => {
                 Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, $span)
             };
@@ -330,12 +317,14 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                     } else {
                         None
                     };
-                    fields.push((ident, init));
+                    fields
+                        .push((ident, init))
+                        .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
 
                     match t.kind {
                         TokenKind::Comma => continue,
                         TokenKind::CloseBrace => break,
-                        k => ParseError::unexpected_token(t).context("expected '=', ',' or '}'")?,
+                        _ => ParseError::unexpected_token(t).context("expected '=', ',' or '}'")?,
                     }
                 }
                 let close = self.tok(TokenKind::CloseBrace)?;
@@ -347,14 +336,16 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let Expr { kind: ExprKind::Ident, span: param_span } = lhs else {
                     panic!("SingleArgFn: unknown rhs")
                 };
-                let param = FnParam {
-                    is_mut: false,
+                let param = VarDecl {
+                    markers: DeclMarkers::default(),
                     ident: Ident { span: *param_span },
                     ty: None,
                     default: None,
+                    is_const: false,
                 };
-                let mut params =
-                    self.clone_slice_from_scratch_pool(ScratchPool::new_with_first_val(param))?;
+                let params = ScratchPool::new_with_first_val(param)
+                    .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
+                let params = self.clone_slice_from_scratch_pool(params)?;
                 return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
@@ -377,19 +368,24 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 let markers = DeclMarkers::default();
                 let ident = unsafe { lhs.as_ref() }.try_to_ident().context("var decl ident")?;
                 let init = self.expr().context(":= init")?;
-                expr!(VarDecl { markers, ident, kind: VarDeclKind::InferTy { init } }, span)
+                let decl =
+                    VarDecl { markers, ident, ty: None, default: Some(init), is_const: false };
+                expr!(VarDecl(decl), span)
             },
             FollowingOperator::ConstDecl => {
                 let markers = DeclMarkers::default();
                 let ident = unsafe { lhs.as_ref() }.try_to_ident().context("const decl ident")?;
                 let init = self.expr().context(":: init")?;
-                expr!(ConstDecl { markers, ident, ty: None, init }, span)
+                let decl =
+                    VarDecl { markers, ident, ty: None, default: Some(init), is_const: true };
+                expr!(VarDecl(decl), span)
             },
             FollowingOperator::TypedDecl => {
-                return self.typed_decl(
+                let decl = self.typed_decl(
                     DeclMarkers::default(),
                     unsafe { lhs.as_ref() }.try_to_ident().context("const decl ident")?,
-                );
+                )?;
+                expr!(VarDecl(decl), span)
             },
             FollowingOperator::Pipe => {
                 let t = self.ws0_and_next_tok()?;
@@ -412,7 +408,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                         let open_paren = self
                             .tok(TokenKind::OpenParenthesis)
                             .context("pipe call: expect '('")?;
-                        let mut args = ScratchPool::new_with_first_val(lhs);
+                        let args = ScratchPool::new_with_first_val(lhs)
+                            .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
                         self.call(func, open_paren.span, args)
                     },
                     _ => ParseError::unexpected_token(t)
@@ -425,7 +422,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
     /// anything which has higher precedence than any operator
     pub fn value(&mut self, min_precedence: usize) -> ParseResult<NonNull<Expr>> {
-        let Token { kind, span } = self.next_tok()?;
+        let Token { kind, span } = self.next_tok().context("expected value")?;
 
         macro_rules! expr {
             ($kind:ident) => {
@@ -447,53 +444,37 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
         let expr = match kind {
             TokenKind::Ident => expr!(Ident),
-            TokenKind::Keyword(Keyword::Mut)
-            | TokenKind::Keyword(Keyword::Rec)
-            | TokenKind::Keyword(Keyword::Pub) => {
-                let mut markers = DeclMarkers::default();
-                let mut t = Token { kind, span };
-
-                macro_rules! set_marker {
-                    ($variant:ident $field:ident) => {
-                        if markers.$field {
-                            return err!(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
-                        } else {
-                            markers.$field = true
-                        }
-                    };
-                }
-
-                let ident = loop {
-                    match t.kind {
-                        TokenKind::Ident => break Expr::new(ExprKind::Ident, t.span), /* break Ident { span: t.span }, */
-                        TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
-                        TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
-                        TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
-                        _ => ParseError::unexpected_token(t)
-                            .context("expected decl marker or ident")?,
-                    }
-                    self.ws1()?;
-                    t = self.next_tok().context("missing decl ident")?;
-                };
-                let ident = ident.try_to_ident()?;
-
-                let decl = self.ws0_and_next_tok().context("expected ':', ':=' or '::'")?;
-                match decl.kind {
-                    TokenKind::Colon => return self.typed_decl(markers, ident),
-                    TokenKind::ColonEq => {
-                        let init = self.expr().context(":= init")?;
-                        expr!(VarDecl { markers, ident, kind: VarDeclKind::InferTy { init } }, span)
-                    },
-                    TokenKind::ColonColon => {
-                        let init = self.expr().context(":: init")?;
-                        expr!(ConstDecl { markers, ident, ty: None, init }, span)
-                    },
-                    _ => ParseError::unexpected_token(decl)
-                        .context("expected decl marker or ident")?,
-                }
+            TokenKind::Keyword(Keyword::Mut) => {
+                self.ws0();
+                let markers = DeclMarkers { is_pub: false, is_mut: true, is_rec: false };
+                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
             },
-            TokenKind::Keyword(Keyword::Struct) => todo!("struct"),
-            TokenKind::Keyword(Keyword::Union) => todo!("union"),
+            TokenKind::Keyword(Keyword::Rec) => {
+                self.ws0();
+                let markers = DeclMarkers { is_pub: false, is_mut: false, is_rec: true };
+                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
+            },
+            TokenKind::Keyword(Keyword::Pub) => {
+                self.ws0();
+                let markers = DeclMarkers { is_pub: true, is_mut: false, is_rec: false };
+                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
+            },
+            TokenKind::Keyword(Keyword::Struct) => {
+                self.ws0();
+                self.tok(TokenKind::OpenBrace).context("struct '{'")?;
+                self.ws0();
+                let fields = self.struct_fields()?;
+                let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
+                expr!(StructDef(fields), span.join(close_b.span))
+            },
+            TokenKind::Keyword(Keyword::Union) => {
+                self.ws0();
+                self.tok(TokenKind::OpenBrace).context("struct '{'")?;
+                self.ws0();
+                let fields = self.struct_fields()?;
+                let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
+                expr!(UnionDef(fields), span.join(close_b.span))
+            },
             TokenKind::Keyword(Keyword::Enum) => todo!("enum"),
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::If) => {
@@ -502,8 +483,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             },
             //TokenKind::Keyword(Keyword::Else) => todo!("else"),
             TokenKind::Keyword(Keyword::Match) => {
-                let val = self.expr().context("match value")?;
                 todo!("match body");
+                let val = self.expr().context("match value")?;
                 self.ws0();
                 let else_body = self
                     .lex
@@ -516,8 +497,9 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 expr!(Match { val, else_body }, span)
             },
             TokenKind::Keyword(Keyword::For) => {
-                let (source, iter_var, body) = todo!("for");
-                expr!(For { source, iter_var, body }, span)
+                todo!("for");
+                // let (source, iter_var, body) = todo!();
+                // expr!(For { source, iter_var, body }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.expr().context("while condition")?;
@@ -549,11 +531,11 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                     self.tok(TokenKind::Arrow).context("'->'")?;
                     return self.function_tail(self.alloc_empty_slice(), span);
                 }
-                let start_pos = self.lex.get_pos();
+                let start_state = self.lex.get_state();
                 let first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
                 let t = self.ws0_and_next_tok().context("missing ')'")?;
                 self.ws0();
-                return match t.kind {
+                match t.kind {
                     // (expr)
                     TokenKind::CloseParenthesis
                         if !self.lex.peek().is_some_and(|t| t.kind == TokenKind::Arrow) =>
@@ -564,15 +546,32 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                     // (expr) -> ...
                     // (params...) -> ...
                     TokenKind::CloseParenthesis | TokenKind::Comma => {
-                        self.lex.set_pos(start_pos); // TODO: maybe no resetting in the future
-                        self.function_with_params(span)
+                        self.lex.set_state(start_state) // TODO: maybe no resetting in the future
                     },
                     _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
                 };
+                let mut params = ScratchPool::new();
+                loop {
+                    let param = self.var_decl().context("function parameter")?;
+                    params.push(param).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
+                    self.ws0();
+                    let t = self.next_tok().context("expected ',' or ')'")?;
+                    self.ws0();
+                    match t.kind {
+                        TokenKind::Comma if self.lex.advance_if(is_close_paren) => break,
+                        TokenKind::Comma => self.ws0(),
+                        TokenKind::CloseParenthesis => break,
+                        _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
+                    }
+                }
+                let params = self.clone_slice_from_scratch_pool(params)?;
+                self.ws0();
+                self.tok(TokenKind::Arrow).context("'->'")?;
+                return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
                 self.expr().context("[...]")?;
-                let Ok(Token { kind, span }) = self.ws0_and_next_tok() else {
+                let Ok(Token { .. }) = self.ws0_and_next_tok() else {
                     return err!(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
                         .context("[...]");
                 };
@@ -618,55 +617,30 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             | TokenKind::CloseBracket
             | TokenKind::CloseBrace
             | TokenKind::Semicolon => return err!(NoInput, self.lex.pos_span()),
-            t => return err!(UnexpectedToken(t), span).context("value"),
+            t => return err!(UnexpectedToken(t), span).context("expected valid value"),
         };
         self.alloc(expr)
     }
 
-    /// parsing starts after the '(' and expects at least one parameter
-    pub fn function_with_params(&mut self, open_paren_span: Span) -> ParseResult<NonNull<Expr>> {
-        let mut params = ScratchPool::new();
+    /// `struct { ... }`
+    /// `         ^^^` Parses this
+    pub fn struct_fields(&mut self) -> ParseResult<NonNull<[VarDecl]>> {
+        todo!("struct_fields");
+        let mut fields = ScratchPool::new();
+        /*
         loop {
-            self.ws0();
-            let is_mut = self.lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
-            self.ws0();
-            let ident = self.ident().context("param ident")?;
-            let mut ty = None;
-            let mut default = None;
-            let mut t = self.ws0_and_next_tok()?;
-            if t.kind == TokenKind::Colon {
-                ty.insert(self.expr().context("param type")?);
-                t = self.ws0_and_next_tok()?;
-                if t.kind == TokenKind::Eq {
-                    default.insert(self.expr().context("param default value")?);
-                    t = self.ws0_and_next_tok()?;
-                }
-            } else if t.kind == TokenKind::ColonEq {
-                default.insert(self.expr().context("param default value")?);
-                t = self.ws0_and_next_tok()?;
-            }
-            params.push(FnParam { is_mut, ident, ty, default });
-            match t.kind {
-                TokenKind::Comma => {
-                    if self.lex.advance_if(is_close_paren) {
-                        break;
-                    }
-                    continue;
-                },
-                TokenKind::CloseParenthesis => break,
-                _ => ParseError::unexpected_token(t).context("expected ':', ':=', ',' or ')'")?,
-            }
+            fields
+                .push(self.var_decl()?)
+                .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
         }
-        self.ws0();
-        self.tok(TokenKind::Arrow).context("'->'")?;
-        let params = self.clone_slice_from_scratch_pool(params)?;
-        self.function_tail(params, open_paren_span)
+        */
+        self.clone_slice_from_scratch_pool(fields)
     }
 
     /// parsing starts after the '->'
     pub fn function_tail(
         &mut self,
-        params: NonNull<[FnParam]>,
+        params: NonNull<[VarDecl]>,
         start_span: Span,
     ) -> ParseResult<NonNull<Expr>> {
         let expr = self.expr().context("fn body")?;
@@ -713,11 +687,11 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             if let Some(closing_paren) = self.lex.next_if(is_close_paren) {
                 break closing_paren.span;
             }
-            args.push(self.expr()?);
+            args.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
             match self.ws0_and_next_tok()? {
                 Token { kind: TokenKind::CloseParenthesis, span } => break span,
                 Token { kind: TokenKind::Comma, .. } => continue,
-                t => ParseError::unexpected_token(t).context("expect ',' or ')'"),
+                t => ParseError::unexpected_token(t).context("expect ',' or ')'")?,
             };
         };
         let args = self.clone_slice_from_scratch_pool(args)?;
@@ -735,14 +709,13 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             if let Some(closing_brace) = self.lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
                 break (true, closing_brace.span);
             }
-            stmts.push(self.expr()?);
+            stmts.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
             match self.ws0_and_next_tok()? {
                 Token { kind: TokenKind::CloseBrace, span } => break (false, span),
                 Token { kind: TokenKind::Semicolon, .. } => continue,
-                t => ParseError::unexpected_token(t).context("expect ';' or '}'"),
+                t => ParseError::unexpected_token(t).context("expect ';' or '}'")?,
             };
         };
-        //let stmts = self.alloc_slice(&stmts)?;
         let stmts = self.clone_slice_from_scratch_pool(stmts)?;
         self.alloc(Expr::new(
             ExprKind::Block { stmts, has_trailing_semicolon },
@@ -750,38 +723,73 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
         ))
     }
 
+    /// These options are allowed in a lot of places:
+    /// * `[markers] ident`
+    /// * `[markers] ident: ty`
+    /// * `[markers] ident: ty = default`
+    /// * `[markers] ident := default`
+    ///
+    /// That is the reason why this doesn't return a [`NonNull<Expr>`].
+    pub fn var_decl(&mut self) -> ParseResult<VarDecl> {
+        self.var_decl_with_markers(DeclMarkers::default())
+    }
+
+    /// This will still parse more markers, if they exists.
+    pub fn var_decl_with_markers(&mut self, mut markers: DeclMarkers) -> ParseResult<VarDecl> {
+        let mut t = self.next_tok().context("expected variable marker or ident")?;
+
+        macro_rules! set_marker {
+            ($variant:ident $field:ident) => {
+                if markers.$field {
+                    return err!(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
+                } else {
+                    markers.$field = true
+                }
+            };
+        }
+
+        let ident = loop {
+            match t.kind {
+                TokenKind::Ident => break Ident { span: t.span },
+                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
+                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
+                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
+                _ => ParseError::unexpected_token(t).context("expected decl marker or ident")?,
+            }
+            self.ws1()?;
+            t = self.next_tok().context("expected variable marker or ident")?;
+        };
+
+        self.ws0();
+        let t = self.lex.peek();
+        let init = match t.map(|t| t.kind) {
+            Some(TokenKind::Colon) => {
+                self.lex.advance();
+                return self.typed_decl(markers, ident);
+            },
+            Some(TokenKind::ColonEq | TokenKind::ColonColon) => {
+                self.lex.advance();
+                Some(self.expr().context("variable initialization")?)
+            },
+            _ => None,
+        };
+        let is_const = t.is_some_and(|t| t.kind == TokenKind::ColonColon);
+        Ok(VarDecl { markers, ident, ty: None, default: init, is_const })
+    }
+
     /// starts parsing after the colon:
     /// `mut a: int = 0;`
     /// `      ^`
-    pub fn typed_decl(
-        &mut self,
-        markers: DeclMarkers,
-        //ident: NonNull<Expr>,
-        ident: Ident,
-    ) -> ParseResult<NonNull<Expr>> {
-        let ty = self.expr().context("decl type")?;
-        let t = self.lex.peek().ok_or(err!(x NoInput, self.lex.pos_span()))?;
-        let expr = match t.kind {
-            TokenKind::Eq => {
-                self.lex.advance();
-                let init = Some(self.expr().context(": ty = init")?);
-                Expr::new(
-                    ExprKind::VarDecl { markers, ident, kind: VarDeclKind::WithTy { ty, init } },
-                    t.span, // TODO
-                )
-            },
-            TokenKind::Colon => {
-                self.lex.advance();
-                let init = self.expr().context(": ty : init")?;
-                Expr::new(ExprKind::ConstDecl { markers, ident, ty: Some(ty), init }, t.span) // TODO
-            },
-            TokenKind::Semicolon => Expr::new(
-                ExprKind::VarDecl { markers, ident, kind: VarDeclKind::WithTy { ty, init: None } },
-                t.span, // TODO
-            ),
-            _ => ParseError::unexpected_token(t).context("expected '=', ':' or ';'")?,
-        };
-        self.alloc(expr)
+    pub fn typed_decl(&mut self, markers: DeclMarkers, ident: Ident) -> ParseResult<VarDecl> {
+        let ty = Some(self.expr().context("decl type")?);
+        self.ws0();
+        let t = self.lex.peek();
+        let init = t
+            .filter(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon))
+            .map(|_| self.expr().context("variable initialization"))
+            .transpose()?;
+        let is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
+        Ok(VarDecl { markers, ident, ty, default: init, is_const })
     }
 
     pub fn ident(&mut self) -> ParseResult<Ident> {
@@ -862,27 +870,11 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
 
     #[inline]
     fn alloc_empty_slice<T>(&self) -> NonNull<[T]> {
-        unsafe { NonNull::from(&[]) }
-    }
-
-    pub fn get_pos(&self) -> usize {
-        self.lex.get_pos()
-    }
-
-    pub fn set_pos(&mut self, pos: usize) {
-        self.lex.set_pos(pos);
+        NonNull::from(&[])
     }
 
     pub fn get_text(&self, range: Range<usize>) -> &str {
         &self.lex.get_code().0[range]
-    }
-
-    pub fn advance_if_ok<T>(
-        &mut self,
-        f: impl FnOnce(&mut Self) -> ParseResult<T>,
-    ) -> ParseResult<T> {
-        let pos = self.get_pos();
-        f(self).inspect_err(|_| self.set_pos(pos))
     }
 }
 
@@ -926,7 +918,7 @@ pub enum FollowingOperator {
     /// `a :: b`
     /// `  ^^`
     ConstDecl,
-    /// `a: ty = b` or `a: ty = b`
+    /// `a: ty = b` or `a: ty : b`
     /// ` ^`         `   ^`
     TypedDecl,
 
@@ -1163,6 +1155,17 @@ impl<'code, 'alloc> StmtIter<'code, 'alloc> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VarDecl {
+    pub markers: DeclMarkers,
+    pub ident: Ident,
+    pub ty: Option<NonNull<Expr>>,
+    /// * default value for fn params, struct fields, ...
+    /// * init for local veriable declarations
+    pub default: Option<NonNull<Expr>>,
+    pub is_const: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DeclMarkers {
     pub is_pub: bool,
@@ -1183,6 +1186,7 @@ pub enum DeclMarkerKind {
     Rec,
 }
 
+/*
 #[derive(Debug, Clone, Copy)]
 pub enum VarDeclKind {
     /// `<name>: <ty>;`
@@ -1200,6 +1204,7 @@ impl VarDeclKind {
         }
     }
 }
+*/
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ident {
@@ -1223,14 +1228,6 @@ impl Ident {
 pub struct Pattern {
     kind: ExprKind, // TODO: own kind enum
     span: Span,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct FnParam {
-    pub is_mut: bool,
-    pub ident: Ident,
-    pub ty: Option<NonNull<Expr>>,
-    pub default: Option<NonNull<Expr>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1268,6 +1265,8 @@ fn is_close_paren(t: Token) -> bool {
 }
 
 pub mod debug {
+    use super::{lexer::Code, Expr, Ident};
+
     #[derive(Default)]
     pub struct TreeLine(pub String);
 
@@ -1325,6 +1324,16 @@ pub mod debug {
             out
         }
 
+        pub fn write_expr_tree(&mut self, expr: &Expr, code: &Code) {
+            self.scope_next_line(|l| expr.write_tree(l, code));
+            self.write_minus(expr.to_text(code).len());
+        }
+
+        pub fn write_ident(&mut self, ident: &Ident, code: &Code) {
+            self.scope_next_line(|l| l.write(&code[ident.span]));
+            self.write_minus(ident.span.len());
+        }
+
         pub fn next_line(&mut self) {
             self.cur_line += 1;
         }
@@ -1374,25 +1383,7 @@ impl Expr {
                     params
                         .as_ref()
                         .iter()
-                        .map(|FnParam { is_mut, ident, ty, default }| {
-                            let a = match (ty, default) {
-                                (Some(ty), Some(default)) => {
-                                    format!(
-                                        ":{}={}",
-                                        ty.as_ref().to_text(code),
-                                        default.as_ref().to_text(code)
-                                    )
-                                },
-                                (None, Some(default)) => {
-                                    format!(":={}", default.as_ref().to_text(code))
-                                },
-                                (Some(ty), None) => {
-                                    format!(":{}", ty.as_ref().to_text(code),)
-                                },
-                                (None, None) => String::default(),
-                            };
-                            format!("{}{}{}", mut_marker(is_mut), &code[ident.span], a)
-                        })
+                        .map(|decl| Expr::var_decl_to_text(decl, code))
                         .intersperse(",".to_string())
                         .collect::<String>(),
                     {
@@ -1406,14 +1397,13 @@ impl Expr {
                     }
                 ),
                 ExprKind::StructDef(..) => panic!(),
-                ExprKind::TupleStructDef(..) => panic!(),
-                ExprKind::Union {} => panic!(),
-                ExprKind::Enum {} => panic!(),
+                ExprKind::UnionDef(..) => panic!(),
+                ExprKind::EnumDef {} => panic!(),
                 ExprKind::OptionShort(ty) => {
                     format!("?{}", ty.as_ref().to_text(code))
                 },
                 ExprKind::Ptr { is_mut, ty } => {
-                    format!("*{}{}", mut_marker(is_mut), ty.as_ref().to_text(code))
+                    format!("*{}{}", mut_marker(*is_mut), ty.as_ref().to_text(code))
                 },
                 ExprKind::Initializer { lhs, fields } => panic!(),
                 ExprKind::Block { stmts, has_trailing_semicolon } => {
@@ -1470,51 +1460,7 @@ impl Expr {
                         rhs.as_ref().to_text(code)
                     )
                 },
-                ExprKind::VarDecl { markers, ident, kind } => {
-                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                    format!(
-                        "{}{}{}{}{}",
-                        if *is_pub { "pub " } else { "" },
-                        mut_marker(is_mut),
-                        if *is_rec { "rec " } else { "" },
-                        &code[ident.span],
-                        match kind {
-                            VarDeclKind::WithTy { ty, init: Some(init) } => format!(
-                                ": {} = {}",
-                                ty.as_ref().to_text(code),
-                                init.as_ref().to_text(code)
-                            ),
-                            VarDeclKind::WithTy { ty, init: None } =>
-                                format!(": {}", ty.as_ref().to_text(code)),
-                            VarDeclKind::InferTy { init } =>
-                                format!(" := {}", init.as_ref().to_text(code)),
-                            // VarDeclKind::Const { ty: Some(ty), init } =>
-                            //     format!(": {} : {}", ty.as_ref().to_text(code),
-                            // init.as_ref().to_text(code)),
-                            // VarDeclKind::Const { ty: None, init } =>
-                            //     format!(" :: {}", init.as_ref().to_text(code)),
-                        },
-                    )
-                },
-                ExprKind::ConstDecl { markers, ident, ty, init } => {
-                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                    format!(
-                        "{}{}{}{}{}",
-                        if *is_pub { "pub " } else { "" },
-                        mut_marker(is_mut),
-                        if *is_rec { "rec " } else { "" },
-                        &code[ident.span],
-                        if let Some(ty) = ty {
-                            format!(
-                                ": {} : {}",
-                                ty.as_ref().to_text(code),
-                                init.as_ref().to_text(code)
-                            )
-                        } else {
-                            format!(" :: {}", init.as_ref().to_text(code))
-                        }
-                    )
-                },
+                ExprKind::VarDecl(decl) => Expr::var_decl_to_text(decl, code),
                 ExprKind::If { condition, then_body, else_body } => {
                     format!(
                         "if {} {}{}",
@@ -1571,8 +1517,7 @@ impl Expr {
                             lines.write(",");
                         }
 
-                        lines.scope_next_line(|l| e.write_tree(l, code));
-                        lines.write_minus(e.to_text(code).len());
+                        lines.write_expr_tree(e, code);
                     }
                     lines.write(")");
                 },
@@ -1586,58 +1531,24 @@ impl Expr {
                     let body = body.as_ref();
                     lines.write("(");
 
-                    for (idx, FnParam { is_mut, ident, ty, default }) in
-                        params.as_ref().into_iter().enumerate()
-                    {
+                    for (idx, decl) in params.as_ref().into_iter().enumerate() {
                         if idx != 0 {
                             lines.write(",");
                         }
 
-                        if *is_mut {
-                            lines.write("mut ");
-                        }
-                        lines.scope_next_line(|l| l.write(&code[ident.span]));
-                        lines.write_minus(ident.span.len());
-                        match (ty, default) {
-                            (Some(ty), Some(default)) => {
-                                let ty = ty.as_ref();
-                                let default = default.as_ref();
-                                lines.write(":");
-                                lines.scope_next_line(|l| ty.write_tree(l, code));
-                                lines.write_minus(ty.to_text(code).len());
-                                lines.write("=");
-                                lines.scope_next_line(|l| default.write_tree(l, code));
-                                lines.write_minus(default.to_text(code).len());
-                            },
-                            (None, Some(default)) => {
-                                let default = default.as_ref();
-                                lines.write(":=");
-                                lines.scope_next_line(|l| default.write_tree(l, code));
-                                lines.write_minus(default.to_text(code).len());
-                            },
-                            (Some(ty), None) => {
-                                let ty = ty.as_ref();
-                                lines.write(":");
-                                lines.scope_next_line(|l| ty.write_tree(l, code));
-                                lines.write_minus(ty.to_text(code).len());
-                            },
-                            (None, None) => {},
-                        }
+                        Expr::var_decl_write_tree(decl, lines, code)
                     }
                     lines.write(")->");
                     match ret_type {
                         Some(ret_type) => {
                             let ret_type = ret_type.as_ref();
-                            lines.scope_next_line(|l| ret_type.write_tree(l, code));
-                            lines.write_minus(ret_type.to_text(code).len());
+                            lines.write_expr_tree(ret_type, code);
                             lines.write("{");
-                            lines.scope_next_line(|l| body.write_tree(l, code));
-                            lines.write_minus(body.to_text(code).len());
+                            lines.write_expr_tree(body, code);
                             lines.write("}");
                         },
                         None => {
-                            lines.scope_next_line(|l| body.write_tree(l, code));
-                            lines.write_minus(body.to_text(code).len());
+                            lines.write_expr_tree(body, code);
                         },
                     }
                 },
@@ -1675,16 +1586,14 @@ impl Expr {
                 },
                 ExprKind::Dot { lhs, rhs } => {
                     let lhs = lhs.as_ref();
-                    lines.scope_next_line(|l| lhs.write_tree(l, code));
-                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write_expr_tree(lhs, code);
                     lines.write(".");
                     lines.scope_next_line(|l| l.write(&code[rhs.span]));
                     lines.write_minus(rhs.span.len());
                 },
                 /*
                 ExprKind::Colon { lhs, rhs } => {
-                    lines.scope_next_line(|l| lhs.write_tree(l, code));
-                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write_expr_tree(lhs, code);
                     lines.write(":");
                     lines.scope_next_line(|l| rhs.write_tree(l, code));
                     lines.write_minus(rhs.span.len());
@@ -1695,14 +1604,12 @@ impl Expr {
                 */
                 ExprKind::Call { func, args } => {
                     let func = func.as_ref();
-                    lines.scope_next_line(|l| func.write_tree(l, code));
-                    lines.write_minus(func.to_text(code).len());
+                    lines.write_expr_tree(func, code);
                     lines.write("(");
                     let len = args.as_ref().len();
                     for (idx, arg) in args.as_ref().into_iter().enumerate() {
                         let arg = arg.as_ref();
-                        lines.scope_next_line(|l| arg.write_tree(l, code));
-                        lines.write_minus(arg.to_text(code).len());
+                        lines.write_expr_tree(arg, code);
                         if idx + 1 != len {
                             lines.write(",");
                         }
@@ -1718,148 +1625,53 @@ impl Expr {
                         PreOpKind::Not => "!",
                         PreOpKind::Neg => "- ",
                     });
-                    lines.scope_next_line(|l| expr.write_tree(l, code));
-                    lines.write_minus(expr.to_text(code).len());
+                    lines.write_expr_tree(expr, code);
                 },
                 ExprKind::BinOp { lhs, op, rhs } => {
                     let lhs = lhs.as_ref();
                     let rhs = rhs.as_ref();
-                    lines.scope_next_line(|l| lhs.write_tree(l, code));
-                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write_expr_tree(lhs, code);
                     lines.write(op.to_binop_text());
-                    lines.scope_next_line(|l| rhs.write_tree(l, code));
-                    lines.write_minus(rhs.to_text(code).len());
+                    lines.write_expr_tree(rhs, code);
                 },
                 ExprKind::Assign { lhs, rhs } => {
                     let lhs = lhs.as_ref();
                     let rhs = rhs.as_ref();
-                    lines.scope_next_line(|l| lhs.write_tree(l, code));
-                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write_expr_tree(lhs, code);
                     lines.write("=");
-                    lines.scope_next_line(|l| rhs.write_tree(l, code));
-                    lines.write_minus(rhs.to_text(code).len());
+                    lines.write_expr_tree(rhs, code);
                 },
                 ExprKind::BinOpAssign { lhs, op, rhs } => {
                     let lhs = lhs.as_ref();
                     let rhs = rhs.as_ref();
-                    lines.scope_next_line(|l| lhs.write_tree(l, code));
-                    lines.write_minus(lhs.to_text(code).len());
+                    lines.write_expr_tree(lhs, code);
                     lines.write(op.to_binop_assign_text());
-                    lines.scope_next_line(|l| rhs.write_tree(l, code));
-                    lines.write_minus(rhs.to_text(code).len());
+                    lines.write_expr_tree(rhs, code);
                 },
                 ExprKind::If { condition, then_body, else_body } => {
                     let condition = condition.as_ref();
                     let then_body = then_body.as_ref();
                     lines.write("if ");
-                    lines.scope_next_line(|l| condition.write_tree(l, code));
-                    lines.write_minus(condition.to_text(code).len());
+                    lines.write_expr_tree(condition, code);
                     lines.write(" ");
-                    lines.scope_next_line(|l| then_body.write_tree(l, code));
-                    lines.write_minus(then_body.to_text(code).len());
+                    lines.write_expr_tree(then_body, code);
                     if let Some(else_body) = else_body {
                         let else_body = else_body.as_ref();
                         lines.write(" else ");
-                        lines.scope_next_line(|l| else_body.write_tree(l, code));
-                        lines.write_minus(else_body.to_text(code).len());
+                        lines.write_expr_tree(else_body, code);
                     }
                 },
-                ExprKind::VarDecl { markers, ident, kind } => {
-                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                    lines.write(&format!(
-                        "{}{}{}",
-                        if *is_pub { "pub " } else { "" },
-                        mut_marker(is_mut),
-                        if *is_rec { "rec " } else { "" }
-                    ));
-
-                    lines.scope_next_line(|l| l.write(&code[ident.span]));
-                    lines.write_minus(ident.span.len());
-
-                    match kind {
-                        VarDeclKind::WithTy { ty, init } => {
-                            let ty = ty.as_ref();
-                            lines.write(": ");
-                            lines.scope_next_line(|l| ty.write_tree(l, code));
-                            lines.write_minus(ty.span.len());
-                            if let Some(init) = init {
-                                let init = init.as_ref();
-                                lines.write(" = ");
-                                lines.scope_next_line(|l| init.write_tree(l, code));
-                                lines.write_minus(init.span.len());
-                            }
-                        },
-                        VarDeclKind::InferTy { init } => {
-                            let init = init.as_ref();
-                            lines.write(" := ");
-                            lines.scope_next_line(|l| init.write_tree(l, code));
-                            lines.write_minus(init.to_text(code).len());
-                        },
-                        /*
-                        VarDeclKind::Const { ty: Some(ty), init } => {
-                            lines.write(": ");
-                            lines.scope_next_line(|l| ty.write_tree(l, code));
-                            lines.write_minus(ty.span.len());
-                            lines.write(" : ");
-                            lines.scope_next_line(|l| init.write_tree(l, code));
-                            lines.write_minus(init.span.len());
-                        },
-                        VarDeclKind::Const { ty: None, init } => {
-                            lines.write(" :: ");
-                            lines.scope_next_line(|l| init.write_tree(l, code));
-                            lines.write_minus(init.span.len());
-                        },
-                        */
-                    }
-                },
-                ExprKind::ConstDecl { markers, ident, ty, init } => {
-                    let init = init.as_ref();
-                    let init_len = init.to_text(code).len();
-                    let DeclMarkers { is_pub, is_mut, is_rec } = markers;
-                    lines.write(&format!(
-                        "{}{}{}",
-                        if *is_pub { "pub " } else { "" },
-                        mut_marker(is_mut),
-                        if *is_rec { "rec " } else { "" }
-                    ));
-
-                    lines.scope_next_line(|l| l.write(&code[ident.span]));
-                    lines.write_minus(ident.span.len());
-
-                    if let Some(ty) = ty {
-                        let ty = ty.as_ref();
-                        lines.write(": ");
-                        lines.scope_next_line(|l| ty.write_tree(l, code));
-                        lines.write_minus(ty.span.len());
-                        lines.write(" : ");
-                        lines.scope_next_line(|l| init.write_tree(l, code));
-                        lines.write_minus(init_len);
-                    } else {
-                        lines.write(" :: ");
-                        lines.scope_next_line(|l| init.write_tree(l, code));
-                        lines.write_minus(init_len);
-                    }
-                    /*
-                       if let Some(ty) = ty {
-                           format!(": {} : {}", ty.as_ref().to_text(code), init.as_ref().to_text(code))
-                       } else {
-                           format!(" :: {}", init.as_ref().to_text(code))
-                       }
-                    */
-                },
+                ExprKind::VarDecl(decl) => Expr::var_decl_write_tree(decl, lines, code),
                 ExprKind::Return { expr } => {
                     lines.write("return");
                     if let Some(expr) = expr {
                         let expr = expr.as_ref();
                         lines.write(" ");
-                        lines.scope_next_line(|l| expr.write_tree(l, code));
-                        lines.write_minus(expr.to_text(code).len());
+                        lines.write_expr_tree(expr, code);
                     }
                 },
                 ExprKind::Semicolon(expr) => {
-                    let expr = expr.as_ref();
-                    lines.scope_next_line(|l| expr.write_tree(l, code));
-                    lines.write_minus(expr.to_text(code).len());
+                    lines.write_expr_tree(expr.as_ref(), code);
                     lines.write(";");
                 },
 
@@ -1875,9 +1687,64 @@ impl Expr {
             println!("| {}", l.0);
         }
     }
+
+    fn var_decl_to_text(
+        VarDecl { markers, ident, ty, default, is_const }: &VarDecl,
+        code: &Code,
+    ) -> String {
+        unsafe {
+            format!(
+                "{}{}{}{}{}{}",
+                if markers.is_pub { "pub " } else { "" },
+                mut_marker(markers.is_mut),
+                if markers.is_rec { "rec " } else { "" },
+                &code[ident.span],
+                ty.map(|ty| format!(": {}", ty.as_ref().to_text(code))).unwrap_or_default(),
+                default
+                    .map(|default| format!(
+                        " {}{} {}",
+                        if ty.is_none() { ":" } else { "" },
+                        if *is_const { ":" } else { "=" },
+                        default.as_ref().to_text(code)
+                    ))
+                    .unwrap_or_default()
+            )
+        }
+    }
+
+    fn var_decl_write_tree(
+        VarDecl { markers, ident, ty, default, is_const }: &VarDecl,
+        lines: &mut TreeLines,
+        code: &Code,
+    ) {
+        lines.write(&format!(
+            "{}{}{}",
+            if markers.is_pub { "pub " } else { "" },
+            mut_marker(markers.is_mut),
+            if markers.is_rec { "rec " } else { "" }
+        ));
+
+        lines.write_ident(ident, code);
+
+        if let Some(ty) = ty {
+            let ty = unsafe { ty.as_ref() };
+            lines.write(": ");
+            lines.write_expr_tree(ty, code);
+        }
+
+        if let Some(default) = default {
+            let default = unsafe { default.as_ref() };
+            lines.write(&format!(
+                " {}{} ",
+                if ty.is_none() { ":" } else { "" },
+                if *is_const { ":" } else { "=" },
+            ));
+            lines.write_expr_tree(default, code);
+        }
+    }
 }
 
 #[inline]
-fn mut_marker(is_mut: &bool) -> &'static str {
-    if *is_mut { "mut " } else { "" }
+fn mut_marker(is_mut: bool) -> &'static str {
+    if is_mut { "mut " } else { "" }
 }

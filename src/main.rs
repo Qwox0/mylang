@@ -201,7 +201,14 @@ pub test :: (mut x := 1) -> {
     x += 1;
     1+2*x
 };
-pub sub :: (a, b) -> -b + a;
+pub sub :: (a, b, ) -> -b + a;
+
+// Sub :: struct {
+//     a: f64,
+//     b: f64,
+// }
+// pub sub2 :: (values: Sub) -> values.a - values.b;
+
 //main :: -> test(1) + test(2);
 //mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
 // factorial :: x -> x == 0 | if 1 else x * factorial(x-1);
@@ -211,7 +218,9 @@ mymain :: -> {
     mut a := 10;
     a = 100;
     b := test();
-    a + b
+
+    //sub2(Sub.{a, b})
+    sub(a, b)
 };
 ";
 
@@ -304,28 +313,21 @@ fn run_with_jit(mut module: CodegenModule) {
     println!("main returned {}", out);
 }
 
-/// old (Vec<T> -> Box<[T]>)
-/// ```
-/// test benches::bench_parse  ... bench:       2,918.07 ns/iter (+/- 963.54)
-/// test benches::bench_parse2 ... bench:       4,241.97 ns/iter (+/- 670.58)
-/// test benches::bench_parse3 ... bench:       4,715.20 ns/iter (+/- 2,430.77)
-/// test benches::bench_parse4 ... bench:       7,072.83 ns/iter (+/- 560.36)
-/// ```
-///
-/// Vec<T> -> clone to alloc
-/// ```
-/// test benches::bench_parse  ... bench:       2,764.31 ns/iter (+/- 485.16)
-/// test benches::bench_parse2 ... bench:       3,931.87 ns/iter (+/- 269.52)
-/// test benches::bench_parse3 ... bench:       4,251.83 ns/iter (+/- 110.45)
-/// test benches::bench_parse4 ... bench:       6,729.51 ns/iter (+/- 535.07)
-/// ```
-///
-/// scratchpool -> clone to alloc
+/// old (clone in Lexer::peek)
 /// ```
 /// test benches::bench_parse  ... bench:       2,898.31 ns/iter (+/- 229.93)
 /// test benches::bench_parse2 ... bench:       4,115.37 ns/iter (+/- 397.96)
 /// test benches::bench_parse3 ... bench:       4,569.32 ns/iter (+/- 537.69)
 /// test benches::bench_parse4 ... bench:       6,576.30 ns/iter (+/- 638.84)
+///
+/// ```
+///
+/// next_tok field in Lexer
+/// ```
+/// test benches::bench_parse  ... bench:       1,880.97 ns/iter (+/- 386.20)
+/// test benches::bench_parse2 ... bench:       2,780.48 ns/iter (+/- 851.97)
+/// test benches::bench_parse3 ... bench:       2,908.87 ns/iter (+/- 408.08)
+/// test benches::bench_parse4 ... bench:       4,063.92 ns/iter (+/- 567.65)
 /// ```
 #[cfg(test)]
 mod benches {
@@ -354,7 +356,9 @@ main :: -> {
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
+                res.unwrap();
+            }
         })
     }
 
@@ -374,7 +378,9 @@ main :: -> test(10);
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
+                res.unwrap();
+            }
         })
     }
 
@@ -389,7 +395,9 @@ main :: -> false | if test(1) else (10 | sub(3));
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
+                res.unwrap();
+            }
         })
     }
 
@@ -410,7 +418,9 @@ mymain :: -> {
 ";
             let code = code.as_ref();
             let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(_) = black_box(StmtIter::next(black_box(&mut stmts))) {}
+            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
+                res.unwrap();
+            }
         })
     }
 }

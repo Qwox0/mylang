@@ -1,11 +1,6 @@
 use bumpalo::{AllocErr, Bump};
 use core::slice;
-use std::{
-    alloc::Layout,
-    marker::PhantomData,
-    mem::{self, MaybeUninit},
-    ptr::NonNull,
-};
+use std::{alloc::Layout, marker::PhantomData, mem, ptr::NonNull};
 
 pub struct ScratchPool<'bump, T: 'bump> {
     //bump: &'bump mut Bump,
@@ -30,10 +25,10 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
     }
 
     #[inline]
-    pub fn new_with_first_val(val: T) -> ScratchPool<'bump, T> {
+    pub fn new_with_first_val(val: T) -> Result<ScratchPool<'bump, T>, AllocErr> {
         let mut pool = Self::new();
-        pool.push(val);
-        pool
+        pool.push(val)?;
+        Ok(pool)
     }
 
     /// see [`Bump::iter_allocated_chunks`]:
@@ -98,12 +93,6 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{lexer::Span, Expr, ExprKind, Ident};
-    use core::slice;
-    use std::{
-        mem,
-        ptr::{slice_from_raw_parts, NonNull},
-    };
 
     #[test]
     fn test_clone_to_slice() {

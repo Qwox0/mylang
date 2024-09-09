@@ -4,8 +4,8 @@ use self::jit::Jit;
 use crate::{
     cli::DebugOptions,
     parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, FnParam, Ident, LitKind, ParseError,
-        PreOpKind, StmtIter, VarDeclKind,
+        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, ParseError, PreOpKind,
+        StmtIter, VarDecl,
     },
 };
 use inkwell::{
@@ -165,13 +165,19 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
     pub fn compile_top_level(&mut self, expr: &Expr, code: &Code) -> CompileResult<()> {
         match &expr.kind {
-            ExprKind::ConstDecl { markers, ident, ty, init } => {
-                let init = unsafe { init.as_ref() };
+            ExprKind::VarDecl(VarDecl {
+                markers,
+                ident,
+                ty,
+                default: Some(default),
+                is_const: true,
+            }) => {
+                let default = unsafe { default.as_ref() };
                 let name = code[ident.span].to_string();
                 // if self.items.contains_key(&name) {
                 //     return Err(CError::RedefinedItem(name.into_boxed_str()));
                 // }
-                self.compile_top_level_const_decl(markers, &name, ty, init, code)
+                self.compile_top_level_const_decl(markers, &name, ty, default, code)
             },
             ExprKind::Semicolon(expr) => self.compile_top_level(unsafe { expr.as_ref() }, code),
             _ => todo!(),
@@ -198,9 +204,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
             ExprKind::StructDef(_) => todo!(),
-            ExprKind::TupleStructDef(_) => todo!(),
-            ExprKind::Union {} => todo!(),
-            ExprKind::Enum {} => todo!(),
+            ExprKind::UnionDef(_) => todo!(),
+            ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Initializer { lhs, fields } => panic!(),
             ExprKind::Dot { lhs, rhs } => todo!(),
@@ -214,8 +219,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Assign { lhs, rhs } => todo!(),
             ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
             ExprKind::If { condition, then_body, else_body } => todo!(),
-            ExprKind::VarDecl { markers, ident, kind } => todo!(),
-            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
+            ExprKind::VarDecl(_) => todo!(),
             ExprKind::Semicolon(_) => todo!(),
             _ => todo!(),
         }
@@ -224,16 +228,14 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_prototype(
         &mut self,
         name: &str,
-        params: NonNull<[FnParam]>,
+        params: NonNull<[VarDecl]>,
         code: &Code,
     ) -> FunctionValue<'ctx> {
         let ret_type = self.context.f64_type();
         let params_ref = unsafe { params.as_ref() };
         let args_types = params_ref
             .iter()
-            .map(|FnParam { is_mut, ident, ty, default }| {
-                BasicMetadataTypeEnum::FloatType(self.context.f64_type())
-            })
+            .map(|VarDecl { .. }| BasicMetadataTypeEnum::FloatType(self.context.f64_type()))
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
@@ -250,7 +252,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     pub fn compile_fn(
         &mut self,
         name: &str,
-        params: NonNull<[FnParam]>,
+        params: NonNull<[VarDecl]>,
         body: NonNull<Expr>,
         code: &Code,
     ) -> CompileResult<FunctionValue<'ctx>> {
@@ -268,7 +270,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             let pname = &code[param_def.ident.span];
             self.symbols.insert(
                 pname.to_string(),
-                if param_def.is_mut {
+                if param_def.markers.is_mut {
                     let alloca = self.create_entry_block_alloca(func, pname);
                     self.builder.build_store(alloca, param)?;
                     Symbol::Stack(alloca)
@@ -347,9 +349,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 })
             },
             ExprKind::StructDef(_) => todo!(),
-            ExprKind::TupleStructDef(_) => todo!(),
-            ExprKind::Union {} => todo!(),
-            ExprKind::Enum {} => todo!(),
+            ExprKind::UnionDef(_) => todo!(),
+            ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs, fields } => panic!(),
@@ -437,10 +438,10 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
-            ExprKind::VarDecl { markers, ident, kind } => {
+            ExprKind::VarDecl(VarDecl { markers, ident, ty, default, is_const }) => {
+                let init = default;
                 let var_name = &code[ident.span];
                 let is_mut = markers.is_mut;
-                let init = kind.get_init();
                 let v = if !is_mut && let Some(init) = init {
                     let init = self.compile_expr_to_float(*init, code)?.as_any_value_enum();
                     Symbol::Register(init)
@@ -459,7 +460,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
-            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
             ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap();
                 let zero = self.context.f64_type().const_float(0.0);
@@ -574,117 +574,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         //self.compile_fn(name, &params, &body, code)
         Ok(self.compile_prototype(name, params, code))
     }
-
-    /*
-    pub fn compile_item(&mut self, item: &Item<'i>) -> CompileResult<FunctionValue<'ctx>> {
-        let code = item.code;
-        match &item.value.kind {
-            ExprKind::Ident => todo!(),
-            ExprKind::Literal(_) => todo!(),
-            ExprKind::ArraySemi { val, count } => todo!(),
-            ExprKind::ArrayComma { elements } => todo!(),
-            ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn { params, ret_type, body } => {
-                let n = code[item.ident.span].to_string();
-                self.compile_fn(&n, &params, &body, code)
-            },
-            ExprKind::Parenthesis { expr } => todo!(),
-            ExprKind::Block { stmts } => todo!(),
-            ExprKind::StructDef(_) => todo!(),
-            ExprKind::StructInit { name, fields } => todo!(),
-            ExprKind::TupleStructDef(_) => todo!(),
-            ExprKind::Union {} => todo!(),
-            ExprKind::Enum {} => todo!(),
-            ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
-            ExprKind::Colon { lhs, rhs } => todo!(),
-            ExprKind::PostOp { kind, expr } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
-            ExprKind::CompCall { func, args } => todo!(),
-            ExprKind::Call { func, args } => todo!(),
-            ExprKind::PreOp { kind, expr } => todo!(),
-            ExprKind::BinOp { lhs, op, rhs } => todo!(),
-            ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            ExprKind::Decl { markers, ident, kind } => todo!(),
-            ExprKind::Semicolon(_) => todo!(),
-        }
-    }
-    */
-
-    pub fn compile_var_decl(
-        &mut self,
-        ident: Ident,
-        kind: VarDeclKind,
-        code: &Code,
-    ) -> CompileResult<FunctionValue<'ctx>> {
-        let init = match kind {
-            VarDeclKind::WithTy { ty, init } => init.unwrap_or_else(|| todo!("decl")),
-            VarDeclKind::InferTy { init } => init,
-        };
-        let init = unsafe { init.as_ref() };
-        match &init.kind {
-            ExprKind::Ident => todo!(),
-            ExprKind::Literal(_) => todo!(),
-            ExprKind::ArraySemi { val, count } => todo!(),
-            ExprKind::ArrayComma { elements } => todo!(),
-            ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn { params, ret_type, body } => {
-                let n = code[ident.span].to_string();
-                self.compile_fn(&n, *params, *body, code)
-            },
-            ExprKind::Parenthesis { expr } => todo!(),
-            ExprKind::Block { stmts, .. } => todo!(),
-            ExprKind::StructDef(_) => todo!(),
-            ExprKind::TupleStructDef(_) => todo!(),
-            ExprKind::Union {} => todo!(),
-            ExprKind::Enum {} => todo!(),
-            ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Initializer { lhs, fields } => panic!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
-            //ExprKind::Colon { lhs, rhs } => todo!(),
-            ExprKind::PostOp { kind, expr } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
-            //ExprKind::CompCall { func, args } => todo!(),
-            ExprKind::Call { func, args } => todo!(),
-            ExprKind::PreOp { kind, expr } => todo!(),
-            ExprKind::BinOp { lhs, op, rhs } => todo!(),
-            ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            ExprKind::If { condition, then_body, else_body } => todo!(),
-            ExprKind::VarDecl { markers, ident, kind } => todo!(),
-            ExprKind::ConstDecl { markers, ident, ty, init } => todo!(),
-            ExprKind::Semicolon(_) => todo!(),
-            _ => todo!(),
-        }
-    }
-
-    /*
-    pub fn jit_run_expr(
-        &mut self,
-        expr: &Expr,
-        code: &Code,
-        debug: Option<DebugOptions>,
-    ) -> CompileResult<f64> {
-        const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
-        let func = self.compile_fn(REPL_EXPR_ANON_FN_NAME, &[], expr, code)?;
-
-        self.run_passes_debug(debug);
-
-        if debug == Some(DebugOptions::ReplExpr) {
-            func.print_to_stderr();
-        }
-
-        let fn_name = func.get_name().to_str().unwrap();
-
-        println!("1",);
-        let out = self.jit_run_fn(REPL_EXPR_ANON_FN_NAME);
-        println!("2",);
-        self.replace_mod_same_name();
-        println!("3",);
-        out
-    }
-    */
 
     pub fn build_float_binop(
         &mut self,
@@ -841,7 +730,7 @@ enum Symbol<'ctx> {
     Register(AnyValueEnum<'ctx>),
     Function {
         /// TODO: think of a better way to store the fn definition
-        params: NonNull<[FnParam]>,
+        params: NonNull<[VarDecl]>,
         val: FunctionValue<'ctx>,
     },
 }
