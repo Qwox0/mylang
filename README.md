@@ -14,3 +14,11 @@ My programming language (TODO: think of a good name; this is always the hardest 
 - [ ] Finish the main aspects and features of the language
 - [ ] ...
 
+## Inspirations
+
+While collecting ideas for this language, I thought about and developed concepts for many different features. After some time, I realized that most of my ideas were already implemented in the following languages (especially in Jai), and usually in a better way.
+
+* [Rust](https://github.com/rust-lang/rust)
+* Jai (Jonathan Blow's language)
+* [Zig](https://github.com/ziglang/zig)
+* [Odin](https://github.com/odin-lang/Odin)
