@@ -527,6 +527,7 @@ impl<'c> Lexer<'c> {
                 },
                 '*' => TokenKind::DotAsterisk,
                 '&' => TokenKind::DotAmpersand,
+                '{' => TokenKind::DotOpenBrace,
             },
             ',' => TokenKind::Comma,
             ':' => maybe_followed_by! {

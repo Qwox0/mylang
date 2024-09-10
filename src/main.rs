@@ -181,7 +181,7 @@ fn display_parse_error(e: ParseError, code: &Code) {
     eprintln!("ERROR: {:?}", e);
     const VIEW_SIZE: usize = 20;
     let view_start = e.span.start.saturating_sub(VIEW_SIZE);
-    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE));
+    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE).min(code.len()));
     let newline_count = code[Span::new(view_start, e.span.start)].lines().skip(1).count();
     eprintln!("  {:?}", &code[view]);
     eprintln!("  {}{}", " ".repeat(VIEW_SIZE + newline_count + 1), "^".repeat(e.span.len()));
@@ -219,7 +219,7 @@ mymain :: -> {
     a = 100;
     b := test();
 
-    //sub2(Sub.{a, b})
+    //sub2(Sub.{ a = a, b })
     sub(a, b)
 };
 ";
@@ -319,7 +319,6 @@ fn run_with_jit(mut module: CodegenModule) {
 /// test benches::bench_parse2 ... bench:       4,115.37 ns/iter (+/- 397.96)
 /// test benches::bench_parse3 ... bench:       4,569.32 ns/iter (+/- 537.69)
 /// test benches::bench_parse4 ... bench:       6,576.30 ns/iter (+/- 638.84)
-///
 /// ```
 ///
 /// next_tok field in Lexer

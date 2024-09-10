@@ -22,7 +22,7 @@ use inkwell::{
     passes::{PassBuilderOptions, PassManager},
     support::LLVMString,
     targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
-    types::BasicMetadataTypeEnum,
+    types::{BasicMetadataTypeEnum, BasicType},
     values::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValueEnum, FloatValue,
         FunctionValue, PointerValue,
@@ -199,11 +199,17 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, *params, *body, code).map(|_| ())
+                self.compile_fn(name, *params, *body, code)?;
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
-            ExprKind::StructDef(_) => todo!(),
+            ExprKind::StructDef(fields) => {
+                let field_types = unsafe { fields.as_ref() }
+                    .iter()
+                    .map(|_| self.context.f64_type().as_basic_type_enum())
+                    .collect::<Vec<_>>();
+                let a = self.context.struct_type(&field_types, false);
+            },
             ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
@@ -223,6 +229,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Semicolon(_) => todo!(),
             _ => todo!(),
         }
+        Ok(())
     }
 
     pub fn compile_prototype(
