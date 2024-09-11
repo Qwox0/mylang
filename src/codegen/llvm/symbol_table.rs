@@ -9,6 +9,10 @@ impl<'ctx> SymbolTable<'ctx> {
         SymbolTable(vec![HashMap::new()])
     }
 
+    pub fn inner(&self) -> &[HashMap<String, Symbol<'ctx>>] {
+        &self.0
+    }
+
     pub fn open_scope(&mut self) {
         self.0.push(HashMap::new())
     }

@@ -1,218 +1,19 @@
-use crate::scratch_pool::ScratchPool;
+use crate::{
+    ast::{
+        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Ident, PostOpKind, PreOpKind, Type,
+        VarDecl,
+    },
+    scratch_pool::ScratchPool,
+};
 use debug::TreeLines;
 pub use error::*;
 use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
-use parser_helper::Parser;
+use parser_helper::ParserInterface;
 use std::{ptr::NonNull, str::FromStr};
 
 pub mod error;
 pub mod lexer;
 pub mod parser_helper;
-
-#[derive(Debug, Clone, Copy)]
-pub enum ExprKind {
-    Ident(NonNull<str>),
-    Literal {
-        kind: LitKind,
-        code: NonNull<str>,
-    },
-    /// `true`, `false`
-    BoolLit(bool),
-
-    /// `[<val>; <count>]`
-    /// both for types and literals
-    ArraySemi {
-        val: NonNull<Expr>,
-        count: NonNull<Expr>,
-    },
-    /// `[<expr>, <expr>, ..., <expr>,]`
-    ArrayComma {
-        elements: NonNull<[Expr]>,
-    },
-    /// `(<expr>, <expr>, ..., <expr>,)`
-    /// both for types and literals
-    Tuple {
-        elements: NonNull<[Expr]>,
-    },
-    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
-    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
-    /// `-> <type> { <body> }`
-    /// `-> <body>`
-    Fn {
-        params: NonNull<[VarDecl]>,
-        ret_type: Option<NonNull<Expr>>,
-        body: NonNull<Expr>,
-    },
-    /// `( <expr> )`
-    Parenthesis {
-        expr: NonNull<Expr>,
-    },
-    /// `{ <stmt>`*` }`
-    Block {
-        stmts: NonNull<[NonNull<Expr>]>,
-        has_trailing_semicolon: bool,
-    },
-
-    /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(NonNull<[VarDecl]>),
-    /// `union { a: int, b: String, c: (u8, u32) }`
-    UnionDef(NonNull<[VarDecl]>),
-    /// `enum { ... }`
-    EnumDef {},
-    /// `?<ty>`
-    OptionShort(NonNull<Expr>),
-    /// `*<ty>`
-    /// `*mut <ty>`
-    Ptr {
-        is_mut: bool,
-        ty: NonNull<Expr>,
-    },
-
-    /// `alloc(MyStruct).{ a = <expr>, b, }`
-    Initializer {
-        lhs: Option<NonNull<Expr>>,
-        fields: NonNull<[(Ident, Option<NonNull<Expr>>)]>,
-    },
-
-    /// [`expr`] . [`expr`]
-    Dot {
-        lhs: NonNull<Expr>,
-        rhs: Ident,
-    },
-    /// examples: `<expr>?`, `<expr>.*`
-    PostOp {
-        expr: NonNull<Expr>,
-        kind: PostOpKind,
-    },
-    /// `<lhs> [ <idx> ]`
-    Index {
-        lhs: NonNull<Expr>,
-        idx: NonNull<Expr>,
-    },
-
-    /*
-    /// `<func> < <params> >`
-    CompCall {
-        func: NonNull<Expr>,
-        args: Vec<Expr>,
-    },
-    */
-    /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
-    Call {
-        func: NonNull<Expr>,
-        args: NonNull<[NonNull<Expr>]>,
-    },
-
-    /// examples: `&<expr>`, `- <expr>`
-    PreOp {
-        kind: PreOpKind,
-        expr: NonNull<Expr>,
-    },
-    /// `<lhs> op <lhs>`
-    BinOp {
-        lhs: NonNull<Expr>,
-        op: BinOpKind,
-        rhs: NonNull<Expr>,
-    },
-    /// `<lhs> = <lhs>`
-    Assign {
-        //lhs: NonNull<LValue>,
-        lhs: NonNull<Expr>,
-        rhs: NonNull<Expr>,
-    },
-    /// `<lhs> op= <lhs>`
-    BinOpAssign {
-        //lhs: NonNull<LValue>,
-        lhs: NonNull<Expr>,
-        op: BinOpKind,
-        rhs: NonNull<Expr>,
-    },
-
-    /// variable declaration (and optional initialization)
-    /// `mut rec <name>: <ty>`
-    /// `mut rec <name>: <ty> = <init>`
-    /// `mut rec <name>: <ty> : <init>`
-    /// `mut rec <name> := <init>`
-    /// `mut rec <name> :: <init>`
-    VarDecl(VarDecl),
-
-    // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
-    // ExternDecl {
-    //     is_pub: bool,
-    //     ident: NonNull<Expr>,
-    //     ty: NonNull<Expr>,
-    // },
-    /// `if <cond> <then>` (`else <else>`)
-    If {
-        condition: NonNull<Expr>,
-        then_body: NonNull<Expr>,
-        else_body: Option<NonNull<Expr>>,
-    },
-    /// `match <val> <body>` (`else <else>`)
-    Match {
-        val: NonNull<Expr>,
-        // TODO
-        else_body: Option<NonNull<Expr>>,
-    },
-
-    /// TODO: normal syntax
-    /// `<source> | for <iter_var> <body>`
-    For {
-        source: NonNull<Expr>,
-        iter_var: Ident,
-        body: NonNull<Expr>,
-    },
-    /// `while <cond> <body>`
-    While {
-        condition: NonNull<Expr>,
-        body: NonNull<Expr>,
-    },
-
-    /// `lhs catch ...`
-    Catch {
-        lhs: NonNull<Expr>,
-        // TODO
-    },
-
-    /// `lhs | rhs`
-    /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
-    /// `lhs | while ...` are inlined during parsing
-    Pipe {
-        lhs: NonNull<Expr>,
-        // TODO
-    },
-
-    Return {
-        expr: Option<NonNull<Expr>>,
-    },
-
-    Semicolon(NonNull<Expr>),
-}
-
-#[derive(Debug, Clone)]
-pub struct Expr {
-    pub kind: ExprKind,
-    pub span: Span,
-}
-
-impl From<(ExprKind, Span)> for Expr {
-    fn from((kind, span): (ExprKind, Span)) -> Self {
-        Expr { kind, span }
-    }
-}
-
-impl Expr {
-    pub fn new(kind: ExprKind, span: Span) -> Self {
-        Self { kind, span }
-    }
-
-    pub fn try_to_ident(&self) -> ParseResult<Ident> {
-        match self.kind {
-            ExprKind::Ident(text) => Ok(Ident { text, span: self.span }),
-            _ => err!(NotAnIdent, self.span),
-        }
-    }
-}
 
 macro_rules! expr {
     ($kind:ident, $span:expr) => {
@@ -227,16 +28,29 @@ macro_rules! expr {
 }
 use expr as expr_;
 
+impl Expr {
+    pub fn try_to_ident(&self) -> ParseResult<Ident> {
+        match self.kind {
+            ExprKind::Ident(text) => Ok(Ident { text, span: self.span }),
+            _ => err!(NotAnIdent, self.span),
+        }
+    }
+}
+
+pub fn ty(ty_expr: NonNull<Expr>) -> Type {
+    Type::Unevaluated(ty_expr)
+}
+
 #[derive(Debug, Clone)]
-pub struct ExprParser<'code, 'alloc> {
+pub struct Parser<'code, 'alloc> {
     lex: Lexer<'code>,
     alloc: &'alloc bumpalo::Bump,
 }
 
 // methods may advance the parser even on error
 // resetting is done by the callee
-impl<'code, 'alloc> ExprParser<'code, 'alloc> {
-    pub fn new(lex: Lexer<'code>, alloc: &'alloc bumpalo::Bump) -> ExprParser<'code, 'alloc> {
+impl<'code, 'alloc> Parser<'code, 'alloc> {
+    pub fn new(lex: Lexer<'code>, alloc: &'alloc bumpalo::Bump) -> Parser<'code, 'alloc> {
         Self { lex, alloc }
     }
 
@@ -248,7 +62,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
                 err
             }
         });
-        self.lex.advance_if(|t| t.kind == TokenKind::Semicolon);
+        self.lex
+            .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
         res
     }
 
@@ -601,8 +416,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             //TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
             //TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
             TokenKind::Question => {
-                let ty = self.expr().expect("type after ?");
-                expr!(OptionShort(ty), span.join(unsafe { ty.as_ref().span }))
+                let type_ = self.expr().expect("type after ?");
+                expr!(OptionShort(ty(type_)), span.join(unsafe { type_.as_ref().span }))
             },
             TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -611,10 +426,11 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
             TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
             TokenKind::BackTick => todo!("TokenKind::BackTick"),
 
-            TokenKind::CloseParenthesis
-            | TokenKind::CloseBracket
-            | TokenKind::CloseBrace
-            | TokenKind::Semicolon => return err!(NoInput, self.lex.pos_span()),
+            // TokenKind::CloseParenthesis | TokenKind::CloseBracket | TokenKind::CloseBrace => {
+            //     return err!(NoInput, self.lex.pos_span());
+            // },
+            // TokenKind::Semicolon => return err!(NoInput, self.lex.pos_span()),
+            // TokenKind::Semicolon => expr!(Semicolon(None), span),
             t => return err!(UnexpectedToken(t), span).context("expected valid value"),
         };
         self.alloc(expr)
@@ -628,8 +444,8 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     ) -> ParseResult<NonNull<Expr>> {
         let expr = self.expr().context("fn return type or body")?;
         let (ret_type, body) = match self.lex.next_if(|t| t.kind == TokenKind::OpenBrace) {
-            Some(brace) => (Some(expr), self.block(brace.span).context("fn body")?),
-            None => (None, expr),
+            Some(brace) => (Some(ty(expr)), self.block(brace.span).context("fn body")?),
+            None => (Type::UNKNOWN, expr),
         };
         let span = start_span.join(unsafe { body.as_ref().span });
         self.alloc(expr!(Fn { params, ret_type, body }, span))
@@ -773,7 +589,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     /// `mut a: int = 0;`
     /// `      ^`
     pub fn typed_decl(&mut self, markers: DeclMarkers, ident: Ident) -> ParseResult<VarDecl> {
-        let ty = Some(self.expr().context("decl type")?);
+        let ty = Some(ty(self.expr().context("decl type")?));
         self.ws0();
         let t = self.lex.peek();
         let init = t
@@ -841,6 +657,7 @@ impl<'code, 'alloc> ExprParser<'code, 'alloc> {
     ///
     /// see [`bumpalo::Bump::alloc_slice_copy`]
     #[inline]
+    #[allow(unused)]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<NonNull<[T]>> {
         let layout = core::alloc::Layout::for_value(slice);
         let dst = self
@@ -986,61 +803,6 @@ impl FollowingOperator {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BinOpKind {
-    /// `*`, `*=`
-    Mul,
-    /// `/`, `/=`
-    Div,
-    /// `%`, `%=`
-    Mod,
-
-    /// `+`, `+=`
-    Add,
-    /// `-`, `-=`
-    Sub,
-
-    /// `<<`, `<<=`
-    ShiftL,
-    /// `>>`, `>>=`
-    ShiftR,
-
-    /// `&`, `&=`
-    BitAnd,
-
-    /// `^`, `^=`
-    BitXor,
-
-    /// TODO: find a solution for pipe vs bitor (currently bitand, bitxor and
-    /// bitor are ignored)
-    /// `|`, `|=`
-    BitOr,
-
-    /// `==`
-    Eq,
-    /// `!=`
-    Ne,
-    /// `<`
-    Lt,
-    /// `<=`
-    Le,
-    /// `>`
-    Gt,
-    /// `>=`
-    Ge,
-
-    /// `&&`
-    And,
-
-    /// `||`
-    Or,
-
-    /// `..`
-    Range,
-    /// `..=`
-    RangeInclusive,
-}
-
 const MIN_PRECEDENCE: usize = 0;
 const PIPE_PRECEDENCE: usize = 1;
 const IF_PRECEDENCE: usize = 2;
@@ -1065,70 +827,11 @@ impl BinOpKind {
             BinOpKind::Range | BinOpKind::RangeInclusive => 10,
         }
     }
-
-    pub fn to_binop_text(self) -> &'static str {
-        match self {
-            BinOpKind::Mul => "*",
-            BinOpKind::Div => "/",
-            BinOpKind::Mod => "%",
-            BinOpKind::Add => "+",
-            BinOpKind::Sub => "-",
-            BinOpKind::ShiftL => "<<",
-            BinOpKind::ShiftR => ">>",
-            BinOpKind::BitAnd => "&",
-            BinOpKind::BitXor => "^",
-            BinOpKind::BitOr => "|",
-            BinOpKind::Eq => "==",
-            BinOpKind::Ne => "!=",
-            BinOpKind::Lt => "<",
-            BinOpKind::Le => "<=",
-            BinOpKind::Gt => ">",
-            BinOpKind::Ge => ">=",
-            BinOpKind::And => "&&",
-            BinOpKind::Or => "||",
-            BinOpKind::Range => "..",
-            BinOpKind::RangeInclusive => "..=",
-        }
-    }
-
-    pub fn to_binop_assign_text(self) -> &'static str {
-        match self {
-            BinOpKind::Mul => "*=",
-            BinOpKind::Div => "/=",
-            BinOpKind::Mod => "%=",
-            BinOpKind::Add => "+=",
-            BinOpKind::Sub => "-=",
-            BinOpKind::ShiftL => "<<=",
-            BinOpKind::ShiftR => ">>=",
-            BinOpKind::BitAnd => "&=",
-            BinOpKind::BitXor => "^=",
-            BinOpKind::BitOr => "|=",
-            k => panic!("Unexpected binop kind: {:?}", k),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum PostOpKind {
-    /// `<expr>.&`
-    AddrOf,
-    /// `<expr>.&mut`
-    AddrMutOf,
-    /// `<expr>.*`
-    Deref,
-    /// `<expr>?`
-    Try,
-    /// `<expr>!`
-    Force,
-    /// `<expr>!unsafe`
-    ForceUnsafe,
-    // /// `<expr>.type`
-    // TypeOf,
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtIter<'code, 'alloc> {
-    parser: ExprParser<'code, 'alloc>,
+    parser: Parser<'code, 'alloc>,
 }
 
 impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
@@ -1146,67 +849,10 @@ impl<'code, 'alloc> StmtIter<'code, 'alloc> {
     /// Parses top-level items until the end of the [`Code`] or until an
     /// [`PError`] occurs.
     pub fn parse(code: &'code Code, alloc: &'alloc bumpalo::Bump) -> Self {
-        let mut parser = ExprParser::new(Lexer::new(code), alloc);
+        let mut parser = Parser::new(Lexer::new(code), alloc);
         parser.ws0();
         Self { parser }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VarDecl {
-    pub markers: DeclMarkers,
-    pub ident: Ident,
-    pub ty: Option<NonNull<Expr>>,
-    /// * default value for fn params, struct fields, ...
-    /// * init for local veriable declarations
-    pub default: Option<NonNull<Expr>>,
-    pub is_const: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DeclMarkers {
-    pub is_pub: bool,
-    pub is_mut: bool,
-    pub is_rec: bool,
-}
-
-impl DeclMarkers {
-    pub fn is_empty(&self) -> bool {
-        !(self.is_pub || self.is_mut || self.is_rec)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclMarkerKind {
-    Pub,
-    Mut,
-    Rec,
-}
-
-/*
-#[derive(Debug, Clone, Copy)]
-pub enum VarDeclKind {
-    /// `<name>: <ty>;`
-    /// `<name>: <ty> = <init>;`
-    WithTy { ty: NonNull<Expr>, init: Option<NonNull<Expr>> },
-    /// `<name> := <init>;`
-    InferTy { init: NonNull<Expr> },
-}
-
-impl VarDeclKind {
-    pub fn get_init(&self) -> Option<&NonNull<Expr>> {
-        match self {
-            VarDeclKind::WithTy { init, .. } => init.as_ref(),
-            VarDeclKind::InferTy { init } => Some(init),
-        }
-    }
-}
-*/
-
-#[derive(Debug, Clone, Copy)]
-pub struct Ident {
-    text: NonNull<str>,
-    pub span: Span,
 }
 
 impl Ident {
@@ -1217,49 +863,6 @@ impl Ident {
         }
         Ok(Ident { text: text.into(), span: t.span })
     }
-
-    pub fn into_expr(self) -> Expr {
-        Expr { kind: ExprKind::Ident(self.text), span: self.span }
-    }
-
-    pub fn get_text(&self) -> &str {
-        unsafe { self.text.as_ref() }
-    }
-}
-
-#[allow(unused)]
-pub struct Pattern {
-    kind: ExprKind, // TODO: own kind enum
-    span: Span,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum PreOpKind {
-    /// `& <expr>`
-    AddrOf,
-    /// `&mut <expr>`
-    AddrMutOf,
-    /// `* <expr>`
-    Deref,
-    /// `! <expr>`
-    Not,
-    /// `- <expr>`
-    Neg,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LitKind {
-    /// `'a'`
-    Char,
-    /// `b'a'`
-    BChar,
-    /// `1`, `-10`, `10_000`
-    /// allowed but not recommended: `1_0_0_0`
-    Int,
-    /// `1.5`
-    Float,
-    /// `"literal"`
-    Str,
 }
 
 #[inline]
@@ -1268,7 +871,8 @@ fn is_close_paren(t: Token) -> bool {
 }
 
 pub mod debug {
-    use super::{DebugAst, Ident, VarDecl};
+    use super::{DebugAst, Ident};
+    use crate::ast::VarDecl;
     use std::ptr::NonNull;
 
     #[derive(Default)]
@@ -1360,10 +964,10 @@ pub mod debug {
                 mut_marker(markers.is_mut),
                 if markers.is_rec { "rec " } else { "" },
                 ident.text.as_ref(),
-                ty.map(|ty| format!(": {}", ty.to_text())).unwrap_or_default(),
+                ty.map(|ty| format!(":{}", ty.to_text())).unwrap_or_default(),
                 default
                     .map(|default| format!(
-                        " {}{} {}",
+                        "{}{}{}",
                         if ty.is_none() { ":" } else { "" },
                         if *is_const { ":" } else { "=" },
                         default.as_ref().to_text()
@@ -1443,6 +1047,7 @@ pub trait DebugAst {
     fn print_tree(&self) {
         let mut lines = TreeLines::default();
         self.write_tree(&mut lines);
+        println!("| {}", self.to_text());
         for l in lines.lines {
             println!("| {}", l.0);
         }
@@ -1503,7 +1108,7 @@ impl DebugAst for Expr {
                 ExprKind::UnionDef(..) => panic!(),
                 ExprKind::EnumDef {} => panic!(),
                 ExprKind::OptionShort(ty) => {
-                    format!("?{}", ty.as_ref().to_text())
+                    format!("?{}", ty.to_text())
                 },
                 ExprKind::Ptr { is_mut, ty } => {
                     format!("*{}{}", debug::mut_marker(*is_mut), ty.to_text())
@@ -1587,7 +1192,7 @@ impl DebugAst for Expr {
                     "return{}",
                     debug::opt_to_text(expr, |e| format!(" {}", e.as_ref().to_text()))
                 ),
-                ExprKind::Semicolon(expr) => format!("{};", expr.as_ref().to_text()),
+                ExprKind::Semicolon(expr) => format!("{};", debug::opt_expr_to_text(expr)),
             }
         }
     }
@@ -1675,7 +1280,7 @@ impl DebugAst for Expr {
                 */
                 ExprKind::OptionShort(ty) => {
                     lines.write("?");
-                    lines.write_tree(ty.as_ref());
+                    lines.write_tree(ty);
                 },
                 ExprKind::Ptr { is_mut, ty } => {
                     lines.write("*");
@@ -1784,12 +1389,34 @@ impl DebugAst for Expr {
                     }
                 },
                 ExprKind::Semicolon(expr) => {
-                    lines.write_tree(expr.as_ref());
+                    if let Some(expr) = expr {
+                        lines.write_tree(expr.as_ref());
+                    }
                     lines.write(";");
                 },
 
                 k => panic!("{:?}", k),
             }
+        }
+    }
+}
+
+impl DebugAst for Type {
+    fn to_text(&self) -> String {
+        match self {
+            Type::Void => "void".to_string(),
+            Type::Never => "!".to_string(),
+            Type::Float { bits } => format!("f{}", bits),
+            Type::Function(_) => todo!(),
+            Type::Unevaluated(expr) => expr.to_text(),
+        }
+    }
+
+    fn write_tree(&self, lines: &mut TreeLines) {
+        match self {
+            Type::Void | Type::Never | Type::Float { .. } => lines.write(&self.to_text()),
+            Type::Function(_) => todo!(),
+            Type::Unevaluated(expr) => expr.write_tree(lines),
         }
     }
 }

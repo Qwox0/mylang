@@ -1,4 +1,4 @@
-pub trait Parser {
+pub trait ParserInterface {
     type Item;
     type PeekedItem;
 

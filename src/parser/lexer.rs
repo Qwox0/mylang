@@ -1,5 +1,5 @@
 use super::ParseErrorKind;
-use crate::parser::{parser_helper::Parser, LitKind};
+use crate::{ast::LitKind, parser::parser_helper::ParserInterface};
 use core::{fmt, range::Range};
 use std::{
     mem,
@@ -630,7 +630,7 @@ impl<'c> Lexer<'c> {
     }
 }
 
-impl<'c> Parser for Lexer<'c> {
+impl<'c> ParserInterface for Lexer<'c> {
     type Item = Token;
     type PeekedItem = Token;
 
@@ -694,7 +694,7 @@ impl<'c> Cursor<'c> {
     }
 }
 
-impl<'c> Parser for Cursor<'c> {
+impl<'c> ParserInterface for Cursor<'c> {
     type Item = char;
     type PeekedItem = char;
 

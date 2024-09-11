@@ -1,35 +1,13 @@
 #![feature(test)]
-#![allow(unused)]
 
-use inkwell::{
-    context::Context,
-    data_layout::DataLayout,
-    llvm_sys::target::LLVM_InitializeAllTargetInfos,
-    module::Module,
-    passes::PassManager,
-    targets::{
-        CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine, TargetTriple,
-    },
-    OptimizationLevel,
-};
+use inkwell::{context::Context, module::Module, targets::TargetMachine};
 use mylang::{
     cli::Cli,
-    codegen::{
-        self,
-        llvm::{CodegenModule, Compiler},
-    },
-    parser::{
-        lexer::{Code, Lexer, Span},
-        parser_helper::Parser,
-        DebugAst, ParseError, StmtIter,
-    },
+    codegen::llvm,
+    parser::{lexer::Lexer, parser_helper::ParserInterface, DebugAst, StmtIter},
+    util::display_spanned_error,
 };
-use std::{
-    io::{Read, Write},
-    path::Path,
-    ptr::NonNull,
-    time::Instant,
-};
+use std::{io::Read, path::Path, time::Instant};
 
 fn main() {
     dev();
@@ -164,6 +142,7 @@ fn main() {
     */
 }
 
+#[allow(unused)]
 fn read_code_file(path: &Path) -> String {
     fn inner(path: &Path) -> Result<String, std::io::Error> {
         let mut buf = String::new();
@@ -177,16 +156,6 @@ fn read_code_file(path: &Path) -> String {
     })
 }
 
-fn display_parse_error(e: ParseError, code: &Code) {
-    eprintln!("ERROR: {:?}", e);
-    const VIEW_SIZE: usize = 20;
-    let view_start = e.span.start.saturating_sub(VIEW_SIZE);
-    let view = Span::new(view_start, e.span.end.saturating_add(VIEW_SIZE).min(code.len()));
-    let newline_count = code[Span::new(view_start, e.span.start)].lines().skip(1).count();
-    eprintln!("  {:?}", &code[view]);
-    eprintln!("  {}{}", " ".repeat(VIEW_SIZE + newline_count + 1), "^".repeat(e.span.len()));
-}
-
 fn dev() {
     const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = true;
@@ -197,10 +166,6 @@ fn dev() {
     let alloc = bumpalo::Bump::new();
 
     let code = "
-pub test :: (mut x := 1) -> {
-    x += 1;
-    1+2*x
-};
 pub sub :: (a, b, ) -> -b + a;
 
 // Sub :: struct {
@@ -222,21 +187,26 @@ mymain :: -> {
     //sub2(Sub.{ a = a, b })
     sub(a, b)
 };
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
+};
 ";
 
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);
 
     if DEBUG_TOKENS {
-        println!("\n### Tokens:");
+        println!("### Tokens:");
         let mut lex = Lexer::new(code);
         while let Some(t) = lex.next() {
             println!("{:?}", t)
         }
+        println!();
     }
 
     if DEBUG_AST {
-        println!("\n### AST Nodes:");
+        println!("### AST Nodes:");
         for s in stmts.clone() {
             match s {
                 Ok(s) => {
@@ -244,37 +214,57 @@ mymain :: -> {
                     s.print_tree();
                 },
                 Err(e) => {
-                    display_parse_error(e, code);
-                    break;
+                    display_spanned_error(e, code);
                 },
             }
         }
+        println!();
     }
 
+    println!("### Frontend:");
     let frontend_start = Instant::now();
     let context = Context::create();
-    let module =
-        codegen::llvm::Compiler::compile_module(&context, stmts, "dev").unwrap_or_else(|err| {
-            match err {
-                codegen::llvm::CodegenError::ParseError(e) => {
-                    display_parse_error(e, code);
-                    panic!("Parse ERROR")
-                },
-                e => panic!("Compile ERROR: {:?}", e),
-            }
-        });
+    let mut compiler = llvm::Codegen::new_module(&context, "dev");
+
+    let mut has_parse_error = false;
+    let stmts = stmts
+        .filter_map(|s| match s {
+            Ok(stmt) => {
+                compiler.add_top_level_symbol(stmt);
+                Some(stmt)
+            },
+            Err(err) => {
+                display_spanned_error(err, code);
+                has_parse_error = true;
+                None
+            },
+        })
+        .collect::<Vec<_>>();
+
+    if has_parse_error {
+        panic!("Parse ERROR")
+    }
+
+    for expr in stmts {
+        compiler
+            .compile_top_level_fn_body(unsafe { expr.as_ref() })
+            .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
+    }
+    let module = compiler.into_module();
     let frontend_duration = frontend_start.elapsed();
 
     print!("functions:");
     for a in module.get_functions() {
         print!("{:?},", a.get_name());
     }
+    println!("\n");
 
-    let target_machine = Compiler::init_target_machine();
+    let target_machine = llvm::Codegen::init_target_machine();
 
     if DEBUG_LLVM_IR_UNOPTIMIZED {
-        println!("\n### Unoptimized LLVM IR:");
+        println!("### Unoptimized LLVM IR:");
         module.print_to_stderr();
+        println!();
     }
 
     let backend_start = Instant::now();
@@ -282,10 +272,12 @@ mymain :: -> {
     let backend_duration = backend_start.elapsed();
 
     if DEBUG_LLVM_IR_OPTIMIZED {
-        println!("\n### Optimized LLVM IR:");
+        println!("### Optimized LLVM IR:");
         module.print_to_stderr();
+        println!();
     }
 
+    #[allow(unused)]
     enum ExecutionVariant {
         ObjectCode,
         Jit,
@@ -297,7 +289,7 @@ mymain :: -> {
         ExecutionVariant::Jit => run_with_jit(module),
     }
 
-    println!("\n### Compilation time");
+    println!("### Compilation time:");
     println!("  Frontend:     {:<10?} (Lever, Parser, LLVM IR codegen)", frontend_duration);
     println!("  LLVM Backend: {:<10?} (LLVM pass pipeline)", backend_duration);
     println!("  Total:        {:?}", frontend_duration + backend_duration);
@@ -310,7 +302,7 @@ fn compile(module: &Module, target_machine: &TargetMachine) {
         .unwrap();
 }
 
-fn run_with_jit(mut module: CodegenModule) {
+fn run_with_jit(mut module: llvm::CodegenModule) {
     let out = module.jit_run_fn("main").expect("has main function");
     println!("main returned {}", out);
 }

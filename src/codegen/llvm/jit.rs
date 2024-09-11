@@ -1,4 +1,4 @@
-use super::{Compiler, REPL_EXPR_ANON_FN_NAME};
+use super::{Codegen, REPL_EXPR_ANON_FN_NAME};
 use inkwell::{
     execution_engine::{ExecutionEngine, FunctionLookupError},
     llvm_sys::orc2::{
@@ -35,7 +35,7 @@ impl<'ctx> Jit<'ctx> {
         }
     }
 
-    pub fn take_module_from(&mut self, compiler: &mut Compiler<'ctx, '_>) {
+    pub fn take_module_from(&mut self, compiler: &mut Codegen<'ctx>) {
         compiler.move_module_to(self)
     }
 

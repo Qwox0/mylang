@@ -17,6 +17,8 @@ error() {
 
 cd "$script_dir"
 
+rm "target/output.o" "target/test" 2>/dev/null
+
 cmd="cargo run"
 info "$cmd"
 #RUSTFLAGS=-Awarnings $cmd || error "Failed" 0
@@ -29,3 +31,5 @@ $cmd || error "Failed" 1
 cmd="./target/test"
 info "$cmd"
 $cmd || error "Failed" 2
+
+cargo bench

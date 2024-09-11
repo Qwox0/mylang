@@ -2,11 +2,9 @@
 
 use self::jit::Jit;
 use crate::{
+    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, Type, VarDecl},
     cli::DebugOptions,
-    parser::{
-        lexer::Code, BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, ParseError, PreOpKind,
-        StmtIter, VarDecl,
-    },
+    parser::{lexer::Code, ParseError, StmtIter},
 };
 use inkwell::{
     basic_block::BasicBlock,
@@ -39,7 +37,6 @@ const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
 
 #[derive(Debug)]
 pub enum CodegenError {
-    ParseError(ParseError),
     BuilderError(BuilderError),
     InvalidGeneratedFunction,
     MismatchedArgCount { expected: usize, got: usize },
@@ -68,40 +65,30 @@ impl From<FunctionLookupError> for CodegenError {
     }
 }
 
-pub struct Compiler<'ctx, 'i> {
+pub struct Codegen<'ctx> {
     pub context: &'ctx Context,
     pub builder: Builder<'ctx>,
     pub module: Module<'ctx>,
 
     symbols: SymbolTable<'ctx>,
 
-    //items: HashMap<String, Item<'i>>,
-    items: PhantomData<&'i ()>,
-
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
 }
 
-impl<'ctx, 'i> Compiler<'ctx, 'i> {
+impl<'ctx> Codegen<'ctx> {
     pub fn new(
         context: &'ctx Context,
         builder: Builder<'ctx>,
         module: Module<'ctx>,
-    ) -> Compiler<'ctx, 'i> {
-        Compiler {
-            context,
-            builder,
-            module,
-            symbols: SymbolTable::with_one_scope(),
-            items: PhantomData,
-            cur_fn: None,
-        }
+    ) -> Codegen<'ctx> {
+        Codegen { context, builder, module, symbols: SymbolTable::with_one_scope(), cur_fn: None }
     }
 
     pub fn new_module(context: &'ctx Context, module_name: &str) -> Self {
         let builder = context.create_builder();
         let module = context.create_module(module_name);
-        Compiler::new(context, builder, module)
+        Codegen::new(context, builder, module)
     }
 
     pub fn replace_mod_with_new(&mut self, new_mod_name: &str) -> Module<'ctx> {
@@ -123,88 +110,60 @@ impl<'ctx, 'i> Compiler<'ctx, 'i> {
         jit.add_module(module);
     }
 
-    pub fn compile_module(
-        context: &'ctx Context,
-        stmts: StmtIter,
-        module_name: &str,
-    ) -> CodegenResult<CodegenModule<'ctx>> {
-        let mut compiler = Compiler::new_module(&context, module_name);
-        for pres in stmts {
-            let expr = pres.map_err(CodegenError::ParseError)?;
-
-            compiler
-                .compile_top_level(unsafe { expr.as_ref() })
-                .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
-        }
-        Ok(CodegenModule(compiler.module))
+    pub fn into_module(self) -> CodegenModule<'ctx> {
+        CodegenModule(self.module)
     }
 
-    pub fn compile_top_level(&mut self, expr: &Expr) -> CodegenResult<()> {
+    /// for functions, this adds only the prototype, not the function body
+    pub fn add_top_level_symbol(&mut self, expr: NonNull<Expr>) {
+        match &unsafe { expr.as_ref() }.kind {
+            ExprKind::VarDecl(VarDecl {
+                markers,
+                ident,
+                ty,
+                default: Some(init),
+                is_const: true,
+            }) => {
+                let init = unsafe { init.as_ref() };
+                let name = ident.get_text();
+                match &init.kind {
+                    ExprKind::Fn { params, ret_type, body } => {
+                        self.compile_prototype(name, *params);
+                    },
+                    _ => todo!(),
+                }
+            },
+            ExprKind::Semicolon(Some(expr)) => self.add_top_level_symbol(*expr),
+            ExprKind::Semicolon(None) => (),
+            _ => todo!(),
+        }
+    }
+
+    pub fn compile_top_level_fn_body(&mut self, expr: &Expr) -> CodegenResult<()> {
         match &expr.kind {
             ExprKind::VarDecl(VarDecl {
                 markers,
                 ident,
                 ty,
-                default: Some(default),
+                default: Some(init),
                 is_const: true,
             }) => {
-                let default = unsafe { default.as_ref() };
+                let init = unsafe { init.as_ref() };
                 let name = ident.get_text();
-                // if self.items.contains_key(&name) {
-                //     return Err(CError::RedefinedItem(name.into_boxed_str()));
-                // }
-                self.compile_top_level_const_decl(markers, &name, ty, default)
+                match &init.kind {
+                    ExprKind::Fn { params, ret_type, body } => {
+                        self.compile_fn_body(name, *params, *body);
+                    },
+                    _ => todo!(),
+                }
+                Ok(())
             },
-            ExprKind::Semicolon(expr) => self.compile_top_level(unsafe { expr.as_ref() }),
+            ExprKind::Semicolon(Some(expr)) => {
+                self.compile_top_level_fn_body(unsafe { expr.as_ref() })
+            },
+            ExprKind::Semicolon(None) => Ok(()),
             _ => todo!(),
         }
-    }
-
-    pub fn compile_top_level_const_decl(
-        &mut self,
-        markers: &DeclMarkers,
-        name: &str,
-        ty: &Option<NonNull<Expr>>,
-        init: &Expr,
-    ) -> CodegenResult<()> {
-        match &init.kind {
-            ExprKind::Ident(_) => todo!(),
-            ExprKind::Literal { .. } => todo!(),
-            ExprKind::ArraySemi { val, count } => todo!(),
-            ExprKind::ArrayComma { elements } => todo!(),
-            ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, *params, *body)?;
-            },
-            ExprKind::Parenthesis { expr } => todo!(),
-            ExprKind::Block { stmts, .. } => todo!(),
-            ExprKind::StructDef(fields) => {
-                let field_types = unsafe { fields.as_ref() }
-                    .iter()
-                    .map(|_| self.context.f64_type().as_basic_type_enum())
-                    .collect::<Vec<_>>();
-                let a = self.context.struct_type(&field_types, false);
-            },
-            ExprKind::UnionDef(_) => todo!(),
-            ExprKind::EnumDef {} => todo!(),
-            ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Initializer { lhs, fields } => panic!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
-            //ExprKind::Colon { lhs, rhs } => todo!(),
-            ExprKind::PostOp { kind, expr } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
-            //ExprKind::CompCall { func, args } => todo!(),
-            ExprKind::Call { func, args } => todo!(),
-            ExprKind::PreOp { kind, expr } => todo!(),
-            ExprKind::BinOp { lhs, op, rhs } => todo!(),
-            ExprKind::Assign { lhs, rhs } => todo!(),
-            ExprKind::BinOpAssign { lhs, op, rhs } => todo!(),
-            ExprKind::If { condition, then_body, else_body } => todo!(),
-            ExprKind::VarDecl(_) => todo!(),
-            ExprKind::Semicolon(_) => todo!(),
-            _ => todo!(),
-        }
-        Ok(())
     }
 
     pub fn compile_prototype(
@@ -230,13 +189,13 @@ impl<'ctx, 'i> Compiler<'ctx, 'i> {
         fn_val
     }
 
-    pub fn compile_fn(
+    pub fn compile_fn_body(
         &mut self,
         name: &str,
         params: NonNull<[VarDecl]>,
         body: NonNull<Expr>,
     ) -> CodegenResult<FunctionValue<'ctx>> {
-        let func = self.compile_prototype(name, params);
+        let func = self.module.get_function(name).unwrap();
         let params = unsafe { params.as_ref() };
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
@@ -648,6 +607,12 @@ impl<'ctx, 'i> Compiler<'ctx, 'i> {
                 CodeModel::Default,
             )
             .unwrap()
+    }
+
+    pub fn debug_symbols(&self) {
+        for map in self.symbols.inner() {
+            println!("{:#?}", map);
+        }
     }
 }
 

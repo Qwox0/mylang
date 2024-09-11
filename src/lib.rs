@@ -9,7 +9,9 @@
 #![feature(let_chains)]
 #![allow(unreachable_code)]
 
+pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod parser;
 mod scratch_pool;
+pub mod util;
