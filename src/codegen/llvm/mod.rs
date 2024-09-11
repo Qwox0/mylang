@@ -38,7 +38,7 @@ mod symbol_table;
 const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
 
 #[derive(Debug)]
-pub enum CError {
+pub enum CodegenError {
     ParseError(ParseError),
     BuilderError(BuilderError),
     InvalidGeneratedFunction,
@@ -54,45 +54,24 @@ pub enum CError {
     CouldntCreateJit(LLVMString),
 }
 
-impl From<BuilderError> for CError {
+type CodegenResult<T> = Result<T, CodegenError>;
+
+impl From<BuilderError> for CodegenError {
     fn from(e: BuilderError) -> Self {
-        CError::BuilderError(e)
+        CodegenError::BuilderError(e)
     }
 }
 
-impl From<FunctionLookupError> for CError {
+impl From<FunctionLookupError> for CodegenError {
     fn from(e: FunctionLookupError) -> Self {
-        CError::FunctionLookupError(e)
+        CodegenError::FunctionLookupError(e)
     }
 }
-type CompileResult<T> = Result<T, CError>;
 
-pub trait Codegen {}
-
-pub struct FileCodegen<'ctx> {
-    pub context: &'ctx Context,
-}
-
-pub struct REPLCodegen<'ctx> {
-    pub context: &'ctx Context,
-}
-
-/*
-pub struct Compiler<'a, 'ctx, 'c> {
-    pub context: &'ctx Context,
-    pub builder: &'a Builder<'ctx>,
-    pub module: &'a Module<'ctx>,
-
-    code: &'c Code,
-    variables: HashMap<String, PointerValue<'ctx>>,
-}
-*/
-
-pub struct Compiler<'ctx, 'c, 'i> {
+pub struct Compiler<'ctx, 'i> {
     pub context: &'ctx Context,
     pub builder: Builder<'ctx>,
     pub module: Module<'ctx>,
-    code: &'c Code,
 
     symbols: SymbolTable<'ctx>,
 
@@ -103,28 +82,26 @@ pub struct Compiler<'ctx, 'c, 'i> {
     cur_fn: Option<FunctionValue<'ctx>>,
 }
 
-impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
+impl<'ctx, 'i> Compiler<'ctx, 'i> {
     pub fn new(
         context: &'ctx Context,
         builder: Builder<'ctx>,
         module: Module<'ctx>,
-        code: &'c Code,
-    ) -> Compiler<'ctx, 'c, 'i> {
+    ) -> Compiler<'ctx, 'i> {
         Compiler {
             context,
             builder,
             module,
-            code,
             symbols: SymbolTable::with_one_scope(),
             items: PhantomData,
             cur_fn: None,
         }
     }
 
-    pub fn new_module(context: &'ctx Context, module_name: &str, code: &'c Code) -> Self {
+    pub fn new_module(context: &'ctx Context, module_name: &str) -> Self {
         let builder = context.create_builder();
         let module = context.create_module(module_name);
-        Compiler::new(context, builder, module, code)
+        Compiler::new(context, builder, module)
     }
 
     pub fn replace_mod_with_new(&mut self, new_mod_name: &str) -> Module<'ctx> {
@@ -150,20 +127,19 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         context: &'ctx Context,
         stmts: StmtIter,
         module_name: &str,
-        code: &Code,
-    ) -> CompileResult<CodegenModule<'ctx>> {
-        let mut compiler = Compiler::new_module(&context, module_name, code);
+    ) -> CodegenResult<CodegenModule<'ctx>> {
+        let mut compiler = Compiler::new_module(&context, module_name);
         for pres in stmts {
-            let expr = pres.map_err(CError::ParseError)?;
+            let expr = pres.map_err(CodegenError::ParseError)?;
 
             compiler
-                .compile_top_level(unsafe { expr.as_ref() }, code)
+                .compile_top_level(unsafe { expr.as_ref() })
                 .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
         }
         Ok(CodegenModule(compiler.module))
     }
 
-    pub fn compile_top_level(&mut self, expr: &Expr, code: &Code) -> CompileResult<()> {
+    pub fn compile_top_level(&mut self, expr: &Expr) -> CodegenResult<()> {
         match &expr.kind {
             ExprKind::VarDecl(VarDecl {
                 markers,
@@ -173,13 +149,13 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 is_const: true,
             }) => {
                 let default = unsafe { default.as_ref() };
-                let name = code[ident.span].to_string();
+                let name = ident.get_text();
                 // if self.items.contains_key(&name) {
                 //     return Err(CError::RedefinedItem(name.into_boxed_str()));
                 // }
-                self.compile_top_level_const_decl(markers, &name, ty, default, code)
+                self.compile_top_level_const_decl(markers, &name, ty, default)
             },
-            ExprKind::Semicolon(expr) => self.compile_top_level(unsafe { expr.as_ref() }, code),
+            ExprKind::Semicolon(expr) => self.compile_top_level(unsafe { expr.as_ref() }),
             _ => todo!(),
         }
     }
@@ -190,16 +166,15 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         name: &str,
         ty: &Option<NonNull<Expr>>,
         init: &Expr,
-        code: &Code,
-    ) -> CompileResult<()> {
+    ) -> CodegenResult<()> {
         match &init.kind {
-            ExprKind::Ident => todo!(),
-            ExprKind::Literal(_) => todo!(),
+            ExprKind::Ident(_) => todo!(),
+            ExprKind::Literal { .. } => todo!(),
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => {
-                self.compile_fn(name, *params, *body, code)?;
+                self.compile_fn(name, *params, *body)?;
             },
             ExprKind::Parenthesis { expr } => todo!(),
             ExprKind::Block { stmts, .. } => todo!(),
@@ -236,7 +211,6 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         &mut self,
         name: &str,
         params: NonNull<[VarDecl]>,
-        code: &Code,
     ) -> FunctionValue<'ctx> {
         let ret_type = self.context.f64_type();
         let params_ref = unsafe { params.as_ref() };
@@ -248,7 +222,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
-            param.set_name(&code[params_ref[idx].ident.span])
+            param.set_name(params_ref[idx].ident.get_text())
         }
 
         self.symbols.insert(name.to_string(), Symbol::Function { params, val: fn_val });
@@ -261,9 +235,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         name: &str,
         params: NonNull<[VarDecl]>,
         body: NonNull<Expr>,
-        code: &Code,
-    ) -> CompileResult<FunctionValue<'ctx>> {
-        let func = self.compile_prototype(name, params, code);
+    ) -> CodegenResult<FunctionValue<'ctx>> {
+        let func = self.compile_prototype(name, params);
         let params = unsafe { params.as_ref() };
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
@@ -274,7 +247,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         self.symbols.reserve(params.len());
 
         for (param, param_def) in func.get_param_iter().zip(params) {
-            let pname = &code[param_def.ident.span];
+            let pname = param_def.ident.get_text();
             self.symbols.insert(
                 pname.to_string(),
                 if param_def.markers.is_mut {
@@ -288,7 +261,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             );
         }
 
-        let body = self.compile_expr_to_float(body, code)?;
+        let body = self.compile_expr_to_float(body)?;
         self.builder.build_return(Some(&body))?;
 
         self.symbols.close_scope();
@@ -296,22 +269,21 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             Ok(func)
         } else {
             unsafe { func.delete() };
-            Err(CError::InvalidGeneratedFunction)
+            Err(CodegenError::InvalidGeneratedFunction)
         }
     }
 
     pub fn compile_expr_to_float(
         &mut self,
         expr: NonNull<Expr>,
-        code: &Code,
-    ) -> CompileResult<FloatValue<'ctx>> {
+    ) -> CodegenResult<FloatValue<'ctx>> {
         let expr = unsafe { expr.as_ref() };
         match &expr.kind {
-            ExprKind::Ident => {
-                let name = &code[expr.span];
+            ExprKind::Ident(name) => {
+                let name = unsafe { name.as_ref() };
                 // TODO: ident which is not a variable
                 let Some(var) = self.symbols.get(name) else {
-                    return Err(CError::UnknownIdent(Box::from(name)));
+                    return Err(CodegenError::UnknownIdent(Box::from(name)));
                 };
 
                 let f = match var {
@@ -325,19 +297,18 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
                 Ok(f)
             },
-            ExprKind::Literal(LitKind::Int | LitKind::Float) => {
-                let s = &code[expr.span];
-                Ok(self.context.f64_type().const_float_from_string(s))
+            ExprKind::Literal { kind: LitKind::Int | LitKind::Float, code } => {
+                Ok(self.context.f64_type().const_float_from_string(unsafe { code.as_ref() }))
             },
             ExprKind::BoolLit(bool) => {
                 Ok(self.context.f64_type().const_float(if *bool { 1.0 } else { 0.0 }))
             },
-            ExprKind::Literal(_) => todo!(),
+            ExprKind::Literal { .. } => todo!(),
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn { params, ret_type, body } => todo!(),
-            ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr, code),
+            ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 self.symbols.open_scope();
                 let stmts = unsafe { stmts.as_ref() };
@@ -345,9 +316,9 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
                 };
                 for s in stmts {
-                    let _ = self.compile_expr_to_float(*s, code)?;
+                    let _ = self.compile_expr_to_float(*s)?;
                 }
-                let out = self.compile_expr_to_float(*last, code)?;
+                let out = self.compile_expr_to_float(*last)?;
                 self.symbols.close_scope();
                 Ok(if *has_trailing_semicolon {
                     self.context.f64_type().const_float(0.0) // TODO: return void
@@ -367,16 +338,18 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Index { lhs, idx } => todo!(),
             //ExprKind::CompCall { func, args } => todo!(),
             ExprKind::Call { func, args } => {
-                let func = unsafe { func.as_ref() };
-                if !matches!(func.kind, ExprKind::Ident) {
+                let Ok(func) = unsafe { func.as_ref() }.try_to_ident() else {
                     todo!("non ident function call")
-                }
-
-                let func_name = &code[func.span];
+                };
+                let func_name = func.get_text();
                 let (params, func) = match self.symbols.get(func_name) {
                     Some(Symbol::Function { params, val }) => (params, *val),
                     Some(_) => panic!("cannot call a non function"), // TODO
-                    None => return Err(CError::UnknownFn(func_name.to_string().into_boxed_str())),
+                    None => {
+                        return Err(CodegenError::UnknownFn(
+                            func_name.to_string().into_boxed_str(),
+                        ));
+                    },
                 };
                 let expected_arg_count = params.len();
                 let args = unsafe { args.as_ref() };
@@ -384,8 +357,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                     .iter()
                     .enumerate()
                     .map(|(idx, param)| match args.get(idx).or(param.default.as_ref()) {
-                        Some(&arg) => self.compile_expr_to_float(arg, code).map(Into::into),
-                        None => Err(CError::MismatchedArgCount {
+                        Some(&arg) => self.compile_expr_to_float(arg).map(Into::into),
+                        None => Err(CodegenError::MismatchedArgCount {
                             expected: expected_arg_count,
                             got: args.len(),
                         }),
@@ -394,11 +367,11 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
 
                 match self.builder.build_call(func, &args, "call")?.try_as_basic_value().left() {
                     Some(v) => Ok(v.into_float_value()),
-                    None => Err(CError::InvalidCallProduced),
+                    None => Err(CodegenError::InvalidCallProduced),
                 }
             },
             ExprKind::PreOp { kind, expr } => {
-                let expr = self.compile_expr_to_float(*expr, code)?;
+                let expr = self.compile_expr_to_float(*expr)?;
                 match kind {
                     PreOpKind::AddrOf => todo!(),
                     PreOpKind::AddrMutOf => todo!(),
@@ -408,16 +381,16 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 }
             },
             ExprKind::BinOp { lhs, op, rhs } => {
-                let lhs = self.compile_expr_to_float(*lhs, code)?;
-                let rhs = self.compile_expr_to_float(*rhs, code)?;
+                let lhs = self.compile_expr_to_float(*lhs)?;
+                let rhs = self.compile_expr_to_float(*rhs)?;
                 self.build_float_binop(lhs, rhs, *op)
             },
             ExprKind::Assign { lhs, rhs } => {
                 let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
-                let var_name = &code[lhs.span];
+                let var_name = lhs.get_text();
                 match self.symbols.get(var_name) {
                     Some(&Symbol::Stack(stack_var)) => {
-                        let rhs = self.compile_expr_to_float(*rhs, code)?;
+                        let rhs = self.compile_expr_to_float(*rhs)?;
                         self.builder.build_store(stack_var, rhs)?;
                     },
                     Some(Symbol::Register(_)) => panic!("cannot assign to register"),
@@ -428,14 +401,14 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             },
             ExprKind::BinOpAssign { lhs, op, rhs } => {
                 let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
-                let var_name = &code[lhs.span];
+                let var_name = lhs.get_text();
                 match self.symbols.get(var_name) {
                     Some(&Symbol::Stack(stack_var)) => {
                         let lhs = self
                             .builder
                             .build_load(self.context.f64_type(), stack_var, "tmp")?
                             .into_float_value();
-                        let rhs = self.compile_expr_to_float(*rhs, code)?;
+                        let rhs = self.compile_expr_to_float(*rhs)?;
                         let binop_res = self.build_float_binop(lhs, rhs, *op)?;
                         self.builder.build_store(stack_var, binop_res)?;
                     },
@@ -447,16 +420,16 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default, is_const }) => {
                 let init = default;
-                let var_name = &code[ident.span];
+                let var_name = ident.get_text();
                 let is_mut = markers.is_mut;
                 let v = if !is_mut && let Some(init) = init {
-                    let init = self.compile_expr_to_float(*init, code)?.as_any_value_enum();
+                    let init = self.compile_expr_to_float(*init)?.as_any_value_enum();
                     Symbol::Register(init)
                 } else {
                     let stack_var =
                         self.builder.build_alloca(self.context.f64_type(), &var_name)?;
                     if let Some(init) = init {
-                        let init = self.compile_expr_to_float(*init, code)?;
+                        let init = self.compile_expr_to_float(*init)?;
                         self.builder.build_store(stack_var, init)?;
                     }
                     Symbol::Stack(stack_var)
@@ -471,7 +444,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 let func = self.cur_fn.unwrap();
                 let zero = self.context.f64_type().const_float(0.0);
 
-                let condition = self.compile_expr_to_float(*condition, code)?;
+                let condition = self.compile_expr_to_float(*condition)?;
                 let condition = self.builder.build_float_compare(
                     FloatPredicate::ONE,
                     condition,
@@ -486,13 +459,13 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
                 self.builder.build_conditional_branch(condition, then_bb, else_bb)?;
 
                 self.builder.position_at_end(then_bb);
-                let then_val = self.compile_expr_to_float(*then_body, code)?;
+                let then_val = self.compile_expr_to_float(*then_body)?;
                 self.builder.build_unconditional_branch(merge_bb)?;
                 then_bb = self.builder.get_insert_block().expect("has block");
 
                 self.builder.position_at_end(else_bb);
                 let else_val = if let Some(else_body) = else_body {
-                    self.compile_expr_to_float(*else_body, code)?
+                    self.compile_expr_to_float(*else_body)?
                 } else {
                     self.context.f64_type().const_zero()
                 };
@@ -514,7 +487,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
             ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Return { expr } => {
                 if let Some(expr) = expr {
-                    let val = self.compile_expr_to_float(*expr, code)?;
+                    let val = self.compile_expr_to_float(*expr)?;
                     self.builder.build_return(Some(&val))?;
                 } else {
                     self.builder.build_return(None)?;
@@ -539,20 +512,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
     }
     */
 
-    /// if `stmt` is an [`Expr`] then this function returns the evaluated
-    /// [`FloatValue`]
-    pub fn compile_stmt(&mut self, stmt: &Expr, code: &Code) -> CompileResult<FloatValue<'_>> {
-        todo!()
-        /*
-        match &stmt.kind {
-            StmtKind::Decl { markers, ident, kind } => todo!(),
-            StmtKind::Semicolon(expr) => todo!(),
-            StmtKind::Expr(expr) => self.compile_expr_to_float(&expr, code),
-        }
-        */
-    }
-
-    pub fn get_function(&mut self, name: &str) -> CompileResult<FunctionValue<'ctx>> {
+    pub fn get_function(&mut self, name: &str) -> CodegenResult<FunctionValue<'ctx>> {
         if let Some(func) = self.module.get_function(name) {
             return Ok(func);
         };
@@ -565,7 +525,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         */
 
         let ExprKind::Fn { ref params, ref ret_type, ref body } = value.kind else {
-            return Err(CError::NotAFn(Box::from(name)));
+            return Err(CodegenError::NotAFn(Box::from(name)));
         };
 
         /*
@@ -578,8 +538,8 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         let params = params.clone();
         let body = body.clone();
 
-        //self.compile_fn(name, &params, &body, code)
-        Ok(self.compile_prototype(name, params, code))
+        //self.compile_fn(name, &params, &body)
+        Ok(self.compile_prototype(name, params))
     }
 
     pub fn build_float_binop(
@@ -587,7 +547,7 @@ impl<'ctx, 'c, 'i> Compiler<'ctx, 'c, 'i> {
         lhs: FloatValue<'ctx>,
         rhs: FloatValue<'ctx>,
         op: BinOpKind,
-    ) -> CompileResult<FloatValue<'ctx>> {
+    ) -> CodegenResult<FloatValue<'ctx>> {
         match op {
             BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "mul")?),
             BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "div")?),
@@ -709,12 +669,12 @@ impl<'ctx> CodegenModule<'ctx> {
             .unwrap();
     }
 
-    pub fn jit_run_fn(&mut self, fn_name: &str) -> CompileResult<f64> {
+    pub fn jit_run_fn(&mut self, fn_name: &str) -> CodegenResult<f64> {
         match self.0.create_jit_execution_engine(OptimizationLevel::None) {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> f64>(fn_name)?.call() })
             },
-            Err(err) => Err(CError::CouldntCreateJit(err)),
+            Err(err) => Err(CodegenError::CouldntCreateJit(err)),
         }
     }
 

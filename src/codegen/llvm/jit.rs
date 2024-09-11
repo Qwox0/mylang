@@ -35,7 +35,7 @@ impl<'ctx> Jit<'ctx> {
         }
     }
 
-    pub fn take_module_from(&mut self, compiler: &mut Compiler<'ctx, '_, '_>) {
+    pub fn take_module_from(&mut self, compiler: &mut Compiler<'ctx, '_>) {
         compiler.move_module_to(self)
     }
 

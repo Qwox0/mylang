@@ -21,7 +21,7 @@ use mylang::{
     parser::{
         lexer::{Code, Lexer, Span},
         parser_helper::Parser,
-        ParseError, StmtIter,
+        DebugAst, ParseError, StmtIter,
     },
 };
 use std::{
@@ -241,7 +241,7 @@ mymain :: -> {
             match s {
                 Ok(s) => {
                     println!("stmt @ {:?}", s);
-                    unsafe { s.as_ref().print_tree(code) };
+                    s.print_tree();
                 },
                 Err(e) => {
                     display_parse_error(e, code);
@@ -253,13 +253,15 @@ mymain :: -> {
 
     let frontend_start = Instant::now();
     let context = Context::create();
-    let module = codegen::llvm::Compiler::compile_module(&context, stmts, "dev", code)
-        .unwrap_or_else(|err| match err {
-            codegen::llvm::CError::ParseError(e) => {
-                display_parse_error(e, code);
-                panic!("Parse ERROR")
-            },
-            e => panic!("Compile ERROR: {:?}", e),
+    let module =
+        codegen::llvm::Compiler::compile_module(&context, stmts, "dev").unwrap_or_else(|err| {
+            match err {
+                codegen::llvm::CodegenError::ParseError(e) => {
+                    display_parse_error(e, code);
+                    panic!("Parse ERROR")
+                },
+                e => panic!("Compile ERROR: {:?}", e),
+            }
         });
     let frontend_duration = frontend_start.elapsed();
 
@@ -335,13 +337,21 @@ mod benches {
     use super::*;
     use test::*;
 
+    #[inline]
+    fn bench(code: &str) {
+        let alloc = bumpalo::Bump::new();
+        let code = code.as_ref();
+        let mut stmts = StmtIter::parse(code, &alloc);
+        while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
+            res.unwrap();
+        }
+    }
+
     /// old: 11ms  <- so bad
     /// new: 3000ns  (3667x faster)
     #[bench]
     fn bench_parse(b: &mut Bencher) {
-        b.iter(|| {
-            let alloc = bumpalo::Bump::new();
-            let code = "
+        let code = "
 test :: x -> 1+2+x;
 main :: -> test(1) + test(2);
 //main :: -> if true test(1) else test(2);
@@ -353,21 +363,14 @@ main :: -> {
 };
 */
 ";
-            let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
-                res.unwrap();
-            }
-        })
+        b.iter(|| bench(code));
     }
 
     /// old: 23ms  <- so bad
     /// new: 3900ns  (5897x faster)
     #[bench]
     fn bench_parse2(b: &mut Bencher) {
-        b.iter(|| {
-            let alloc = bumpalo::Bump::new();
-            let code = "
+        let code = "
 test :: x -> {
     a := (x + 3 * 2) * x + 1;
     b := x * 2 * x;
@@ -375,36 +378,22 @@ test :: x -> {
 };
 main :: -> test(10);
 ";
-            let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
-                res.unwrap();
-            }
-        })
+        b.iter(|| bench(code));
     }
 
     #[bench]
     fn bench_parse3(b: &mut Bencher) {
-        b.iter(|| {
-            let alloc = bumpalo::Bump::new();
-            let code = "
+        let code = "
 pub test :: x -> 1+2*x;
 pub sub :: (a, b) -> -b + a;
 main :: -> false | if test(1) else (10 | sub(3));
 ";
-            let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
-                res.unwrap();
-            }
-        })
+        b.iter(|| bench(code));
     }
 
     #[bench]
     fn bench_parse4(b: &mut Bencher) {
-        b.iter(|| {
-            let alloc = bumpalo::Bump::new();
-            let code = "
+        let code = "
 pub test :: (x := 2) -> 1+2*x;
 pub sub :: (a, mut b) -> -b + a;
 mymain :: -> {
@@ -415,11 +404,6 @@ mymain :: -> {
     a + b
 };
 ";
-            let code = code.as_ref();
-            let mut stmts = StmtIter::parse(code, &alloc);
-            while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {
-                res.unwrap();
-            }
-        })
+        b.iter(|| bench(code));
     }
 }
