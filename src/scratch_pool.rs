@@ -1,6 +1,7 @@
+use crate::ptr::Ptr;
 use bumpalo::{AllocErr, Bump};
 use core::slice;
-use std::{alloc::Layout, marker::PhantomData, mem, ptr::NonNull};
+use std::{alloc::Layout, marker::PhantomData, mem};
 
 pub struct ScratchPool<'bump, T: 'bump> {
     //bump: &'bump mut Bump,
@@ -79,14 +80,14 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
         }
     }
 
-    pub fn clone_to_slice_in_bump(&self, target_bump: &Bump) -> Result<NonNull<[T]>, AllocErr>
+    pub fn clone_to_slice_in_bump(&self, target_bump: &Bump) -> Result<Ptr<[T]>, AllocErr>
     where T: Clone {
         let len = self.get_item_count();
         let layout = Layout::array::<T>(len).unwrap();
         let ptr = target_bump.alloc_layout(layout).cast::<T>();
         let target_slice = unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), len) };
         self.clone_to_slice(target_slice);
-        Ok(NonNull::from(target_slice))
+        Ok(Ptr::from(target_slice))
     }
 }
 
@@ -130,8 +131,7 @@ mod tests {
         assert!(scratch.len == count);
 
         let mut target_bump = Bump::new();
-        let result_slice =
-            unsafe { scratch.clone_to_slice_in_bump(&mut target_bump).unwrap().as_ref() };
+        let result_slice = scratch.clone_to_slice_in_bump(&mut target_bump).unwrap();
 
         println!("{:?}", result_slice);
 
@@ -148,9 +148,9 @@ mod tests {
             scratch
                 .push(Expr::new(
                     ExprKind::Fn {
-                        params: NonNull::from(&[(Ident { span: Span::new(1, 3) }, None)]),
+                        params: Ptr::from(&[(Ident { span: Span::new(1, 3) }, None)]),
                         ret_type: None,
-                        body: NonNull::new(100000 as *mut _).unwrap(),
+                        body: Ptr::new(100000 as *mut _).unwrap(),
                     },
                     Span::new(1234, usize::MAX),
                 ))

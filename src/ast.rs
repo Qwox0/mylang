@@ -1,12 +1,15 @@
-use crate::parser::lexer::Span;
-use std::ptr::NonNull;
+use crate::{
+    parser::{lexer::Span, DebugAst},
+    ptr::Ptr,
+};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
-    Ident(NonNull<str>),
+    Ident(Ptr<str>),
     Literal {
         kind: LitKind,
-        code: NonNull<str>,
+        code: Ptr<str>,
     },
     /// `true`, `false`
     BoolLit(bool),
@@ -14,41 +17,41 @@ pub enum ExprKind {
     /// `[<val>; <count>]`
     /// both for types and literals
     ArraySemi {
-        val: NonNull<Expr>,
-        count: NonNull<Expr>,
+        val: Ptr<Expr>,
+        count: Ptr<Expr>,
     },
     /// `[<expr>, <expr>, ..., <expr>,]`
     ArrayComma {
-        elements: NonNull<[Expr]>,
+        elements: Ptr<[Expr]>,
     },
     /// `(<expr>, <expr>, ..., <expr>,)`
     /// both for types and literals
     Tuple {
-        elements: NonNull<[Expr]>,
+        elements: Ptr<[Expr]>,
     },
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
     /// `-> <type> { <body> }`
     /// `-> <body>`
     Fn {
-        params: NonNull<[VarDecl]>,
-        ret_type: Option<Type>,
-        body: NonNull<Expr>,
+        params: Ptr<[VarDecl]>,
+        ret_type: Type,
+        body: Ptr<Expr>,
     },
     /// `( <expr> )`
     Parenthesis {
-        expr: NonNull<Expr>,
+        expr: Ptr<Expr>,
     },
     /// `{ <stmt>`*` }`
     Block {
-        stmts: NonNull<[NonNull<Expr>]>,
+        stmts: Ptr<[Ptr<Expr>]>,
         has_trailing_semicolon: bool,
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(NonNull<[VarDecl]>),
+    StructDef(Ptr<[VarDecl]>),
     /// `union { a: int, b: String, c: (u8, u32) }`
-    UnionDef(NonNull<[VarDecl]>),
+    UnionDef(Ptr<[VarDecl]>),
     /// `enum { ... }`
     EnumDef {},
     /// `?<ty>`
@@ -62,62 +65,70 @@ pub enum ExprKind {
 
     /// `alloc(MyStruct).{ a = <expr>, b, }`
     Initializer {
-        lhs: Option<NonNull<Expr>>,
-        fields: NonNull<[(Ident, Option<NonNull<Expr>>)]>,
+        lhs: Option<Ptr<Expr>>,
+        fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
     },
 
     /// [`expr`] . [`expr`]
     Dot {
-        lhs: NonNull<Expr>,
+        lhs: Ptr<Expr>,
         rhs: Ident,
     },
     /// examples: `<expr>?`, `<expr>.*`
     PostOp {
-        expr: NonNull<Expr>,
+        expr: Ptr<Expr>,
         kind: PostOpKind,
     },
     /// `<lhs> [ <idx> ]`
     Index {
-        lhs: NonNull<Expr>,
-        idx: NonNull<Expr>,
+        lhs: Ptr<Expr>,
+        idx: Ptr<Expr>,
     },
 
     /*
     /// `<func> < <params> >`
     CompCall {
-        func: NonNull<Expr>,
+        func: Ptr<Expr>,
         args: Vec<Expr>,
     },
     */
     /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
     Call {
-        func: NonNull<Expr>,
-        args: NonNull<[NonNull<Expr>]>,
+        func: Ptr<Expr>,
+        args: Ptr<[Ptr<Expr>]>,
     },
 
     /// examples: `&<expr>`, `- <expr>`
+    /// `          ^^^^^^^`  `^^^^^^^^ expr.span`
+    /// `          ^`        `^ op_span`
     PreOp {
         kind: PreOpKind,
-        expr: NonNull<Expr>,
+        expr: Ptr<Expr>,
+        op_span: Span,
     },
     /// `<lhs> op <lhs>`
+    /// `^^^^^^^^^^^^^^ expr.span`
+    /// `      ^^ op_span`
     BinOp {
-        lhs: NonNull<Expr>,
+        lhs: Ptr<Expr>,
         op: BinOpKind,
-        rhs: NonNull<Expr>,
+        rhs: Ptr<Expr>,
+        op_span: Span, // TODO: maybe move this back to `expr.span` and calculate the full span only if needed
     },
     /// `<lhs> = <lhs>`
     Assign {
-        //lhs: NonNull<LValue>,
-        lhs: NonNull<Expr>,
-        rhs: NonNull<Expr>,
+        //lhs: Ptr<LValue>,
+        lhs: Ptr<Expr>,
+        rhs: Ptr<Expr>,
+        op_span: Span,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
-        //lhs: NonNull<LValue>,
-        lhs: NonNull<Expr>,
+        //lhs: Ptr<LValue>,
+        lhs: Ptr<Expr>,
         op: BinOpKind,
-        rhs: NonNull<Expr>,
+        rhs: Ptr<Expr>,
+        op_span: Span,
     },
 
     /// variable declaration (and optional initialization)
@@ -131,38 +142,38 @@ pub enum ExprKind {
     // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
     // ExternDecl {
     //     is_pub: bool,
-    //     ident: NonNull<Expr>,
-    //     ty: NonNull<Expr>,
+    //     ident: Ptr<Expr>,
+    //     ty: Ptr<Expr>,
     // },
     /// `if <cond> <then>` (`else <else>`)
     If {
-        condition: NonNull<Expr>,
-        then_body: NonNull<Expr>,
-        else_body: Option<NonNull<Expr>>,
+        condition: Ptr<Expr>,
+        then_body: Ptr<Expr>,
+        else_body: Option<Ptr<Expr>>,
     },
     /// `match <val> <body>` (`else <else>`)
     Match {
-        val: NonNull<Expr>,
+        val: Ptr<Expr>,
         // TODO
-        else_body: Option<NonNull<Expr>>,
+        else_body: Option<Ptr<Expr>>,
     },
 
     /// TODO: normal syntax
     /// `<source> | for <iter_var> <body>`
     For {
-        source: NonNull<Expr>,
+        source: Ptr<Expr>,
         iter_var: Ident,
-        body: NonNull<Expr>,
+        body: Ptr<Expr>,
     },
     /// `while <cond> <body>`
     While {
-        condition: NonNull<Expr>,
-        body: NonNull<Expr>,
+        condition: Ptr<Expr>,
+        body: Ptr<Expr>,
     },
 
     /// `lhs catch ...`
     Catch {
-        lhs: NonNull<Expr>,
+        lhs: Ptr<Expr>,
         // TODO
     },
 
@@ -170,15 +181,15 @@ pub enum ExprKind {
     /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
     /// `lhs | while ...` are inlined during parsing
     Pipe {
-        lhs: NonNull<Expr>,
+        lhs: Ptr<Expr>,
         // TODO
     },
 
     Return {
-        expr: Option<NonNull<Expr>>,
+        expr: Option<Ptr<Expr>>,
     },
 
-    Semicolon(Option<NonNull<Expr>>),
+    Semicolon(Option<Ptr<Expr>>),
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +207,12 @@ impl From<(ExprKind, Span)> for Expr {
 impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Self {
         Self { kind, span }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -319,10 +336,10 @@ pub enum PostOpKind {
 pub struct VarDecl {
     pub markers: DeclMarkers,
     pub ident: Ident,
-    pub ty: Option<Type>,
+    pub ty: Type,
     /// * default value for fn params, struct fields, ...
     /// * init for local veriable declarations
-    pub default: Option<NonNull<Expr>>,
+    pub default: Option<Ptr<Expr>>,
     pub is_const: bool,
 }
 
@@ -351,13 +368,13 @@ pub enum DeclMarkerKind {
 pub enum VarDeclKind {
     /// `<name>: <ty>;`
     /// `<name>: <ty> = <init>;`
-    WithTy { ty: NonNull<Expr>, init: Option<NonNull<Expr>> },
+    WithTy { ty: Ptr<Expr>, init: Option<Ptr<Expr>> },
     /// `<name> := <init>;`
-    InferTy { init: NonNull<Expr> },
+    InferTy { init: Ptr<Expr> },
 }
 
 impl VarDeclKind {
-    pub fn get_init(&self) -> Option<&NonNull<Expr>> {
+    pub fn get_init(&self) -> Option<&Ptr<Expr>> {
         match self {
             VarDeclKind::WithTy { init, .. } => init.as_ref(),
             VarDeclKind::InferTy { init } => Some(init),
@@ -368,17 +385,13 @@ impl VarDeclKind {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ident {
-    pub(super) text: NonNull<str>,
+    pub(super) text: Ptr<str>,
     pub span: Span,
 }
 
 impl Ident {
     pub fn into_expr(self) -> Expr {
         Expr { kind: ExprKind::Ident(self.text), span: self.span }
-    }
-
-    pub fn get_text(&self) -> &str {
-        unsafe { self.text.as_ref() }
     }
 }
 
@@ -417,35 +430,49 @@ pub enum LitKind {
     Str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Void,
     Never,
-    Float { bits: u8 },
-    Function(NonNull<Expr>),
-
-    Unevaluated(NonNull<Expr>),
+    Float {
+        bits: u8,
+    },
+    Function(Ptr<Expr>),
+    //Literal(LitKind),
+    /// The type was not explicitly set in the original source code and must
+    /// still be inferred.
+    Unset,
+    /// The type was explicitly set in the original source code, but hasn't been
+    /// analyzed yet.
+    Unevaluated(Ptr<Expr>),
 }
 
-impl Type {
-    pub const UNKNOWN: Option<Type> = None;
-}
-
-pub trait IsValidType {
-    fn is_valid_ty(&self) -> bool;
-}
-
-impl IsValidType for Type {
-    fn is_valid_ty(&self) -> bool {
+impl fmt::Debug for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Unevaluated(_) => false,
-            _ => true,
+            Type::Void => write!(f, "Void"),
+            Type::Never => write!(f, "Never"),
+            Type::Float { bits } => write!(f, "f{}", bits),
+            Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
+            // Type::Literal(kind) => write!(f, "{:?}Lit", kind),
+            Type::Unset => write!(f, "Unset"),
+            Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
         }
     }
 }
 
-impl IsValidType for Option<Type> {
-    fn is_valid_ty(&self) -> bool {
-        self.as_ref().is_some_and(Type::is_valid_ty)
+impl Type {
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Type::Unset | Type::Unevaluated(_) => false,
+            _ => true,
+        }
+    }
+
+    /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
+    #[inline]
+    pub fn into_valid(self) -> Option<Type> {
+        if self.is_valid() { Some(self) } else { None }
     }
 }

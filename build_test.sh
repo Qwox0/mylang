@@ -22,6 +22,7 @@ rm "target/output.o" "target/test" 2>/dev/null
 cmd="cargo run"
 info "$cmd"
 #RUSTFLAGS=-Awarnings $cmd || error "Failed" 0
+#RUST_BACKTRACE=1 $cmd || error "Failed" 0 # slows down the Frontend (especially in non-release mode)
 $cmd || error "Failed" 0
 
 cmd="gcc test.c target/output.o -o target/test"

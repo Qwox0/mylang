@@ -1,15 +1,14 @@
-use super::Symbol;
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub struct SymbolTable<'ctx>(Vec<HashMap<String, Symbol<'ctx>>>);
+pub struct SymbolTable<Symbol>(Vec<HashMap<String, Symbol>>);
 
-impl<'ctx> SymbolTable<'ctx> {
-    pub fn with_one_scope() -> SymbolTable<'ctx> {
+impl<Symbol> SymbolTable<Symbol> {
+    pub fn with_one_scope() -> SymbolTable<Symbol> {
         SymbolTable(vec![HashMap::new()])
     }
 
-    pub fn inner(&self) -> &[HashMap<String, Symbol<'ctx>>] {
+    pub fn inner(&self) -> &[HashMap<String, Symbol>] {
         &self.0
     }
 
@@ -21,7 +20,7 @@ impl<'ctx> SymbolTable<'ctx> {
         self.0.pop();
     }
 
-    fn get_last_mut(&mut self) -> &mut HashMap<String, Symbol<'ctx>> {
+    fn get_last_mut(&mut self) -> &mut HashMap<String, Symbol> {
         self.0.last_mut().expect("symbol table has at least one scope")
     }
 
@@ -30,11 +29,11 @@ impl<'ctx> SymbolTable<'ctx> {
         self.get_last_mut().reserve(additional)
     }
 
-    pub fn insert(&mut self, name: String, value: Symbol<'ctx>) -> Option<Symbol<'ctx>> {
-        self.get_last_mut().insert(name, value)
+    pub fn insert(&mut self, name: impl ToString, value: Symbol) -> Option<Symbol> {
+        self.get_last_mut().insert(name.to_string(), value)
     }
 
-    pub fn get(&self, name: &str) -> Option<&Symbol<'ctx>> {
+    pub fn get(&self, name: &str) -> Option<&Symbol> {
         self.0.iter().rev().find_map(|scope| scope.get(name))
     }
 }

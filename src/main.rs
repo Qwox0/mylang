@@ -5,6 +5,7 @@ use mylang::{
     cli::Cli,
     codegen::llvm,
     parser::{lexer::Lexer, parser_helper::ParserInterface, DebugAst, StmtIter},
+    sema,
     util::display_spanned_error,
 };
 use std::{io::Read, path::Path, time::Instant};
@@ -158,7 +159,8 @@ fn read_code_file(path: &Path) -> String {
 
 fn dev() {
     const DEBUG_TOKENS: bool = false;
-    const DEBUG_AST: bool = true;
+    const DEBUG_AST: bool = false;
+    const DEBUG_TYPED_AST: bool = true;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
@@ -166,7 +168,11 @@ fn dev() {
     let alloc = bumpalo::Bump::new();
 
     let code = "
-pub sub :: (a, b, ) -> -b + a;
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
+};
+pub sub :: (a: f64, b: f64, ) -> -b + a;
 
 // Sub :: struct {
 //     a: f64,
@@ -187,10 +193,9 @@ mymain :: -> {
     //sub2(Sub.{ a = a, b })
     sub(a, b)
 };
-pub test :: (mut x := 1) -> {
-    x += 1;
-    1+2*x
-};
+
+// pub infer_problem1 :: () -> infer_problem2();
+// pub infer_problem2 :: () -> infer_problem1();
 ";
 
     let code = code.as_ref();
@@ -222,7 +227,7 @@ pub test :: (mut x := 1) -> {
     }
 
     println!("### Frontend:");
-    let frontend_start = Instant::now();
+    let frontend_parse_start = Instant::now();
     let context = Context::create();
     let mut compiler = llvm::Codegen::new_module(&context, "dev");
 
@@ -244,14 +249,49 @@ pub test :: (mut x := 1) -> {
     if has_parse_error {
         panic!("Parse ERROR")
     }
+    let frontend_parse_duration = frontend_parse_start.elapsed();
 
+    let frontend_sema_start = Instant::now();
+    let mut sema = sema::Sema::new(code);
+
+    for s in stmts.iter().copied() {
+        sema.preload_top_level(s).unwrap(); // TODO: error handling
+    }
+    println!("{:#?}", sema.symbols);
+
+    let mut has_sema_error = false;
+    for s in stmts.iter().copied() {
+        println!("{:?}", s);
+        if let Err(e) = sema.analyze_top_level(s) {
+            display_spanned_error(e, code);
+            has_sema_error = true;
+        }
+    }
+
+    if has_sema_error {
+        panic!("Semantic analysis ERROR")
+    }
+    let frontend_sema_duration = frontend_sema_start.elapsed();
+
+    if DEBUG_TYPED_AST {
+        println!("\n### Typed AST Nodes:");
+        for s in stmts.iter().copied() {
+            println!("stmt @ {:?}", s);
+            s.print_tree();
+        }
+        println!();
+    }
+
+    let frontend_codegen_start = Instant::now();
     for expr in stmts {
         compiler
-            .compile_top_level_fn_body(unsafe { expr.as_ref() })
+            .compile_top_level_fn_body(&expr)
             .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
     }
     let module = compiler.into_module();
-    let frontend_duration = frontend_start.elapsed();
+    let frontend_codegen_duration = frontend_codegen_start.elapsed();
+    let frontend_duration =
+        frontend_parse_duration + frontend_sema_duration + frontend_codegen_duration;
 
     print!("functions:");
     for a in module.get_functions() {
@@ -290,9 +330,12 @@ pub test :: (mut x := 1) -> {
     }
 
     println!("### Compilation time:");
-    println!("  Frontend:     {:<10?} (Lever, Parser, LLVM IR codegen)", frontend_duration);
-    println!("  LLVM Backend: {:<10?} (LLVM pass pipeline)", backend_duration);
-    println!("  Total:        {:?}", frontend_duration + backend_duration);
+    println!("  Frontend:            {:?}", frontend_duration);
+    println!("    Lexer, Parser:     {:?}", frontend_parse_duration);
+    println!("    Semantic Analysis: {:?}", frontend_sema_duration);
+    println!("    LLVM IR Codegen:   {:?}", frontend_codegen_duration);
+    println!("  LLVM Backend:        {:?} (LLVM pass pipeline)", backend_duration);
+    println!("  Total:               {:?}", frontend_duration + backend_duration);
 }
 
 fn compile(module: &Module, target_machine: &TargetMachine) {

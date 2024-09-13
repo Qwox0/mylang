@@ -250,6 +250,10 @@ impl Span {
         Self::new(pos, pos + 1)
     }
 
+    pub fn zero_width(pos: usize) -> Span {
+        Span::new(pos, pos)
+    }
+
     pub fn len(&self) -> usize {
         (self.start..self.end).len()
     }

@@ -3,13 +3,14 @@ use crate::{
         BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Ident, PostOpKind, PreOpKind, Type,
         VarDecl,
     },
+    ptr::Ptr,
     scratch_pool::ScratchPool,
 };
 use debug::TreeLines;
 pub use error::*;
 use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
-use std::{ptr::NonNull, str::FromStr};
+use std::str::FromStr;
 
 pub mod error;
 pub mod lexer;
@@ -37,7 +38,7 @@ impl Expr {
     }
 }
 
-pub fn ty(ty_expr: NonNull<Expr>) -> Type {
+pub fn ty(ty_expr: Ptr<Expr>) -> Type {
     Type::Unevaluated(ty_expr)
 }
 
@@ -54,7 +55,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         Self { lex, alloc }
     }
 
-    pub fn top_level_item(&mut self) -> ParseResult<NonNull<Expr>> {
+    pub fn top_level_item(&mut self) -> ParseResult<Ptr<Expr>> {
         let res = self.expr().map_err(|err| {
             if err.kind == ParseErrorKind::NoInput {
                 ParseError { kind: ParseErrorKind::Finished, ..err }
@@ -67,11 +68,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         res
     }
 
-    pub fn expr(&mut self) -> ParseResult<NonNull<Expr>> {
+    pub fn expr(&mut self) -> ParseResult<Ptr<Expr>> {
         self.expr_(MIN_PRECEDENCE)
     }
 
-    pub fn expr_(&mut self, min_precedence: usize) -> ParseResult<NonNull<Expr>> {
+    pub fn expr_(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
         self.ws0();
         let mut lhs = self.value(min_precedence).context("expr lhs")?;
         loop {
@@ -83,11 +84,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
     }
 
-    pub fn op_chain(
-        &mut self,
-        lhs: NonNull<Expr>,
-        min_precedence: usize,
-    ) -> ParseResult<NonNull<Expr>> {
+    pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
         self.ws0();
         let Some(Token { kind, span }) = self.lex.peek() else {
             return err!(Finished, self.lex.pos_span());
@@ -147,13 +144,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(Initializer { lhs: Some(lhs), fields }, span.join(close_b_span))
             },
             FollowingOperator::SingleArgNoParenFn => {
-                let Ok(lhs) = unsafe { lhs.as_ref() }.try_to_ident() else {
-                    panic!("SingleArgFn: unknown rhs")
-                };
+                let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
                 let param = VarDecl {
                     markers: DeclMarkers::default(),
                     ident: lhs,
-                    ty: None,
+                    ty: Type::Unset,
                     default: None,
                     is_const: false,
                 };
@@ -167,38 +162,53 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
-                let span = unsafe { lhs.as_ref().span.join(rhs.as_ref().span) };
-                expr!(BinOp { lhs, op, rhs }, span)
+                let full_span = lhs.span.join(rhs.span);
+                expr!(BinOp { lhs, op, rhs, op_span: span }, full_span)
             },
             FollowingOperator::Assign => {
                 let rhs = self.expr()?;
-                expr!(Assign { lhs, rhs }, span)
+                let full_span = lhs.span.join(rhs.span);
+                expr!(Assign { lhs, rhs, op_span: span }, full_span)
             },
             FollowingOperator::BinOpAssign(op) => {
                 let rhs = self.expr()?;
-                expr!(BinOpAssign { lhs, op, rhs }, span)
+                let full_span = lhs.span.join(rhs.span);
+                expr!(BinOpAssign { lhs, op, rhs, op_span: span }, full_span)
             },
             FollowingOperator::VarDecl => {
                 let markers = DeclMarkers::default();
-                let ident = unsafe { lhs.as_ref() }.try_to_ident().context("var decl ident")?;
+                let ident = lhs.try_to_ident().context("var decl ident")?;
                 let init = self.expr().context(":= init")?;
-                let decl =
-                    VarDecl { markers, ident, ty: None, default: Some(init), is_const: false };
+                let decl = VarDecl {
+                    markers,
+                    ident,
+                    ty: Type::Unset,
+                    default: Some(init),
+                    is_const: false,
+                };
+                let span = ident.span.join(init.span);
                 expr!(VarDecl(decl), span)
             },
             FollowingOperator::ConstDecl => {
                 let markers = DeclMarkers::default();
-                let ident = unsafe { lhs.as_ref() }.try_to_ident().context("const decl ident")?;
+                let ident = lhs.try_to_ident().context("const decl ident")?;
                 let init = self.expr().context(":: init")?;
-                let decl =
-                    VarDecl { markers, ident, ty: None, default: Some(init), is_const: true };
+                let decl = VarDecl {
+                    markers,
+                    ident,
+                    ty: Type::Unset,
+                    default: Some(init),
+                    is_const: true,
+                };
+                let span = ident.span.join(init.span);
                 expr!(VarDecl(decl), span)
             },
             FollowingOperator::TypedDecl => {
-                let decl = self.typed_decl(
+                let (decl, end_span) = self.typed_decl(
                     DeclMarkers::default(),
-                    unsafe { lhs.as_ref() }.try_to_ident().context("const decl ident")?,
+                    lhs.try_to_ident().context("const decl ident")?,
                 )?;
+                let span = span.join(end_span);
                 expr!(VarDecl(decl), span)
             },
             FollowingOperator::Pipe => {
@@ -235,7 +245,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// anything which has higher precedence than any operator
-    pub fn value(&mut self, min_precedence: usize) -> ParseResult<NonNull<Expr>> {
+    pub fn value(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
         let Token { kind, span } = self.next_tok().context("expected value")?;
 
         macro_rules! expr {
@@ -255,20 +265,16 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
         let expr = match kind {
             TokenKind::Ident => expr!(Ident(self.get_text_from_span(span))),
-            TokenKind::Keyword(Keyword::Mut) => {
+            TokenKind::Keyword(k @ Keyword::Mut | k @ Keyword::Rec | k @ Keyword::Pub) => {
                 self.ws0();
-                let markers = DeclMarkers { is_pub: false, is_mut: true, is_rec: false };
-                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
-            },
-            TokenKind::Keyword(Keyword::Rec) => {
-                self.ws0();
-                let markers = DeclMarkers { is_pub: false, is_mut: false, is_rec: true };
-                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
-            },
-            TokenKind::Keyword(Keyword::Pub) => {
-                self.ws0();
-                let markers = DeclMarkers { is_pub: true, is_mut: false, is_rec: false };
-                expr!(VarDecl(self.var_decl_with_markers(markers)?), span)
+                let markers = match k {
+                    Keyword::Mut => DeclMarkers { is_pub: false, is_mut: true, is_rec: false },
+                    Keyword::Rec => DeclMarkers { is_pub: false, is_mut: false, is_rec: true },
+                    Keyword::Pub => DeclMarkers { is_pub: true, is_mut: false, is_rec: false },
+                    _ => unreachable!(),
+                };
+                let (decl, end_span) = self.var_decl_with_markers(markers)?;
+                expr!(VarDecl(decl), span.join(end_span))
             },
             TokenKind::Keyword(Keyword::Struct) => {
                 self.ws0();
@@ -367,7 +373,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     if self.lex.advance_if(|t| t.kind == TokenKind::CloseParenthesis) {
                         break;
                     }
-                    let param = self.var_decl().context("function parameter")?;
+                    let (param, _end_span) = self.var_decl().context("function parameter")?;
+                    // TODO: use end_span
                     params.push(param).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
                     match self.ws0_and_next_tok() {
                         Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
@@ -393,12 +400,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBrace => return self.block(span),
             TokenKind::Bang => {
                 let expr = self.expr_(usize::MAX).context("! expr")?;
-                expr!(PreOp { kind: PreOpKind::Not, expr }, span)
+                let full_span = span.join(expr.span);
+                expr!(PreOp { kind: PreOpKind::Not, expr, op_span: span }, full_span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
                 let expr = self.expr_(usize::MAX).context("- expr")?;
-                expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
+                let full_span = span.join(expr.span);
+                expr!(PreOp { kind: PreOpKind::Neg, expr, op_span: span }, full_span)
             },
             TokenKind::Arrow => return self.function_tail(self.alloc_empty_slice(), span),
             TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
@@ -417,7 +426,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             //TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
             TokenKind::Question => {
                 let type_ = self.expr().expect("type after ?");
-                expr!(OptionShort(ty(type_)), span.join(unsafe { type_.as_ref().span }))
+                expr!(OptionShort(ty(type_)), span.join(type_.span))
             },
             TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -439,23 +448,23 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// parsing starts after the '->'
     pub fn function_tail(
         &mut self,
-        params: NonNull<[VarDecl]>,
+        params: Ptr<[VarDecl]>,
         start_span: Span,
-    ) -> ParseResult<NonNull<Expr>> {
+    ) -> ParseResult<Ptr<Expr>> {
         let expr = self.expr().context("fn return type or body")?;
         let (ret_type, body) = match self.lex.next_if(|t| t.kind == TokenKind::OpenBrace) {
-            Some(brace) => (Some(ty(expr)), self.block(brace.span).context("fn body")?),
-            None => (Type::UNKNOWN, expr),
+            Some(brace) => (ty(expr), self.block(brace.span).context("fn body")?),
+            None => (Type::Unset, expr),
         };
-        let span = start_span.join(unsafe { body.as_ref().span });
+        let span = start_span.join(body.span);
         self.alloc(expr!(Fn { params, ret_type, body }, span))
     }
 
     pub fn if_after_cond(
         &mut self,
-        condition: NonNull<Expr>,
+        condition: Ptr<Expr>,
         start_span: Span,
-    ) -> ParseResult<NonNull<Expr>> {
+    ) -> ParseResult<Ptr<Expr>> {
         let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
         self.ws0();
         let else_body = self
@@ -472,10 +481,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// `     ^` starts here
     pub fn call(
         &mut self,
-        func: NonNull<Expr>,
+        func: Ptr<Expr>,
         open_paren_span: Span,
-        mut args: ScratchPool<NonNull<Expr>>,
-    ) -> ParseResult<NonNull<Expr>> {
+        mut args: ScratchPool<Ptr<Expr>>,
+    ) -> ParseResult<Ptr<Expr>> {
         let closing_paren_span = loop {
             self.ws0();
             if let Some(closing_paren) = self.lex.next_if(is_close_paren) {
@@ -489,11 +498,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             };
         };
         let args = self.clone_slice_from_scratch_pool(args)?;
-        self.alloc(expr!(Call { func, args }, open_paren_span.join(closing_paren_span)))
+        self.alloc(expr!(Call { func, args }, func.span.join(closing_paren_span)))
     }
 
     /// parses block context and '}', doesn't parse the '{'
-    pub fn block(&mut self, open_brace_span: Span) -> ParseResult<NonNull<Expr>> {
+    pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
         let mut stmts = ScratchPool::new();
         let (has_trailing_semicolon, closing_brace_span) = loop {
             self.ws0();
@@ -514,13 +523,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// `struct { ... }`
     /// `         ^^^` Parses this
-    pub fn struct_fields(&mut self) -> ParseResult<NonNull<[VarDecl]>> {
+    pub fn struct_fields(&mut self) -> ParseResult<Ptr<[VarDecl]>> {
         let mut fields = ScratchPool::new();
         loop {
             if self.lex.advance_if(|t| t.kind == TokenKind::CloseBrace) {
                 break;
             }
-            let field = self.var_decl().context("struct field")?;
+            let (field, _end_span) = self.var_decl().context("struct field")?;
+            // TODO: use end_span
             fields.push(field).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
             match self.ws0_and_next_tok() {
                 Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
@@ -531,19 +541,48 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         self.clone_slice_from_scratch_pool(fields)
     }
 
+    /*
+    /// Parses [`ExprParser::var_decl`] multiple times, seperated by `sep`.
+    ///
+    /// `has_finished` receives two non-whitespace tokens behind each
+    /// [`ExprParser::var_decl`]. Only the first token is consumed.
+    pub fn var_decl_list(
+        &mut self,
+        mut has_finished: impl FnMut(ParseResult<Token>, Option<&Token>) -> ParseResult<bool>,
+    ) -> ParseResult<Ptr<[VarDecl]>> {
+        let mut list = ScratchPool::new();
+        loop {
+            let decl = self.var_decl().context("var_decl")?;
+            list.push(decl).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
+            self.ws0();
+            let sep = self.next_tok();
+            self.ws0();
+            if has_finished(sep, self.lex.peek().as_ref())? {
+                break;
+            }
+        }
+        self.clone_slice_from_scratch_pool(list)
+    }
+     */
+
     /// These options are allowed in a lot of places:
     /// * `[markers] ident`
     /// * `[markers] ident: ty`
     /// * `[markers] ident: ty = default`
     /// * `[markers] ident := default`
     ///
-    /// That is the reason why this doesn't return a [`NonNull<Expr>`].
-    pub fn var_decl(&mut self) -> ParseResult<VarDecl> {
+    /// That is the reason why this doesn't return a [`Ptr<Expr>`].
+    pub fn var_decl(&mut self) -> ParseResult<(VarDecl, Span)> {
         self.var_decl_with_markers(DeclMarkers::default())
     }
 
     /// This will still parse more markers, if they exists.
-    pub fn var_decl_with_markers(&mut self, mut markers: DeclMarkers) -> ParseResult<VarDecl> {
+    /// Also returns a zero-width [`Span`] which points to the end of the
+    /// variable declaration.
+    pub fn var_decl_with_markers(
+        &mut self,
+        mut markers: DeclMarkers,
+    ) -> ParseResult<(VarDecl, Span)> {
         let mut t = self.next_tok().context("expected variable marker or ident")?;
 
         macro_rules! set_marker {
@@ -582,14 +621,22 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             _ => None,
         };
         let is_const = t.is_some_and(|t| t.kind == TokenKind::ColonColon);
-        Ok(VarDecl { markers, ident, ty: None, default: init, is_const })
+        let end_span = Span::zero_width(init.map(|e| e.span.end).unwrap_or(ident.span.end));
+        Ok((VarDecl { markers, ident, ty: Type::Unset, default: init, is_const }, end_span))
     }
 
     /// starts parsing after the colon:
     /// `mut a: int = 0;`
     /// `      ^`
-    pub fn typed_decl(&mut self, markers: DeclMarkers, ident: Ident) -> ParseResult<VarDecl> {
-        let ty = Some(ty(self.expr().context("decl type")?));
+    ///
+    /// Also returns a zero-width [`Span`] which points to the end of the
+    /// variable declaration.
+    pub fn typed_decl(
+        &mut self,
+        markers: DeclMarkers,
+        ident: Ident,
+    ) -> ParseResult<(VarDecl, Span)> {
+        let ty_expr = self.expr().context("decl type")?;
         self.ws0();
         let t = self.lex.peek();
         let init = t
@@ -597,7 +644,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             .map(|_| self.expr().context("variable initialization"))
             .transpose()?;
         let is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
-        Ok(VarDecl { markers, ident, ty, default: init, is_const })
+        let end_span =
+            Span::zero_width(init.map(|e| e.span.end).unwrap_or_else(|| ty_expr.span.end));
+        let ty = ty(ty_expr);
+        Ok((VarDecl { markers, ident, ty, default: init, is_const }, end_span))
     }
 
     pub fn ident(&mut self) -> ParseResult<Ident> {
@@ -646,9 +696,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     // helpers:
 
     #[inline]
-    fn alloc<T>(&self, val: T) -> ParseResult<NonNull<T>> {
+    fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
         match self.alloc.try_alloc(val) {
-            Result::Ok(ok) => Ok(NonNull::from(ok)),
+            Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
         }
     }
@@ -658,7 +708,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// see [`bumpalo::Bump::alloc_slice_copy`]
     #[inline]
     #[allow(unused)]
-    fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<NonNull<[T]>> {
+    fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
         let layout = core::alloc::Layout::for_value(slice);
         let dst = self
             .alloc
@@ -666,7 +716,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             .map_err(|err| err!(x AllocErr(err), self.lex.pos_span()))?
             .cast::<T>();
 
-        Ok(NonNull::from(unsafe {
+        Ok(Ptr::from(unsafe {
             core::ptr::copy_nonoverlapping(slice.as_ptr(), dst.as_ptr(), slice.len());
             core::slice::from_raw_parts_mut(dst.as_ptr(), slice.len())
         }))
@@ -676,18 +726,18 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     fn clone_slice_from_scratch_pool<T: Clone>(
         &self,
         scratch_pool: ScratchPool<T>,
-    ) -> ParseResult<NonNull<[T]>> {
+    ) -> ParseResult<Ptr<[T]>> {
         scratch_pool
             .clone_to_slice_in_bump(&self.alloc)
             .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))
     }
 
     #[inline]
-    fn alloc_empty_slice<T>(&self) -> NonNull<[T]> {
-        NonNull::from(&[])
+    fn alloc_empty_slice<T>(&self) -> Ptr<[T]> {
+        Ptr::from(&[] as &[T])
     }
 
-    fn get_text_from_span(&self, span: Span) -> NonNull<str> {
+    fn get_text_from_span(&self, span: Span) -> Ptr<str> {
         self.lex.get_code()[span].into()
     }
 }
@@ -835,7 +885,7 @@ pub struct StmtIter<'code, 'alloc> {
 }
 
 impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
-    type Item = ParseResult<NonNull<Expr>>;
+    type Item = ParseResult<Ptr<Expr>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.parser.top_level_item() {
@@ -872,8 +922,10 @@ fn is_close_paren(t: Token) -> bool {
 
 pub mod debug {
     use super::{DebugAst, Ident};
-    use crate::ast::VarDecl;
-    use std::ptr::NonNull;
+    use crate::{
+        ast::{Type, VarDecl},
+        ptr::Ptr,
+    };
 
     #[derive(Default)]
     pub struct TreeLine(pub String);
@@ -938,9 +990,8 @@ pub mod debug {
         }
 
         pub fn write_ident(&mut self, ident: &Ident) {
-            let text = unsafe { ident.text.as_ref() };
-            self.scope_next_line(|l| l.write(text));
-            self.write_minus(text.len());
+            self.scope_next_line(|l| l.write(&ident.text));
+            self.write_minus(ident.text.len());
         }
 
         pub fn next_line(&mut self) {
@@ -957,24 +1008,23 @@ pub mod debug {
     }
 
     pub fn var_decl_to_text(VarDecl { markers, ident, ty, default, is_const }: &VarDecl) -> String {
-        unsafe {
-            format!(
-                "{}{}{}{}{}{}",
-                if markers.is_pub { "pub " } else { "" },
-                mut_marker(markers.is_mut),
-                if markers.is_rec { "rec " } else { "" },
-                ident.text.as_ref(),
-                ty.map(|ty| format!(":{}", ty.to_text())).unwrap_or_default(),
-                default
-                    .map(|default| format!(
-                        "{}{}{}",
-                        if ty.is_none() { ":" } else { "" },
-                        if *is_const { ":" } else { "=" },
-                        default.as_ref().to_text()
-                    ))
-                    .unwrap_or_default()
-            )
-        }
+        format!(
+            "{}{}{}{}{}{}{}",
+            if markers.is_pub { "pub " } else { "" },
+            mut_marker(markers.is_mut),
+            if markers.is_rec { "rec " } else { "" },
+            ident.text.as_ref(),
+            if *ty != Type::Unset { ":" } else { "" },
+            ty.to_text(),
+            default
+                .map(|default| format!(
+                    "{}{}{}",
+                    if *ty == Type::Unset { ":" } else { "" },
+                    if *is_const { ":" } else { "=" },
+                    default.to_text()
+                ))
+                .unwrap_or_default()
+        )
     }
 
     pub fn var_decl_write_tree(
@@ -990,16 +1040,16 @@ pub mod debug {
 
         lines.write_ident(ident);
 
-        if let Some(ty) = ty {
-            lines.write(": ");
+        if *ty != Type::Unset {
+            lines.write(":");
             lines.write_tree(ty);
         }
 
         if let Some(default) = default {
-            let default = unsafe { default.as_ref() };
+            let default = default;
             lines.write(&format!(
                 "{}{}",
-                if ty.is_none() { ":" } else { "" },
+                if *ty == Type::Unset { ":" } else { "" },
                 if *is_const { ":" } else { "=" },
             ));
             lines.write_tree(default);
@@ -1007,21 +1057,14 @@ pub mod debug {
     }
 
     pub fn many_to_text<T>(
-        elements: &NonNull<[T]>,
+        elements: &Ptr<[T]>,
         single_to_text: impl FnMut(&T) -> String,
         sep: &str,
     ) -> String {
-        unsafe {
-            elements
-                .as_ref()
-                .iter()
-                .map(single_to_text)
-                .intersperse(sep.to_string())
-                .collect()
-        }
+        elements.iter().map(single_to_text).intersperse(sep.to_string()).collect()
     }
 
-    pub fn many_expr_to_text<T: DebugAst>(elements: &NonNull<[T]>, sep: &str) -> String {
+    pub fn many_expr_to_text<T: DebugAst>(elements: &Ptr<[T]>, sep: &str) -> String {
         many_to_text(elements, |t| t.to_text(), sep)
     }
 
@@ -1054,349 +1097,328 @@ pub trait DebugAst {
     }
 }
 
-impl<T: DebugAst> DebugAst for NonNull<T> {
-    #[inline]
+impl<T: DebugAst> DebugAst for Ptr<T> {
     fn to_text(&self) -> String {
-        unsafe { self.as_ref() }.to_text()
+        self.as_ref().to_text()
     }
 
-    #[inline]
     fn write_tree(&self, lines: &mut TreeLines) {
-        unsafe { self.as_ref() }.write_tree(lines)
+        self.as_ref().write_tree(lines)
     }
 }
 
 impl DebugAst for Expr {
     fn to_text(&self) -> String {
-        unsafe {
-            #[allow(unused)]
-            match &self.kind {
-                ExprKind::Ident(text) => text.as_ref().to_string(),
-                ExprKind::Literal { kind: _, code } => code.as_ref().to_string(),
-                ExprKind::BoolLit(b) => b.to_string(),
-                ExprKind::ArraySemi { val, count } => {
-                    format!("[{};{}]", val.as_ref().to_text(), count.as_ref().to_text())
-                },
-                ExprKind::ArrayComma { elements } => {
-                    format!("[{}]", debug::many_expr_to_text(elements, ","))
-                },
-                ExprKind::Tuple { elements } => {
-                    format!("({})", debug::many_expr_to_text(elements, ","))
-                },
-                ExprKind::Fn { params, ret_type, body } => format!(
-                    "({})->{}{}{}{}",
-                    debug::many_to_text(params, |decl| debug::var_decl_to_text(decl), ","),
-                    debug::opt_expr_to_text(ret_type),
-                    if ret_type.is_some() { "{" } else { "" },
-                    body.as_ref().to_text(),
-                    if ret_type.is_some() { "}" } else { "" },
-                ),
-                ExprKind::Parenthesis { expr } => format!("({})", expr.as_ref().to_text()),
-                ExprKind::Block { stmts, has_trailing_semicolon } => {
-                    format!(
-                        "{{{}{}}}",
-                        debug::many_to_text(stmts, |a| a.as_ref().to_text(), ";"),
-                        if *has_trailing_semicolon { ";" } else { "" }
+        #[allow(unused)]
+        match &self.kind {
+            ExprKind::Ident(text) => text.to_string(),
+            ExprKind::Literal { kind: _, code } => code.to_string(),
+            ExprKind::BoolLit(b) => b.to_string(),
+            ExprKind::ArraySemi { val, count } => {
+                format!("[{};{}]", val.to_text(), count.to_text())
+            },
+            ExprKind::ArrayComma { elements } => {
+                format!("[{}]", debug::many_expr_to_text(elements, ","))
+            },
+            ExprKind::Tuple { elements } => {
+                format!("({})", debug::many_expr_to_text(elements, ","))
+            },
+            ExprKind::Fn { params, ret_type, body } => format!(
+                "({})->{}{}",
+                debug::many_to_text(params, |decl| debug::var_decl_to_text(decl), ","),
+                ret_type.to_text(),
+                if matches!(body.kind, ExprKind::Block { .. }) {
+                    body.to_text()
+                } else {
+                    format!("{{{}}}", body.to_text())
+                }
+            ),
+            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
+            ExprKind::Block { stmts, has_trailing_semicolon } => {
+                format!(
+                    "{{{}{}}}",
+                    debug::many_to_text(stmts, |a| a.to_text(), ";"),
+                    if *has_trailing_semicolon { ";" } else { "" }
+                )
+            },
+            ExprKind::StructDef(fields) => {
+                format!(
+                    "struct {{ {} }}",
+                    debug::many_to_text(fields, |f| debug::var_decl_to_text(f), ",")
+                )
+            },
+            ExprKind::UnionDef(..) => panic!(),
+            ExprKind::EnumDef {} => panic!(),
+            ExprKind::OptionShort(ty) => {
+                format!("?{}", ty.to_text())
+            },
+            ExprKind::Ptr { is_mut, ty } => {
+                format!("*{}{}", debug::mut_marker(*is_mut), ty.to_text())
+            },
+            ExprKind::Initializer { lhs, fields } => {
+                format!(
+                    "{}.{{{}}}",
+                    debug::opt_expr_to_text(lhs),
+                    debug::many_to_text(
+                        fields,
+                        |(f, val)| format!(
+                            "{}{}",
+                            f.text.as_ref(),
+                            debug::opt_to_text(val, |v| format!("={}", v.to_text())),
+                        ),
+                        ","
                     )
+                )
+            },
+            ExprKind::Dot { lhs, rhs } => {
+                format!("{}.{}", lhs.to_text(), rhs.text.as_ref())
+            },
+            //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(),
+            // rhs.to_text()) },
+            ExprKind::PostOp { kind, expr } => panic!(),
+            ExprKind::Index { lhs, idx } => panic!(),
+            //ExprKind::CompCall { func, args } => panic!(),
+            ExprKind::Call { func, args } => {
+                format!("{}({})", func.to_text(), debug::many_to_text(args, |e| e.to_text(), ","))
+            },
+            ExprKind::PreOp { kind, expr, .. } => format!(
+                "{}{}",
+                match kind {
+                    PreOpKind::AddrOf => "&",
+                    PreOpKind::AddrMutOf => "&mut ",
+                    PreOpKind::Deref => "*",
+                    PreOpKind::Not => "!",
+                    PreOpKind::Neg => "- ",
                 },
-                ExprKind::StructDef(fields) => {
-                    format!(
-                        "struct {{ {} }}",
-                        debug::many_to_text(fields, |f| debug::var_decl_to_text(f), ",")
-                    )
-                },
-                ExprKind::UnionDef(..) => panic!(),
-                ExprKind::EnumDef {} => panic!(),
-                ExprKind::OptionShort(ty) => {
-                    format!("?{}", ty.to_text())
-                },
-                ExprKind::Ptr { is_mut, ty } => {
-                    format!("*{}{}", debug::mut_marker(*is_mut), ty.to_text())
-                },
-                ExprKind::Initializer { lhs, fields } => {
-                    format!(
-                        "{}.{{{}}}",
-                        debug::opt_expr_to_text(lhs),
-                        debug::many_to_text(
-                            fields,
-                            |(f, val)| format!(
-                                "{}{}",
-                                f.text.as_ref(),
-                                debug::opt_to_text(val, |v| format!("={}", v.as_ref().to_text())),
-                            ),
-                            ","
-                        )
-                    )
-                },
-                ExprKind::Dot { lhs, rhs } => {
-                    format!("{}.{}", lhs.as_ref().to_text(), rhs.text.as_ref())
-                },
-                //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.as_ref().to_text(),
-                // rhs.as_ref().to_text()) },
-                ExprKind::PostOp { kind, expr } => panic!(),
-                ExprKind::Index { lhs, idx } => panic!(),
-                //ExprKind::CompCall { func, args } => panic!(),
-                ExprKind::Call { func, args } => format!(
-                    "{}({})",
-                    func.as_ref().to_text(),
-                    debug::many_to_text(args, |e| e.as_ref().to_text(), ",")
-                ),
-                ExprKind::PreOp { kind, expr } => format!(
-                    "{}{}",
-                    match kind {
-                        PreOpKind::AddrOf => "&",
-                        PreOpKind::AddrMutOf => "&mut ",
-                        PreOpKind::Deref => "*",
-                        PreOpKind::Not => "!",
-                        PreOpKind::Neg => "- ",
-                    },
-                    expr.as_ref().to_text()
-                ),
-                ExprKind::BinOp { lhs, op, rhs } => {
-                    format!(
-                        "{} {} {}",
-                        lhs.as_ref().to_text(),
-                        op.to_binop_text(),
-                        rhs.as_ref().to_text()
-                    )
-                },
-                ExprKind::Assign { lhs, rhs } => {
-                    format!("{}={}", lhs.as_ref().to_text(), rhs.as_ref().to_text())
-                },
-                ExprKind::BinOpAssign { lhs, op, rhs } => {
-                    format!(
-                        "{}{}{}",
-                        lhs.as_ref().to_text(),
-                        op.to_binop_assign_text(),
-                        rhs.as_ref().to_text()
-                    )
-                },
-                ExprKind::VarDecl(decl) => debug::var_decl_to_text(decl),
-                ExprKind::If { condition, then_body, else_body } => {
-                    format!(
-                        "if {} {}{}",
-                        condition.as_ref().to_text(),
-                        then_body.as_ref().to_text(),
-                        debug::opt_to_text(else_body, |e| format!(
-                            " else {}",
-                            e.as_ref().to_text()
-                        ))
-                    )
-                },
-                ExprKind::Match { val, else_body } => todo!(),
-                ExprKind::For { source, iter_var, body } => todo!(),
-                ExprKind::While { condition, body } => todo!(),
-                ExprKind::Catch { lhs } => todo!(),
-                ExprKind::Pipe { lhs } => todo!(),
-                ExprKind::Return { expr } => format!(
-                    "return{}",
-                    debug::opt_to_text(expr, |e| format!(" {}", e.as_ref().to_text()))
-                ),
-                ExprKind::Semicolon(expr) => format!("{};", debug::opt_expr_to_text(expr)),
-            }
+                expr.to_text()
+            ),
+            ExprKind::BinOp { lhs, op, rhs, .. } => {
+                format!("{} {} {}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
+            },
+            ExprKind::Assign { lhs, rhs, .. } => {
+                format!("{}={}", lhs.to_text(), rhs.to_text())
+            },
+            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
+                format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
+            },
+            ExprKind::VarDecl(decl) => debug::var_decl_to_text(decl),
+            ExprKind::If { condition, then_body, else_body } => {
+                format!(
+                    "if {} {}{}",
+                    condition.to_text(),
+                    then_body.to_text(),
+                    debug::opt_to_text(else_body, |e| format!(" else {}", e.to_text()))
+                )
+            },
+            ExprKind::Match { val, else_body } => todo!(),
+            ExprKind::For { source, iter_var, body } => todo!(),
+            ExprKind::While { condition, body } => todo!(),
+            ExprKind::Catch { lhs } => todo!(),
+            ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Return { expr } => {
+                format!("return{}", debug::opt_to_text(expr, |e| format!(" {}", e.to_text())))
+            },
+            ExprKind::Semicolon(expr) => format!("{};", debug::opt_expr_to_text(expr)),
         }
     }
 
     fn write_tree(&self, lines: &mut TreeLines) {
-        unsafe {
-            match &self.kind {
-                ExprKind::Ident(_) | ExprKind::Literal { .. } | ExprKind::BoolLit(_) => {
-                    lines.write(&self.to_text())
-                },
-                /*
-                ExprKind::ArrayShort { val, count } => {
-                    format!("[{};{}]", val.to_text(), count.to_text())
-                },
-                ExprKind::ArrayInit { elements } => format!(
-                    "[{}]",
-                    elements
-                        .iter()
-                        .map(|e| e.to_text())
-                        .intersperse(",".to_string())
-                        .collect::<String>()
-                ),
-                */
-                ExprKind::Tuple { elements } => {
-                    lines.write("(");
-                    debug::many_expr_to_text(elements, ",");
-                    lines.write(")");
-                },
-                ExprKind::Fn { params, ret_type, body } => {
-                    let body = body.as_ref();
-                    lines.write("(");
+        match &self.kind {
+            ExprKind::Ident(_) | ExprKind::Literal { .. } | ExprKind::BoolLit(_) => {
+                lines.write(&self.to_text())
+            },
+            /*
+            ExprKind::ArrayShort { val, count } => {
+                format!("[{};{}]", val.to_text(), count.to_text())
+            },
+            ExprKind::ArrayInit { elements } => format!(
+                "[{}]",
+                elements
+                    .iter()
+                    .map(|e| e.to_text())
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
+            */
+            ExprKind::Tuple { elements } => {
+                lines.write("(");
+                debug::many_expr_to_text(elements, ",");
+                lines.write(")");
+            },
+            ExprKind::Fn { params, ret_type, body } => {
+                let body = body;
+                lines.write("(");
 
-                    for (idx, decl) in params.as_ref().into_iter().enumerate() {
-                        if idx != 0 {
-                            lines.write(",");
-                        }
+                for (idx, decl) in params.into_iter().enumerate() {
+                    if idx != 0 {
+                        lines.write(",");
+                    }
 
-                        debug::var_decl_write_tree(decl, lines)
-                    }
-                    lines.write(")->");
-                    match ret_type {
-                        Some(ret_type) => {
-                            lines.write_tree(ret_type);
-                            lines.write("{");
-                            lines.write_tree(body);
-                            lines.write("}");
-                        },
-                        None => {
-                            lines.write_tree(body);
-                        },
-                    }
-                },
-                ExprKind::Parenthesis { expr } => {
-                    lines.write("(");
-                    lines.write_tree(expr.as_ref());
-                    lines.write(")");
-                },
-                ExprKind::Block { stmts, has_trailing_semicolon } => {
+                    debug::var_decl_write_tree(decl, lines)
+                }
+                lines.write(")->");
+                if *ret_type != Type::Unset {
+                    lines.write_tree(ret_type);
+                }
+                if matches!(body.kind, ExprKind::Block { .. }) {
+                    body.write_tree(lines);
+                } else {
                     lines.write("{");
-                    let len = stmts.len();
-                    for (idx, s) in stmts.as_ref().iter().enumerate() {
-                        lines.write_tree(s.as_ref());
-                        if idx + 1 < len || *has_trailing_semicolon {
-                            lines.write(";");
-                        }
-                    }
+                    lines.write_tree(body);
                     lines.write("}");
-                },
-                ExprKind::StructDef(fields) => {
-                    lines.write("struct { ");
-                    for (idx, field) in fields.as_ref().into_iter().enumerate() {
-                        if idx != 0 {
-                            lines.write(",");
-                        }
-
-                        debug::var_decl_write_tree(field, lines)
+                }
+            },
+            ExprKind::Parenthesis { expr } => {
+                lines.write("(");
+                lines.write_tree(expr);
+                lines.write(")");
+            },
+            ExprKind::Block { stmts, has_trailing_semicolon } => {
+                lines.write("{");
+                let len = stmts.len();
+                for (idx, s) in stmts.iter().enumerate() {
+                    lines.write_tree(s);
+                    if idx + 1 < len || *has_trailing_semicolon {
+                        lines.write(";");
                     }
-                    lines.write(" }");
-                },
-                /*
-                ExprKind::StructInit { fields, span } => panic!(),
-                ExprKind::TupleStructDef { fields, span } => panic!(),
-                ExprKind::Union { span } => panic!(),
-                ExprKind::Enum { span } => panic!(),
-                */
-                ExprKind::OptionShort(ty) => {
-                    lines.write("?");
-                    lines.write_tree(ty);
-                },
-                ExprKind::Ptr { is_mut, ty } => {
-                    lines.write("*");
-                    if *is_mut {
-                        lines.write("mut ");
-                    }
-                    lines.write_tree(ty);
-                },
-                ExprKind::Initializer { lhs, fields } => {
-                    if let Some(lhs) = lhs {
-                        lines.write_tree(lhs.as_ref());
-                    }
-                    lines.write(".{");
-                    for (idx, (field, val)) in fields.as_ref().into_iter().enumerate() {
-                        if idx != 0 {
-                            lines.write(",");
-                        }
-                        lines.write_ident(field);
-                        if let Some(val) = val {
-                            lines.write("=");
-                            lines.write_tree(val.as_ref());
-                        }
+                }
+                lines.write("}");
+            },
+            ExprKind::StructDef(fields) => {
+                lines.write("struct { ");
+                for (idx, field) in fields.into_iter().enumerate() {
+                    if idx != 0 {
+                        lines.write(",");
                     }
 
-                    lines.write("}");
-                },
-                ExprKind::Dot { lhs, rhs } => {
-                    let lhs = lhs.as_ref();
+                    debug::var_decl_write_tree(field, lines)
+                }
+                lines.write(" }");
+            },
+            /*
+            ExprKind::StructInit { fields, span } => panic!(),
+            ExprKind::TupleStructDef { fields, span } => panic!(),
+            ExprKind::Union { span } => panic!(),
+            ExprKind::Enum { span } => panic!(),
+            */
+            ExprKind::OptionShort(ty) => {
+                lines.write("?");
+                lines.write_tree(ty);
+            },
+            ExprKind::Ptr { is_mut, ty } => {
+                lines.write("*");
+                if *is_mut {
+                    lines.write("mut ");
+                }
+                lines.write_tree(ty);
+            },
+            ExprKind::Initializer { lhs, fields } => {
+                if let Some(lhs) = lhs {
                     lines.write_tree(lhs);
-                    lines.write(".");
-                    lines.write_ident(rhs);
-                },
-                /*
-                ExprKind::PostOp { kind, expr, span } => panic!(),
-                ExprKind::Index { lhs, idx, span } => panic!(),
-                ExprKind::CompCall { func, args } => panic!(),
-                */
-                ExprKind::Call { func, args } => {
-                    let func = func.as_ref();
-                    lines.write_tree(func);
-                    lines.write("(");
-                    let len = args.as_ref().len();
-                    for (idx, arg) in args.as_ref().into_iter().enumerate() {
-                        let arg = arg.as_ref();
-                        lines.write_tree(arg);
-                        if idx + 1 != len {
-                            lines.write(",");
-                        }
+                }
+                lines.write(".{");
+                for (idx, (field, val)) in fields.into_iter().enumerate() {
+                    if idx != 0 {
+                        lines.write(",");
                     }
-                    lines.write(")");
-                },
-                ExprKind::PreOp { kind, expr } => {
-                    let expr = expr.as_ref();
-                    lines.write(match kind {
-                        PreOpKind::AddrOf => "&",
-                        PreOpKind::AddrMutOf => "&mut ",
-                        PreOpKind::Deref => "*",
-                        PreOpKind::Not => "!",
-                        PreOpKind::Neg => "- ",
-                    });
+                    lines.write_ident(field);
+                    if let Some(val) = val {
+                        lines.write("=");
+                        lines.write_tree(val);
+                    }
+                }
+
+                lines.write("}");
+            },
+            ExprKind::Dot { lhs, rhs } => {
+                let lhs = lhs;
+                lines.write_tree(lhs);
+                lines.write(".");
+                lines.write_ident(rhs);
+            },
+            /*
+            ExprKind::PostOp { kind, expr, span } => panic!(),
+            ExprKind::Index { lhs, idx, span } => panic!(),
+            ExprKind::CompCall { func, args } => panic!(),
+            */
+            ExprKind::Call { func, args } => {
+                let func = func;
+                lines.write_tree(func);
+                lines.write("(");
+                let len = args.len();
+                for (idx, arg) in args.into_iter().enumerate() {
+                    let arg = arg;
+                    lines.write_tree(arg);
+                    if idx + 1 != len {
+                        lines.write(",");
+                    }
+                }
+                lines.write(")");
+            },
+            ExprKind::PreOp { kind, expr, .. } => {
+                let expr = expr;
+                lines.write(match kind {
+                    PreOpKind::AddrOf => "&",
+                    PreOpKind::AddrMutOf => "&mut ",
+                    PreOpKind::Deref => "*",
+                    PreOpKind::Not => "!",
+                    PreOpKind::Neg => "- ",
+                });
+                lines.write_tree(expr);
+            },
+            ExprKind::BinOp { lhs, op, rhs, .. } => {
+                let lhs = lhs;
+                let rhs = rhs;
+                lines.write_tree(lhs);
+                lines.write(" ");
+                lines.write(op.to_binop_text());
+                lines.write(" ");
+                lines.write_tree(rhs);
+            },
+            ExprKind::Assign { lhs, rhs, .. } => {
+                let lhs = lhs;
+                let rhs = rhs;
+                lines.write_tree(lhs);
+                lines.write("=");
+                lines.write_tree(rhs);
+            },
+            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
+                let lhs = lhs;
+                let rhs = rhs;
+                lines.write_tree(lhs);
+                lines.write(op.to_binop_assign_text());
+                lines.write_tree(rhs);
+            },
+            ExprKind::If { condition, then_body, else_body } => {
+                let condition = condition;
+                let then_body = then_body;
+                lines.write("if ");
+                lines.write_tree(condition);
+                lines.write(" ");
+                lines.write_tree(then_body);
+                if let Some(else_body) = else_body {
+                    let else_body = else_body;
+                    lines.write(" else ");
+                    lines.write_tree(else_body);
+                }
+            },
+            ExprKind::VarDecl(decl) => debug::var_decl_write_tree(decl, lines),
+            ExprKind::Return { expr } => {
+                lines.write("return");
+                if let Some(expr) = expr {
+                    let expr = expr;
+                    lines.write(" ");
                     lines.write_tree(expr);
-                },
-                ExprKind::BinOp { lhs, op, rhs } => {
-                    let lhs = lhs.as_ref();
-                    let rhs = rhs.as_ref();
-                    lines.write_tree(lhs);
-                    lines.write(" ");
-                    lines.write(op.to_binop_text());
-                    lines.write(" ");
-                    lines.write_tree(rhs);
-                },
-                ExprKind::Assign { lhs, rhs } => {
-                    let lhs = lhs.as_ref();
-                    let rhs = rhs.as_ref();
-                    lines.write_tree(lhs);
-                    lines.write("=");
-                    lines.write_tree(rhs);
-                },
-                ExprKind::BinOpAssign { lhs, op, rhs } => {
-                    let lhs = lhs.as_ref();
-                    let rhs = rhs.as_ref();
-                    lines.write_tree(lhs);
-                    lines.write(op.to_binop_assign_text());
-                    lines.write_tree(rhs);
-                },
-                ExprKind::If { condition, then_body, else_body } => {
-                    let condition = condition.as_ref();
-                    let then_body = then_body.as_ref();
-                    lines.write("if ");
-                    lines.write_tree(condition);
-                    lines.write(" ");
-                    lines.write_tree(then_body);
-                    if let Some(else_body) = else_body {
-                        let else_body = else_body.as_ref();
-                        lines.write(" else ");
-                        lines.write_tree(else_body);
-                    }
-                },
-                ExprKind::VarDecl(decl) => debug::var_decl_write_tree(decl, lines),
-                ExprKind::Return { expr } => {
-                    lines.write("return");
-                    if let Some(expr) = expr {
-                        let expr = expr.as_ref();
-                        lines.write(" ");
-                        lines.write_tree(expr);
-                    }
-                },
-                ExprKind::Semicolon(expr) => {
-                    if let Some(expr) = expr {
-                        lines.write_tree(expr.as_ref());
-                    }
-                    lines.write(";");
-                },
+                }
+            },
+            ExprKind::Semicolon(expr) => {
+                if let Some(expr) = expr {
+                    lines.write_tree(expr);
+                }
+                lines.write(";");
+            },
 
-                k => panic!("{:?}", k),
-            }
+            k => panic!("{:?}", k),
         }
     }
 }
@@ -1407,7 +1429,8 @@ impl DebugAst for Type {
             Type::Void => "void".to_string(),
             Type::Never => "!".to_string(),
             Type::Float { bits } => format!("f{}", bits),
-            Type::Function(_) => todo!(),
+            Type::Function(_) => "fn".to_string(), // TODO: fn type as text
+            Type::Unset => String::default(),
             Type::Unevaluated(expr) => expr.to_text(),
         }
     }
@@ -1415,7 +1438,8 @@ impl DebugAst for Type {
     fn write_tree(&self, lines: &mut TreeLines) {
         match self {
             Type::Void | Type::Never | Type::Float { .. } => lines.write(&self.to_text()),
-            Type::Function(_) => todo!(),
+            Type::Function(_) => lines.write(&self.to_text()), // TODO: fn type as text
+            Type::Unset => {},
             Type::Unevaluated(expr) => expr.write_tree(lines),
         }
     }

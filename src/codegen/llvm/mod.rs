@@ -5,6 +5,8 @@ use crate::{
     ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, Type, VarDecl},
     cli::DebugOptions,
     parser::{lexer::Code, ParseError, StmtIter},
+    ptr::Ptr,
+    symbol_table::SymbolTable,
 };
 use inkwell::{
     basic_block::BasicBlock,
@@ -27,11 +29,9 @@ use inkwell::{
     },
     FloatPredicate, OptimizationLevel,
 };
-use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
-use symbol_table::*;
+use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
 
 pub mod jit;
-mod symbol_table;
 
 const REPL_EXPR_ANON_FN_NAME: &str = "__repl_expr";
 
@@ -43,10 +43,10 @@ pub enum CodegenError {
     InvalidCallProduced,
     FunctionLookupError(FunctionLookupError),
 
-    RedefinedItem(Box<str>),
-    UnknownIdent(Box<str>),
-    UnknownFn(Box<str>),
-    NotAFn(Box<str>),
+    RedefinedItem(Ptr<str>),
+    UnknownIdent(Ptr<str>),
+    UnknownFn(Ptr<str>),
+    NotAFn(Ptr<str>),
 
     CouldntCreateJit(LLVMString),
 }
@@ -70,7 +70,7 @@ pub struct Codegen<'ctx> {
     pub builder: Builder<'ctx>,
     pub module: Module<'ctx>,
 
-    symbols: SymbolTable<'ctx>,
+    symbols: SymbolTable<LLVMSymbol<'ctx>>,
 
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
@@ -115,23 +115,19 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// for functions, this adds only the prototype, not the function body
-    pub fn add_top_level_symbol(&mut self, expr: NonNull<Expr>) {
-        match &unsafe { expr.as_ref() }.kind {
+    pub fn add_top_level_symbol(&mut self, expr: Ptr<Expr>) {
+        match &expr.kind {
             ExprKind::VarDecl(VarDecl {
                 markers,
                 ident,
                 ty,
                 default: Some(init),
                 is_const: true,
-            }) => {
-                let init = unsafe { init.as_ref() };
-                let name = ident.get_text();
-                match &init.kind {
-                    ExprKind::Fn { params, ret_type, body } => {
-                        self.compile_prototype(name, *params);
-                    },
-                    _ => todo!(),
-                }
+            }) => match &init.kind {
+                ExprKind::Fn { params, ret_type, body } => {
+                    self.compile_prototype(&ident.text, *params);
+                },
+                _ => todo!(),
             },
             ExprKind::Semicolon(Some(expr)) => self.add_top_level_symbol(*expr),
             ExprKind::Semicolon(None) => (),
@@ -148,32 +144,23 @@ impl<'ctx> Codegen<'ctx> {
                 default: Some(init),
                 is_const: true,
             }) => {
-                let init = unsafe { init.as_ref() };
-                let name = ident.get_text();
                 match &init.kind {
                     ExprKind::Fn { params, ret_type, body } => {
-                        self.compile_fn_body(name, *params, *body);
+                        self.compile_fn_body(&ident.text, *params, *body);
                     },
                     _ => todo!(),
                 }
                 Ok(())
             },
-            ExprKind::Semicolon(Some(expr)) => {
-                self.compile_top_level_fn_body(unsafe { expr.as_ref() })
-            },
+            ExprKind::Semicolon(Some(expr)) => self.compile_top_level_fn_body(expr),
             ExprKind::Semicolon(None) => Ok(()),
             _ => todo!(),
         }
     }
 
-    pub fn compile_prototype(
-        &mut self,
-        name: &str,
-        params: NonNull<[VarDecl]>,
-    ) -> FunctionValue<'ctx> {
+    pub fn compile_prototype(&mut self, name: &str, params: Ptr<[VarDecl]>) -> FunctionValue<'ctx> {
         let ret_type = self.context.f64_type();
-        let params_ref = unsafe { params.as_ref() };
-        let args_types = params_ref
+        let args_types = params
             .iter()
             .map(|VarDecl { .. }| BasicMetadataTypeEnum::FloatType(self.context.f64_type()))
             .collect::<Vec<_>>();
@@ -181,10 +168,11 @@ impl<'ctx> Codegen<'ctx> {
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
-            param.set_name(params_ref[idx].ident.get_text())
+            param.set_name(&params[idx].ident.text)
         }
 
-        self.symbols.insert(name.to_string(), Symbol::Function { params, val: fn_val });
+        self.symbols
+            .insert(name.to_string(), LLVMSymbol::Function { params, val: fn_val });
 
         fn_val
     }
@@ -192,11 +180,10 @@ impl<'ctx> Codegen<'ctx> {
     pub fn compile_fn_body(
         &mut self,
         name: &str,
-        params: NonNull<[VarDecl]>,
-        body: NonNull<Expr>,
+        params: Ptr<[VarDecl]>,
+        body: Ptr<Expr>,
     ) -> CodegenResult<FunctionValue<'ctx>> {
         let func = self.module.get_function(name).unwrap();
-        let params = unsafe { params.as_ref() };
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
@@ -205,17 +192,17 @@ impl<'ctx> Codegen<'ctx> {
         self.symbols.open_scope();
         self.symbols.reserve(params.len());
 
-        for (param, param_def) in func.get_param_iter().zip(params) {
-            let pname = param_def.ident.get_text();
+        for (param, param_def) in func.get_param_iter().zip(params.iter()) {
+            let pname = &param_def.ident.text;
             self.symbols.insert(
                 pname.to_string(),
                 if param_def.markers.is_mut {
                     let alloca = self.create_entry_block_alloca(func, pname);
                     self.builder.build_store(alloca, param)?;
-                    Symbol::Stack(alloca)
+                    LLVMSymbol::Stack(alloca)
                 } else {
                     let reg_val = param.as_any_value_enum();
-                    Symbol::Register(reg_val)
+                    LLVMSymbol::Register(reg_val)
                 },
             );
         }
@@ -232,32 +219,27 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    pub fn compile_expr_to_float(
-        &mut self,
-        expr: NonNull<Expr>,
-    ) -> CodegenResult<FloatValue<'ctx>> {
-        let expr = unsafe { expr.as_ref() };
+    pub fn compile_expr_to_float(&mut self, expr: Ptr<Expr>) -> CodegenResult<FloatValue<'ctx>> {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                let name = unsafe { name.as_ref() };
                 // TODO: ident which is not a variable
                 let Some(var) = self.symbols.get(name) else {
-                    return Err(CodegenError::UnknownIdent(Box::from(name)));
+                    return Err(CodegenError::UnknownIdent(*name));
                 };
 
                 let f = match var {
-                    Symbol::Stack(ptr) => self
+                    LLVMSymbol::Stack(ptr) => self
                         .builder
                         .build_load(self.context.f64_type(), *ptr, name)?
                         .into_float_value(),
-                    Symbol::Register(reg) => reg.into_float_value(),
+                    LLVMSymbol::Register(reg) => reg.into_float_value(),
                     _ => todo!(),
                 };
 
                 Ok(f)
             },
             ExprKind::Literal { kind: LitKind::Int | LitKind::Float, code } => {
-                Ok(self.context.f64_type().const_float_from_string(unsafe { code.as_ref() }))
+                Ok(self.context.f64_type().const_float_from_string(code))
             },
             ExprKind::BoolLit(bool) => {
                 Ok(self.context.f64_type().const_float(if *bool { 1.0 } else { 0.0 }))
@@ -300,14 +282,11 @@ impl<'ctx> Codegen<'ctx> {
                 let Ok(func) = unsafe { func.as_ref() }.try_to_ident() else {
                     todo!("non ident function call")
                 };
-                let func_name = func.get_text();
-                let (params, func) = match self.symbols.get(func_name) {
-                    Some(Symbol::Function { params, val }) => (params, *val),
+                let (params, func) = match self.symbols.get(&func.text) {
+                    Some(LLVMSymbol::Function { params, val }) => (params, *val),
                     Some(_) => panic!("cannot call a non function"), // TODO
                     None => {
-                        return Err(CodegenError::UnknownFn(
-                            func_name.to_string().into_boxed_str(),
-                        ));
+                        return Err(CodegenError::UnknownFn(func.text));
                     },
                 };
                 let expected_arg_count = params.len();
@@ -329,7 +308,7 @@ impl<'ctx> Codegen<'ctx> {
                     None => Err(CodegenError::InvalidCallProduced),
                 }
             },
-            ExprKind::PreOp { kind, expr } => {
+            ExprKind::PreOp { kind, expr, .. } => {
                 let expr = self.compile_expr_to_float(*expr)?;
                 match kind {
                     PreOpKind::AddrOf => todo!(),
@@ -339,30 +318,30 @@ impl<'ctx> Codegen<'ctx> {
                     PreOpKind::Neg => Ok(self.builder.build_float_neg(expr, "neg")?),
                 }
             },
-            ExprKind::BinOp { lhs, op, rhs } => {
+            ExprKind::BinOp { lhs, op, rhs, .. } => {
                 let lhs = self.compile_expr_to_float(*lhs)?;
                 let rhs = self.compile_expr_to_float(*rhs)?;
                 self.build_float_binop(lhs, rhs, *op)
             },
-            ExprKind::Assign { lhs, rhs } => {
+            ExprKind::Assign { lhs, rhs, .. } => {
                 let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
-                let var_name = lhs.get_text();
+                let var_name = &*lhs.text;
                 match self.symbols.get(var_name) {
-                    Some(&Symbol::Stack(stack_var)) => {
+                    Some(&LLVMSymbol::Stack(stack_var)) => {
                         let rhs = self.compile_expr_to_float(*rhs)?;
                         self.builder.build_store(stack_var, rhs)?;
                     },
-                    Some(Symbol::Register(_)) => panic!("cannot assign to register"),
-                    Some(Symbol::Function { .. }) => panic!("cannot assign to function"),
+                    Some(LLVMSymbol::Register(_)) => panic!("cannot assign to register"),
+                    Some(LLVMSymbol::Function { .. }) => panic!("cannot assign to function"),
                     None => panic!("undefined variable: '{}'", var_name),
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
-            ExprKind::BinOpAssign { lhs, op, rhs } => {
+            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
                 let lhs = unsafe { lhs.as_ref() }.try_to_ident().expect("assign lhs is ident");
-                let var_name = lhs.get_text();
+                let var_name = &*lhs.text;
                 match self.symbols.get(var_name) {
-                    Some(&Symbol::Stack(stack_var)) => {
+                    Some(&LLVMSymbol::Stack(stack_var)) => {
                         let lhs = self
                             .builder
                             .build_load(self.context.f64_type(), stack_var, "tmp")?
@@ -371,19 +350,19 @@ impl<'ctx> Codegen<'ctx> {
                         let binop_res = self.build_float_binop(lhs, rhs, *op)?;
                         self.builder.build_store(stack_var, binop_res)?;
                     },
-                    Some(Symbol::Register(_)) => panic!("cannot assign to register"),
-                    Some(Symbol::Function { .. }) => panic!("cannot assign to function"),
+                    Some(LLVMSymbol::Register(_)) => panic!("cannot assign to register"),
+                    Some(LLVMSymbol::Function { .. }) => panic!("cannot assign to function"),
                     None => panic!("undefined variable: '{}'", var_name),
                 }
                 Ok(self.context.f64_type().const_zero()) // TODO: void
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default, is_const }) => {
                 let init = default;
-                let var_name = ident.get_text();
+                let var_name = &*ident.text;
                 let is_mut = markers.is_mut;
                 let v = if !is_mut && let Some(init) = init {
                     let init = self.compile_expr_to_float(*init)?.as_any_value_enum();
-                    Symbol::Register(init)
+                    LLVMSymbol::Register(init)
                 } else {
                     let stack_var =
                         self.builder.build_alloca(self.context.f64_type(), &var_name)?;
@@ -391,7 +370,7 @@ impl<'ctx> Codegen<'ctx> {
                         let init = self.compile_expr_to_float(*init)?;
                         self.builder.build_store(stack_var, init)?;
                     }
-                    Symbol::Stack(stack_var)
+                    LLVMSymbol::Stack(stack_var)
                 };
                 let old = self.symbols.insert(var_name.to_string(), v);
                 if old.is_some() {
@@ -458,48 +437,6 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     // -----------------------
-
-    /*
-    pub fn add_item(&mut self, item: Item<'i>) -> CompileResult<()> {
-        let name = item.code[item.ident.span].to_string();
-        if self.items.contains_key(&name) {
-            return Err(CError::RedefinedItem(name.into_boxed_str()));
-        }
-        self.compile_item(&item);
-        self.items.insert(name, item);
-        Ok(())
-    }
-    */
-
-    pub fn get_function(&mut self, name: &str) -> CodegenResult<FunctionValue<'ctx>> {
-        if let Some(func) = self.module.get_function(name) {
-            return Ok(func);
-        };
-
-        let (value, code): (Expr, &Code) = todo!("undefined function");
-        /*
-        let Some(Item { markers, ident, ty, value, code }) = self.items.get(name) else {
-            return Err(CError::UnknownFn(Box::from(name)));
-        };
-        */
-
-        let ExprKind::Fn { ref params, ref ret_type, ref body } = value.kind else {
-            return Err(CodegenError::NotAFn(Box::from(name)));
-        };
-
-        /*
-        // SAFETY: borrowing self as mut and the fn item at the same time is safe
-        // because `compile_fn` does not access `self.items`.
-        let params =
-            unsafe { std::ptr::from_ref::<[_]>(params.as_ref()).as_ref().unwrap_unchecked() };
-        let body = unsafe { std::ptr::from_ref(body.as_ref()).as_ref().unwrap_unchecked() };
-        */
-        let params = params.clone();
-        let body = body.clone();
-
-        //self.compile_fn(name, &params, &body)
-        Ok(self.compile_prototype(name, params))
-    }
 
     pub fn build_float_binop(
         &mut self,
@@ -657,12 +594,12 @@ impl<'ctx> CodegenModule<'ctx> {
 }
 
 #[derive(Debug)]
-enum Symbol<'ctx> {
+enum LLVMSymbol<'ctx> {
     Stack(PointerValue<'ctx>),
     Register(AnyValueEnum<'ctx>),
     Function {
         /// TODO: think of a better way to store the fn definition
-        params: NonNull<[VarDecl]>,
+        params: Ptr<[VarDecl]>,
         val: FunctionValue<'ctx>,
     },
 }

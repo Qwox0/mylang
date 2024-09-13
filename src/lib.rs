@@ -12,6 +12,10 @@
 pub mod ast;
 pub mod cli;
 pub mod codegen;
+pub mod error;
 pub mod parser;
+pub mod ptr;
 mod scratch_pool;
+pub mod sema;
+pub mod symbol_table;
 pub mod util;
