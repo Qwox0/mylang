@@ -7,6 +7,7 @@
 #![feature(ptr_as_ref_unchecked)]
 #![feature(unsigned_is_multiple_of)]
 #![feature(let_chains)]
+#![feature(try_blocks)]
 #![allow(unreachable_code)]
 
 pub mod ast;

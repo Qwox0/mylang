@@ -33,11 +33,8 @@ pub enum ExprKind {
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
     /// `-> <type> { <body> }`
     /// `-> <body>`
-    Fn {
-        params: Ptr<[VarDecl]>,
-        ret_type: Type,
-        body: Ptr<Expr>,
-    },
+    /// `^ expr.span`
+    Fn(Fn),
     /// `( <expr> )`
     Parenthesis {
         expr: Ptr<Expr>,
@@ -92,35 +89,31 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
     */
-    /// [`colon`] `(` [`comma_chain`] ([`expr`]) `)`
+    /// `<func> ( <expr>, ..., param=<expr>, ... )`
+    /// `                                        ^ expr.span`
     Call {
         func: Ptr<Expr>,
         args: Ptr<[Ptr<Expr>]>,
     },
 
     /// examples: `&<expr>`, `- <expr>`
-    /// `          ^^^^^^^`  `^^^^^^^^ expr.span`
-    /// `          ^`        `^ op_span`
+    /// `          ^`        `^ expr.span`
     PreOp {
         kind: PreOpKind,
         expr: Ptr<Expr>,
-        op_span: Span,
     },
     /// `<lhs> op <lhs>`
-    /// `^^^^^^^^^^^^^^ expr.span`
-    /// `      ^^ op_span`
+    /// `      ^^ expr.span`
     BinOp {
         lhs: Ptr<Expr>,
         op: BinOpKind,
         rhs: Ptr<Expr>,
-        op_span: Span, // TODO: maybe move this back to `expr.span` and calculate the full span only if needed
     },
     /// `<lhs> = <lhs>`
     Assign {
         //lhs: Ptr<LValue>,
         lhs: Ptr<Expr>,
         rhs: Ptr<Expr>,
-        op_span: Span,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
@@ -128,7 +121,6 @@ pub enum ExprKind {
         lhs: Ptr<Expr>,
         op: BinOpKind,
         rhs: Ptr<Expr>,
-        op_span: Span,
     },
 
     /// variable declaration (and optional initialization)
@@ -137,6 +129,8 @@ pub enum ExprKind {
     /// `mut rec <name>: <ty> : <init>`
     /// `mut rec <name> := <init>`
     /// `mut rec <name> :: <init>`
+    /// `expr.span` must describe the entire expression if `default.is_none()`,
+    /// otherwise only the start is important
     VarDecl(VarDecl),
 
     // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
@@ -207,6 +201,42 @@ impl From<(ExprKind, Span)> for Expr {
 impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Self {
         Self { kind, span }
+    }
+
+    /// Returns a [`Span`] representing the entire expression.
+    pub fn full_span(&self) -> Span {
+        #[allow(unused_variables)]
+        match self.kind {
+            ExprKind::Tuple { elements } => todo!(),
+            ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
+            ExprKind::StructDef(_) => todo!(),
+            ExprKind::UnionDef(_) => todo!(),
+            ExprKind::EnumDef {} => todo!(),
+            ExprKind::OptionShort(_) => todo!(),
+            ExprKind::Ptr { is_mut, ty } => todo!(),
+            ExprKind::Initializer { lhs, fields } => todo!(),
+            ExprKind::Dot { lhs, rhs } => todo!(),
+            ExprKind::PostOp { expr, kind } => todo!(),
+            ExprKind::Index { lhs, idx } => todo!(),
+            ExprKind::Call { func, args } => func.full_span().join(self.span),
+            ExprKind::PreOp { kind: _, expr } => self.span.join(expr.full_span()),
+            ExprKind::BinOp { lhs, op: _, rhs }
+            | ExprKind::Assign { lhs, rhs }
+            | ExprKind::BinOpAssign { lhs, op: _, rhs } => lhs.full_span().join(rhs.full_span()),
+            ExprKind::VarDecl(decl) => match &decl.default {
+                Some(e) => self.span.join(e.full_span()),
+                None => self.span,
+            },
+            ExprKind::If { condition, then_body, else_body } => todo!(),
+            ExprKind::Match { val, else_body } => todo!(),
+            ExprKind::For { source, iter_var, body } => todo!(),
+            ExprKind::While { condition, body } => todo!(),
+            ExprKind::Catch { lhs } => todo!(),
+            ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Return { expr } => todo!(),
+            ExprKind::Semicolon(_) => todo!(),
+            _ => self.span,
+        }
     }
 }
 
@@ -333,6 +363,13 @@ pub enum PostOpKind {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct Fn {
+    pub params: Ptr<[VarDecl]>,
+    pub ret_type: Type,
+    pub body: Ptr<Expr>,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct VarDecl {
     pub markers: DeclMarkers,
     pub ident: Ident,
@@ -437,7 +474,7 @@ pub enum Type {
     Float {
         bits: u8,
     },
-    Function(Ptr<Expr>),
+    Function(Ptr<Fn>),
     //Literal(LitKind),
     /// The type was not explicitly set in the original source code and must
     /// still be inferred.

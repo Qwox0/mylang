@@ -160,18 +160,15 @@ fn read_code_file(path: &Path) -> String {
 fn dev() {
     const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = false;
+    const DEBUG_TYPES: bool = false;
     const DEBUG_TYPED_AST: bool = true;
-    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
-    const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
+    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
+    const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
 
     let alloc = bumpalo::Bump::new();
 
     let code = "
-pub test :: (mut x := 1) -> {
-    x += 1;
-    1+2*x
-};
 pub sub :: (a: f64, b: f64, ) -> -b + a;
 
 // Sub :: struct {
@@ -192,6 +189,10 @@ mymain :: -> {
 
     //sub2(Sub.{ a = a, b })
     sub(a, b)
+};
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
 };
 
 // pub infer_problem1 :: () -> infer_problem2();
@@ -252,25 +253,40 @@ mymain :: -> {
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
     let frontend_sema_start = Instant::now();
-    let mut sema = sema::Sema::new(code);
+    let mut sema = sema::Sema::new(code, DEBUG_TYPES);
 
     for s in stmts.iter().copied() {
-        sema.preload_top_level(s).unwrap(); // TODO: error handling
+        sema.preload_top_level(s);
     }
-    println!("{:#?}", sema.symbols);
 
-    let mut has_sema_error = false;
-    for s in stmts.iter().copied() {
-        println!("{:?}", s);
-        if let Err(e) = sema.analyze_top_level(s) {
-            display_spanned_error(e, code);
-            has_sema_error = true;
+    let mut finished = vec![false; stmts.len()];
+    let mut remaining_fns = stmts.len();
+    while finished.iter().any(std::ops::Not::not) {
+        let old_remaining_fns = remaining_fns;
+        debug_assert!(stmts.len() == finished.len());
+        remaining_fns = stmts
+            .iter()
+            .zip(finished.iter_mut())
+            .filter(|(_, finished)| !**finished)
+            .map(|(s, finished)| {
+                // TODO: don't reanalyse the entire function if `NotFinished` is returned
+                *finished = sema.analyze_top_level(*s);
+                *finished
+            })
+            .filter(|finished| !*finished)
+            .count();
+        if remaining_fns == old_remaining_fns {
+            panic!("cycle detected") // TODO: find location of cycle
         }
     }
 
-    if has_sema_error {
+    if !sema.errors.is_empty() {
+        for e in sema.errors {
+            display_spanned_error(e, code);
+        }
         panic!("Semantic analysis ERROR")
     }
+
     let frontend_sema_duration = frontend_sema_start.elapsed();
 
     if DEBUG_TYPED_AST {

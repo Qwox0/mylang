@@ -2,7 +2,7 @@
 
 use self::jit::Jit;
 use crate::{
-    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Ident, LitKind, PreOpKind, Type, VarDecl},
+    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, Type, VarDecl},
     cli::DebugOptions,
     parser::{lexer::Code, ParseError, StmtIter},
     ptr::Ptr,
@@ -124,7 +124,7 @@ impl<'ctx> Codegen<'ctx> {
                 default: Some(init),
                 is_const: true,
             }) => match &init.kind {
-                ExprKind::Fn { params, ret_type, body } => {
+                ExprKind::Fn(Fn { params, ret_type, body }) => {
                     self.compile_prototype(&ident.text, *params);
                 },
                 _ => todo!(),
@@ -145,11 +145,9 @@ impl<'ctx> Codegen<'ctx> {
                 is_const: true,
             }) => {
                 match &init.kind {
-                    ExprKind::Fn { params, ret_type, body } => {
-                        self.compile_fn_body(&ident.text, *params, *body);
-                    },
+                    ExprKind::Fn(f) => self.compile_fn_body(&ident.text, f.params, f.body)?,
                     _ => todo!(),
-                }
+                };
                 Ok(())
             },
             ExprKind::Semicolon(Some(expr)) => self.compile_top_level_fn_body(expr),
@@ -190,33 +188,36 @@ impl<'ctx> Codegen<'ctx> {
         self.cur_fn = Some(func);
 
         self.symbols.open_scope();
-        self.symbols.reserve(params.len());
+        let res = try {
+            self.symbols.reserve(params.len());
 
-        for (param, param_def) in func.get_param_iter().zip(params.iter()) {
-            let pname = &param_def.ident.text;
-            self.symbols.insert(
-                pname.to_string(),
-                if param_def.markers.is_mut {
-                    let alloca = self.create_entry_block_alloca(func, pname);
-                    self.builder.build_store(alloca, param)?;
-                    LLVMSymbol::Stack(alloca)
-                } else {
-                    let reg_val = param.as_any_value_enum();
-                    LLVMSymbol::Register(reg_val)
-                },
-            );
-        }
+            for (param, param_def) in func.get_param_iter().zip(params.iter()) {
+                let pname = &param_def.ident.text;
+                self.symbols.insert(
+                    pname.to_string(),
+                    if param_def.markers.is_mut {
+                        let alloca = self.create_entry_block_alloca(func, pname);
+                        self.builder.build_store(alloca, param)?;
+                        LLVMSymbol::Stack(alloca)
+                    } else {
+                        let reg_val = param.as_any_value_enum();
+                        LLVMSymbol::Register(reg_val)
+                    },
+                );
+            }
 
-        let body = self.compile_expr_to_float(body)?;
-        self.builder.build_return(Some(&body))?;
+            let body = self.compile_expr_to_float(body)?;
+            self.builder.build_return(Some(&body))?;
 
+            if func.verify(true) {
+                func
+            } else {
+                unsafe { func.delete() };
+                Err(CodegenError::InvalidGeneratedFunction)?
+            }
+        };
         self.symbols.close_scope();
-        if func.verify(true) {
-            Ok(func)
-        } else {
-            unsafe { func.delete() };
-            Err(CodegenError::InvalidGeneratedFunction)
-        }
+        res
     }
 
     pub fn compile_expr_to_float(&mut self, expr: Ptr<Expr>) -> CodegenResult<FloatValue<'ctx>> {
@@ -248,24 +249,28 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn { params, ret_type, body } => todo!(),
+            ExprKind::Fn(Fn { params, ret_type, body }) => todo!(),
             ExprKind::Parenthesis { expr } => self.compile_expr_to_float(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 self.symbols.open_scope();
-                let stmts = unsafe { stmts.as_ref() };
-                let Some((last, stmts)) = stmts.split_last() else {
-                    return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
+                let res = try {
+                    let stmts = unsafe { stmts.as_ref() };
+                    let Some((last, stmts)) = stmts.split_last() else {
+                        return Ok(self.context.f64_type().const_float(0.0)); // TODO: return void
+                    };
+                    for s in stmts {
+                        let _ = self.compile_expr_to_float(*s)?;
+                    }
+                    let out = self.compile_expr_to_float(*last)?;
+
+                    if *has_trailing_semicolon {
+                        self.context.f64_type().const_float(0.0) // TODO: return void
+                    } else {
+                        out
+                    }
                 };
-                for s in stmts {
-                    let _ = self.compile_expr_to_float(*s)?;
-                }
-                let out = self.compile_expr_to_float(*last)?;
                 self.symbols.close_scope();
-                Ok(if *has_trailing_semicolon {
-                    self.context.f64_type().const_float(0.0) // TODO: return void
-                } else {
-                    out
-                })
+                res
             },
             ExprKind::StructDef(_) => todo!(),
             ExprKind::UnionDef(_) => todo!(),

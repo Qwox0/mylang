@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Ident, PostOpKind, PreOpKind, Type,
-        VarDecl,
+        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Fn, Ident, PostOpKind, PreOpKind,
+        Type, VarDecl,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
@@ -162,18 +162,15 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
-                let full_span = lhs.span.join(rhs.span);
-                expr!(BinOp { lhs, op, rhs, op_span: span }, full_span)
+                expr!(BinOp { lhs, op, rhs }, span)
             },
             FollowingOperator::Assign => {
                 let rhs = self.expr()?;
-                let full_span = lhs.span.join(rhs.span);
-                expr!(Assign { lhs, rhs, op_span: span }, full_span)
+                expr!(Assign { lhs, rhs }, span)
             },
             FollowingOperator::BinOpAssign(op) => {
                 let rhs = self.expr()?;
-                let full_span = lhs.span.join(rhs.span);
-                expr!(BinOpAssign { lhs, op, rhs, op_span: span }, full_span)
+                expr!(BinOpAssign { lhs, op, rhs }, span)
             },
             FollowingOperator::VarDecl => {
                 let markers = DeclMarkers::default();
@@ -186,8 +183,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     default: Some(init),
                     is_const: false,
                 };
-                let span = ident.span.join(init.span);
-                expr!(VarDecl(decl), span)
+                expr!(VarDecl(decl), ident.span)
             },
             FollowingOperator::ConstDecl => {
                 let markers = DeclMarkers::default();
@@ -200,16 +196,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     default: Some(init),
                     is_const: true,
                 };
-                let span = ident.span.join(init.span);
-                expr!(VarDecl(decl), span)
+                expr!(VarDecl(decl), ident.span)
             },
             FollowingOperator::TypedDecl => {
-                let (decl, end_span) = self.typed_decl(
-                    DeclMarkers::default(),
-                    lhs.try_to_ident().context("const decl ident")?,
-                )?;
-                let span = span.join(end_span);
-                expr!(VarDecl(decl), span)
+                let ident = lhs.try_to_ident().context("const decl ident")?;
+                let (decl, span) = self.typed_decl(DeclMarkers::default(), ident)?;
+                expr!(VarDecl(decl), ident.span.join(span))
             },
             FollowingOperator::Pipe => {
                 let t = self.ws0_and_next_tok()?;
@@ -273,8 +265,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     Keyword::Pub => DeclMarkers { is_pub: true, is_mut: false, is_rec: false },
                     _ => unreachable!(),
                 };
-                let (decl, end_span) = self.var_decl_with_markers(markers)?;
-                expr!(VarDecl(decl), span.join(end_span))
+                let (decl, span_end) = self.var_decl_with_markers(markers)?;
+                expr!(VarDecl(decl), span.join(span_end))
             },
             TokenKind::Keyword(Keyword::Struct) => {
                 self.ws0();
@@ -400,14 +392,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBrace => return self.block(span),
             TokenKind::Bang => {
                 let expr = self.expr_(usize::MAX).context("! expr")?;
-                let full_span = span.join(expr.span);
-                expr!(PreOp { kind: PreOpKind::Not, expr, op_span: span }, full_span)
+                expr!(PreOp { kind: PreOpKind::Not, expr }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
                 let expr = self.expr_(usize::MAX).context("- expr")?;
-                let full_span = span.join(expr.span);
-                expr!(PreOp { kind: PreOpKind::Neg, expr, op_span: span }, full_span)
+                expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
             },
             TokenKind::Arrow => return self.function_tail(self.alloc_empty_slice(), span),
             TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
@@ -456,8 +446,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             Some(brace) => (ty(expr), self.block(brace.span).context("fn body")?),
             None => (Type::Unset, expr),
         };
-        let span = start_span.join(body.span);
-        self.alloc(expr!(Fn { params, ret_type, body }, span))
+        self.alloc(expr!(Fn(Fn { params, ret_type, body }), start_span))
     }
 
     pub fn if_after_cond(
@@ -498,7 +487,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             };
         };
         let args = self.clone_slice_from_scratch_pool(args)?;
-        self.alloc(expr!(Call { func, args }, func.span.join(closing_paren_span)))
+        self.alloc(expr!(Call { func, args }, closing_paren_span))
     }
 
     /// parses block context and '}', doesn't parse the '{'
@@ -577,8 +566,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// This will still parse more markers, if they exists.
-    /// Also returns a zero-width [`Span`] which points to the end of the
-    /// variable declaration.
+    /// Also returns a [`Span`] which is described by `expr.span` in
+    /// [`ExprKind::VarDecl`].
     pub fn var_decl_with_markers(
         &mut self,
         mut markers: DeclMarkers,
@@ -621,16 +610,15 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             _ => None,
         };
         let is_const = t.is_some_and(|t| t.kind == TokenKind::ColonColon);
-        let end_span = Span::zero_width(init.map(|e| e.span.end).unwrap_or(ident.span.end));
-        Ok((VarDecl { markers, ident, ty: Type::Unset, default: init, is_const }, end_span))
+        let span = ident.span;
+        Ok((VarDecl { markers, ident, ty: Type::Unset, default: init, is_const }, span))
     }
 
     /// starts parsing after the colon:
     /// `mut a: int = 0;`
     /// `      ^`
     ///
-    /// Also returns a zero-width [`Span`] which points to the end of the
-    /// variable declaration.
+    /// Also returns the [`Span`] of the parsed type.
     pub fn typed_decl(
         &mut self,
         markers: DeclMarkers,
@@ -644,10 +632,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             .map(|_| self.expr().context("variable initialization"))
             .transpose()?;
         let is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
-        let end_span =
-            Span::zero_width(init.map(|e| e.span.end).unwrap_or_else(|| ty_expr.span.end));
         let ty = ty(ty_expr);
-        Ok((VarDecl { markers, ident, ty, default: init, is_const }, end_span))
+        Ok((VarDecl { markers, ident, ty, default: init, is_const }, ty_expr.span))
     }
 
     pub fn ident(&mut self) -> ParseResult<Ident> {
@@ -1123,7 +1109,7 @@ impl DebugAst for Expr {
             ExprKind::Tuple { elements } => {
                 format!("({})", debug::many_expr_to_text(elements, ","))
             },
-            ExprKind::Fn { params, ret_type, body } => format!(
+            ExprKind::Fn(Fn { params, ret_type, body }) => format!(
                 "({})->{}{}",
                 debug::many_to_text(params, |decl| debug::var_decl_to_text(decl), ","),
                 ret_type.to_text(),
@@ -1245,7 +1231,7 @@ impl DebugAst for Expr {
                 debug::many_expr_to_text(elements, ",");
                 lines.write(")");
             },
-            ExprKind::Fn { params, ret_type, body } => {
+            ExprKind::Fn(Fn { params, ret_type, body }) => {
                 let body = body;
                 lines.write("(");
 
