@@ -73,8 +73,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn expr_(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
-        self.ws0();
-        let mut lhs = self.value(min_precedence).context("expr lhs")?;
+        let mut lhs = self.ws0().value(min_precedence).context("expr lhs")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) => lhs = node,
@@ -85,8 +84,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
-        self.ws0();
-        let Some(Token { kind, span }) = self.lex.peek() else {
+        let Some(Token { kind, span }) = self.ws0().lex.peek() else {
             return err!(Finished, self.lex.pos_span());
         };
 
@@ -104,8 +102,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
         let expr = match op {
             FollowingOperator::Dot => {
-                self.ws0();
-                let rhs = self.ident().context("dot rhs")?;
+                let rhs = self.ws0().ident().context("dot rhs")?;
                 expr!(Dot { lhs, rhs }, span.join(rhs.span))
             },
             FollowingOperator::Call => return self.call(lhs, span, ScratchPool::new()),
@@ -117,13 +114,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             FollowingOperator::Initializer => {
                 let mut fields = ScratchPool::new();
                 let close_b_span = loop {
-                    self.ws0();
-                    if let Some(t) = self.lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
+                    if let Some(t) = self.ws0().lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
                         break t.span;
                     }
                     let ident = self.ident().context("initializer field ident")?;
-                    self.ws0();
                     let init = self
+                        .ws0()
                         .lex
                         .next_if(|t| t.kind == TokenKind::Eq)
                         .map(|_| self.expr().context("init expr"))
@@ -204,7 +200,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(VarDecl(decl), ident.span.join(span))
             },
             FollowingOperator::Pipe => {
-                let t = self.ws0_and_next_tok()?;
+                let t = self.ws0().next_tok()?;
                 return match t.kind {
                     TokenKind::Keyword(Keyword::If) => self.if_after_cond(lhs, span).context("if"),
                     TokenKind::Keyword(Keyword::Match) => {
@@ -269,17 +265,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(VarDecl(decl), span.join(span_end))
             },
             TokenKind::Keyword(Keyword::Struct) => {
-                self.ws0();
-                self.tok(TokenKind::OpenBrace).context("struct '{'")?;
-                self.ws0();
-                let fields = self.struct_fields()?;
+                self.ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
+                let fields = self.ws0().struct_fields()?;
                 expr!(StructDef(fields), span)
             },
             TokenKind::Keyword(Keyword::Union) => {
-                self.ws0();
-                self.tok(TokenKind::OpenBrace).context("struct '{'")?;
-                self.ws0();
-                let fields = self.struct_fields()?;
+                self.ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
+                let fields = self.ws0().struct_fields()?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
                 expr!(UnionDef(fields), span.join(close_b.span))
             },
@@ -293,8 +285,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Keyword(Keyword::Match) => {
                 todo!("match body");
                 let val = self.expr().context("match value")?;
-                self.ws0();
                 let else_body = self
+                    .ws0()
                     .lex
                     .next_if(|t| t.kind == TokenKind::Keyword(Keyword::Else))
                     .map(|_else| {
@@ -337,13 +329,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 // TODO: currently no tuples allowed!
                 // () -> ...
                 if self.lex.advance_if(is_close_paren) {
-                    self.ws0();
-                    self.tok(TokenKind::Arrow).context("'->'")?;
+                    self.ws0().tok(TokenKind::Arrow).context("'->'")?;
                     return self.function_tail(self.alloc_empty_slice(), span);
                 }
                 let start_state = self.lex.get_state();
                 let first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
-                let t = self.ws0_and_next_tok().context("missing ')'")?;
+                let t = self.ws0().next_tok().context("missing ')'")?;
                 self.ws0();
                 match t.kind {
                     // (expr)
@@ -368,22 +359,21 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     let (param, _end_span) = self.var_decl().context("function parameter")?;
                     // TODO: use end_span
                     params.push(param).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-                    match self.ws0_and_next_tok() {
+                    match self.ws0().next_tok() {
                         Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
                         Ok(Token { kind: TokenKind::CloseParenthesis, .. }) => break,
                         t => t
                             .and_then(ParseError::unexpected_token)
                             .context("expected ',' or ')'")?,
-                    }
+                    };
                 }
                 let params = self.clone_slice_from_scratch_pool(params)?;
-                self.ws0();
-                self.tok(TokenKind::Arrow).context("'->'")?;
+                self.ws0().tok(TokenKind::Arrow).context("'->'")?;
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
                 self.expr().context("[...]")?;
-                let Ok(Token { .. }) = self.ws0_and_next_tok() else {
+                let Ok(Token { .. }) = self.ws0().next_tok() else {
                     return err!(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
                         .context("[...]");
                 };
@@ -455,8 +445,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         start_span: Span,
     ) -> ParseResult<Ptr<Expr>> {
         let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
-        self.ws0();
         let else_body = self
+            .ws0()
             .lex
             .peek()
             .filter(|t| t.kind == TokenKind::Keyword(Keyword::Else))
@@ -480,7 +470,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 break closing_paren.span;
             }
             args.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0_and_next_tok()? {
+            match self.ws0().next_tok()? {
                 Token { kind: TokenKind::CloseParenthesis, span } => break span,
                 Token { kind: TokenKind::Comma, .. } => continue,
                 t => ParseError::unexpected_token(t).context("expect ',' or ')'")?,
@@ -499,7 +489,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 break (true, closing_brace.span);
             }
             stmts.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0_and_next_tok()? {
+            match self.ws0().next_tok()? {
                 Token { kind: TokenKind::CloseBrace, span } => break (false, span),
                 Token { kind: TokenKind::Semicolon, .. } => continue,
                 t => ParseError::unexpected_token(t).context("expect ';' or '}'")?,
@@ -521,11 +511,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             let (field, _end_span) = self.var_decl().context("struct field")?;
             // TODO: use end_span
             fields.push(field).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0_and_next_tok() {
+            match self.ws0().next_tok() {
                 Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
                 Ok(Token { kind: TokenKind::CloseBrace, .. }) => break,
                 t => t.and_then(ParseError::unexpected_token).context("expected ',' or '}'")?,
-            }
+            };
         }
         self.clone_slice_from_scratch_pool(fields)
     }
@@ -596,8 +586,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             t = self.next_tok().context("expected variable marker or ident")?;
         };
 
-        self.ws0();
-        let t = self.lex.peek();
+        let t = self.ws0().lex.peek();
         let init = match t.map(|t| t.kind) {
             Some(TokenKind::Colon) => {
                 self.lex.advance();
@@ -625,8 +614,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         ident: Ident,
     ) -> ParseResult<(VarDecl, Span)> {
         let ty_expr = self.expr().context("decl type")?;
-        self.ws0();
-        let t = self.lex.peek();
+        let t = self.ws0().lex.peek();
         let init = t
             .filter(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon))
             .map(|_| self.expr().context("variable initialization"))
@@ -648,8 +636,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     // -------
 
     /// 0+ whitespace
-    pub fn ws0(&mut self) {
+    pub fn ws0(&mut self) -> &mut Self {
         self.lex.advance_while(|t| t.kind.is_whitespace());
+        self
     }
 
     /// 1+ whitespace
@@ -669,12 +658,6 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     #[inline]
-    pub fn ws0_and_next_tok(&mut self) -> ParseResult<Token> {
-        self.ws0();
-        self.next_tok()
-    }
-
-    #[inline]
     pub fn next_tok(&mut self) -> ParseResult<Token> {
         self.lex.next().ok_or(err!(x NoInput, self.lex.pos_span()))
     }
@@ -682,11 +665,16 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     // helpers:
 
     #[inline]
-    fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
-        match self.alloc.try_alloc(val) {
+    fn alloc<T: core::fmt::Debug>(&self, val: T) -> ParseResult<Ptr<T>> {
+        // println!("alloc {:?} bytes", std::mem::size_of::<T>());
+        // println!("alloc {:#?} ", val);
+        let a = match self.alloc.try_alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
-        }
+        };
+
+        // println!("{:?}", self.alloc.allocated_bytes() - self.alloc.chunk_capacity());
+        a
     }
 
     /// # Source
@@ -1414,7 +1402,13 @@ impl DebugAst for Type {
         match self {
             Type::Void => "void".to_string(),
             Type::Never => "!".to_string(),
+            Type::Int { bits, is_signed } => {
+                format!("{}{}", if *is_signed { "i" } else { "u" }, bits)
+            },
+            Type::IntLiteral => "int lit".to_string(),
+            Type::Bool => "bool".to_string(),
             Type::Float { bits } => format!("f{}", bits),
+            Type::FloatLiteral => "float lit".to_string(),
             Type::Function(_) => "fn".to_string(), // TODO: fn type as text
             Type::Unset => String::default(),
             Type::Unevaluated(expr) => expr.to_text(),
@@ -1423,7 +1417,13 @@ impl DebugAst for Type {
 
     fn write_tree(&self, lines: &mut TreeLines) {
         match self {
-            Type::Void | Type::Never | Type::Float { .. } => lines.write(&self.to_text()),
+            Type::Void
+            | Type::Never
+            | Type::Int { .. }
+            | Type::IntLiteral
+            | Type::Bool
+            | Type::Float { .. }
+            | Type::FloatLiteral => lines.write(&self.to_text()),
             Type::Function(_) => lines.write(&self.to_text()), // TODO: fn type as text
             Type::Unset => {},
             Type::Unevaluated(expr) => expr.write_tree(lines),

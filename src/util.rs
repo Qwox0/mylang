@@ -4,7 +4,7 @@ use crate::{
 };
 use core::fmt;
 
-pub fn display_spanned_error(err: impl SpannedError, code: &Code) {
+pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
     eprintln!("ERROR: {:?}", err);
     display_span_in_code(err.span(), code)
 }
@@ -44,4 +44,32 @@ impl<T> UnwrapDebug for Option<T> {
             unsafe { self.unwrap_unchecked() }
         }
     }
+}
+
+impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
+    type Inner = T;
+
+    fn unwrap_debug(self) -> Self::Inner {
+        if cfg!(debug_assertions) {
+            self.unwrap()
+        } else {
+            unsafe { self.unwrap_unchecked() }
+        }
+    }
+}
+
+pub fn collect_all_result_errors<T, E>(
+    i: impl IntoIterator<Item = Result<T, E>>,
+) -> Result<Vec<T>, Vec<E>> {
+    let iter = i.into_iter();
+    let mut res = Ok(Vec::with_capacity(iter.size_hint().0));
+    for x in iter {
+        match (x, &mut res) {
+            (Ok(t), Ok(ok_list)) => ok_list.push(t),
+            (Ok(_), Err(_)) => continue,
+            (Err(err), Ok(_)) => res = Err(vec![err]),
+            (Err(e), Err(err_list)) => err_list.push(e),
+        }
+    }
+    res
 }

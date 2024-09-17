@@ -84,6 +84,11 @@ impl<T: ?Sized> Ord for Ptr<T> {
 impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for Ptr<T> {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        if f.alternate() {
+            write!(f, "Ptr->")?;
+            self.as_ref().fmt(f)
+        } else {
+            self.0.fmt(f)
+        }
     }
 }

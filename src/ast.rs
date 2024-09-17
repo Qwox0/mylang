@@ -190,17 +190,20 @@ pub enum ExprKind {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    pub ty: Type,
 }
 
 impl From<(ExprKind, Span)> for Expr {
+    #[inline]
     fn from((kind, span): (ExprKind, Span)) -> Self {
-        Expr { kind, span }
+        Expr { kind, span, ty: Type::Unset }
     }
 }
 
 impl Expr {
+    #[inline]
     pub fn new(kind: ExprKind, span: Span) -> Self {
-        Self { kind, span }
+        Self { kind, span, ty: Type::Unset }
     }
 
     /// Returns a [`Span`] representing the entire expression.
@@ -428,7 +431,7 @@ pub struct Ident {
 
 impl Ident {
     pub fn into_expr(self) -> Expr {
-        Expr { kind: ExprKind::Ident(self.text), span: self.span }
+        Expr::new(ExprKind::Ident(self.text), self.span)
     }
 }
 
@@ -471,9 +474,16 @@ pub enum LitKind {
 pub enum Type {
     Void,
     Never,
+    Int {
+        bits: u8,
+        is_signed: bool,
+    },
+    IntLiteral,
+    Bool,
     Float {
         bits: u8,
     },
+    FloatLiteral,
     Function(Ptr<Fn>),
     //Literal(LitKind),
     /// The type was not explicitly set in the original source code and must
@@ -489,7 +499,13 @@ impl fmt::Debug for Type {
         match self {
             Type::Void => write!(f, "Void"),
             Type::Never => write!(f, "Never"),
+            Type::Int { bits, is_signed } => {
+                write!(f, "{}{}", if *is_signed { "i" } else { "u" }, bits)
+            },
+            Type::IntLiteral => write!(f, "int lit"),
+            Type::Bool => write!(f, "bool"),
             Type::Float { bits } => write!(f, "f{}", bits),
+            Type::FloatLiteral => write!(f, "float lit"),
             Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
             // Type::Literal(kind) => write!(f, "{:?}Lit", kind),
             Type::Unset => write!(f, "Unset"),

@@ -1,4 +1,4 @@
-# mylang
+# My unnamed programming language
 
 My programming language (TODO: think of a good name; this is always the hardest part)
 

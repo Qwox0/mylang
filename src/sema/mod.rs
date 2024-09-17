@@ -38,12 +38,19 @@ pub enum SemaErrorKind {
     },
 
     MissingArg,
+    MissingElseBranch,
+    IncompatibleBranches {
+        expected: Type,
+        got: Type,
+    },
 
     UnknownIdent(Ptr<str>),
     CannotInfer,
 
     TopLevelDuplicate,
     UnexpectedTopLevelExpr(Ptr<Expr>),
+
+    ReturnNotInAFunction,
 
     // TODO: remove this
     Unimplemented,
@@ -57,6 +64,7 @@ pub struct SemaError {
 
 //type SemaResult<T = Type> = Result<T, SemaError>;
 #[derive(Debug)]
+#[must_use]
 pub enum SemaResult<T = Type> {
     Ok(T),
     NotFinished,
@@ -131,11 +139,31 @@ macro_rules! err {
     };
 }
 
+/// ```rust
+/// fn check_or_set_type(target: &mut Type, new_ty: Type, err_span: Span) -> Sema<'c>
+/// ```
+macro_rules! check_or_set_type {
+    ($target:expr, $new_ty:expr, $err_span:expr $(,)?) => {{
+        let target: &mut Type = $target;
+        let new_ty: Type = $new_ty;
+        debug_assert!(new_ty.is_valid());
+        if *target == Type::Unset || *target == Type::Never {
+            *target = new_ty;
+            Ok(())
+        } else if *target == new_ty || new_ty == Type::Never {
+            Ok(())
+        } else {
+            err!(MismatchedTypes { expected: *target, got: new_ty }, $err_span)
+        }
+    }};
+}
+
 /// Semantic analyzer
 pub struct Sema<'c> {
     code: &'c Code,
 
     pub symbols: SymbolTable<Option<SemaSymbol>>,
+    function_stack: Vec<Ptr<Fn>>,
     debug_types: bool,
 
     pub errors: Vec<SemaError>,
@@ -143,7 +171,13 @@ pub struct Sema<'c> {
 
 impl<'c> Sema<'c> {
     pub fn new(code: &'c Code, debug_types: bool) -> Sema<'c> {
-        Sema { code, symbols: SymbolTable::with_one_scope(), debug_types, errors: Vec::new() }
+        Sema {
+            code,
+            symbols: SymbolTable::with_one_scope(),
+            function_stack: vec![],
+            debug_types,
+            errors: vec![],
+        }
     }
 
     pub fn preload_top_level(&mut self, mut s: Ptr<Expr>) {
@@ -163,7 +197,7 @@ impl<'c> Sema<'c> {
         }
     }
 
-    /// Returns if s was fully checked
+    /// Returns if `s` was fully analyzed
     pub fn analyze_top_level(&mut self, s: Ptr<Expr>) -> bool {
         match self.analyze(s) {
             Ok(_) => true,
@@ -183,26 +217,26 @@ impl<'c> Sema<'c> {
         #[allow(unused_variables)]
         let ty = match &mut expr.kind {
             ExprKind::Ident(text) => self.get_symbol(*text, expr.span).map_ok(SemaSymbol::get_type),
-            &mut ExprKind::Literal { kind, code } => match kind {
+            &mut ExprKind::Literal { kind, code } => Ok(match kind {
                 // TODO: better literal handling
                 LitKind::Char => todo!(),
                 LitKind::BChar => todo!(),
-                LitKind::Int => Ok(Type::Float { bits: 64 }),
-                LitKind::Float => Ok(Type::Float { bits: 64 }),
+                LitKind::Int => Type::Float { bits: 64 },
+                LitKind::Float => Type::Float { bits: 64 },
                 LitKind::Str => todo!(),
-            },
-            ExprKind::BoolLit(_) => todo!(),
+            }),
+            ExprKind::BoolLit(_) => Ok(Type::Bool),
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(func) => self.analyze_fn(func),
-            ExprKind::Parenthesis { expr } => todo!(),
+            ExprKind::Parenthesis { expr } => self.analyze(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 let mut ty = Type::Void;
                 for s in stmts.iter() {
                     ty = self.analyze(*s)?;
                 }
-                if *has_trailing_semicolon { Ok(Type::Void) } else { Ok(ty) }
+                Ok(if !*has_trailing_semicolon || ty == Type::Never { ty } else { Type::Void })
             },
             ExprKind::StructDef(_) => todo!(),
             ExprKind::UnionDef(_) => todo!(),
@@ -213,12 +247,13 @@ impl<'c> Sema<'c> {
             ExprKind::Dot { lhs, rhs } => todo!(),
             ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => todo!(),
-            ExprKind::Call { func, args } => {
-                let Result::Ok(func) = func.try_to_ident() else {
+            ExprKind::Call { func: fn_expr, args } => {
+                self.analyze(*fn_expr)?;
+                debug_assert!(fn_expr.ty.is_valid());
+                let Result::Ok(func) = fn_expr.try_to_ident() else {
                     todo!("non ident function call")
                 };
-                let func = self.get_ident_symbol(func)?;
-                match func {
+                match self.get_ident_symbol(func)? {
                     SemaSymbol::Variable { markers, ty: Type::Function(mut func) } => {
                         let Fn { params, ret_type, body } = func.as_mut();
                         self.validate_call(*params, *args)?;
@@ -234,16 +269,37 @@ impl<'c> Sema<'c> {
                     (_, Type::Unset | Type::Unevaluated(_)) => return err!(CannotInfer, span),
                     (_, Type::Void) => false,
                     (_, Type::Never) => true,
-                    (PreOpKind::AddrOf, Type::Float { .. }) => true,
-                    (PreOpKind::AddrOf, Type::Function(_)) => todo!(),
-                    (PreOpKind::AddrMutOf, Type::Float { .. }) => true,
-                    (PreOpKind::AddrMutOf, Type::Function(_)) => todo!(),
-                    (PreOpKind::Deref, Type::Float { .. }) => false,
-                    (PreOpKind::Deref, Type::Function(_)) => false,
-                    (PreOpKind::Not, Type::Float { .. }) => false,
-                    (PreOpKind::Not, Type::Function(_)) => false,
-                    (PreOpKind::Neg, Type::Float { .. }) => true,
-                    (PreOpKind::Neg, Type::Function(_)) => false,
+                    (
+                        PreOpKind::AddrOf | PreOpKind::AddrMutOf,
+                        Type::Int { .. }
+                        | Type::IntLiteral
+                        | Type::Bool
+                        | Type::Float { .. }
+                        | Type::FloatLiteral,
+                    ) => true,
+                    (PreOpKind::AddrOf | PreOpKind::AddrMutOf, Type::Function(_)) => todo!(),
+                    (
+                        PreOpKind::Deref,
+                        Type::Int { .. }
+                        | Type::IntLiteral
+                        | Type::Bool
+                        | Type::Float { .. }
+                        | Type::FloatLiteral
+                        | Type::Function(_),
+                    ) => false,
+                    (PreOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => true,
+                    (
+                        PreOpKind::Not,
+                        Type::Float { .. } | Type::FloatLiteral | Type::Function(_),
+                    ) => false,
+                    (
+                        PreOpKind::Neg,
+                        Type::Int { .. }
+                        | Type::IntLiteral
+                        | Type::Float { .. }
+                        | Type::FloatLiteral,
+                    ) => true,
+                    (PreOpKind::Neg, Type::Bool | Type::Function(_)) => false,
                 };
                 if is_valid { Ok(ty) } else { err!(InvalidPreOp { ty, kind }, span) }
             },
@@ -281,15 +337,62 @@ impl<'c> Sema<'c> {
                 }
             },
             ExprKind::VarDecl(decl) => self.analyze_var_decl(decl),
-            ExprKind::If { condition, then_body, else_body } => todo!(),
+            ExprKind::If { condition, then_body, else_body } => {
+                let cond = self.analyze(*condition)?;
+                debug_assert!(cond.is_valid());
+                if cond != Type::Bool {
+                    return err!(
+                        MismatchedTypes { expected: Type::Bool, got: cond },
+                        condition.full_span()
+                    );
+                }
+                let then_ty = self.analyze(*then_body)?;
+                debug_assert!(then_ty.is_valid());
+                if let Some(else_body) = else_body {
+                    let else_ty = self.analyze(*else_body)?;
+                    debug_assert!(else_ty.is_valid());
+                    if then_ty == else_ty {
+                        Ok(then_ty)
+                    } else {
+                        err!(
+                            IncompatibleBranches { expected: then_ty, got: else_ty },
+                            else_body.full_span()
+                        )
+                    }
+                } else if then_ty == Type::Void {
+                    Ok(Type::Void)
+                } else {
+                    err!(MissingElseBranch, expr.full_span())
+                }
+            },
             ExprKind::Match { val, else_body } => todo!(),
             ExprKind::For { source, iter_var, body } => todo!(),
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
-            ExprKind::Return { expr } => Ok(Type::Never),
+            ExprKind::Return { expr: val } => {
+                let ret_type = if let Some(val) = val {
+                    let t = self.analyze(*val)?;
+                    debug_assert!(val.ty.is_valid());
+                    t
+                } else {
+                    Type::Void
+                };
+                let Some(func) = self.function_stack.last_mut() else {
+                    return err!(ReturnNotInAFunction, expr.full_span());
+                };
+                check_or_set_type!(
+                    &mut func.ret_type,
+                    ret_type,
+                    val.map(|v| v.full_span()).unwrap_or(expr.full_span()),
+                )?;
+                Ok(Type::Never)
+            },
             ExprKind::Semicolon(_) => todo!(),
         };
+        if let Ok(ty) = ty {
+            expr.ty = ty;
+        }
         if self.debug_types {
             display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {ty:?}")); // TODO: remove this
         }
@@ -297,17 +400,19 @@ impl<'c> Sema<'c> {
     }
 
     fn analyze_fn(&mut self, func: &mut Fn) -> SemaResult {
-        let Fn { mut params, ret_type, body } = func;
+        self.function_stack.push(func.into());
         self.symbols.open_scope();
+        let Fn { mut params, ret_type, body } = func;
         let res = try {
             for decl in params.iter_mut() {
                 self.analyze_var_decl(decl)?;
             }
             let body_ty = self.analyze(*body)?;
-            Self::check_infered_type(ret_type, body_ty, body.span)?;
+            check_or_set_type!(ret_type, body_ty, body.span)?; // TODO: better span if `body` is a block
             Type::Function(func.into())
         };
         self.symbols.close_scope();
+        self.function_stack.pop();
         res
     }
 
@@ -318,7 +423,8 @@ impl<'c> Sema<'c> {
             .insert(&*decl.ident.text, Some(var))
             .is_some_and(|sym| sym.is_some())
         {
-            println!("INFO: '{}' was shadowed in the same scope", &*decl.ident.text);
+            // println!("INFO: '{}' was shadowed in the same scope",
+            // &*decl.ident.text);
         }
         Ok(Type::Void)
     }
@@ -328,7 +434,7 @@ impl<'c> Sema<'c> {
         self.eval_type(ty)?;
         if let Some(init) = &mut decl.default {
             let init_ty = self.analyze(*init)?;
-            Self::check_infered_type(ty, init_ty, init.span)?;
+            check_or_set_type!(ty, init_ty, init.span)?;
         } else if !ty.is_valid() {
             return err!(VarDeclNoType, decl.ident.span);
         };
@@ -353,18 +459,6 @@ impl<'c> Sema<'c> {
             if p.ty != arg_ty {
                 return err!(MismatchedTypes { expected: p.ty, got: arg_ty }, arg.span);
             }
-        }
-        Ok(())
-    }
-
-    #[inline]
-    #[must_use]
-    fn check_infered_type(ty: &mut Type, infered_ty: Type, err_span: Span) -> SemaResult<()> {
-        debug_assert!(infered_ty.is_valid());
-        if *ty == Type::Unset {
-            *ty = infered_ty;
-        } else if *ty != infered_ty {
-            return err!(MismatchedTypes { expected: *ty, got: infered_ty }, err_span);
         }
         Ok(())
     }

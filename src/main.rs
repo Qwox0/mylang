@@ -4,11 +4,16 @@ use inkwell::{context::Context, module::Module, targets::TargetMachine};
 use mylang::{
     cli::Cli,
     codegen::llvm,
+    compiler::Compiler,
     parser::{lexer::Lexer, parser_helper::ParserInterface, DebugAst, StmtIter},
     sema,
-    util::display_spanned_error,
+    util::{collect_all_result_errors, display_spanned_error},
 };
-use std::{io::Read, path::Path, time::Instant};
+use std::{
+    io::Read,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 fn main() {
     dev();
@@ -161,7 +166,7 @@ fn dev() {
     const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = false;
     const DEBUG_TYPES: bool = false;
-    const DEBUG_TYPED_AST: bool = true;
+    const DEBUG_TYPED_AST: bool = false;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
@@ -177,18 +182,16 @@ pub sub :: (a: f64, b: f64, ) -> -b + a;
 // }
 // pub sub2 :: (values: Sub) -> values.a - values.b;
 
-//main :: -> test(1) + test(2);
-//mymain :: -> false | if test(1) else (10 | sub(1)) | sub(3);
 // factorial :: x -> x == 0 | if 1 else x * factorial(x-1);
 // mymain :: -> factorial(10) == 3628800;
 mymain :: -> {
     mut a := test(1);
     mut a := 10;
-    a = 100;
+    a = false | if test(1) else (10 | sub(1)) | sub(3);
     b := test();
 
     //sub2(Sub.{ a = a, b })
-    sub(a, b)
+    return sub(a, b);
 };
 pub test :: (mut x := 1) -> {
     x += 1;
@@ -197,6 +200,12 @@ pub test :: (mut x := 1) -> {
 
 // pub infer_problem1 :: () -> infer_problem2();
 // pub infer_problem2 :: () -> infer_problem1();
+
+// TODO: This causes too many loops
+// a :: -> b();
+// b :: -> c();
+// c :: -> d();
+// d :: -> 10;
 ";
 
     let code = code.as_ref();
@@ -220,7 +229,7 @@ pub test :: (mut x := 1) -> {
                     s.print_tree();
                 },
                 Err(e) => {
-                    display_spanned_error(e, code);
+                    display_spanned_error(&e, code);
                 },
             }
         }
@@ -229,85 +238,58 @@ pub test :: (mut x := 1) -> {
 
     println!("### Frontend:");
     let frontend_parse_start = Instant::now();
-    let context = Context::create();
-    let mut compiler = llvm::Codegen::new_module(&context, "dev");
-
-    let mut has_parse_error = false;
-    let stmts = stmts
-        .filter_map(|s| match s {
-            Ok(stmt) => {
-                compiler.add_top_level_symbol(stmt);
-                Some(stmt)
-            },
-            Err(err) => {
-                display_spanned_error(err, code);
-                has_parse_error = true;
-                None
-            },
-        })
-        .collect::<Vec<_>>();
-
-    if has_parse_error {
+    let stmts = collect_all_result_errors(stmts).unwrap_or_else(|errors| {
+        for e in errors {
+            display_spanned_error(&e, code);
+        }
         panic!("Parse ERROR")
-    }
+    });
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
-    let frontend_sema_start = Instant::now();
-    let mut sema = sema::Sema::new(code, DEBUG_TYPES);
+    let sema = sema::Sema::new(code, DEBUG_TYPES);
+    let context = Context::create();
+    let codegen = llvm::Codegen::new_module(&context, "dev");
+    let mut compiler = Compiler::new(sema, codegen);
 
-    for s in stmts.iter().copied() {
-        sema.preload_top_level(s);
+    enum FrontendDurations {
+        Detailed { sema: Duration, codegen: Duration },
+        Combined(Duration),
     }
 
-    let mut finished = vec![false; stmts.len()];
-    let mut remaining_fns = stmts.len();
-    while finished.iter().any(std::ops::Not::not) {
-        let old_remaining_fns = remaining_fns;
-        debug_assert!(stmts.len() == finished.len());
-        remaining_fns = stmts
-            .iter()
-            .zip(finished.iter_mut())
-            .filter(|(_, finished)| !**finished)
-            .map(|(s, finished)| {
-                // TODO: don't reanalyse the entire function if `NotFinished` is returned
-                *finished = sema.analyze_top_level(*s);
-                *finished
-            })
-            .filter(|finished| !*finished)
-            .count();
-        if remaining_fns == old_remaining_fns {
-            panic!("cycle detected") // TODO: find location of cycle
+    let frontend2_duration = if cfg!(debug_assertions) {
+        let (sema, codegen) = compiler.compile_stmts_dev::<DEBUG_TYPED_AST>(&stmts, code);
+        FrontendDurations::Detailed { sema, codegen }
+    } else {
+        let frontend2_start = Instant::now();
+        compiler.compile_stmts(&stmts);
+
+        if !compiler.sema.errors.is_empty() {
+            for e in compiler.sema.errors {
+                display_spanned_error(&e, code);
+            }
+            panic!("Semantic analysis ERROR")
         }
-    }
 
-    if !sema.errors.is_empty() {
-        for e in sema.errors {
-            display_spanned_error(e, code);
+        let frontend2_duration = frontend2_start.elapsed();
+
+        if DEBUG_TYPED_AST {
+            println!("\n### Typed AST Nodes:");
+            for s in stmts.iter().copied() {
+                println!("stmt @ {:?}", s);
+                s.print_tree();
+            }
+            println!();
         }
-        panic!("Semantic analysis ERROR")
-    }
 
-    let frontend_sema_duration = frontend_sema_start.elapsed();
+        FrontendDurations::Combined(frontend2_duration)
+    };
+    let total_frontend_duration = frontend_parse_duration
+        + match frontend2_duration {
+            FrontendDurations::Detailed { sema, codegen } => sema + codegen,
+            FrontendDurations::Combined(d) => d,
+        };
 
-    if DEBUG_TYPED_AST {
-        println!("\n### Typed AST Nodes:");
-        for s in stmts.iter().copied() {
-            println!("stmt @ {:?}", s);
-            s.print_tree();
-        }
-        println!();
-    }
-
-    let frontend_codegen_start = Instant::now();
-    for expr in stmts {
-        compiler
-            .compile_top_level_fn_body(&expr)
-            .unwrap_or_else(|e| panic!("ERROR: {:?}", e));
-    }
-    let module = compiler.into_module();
-    let frontend_codegen_duration = frontend_codegen_start.elapsed();
-    let frontend_duration =
-        frontend_parse_duration + frontend_sema_duration + frontend_codegen_duration;
+    let module = compiler.codegen.into_module();
 
     print!("functions:");
     for a in module.get_functions() {
@@ -326,6 +308,7 @@ pub test :: (mut x := 1) -> {
     let backend_start = Instant::now();
     module.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
     let backend_duration = backend_start.elapsed();
+    let total_duration = total_frontend_duration + backend_duration;
 
     if DEBUG_LLVM_IR_OPTIMIZED {
         println!("### Optimized LLVM IR:");
@@ -346,12 +329,21 @@ pub test :: (mut x := 1) -> {
     }
 
     println!("### Compilation time:");
-    println!("  Frontend:            {:?}", frontend_duration);
-    println!("    Lexer, Parser:     {:?}", frontend_parse_duration);
-    println!("    Semantic Analysis: {:?}", frontend_sema_duration);
-    println!("    LLVM IR Codegen:   {:?}", frontend_codegen_duration);
-    println!("  LLVM Backend:        {:?} (LLVM pass pipeline)", backend_duration);
-    println!("  Total:               {:?}", frontend_duration + backend_duration);
+    println!("  Frontend:                             {:?}", total_frontend_duration);
+    println!("    Lexer, Parser:                      {:?}", frontend_parse_duration);
+
+    match frontend2_duration {
+        FrontendDurations::Detailed { sema, codegen } => {
+            println!("    Semantic Analysis:                  {:?}", sema);
+            println!("    LLVM IR Codegen:                    {:?}", codegen);
+        },
+        FrontendDurations::Combined(d) => {
+            println!("    Semantic Analysis, LLVM IR Codegen: {:?}", d);
+        },
+    }
+
+    println!("  LLVM Backend (LLVM pass pipeline):    {:?}", backend_duration);
+    println!("  Total:                                {:?}", total_duration);
 }
 
 fn compile(module: &Module, target_machine: &TargetMachine) {
