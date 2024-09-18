@@ -140,6 +140,7 @@ pub enum ExprKind {
     //     ty: Ptr<Expr>,
     // },
     /// `if <cond> <then>` (`else <else>`)
+    /// `^^` expr.span
     If {
         condition: Ptr<Expr>,
         then_body: Ptr<Expr>,
@@ -179,6 +180,10 @@ pub enum ExprKind {
         // TODO
     },
 
+    Defer(Ptr<Expr>),
+
+    /// `return <expr>`
+    /// `^^^^^^` expr.span
     Return {
         expr: Option<Ptr<Expr>>,
     },
@@ -230,13 +235,18 @@ impl Expr {
                 Some(e) => self.span.join(e.full_span()),
                 None => self.span,
             },
-            ExprKind::If { condition, then_body, else_body } => todo!(),
+            ExprKind::If { condition, then_body, else_body } => {
+                self.span.join(else_body.unwrap_or(then_body).full_span())
+            },
             ExprKind::Match { val, else_body } => todo!(),
             ExprKind::For { source, iter_var, body } => todo!(),
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
-            ExprKind::Return { expr } => todo!(),
+            ExprKind::Return { expr } => match expr {
+                Some(expr) => self.span.join(expr.full_span()),
+                None => self.span,
+            },
             ExprKind::Semicolon(_) => todo!(),
             _ => self.span,
         }

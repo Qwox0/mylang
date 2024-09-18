@@ -1,16 +1,17 @@
 #![allow(unused_variables)]
 
 use crate::{
-    ast::{DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, Type, VarDecl},
+    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, Type, VarDecl},
+    defer_stack::DeferStack,
     parser::lexer::{Code, Span},
     ptr::Ptr,
     symbol_table::SymbolTable,
-    util::display_span_in_code_with_label,
+    util::{display_span_in_code_with_label, forget_lifetime},
 };
 use std::ops::{FromResidual, Try};
 use SemaResult::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SemaErrorKind {
     ConstDeclWithoutInit,
     /// TODO: maybe infer the type from the usage
@@ -51,12 +52,9 @@ pub enum SemaErrorKind {
     UnexpectedTopLevelExpr(Ptr<Expr>),
 
     ReturnNotInAFunction,
-
-    // TODO: remove this
-    Unimplemented,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SemaError {
     pub kind: SemaErrorKind,
     pub span: Span,
@@ -78,6 +76,13 @@ impl<T> SemaResult<T> {
             NotFinished => NotFinished,
             Err(err) => Err(err),
         }
+    }
+
+    pub fn inspect_err(self, f: impl FnOnce(&SemaError)) -> Self {
+        if let Err(e) = &self {
+            f(e);
+        }
+        self
     }
 }
 
@@ -164,8 +169,9 @@ pub struct Sema<'c> {
 
     pub symbols: SymbolTable<Option<SemaSymbol>>,
     function_stack: Vec<Ptr<Fn>>,
-    debug_types: bool,
+    defer_stack: DeferStack,
 
+    debug_types: bool,
     pub errors: Vec<SemaError>,
 }
 
@@ -175,6 +181,7 @@ impl<'c> Sema<'c> {
             code,
             symbols: SymbolTable::with_one_scope(),
             function_stack: vec![],
+            defer_stack: DeferStack::default(),
             debug_types,
             errors: vec![],
         }
@@ -232,10 +239,16 @@ impl<'c> Sema<'c> {
             ExprKind::Fn(func) => self.analyze_fn(func),
             ExprKind::Parenthesis { expr } => self.analyze(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
-                let mut ty = Type::Void;
-                for s in stmts.iter() {
-                    ty = self.analyze(*s)?;
-                }
+                self.open_scope();
+                let ty: SemaResult = try {
+                    let mut ty = Type::Void;
+                    for s in stmts.iter() {
+                        ty = self.analyze(*s)?;
+                    }
+                    ty
+                };
+                self.close_scope()?;
+                let ty = ty?;
                 Ok(if !*has_trailing_semicolon || ty == Type::Never { ty } else { Type::Void })
             },
             ExprKind::StructDef(_) => todo!(),
@@ -260,7 +273,8 @@ impl<'c> Sema<'c> {
                         debug_assert!(ret_type.is_valid());
                         Ok(*ret_type)
                     },
-                    _ => return Err(SemaError { kind: SemaErrorKind::Unimplemented, span }),
+                    SemaSymbol::Err(_) => Ok(Type::Never),
+                    _ => todo!(),
                 }
             },
             &mut ExprKind::PreOp { kind, expr, .. } => {
@@ -309,7 +323,34 @@ impl<'c> Sema<'c> {
                 let rhs_ty = self.analyze(*rhs)?;
                 debug_assert!(rhs_ty.is_valid());
                 if lhs_ty == rhs_ty {
-                    Ok(lhs_ty) // todo: check if binop can be applied to type
+                    // todo: check if binop can be applied to type
+                    Ok(match op {
+                        BinOpKind::Mul
+                        | BinOpKind::Div
+                        | BinOpKind::Mod
+                        | BinOpKind::Add
+                        | BinOpKind::Sub => lhs_ty,
+                        BinOpKind::ShiftL => todo!(),
+                        BinOpKind::ShiftR => todo!(),
+                        BinOpKind::BitAnd => todo!(),
+                        BinOpKind::BitXor => todo!(),
+                        BinOpKind::BitOr => todo!(),
+                        BinOpKind::Eq
+                        | BinOpKind::Ne
+                        | BinOpKind::Lt
+                        | BinOpKind::Le
+                        | BinOpKind::Gt
+                        | BinOpKind::Ge => Type::Bool,
+                        BinOpKind::And | BinOpKind::Or => {
+                            if lhs_ty == Type::Bool {
+                                Type::Bool
+                            } else {
+                                todo!()
+                            }
+                        },
+                        BinOpKind::Range => todo!(),
+                        BinOpKind::RangeInclusive => todo!(),
+                    })
                 } else {
                     err!(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span)
                 }
@@ -340,7 +381,7 @@ impl<'c> Sema<'c> {
             ExprKind::If { condition, then_body, else_body } => {
                 let cond = self.analyze(*condition)?;
                 debug_assert!(cond.is_valid());
-                if cond != Type::Bool {
+                if cond != Type::Bool && cond != Type::Never {
                     return err!(
                         MismatchedTypes { expected: Type::Bool, got: cond },
                         condition.full_span()
@@ -351,15 +392,17 @@ impl<'c> Sema<'c> {
                 if let Some(else_body) = else_body {
                     let else_ty = self.analyze(*else_body)?;
                     debug_assert!(else_ty.is_valid());
-                    if then_ty == else_ty {
+                    if then_ty == else_ty || else_ty == Type::Never {
                         Ok(then_ty)
+                    } else if then_ty == Type::Never {
+                        Ok(else_ty)
                     } else {
                         err!(
                             IncompatibleBranches { expected: then_ty, got: else_ty },
                             else_body.full_span()
                         )
                     }
-                } else if then_ty == Type::Void {
+                } else if matches!(then_ty, Type::Void | Type::Never) {
                     Ok(Type::Void)
                 } else {
                     err!(MissingElseBranch, expr.full_span())
@@ -370,6 +413,10 @@ impl<'c> Sema<'c> {
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Defer(expr) => {
+                self.defer_stack.push_expr(*expr);
+                Ok(Type::Void)
+            },
             ExprKind::Return { expr: val } => {
                 let ret_type = if let Some(val) = val {
                     let t = self.analyze(*val)?;
@@ -401,7 +448,7 @@ impl<'c> Sema<'c> {
 
     fn analyze_fn(&mut self, func: &mut Fn) -> SemaResult {
         self.function_stack.push(func.into());
-        self.symbols.open_scope();
+        self.open_scope();
         let Fn { mut params, ret_type, body } = func;
         let res = try {
             for decl in params.iter_mut() {
@@ -411,18 +458,18 @@ impl<'c> Sema<'c> {
             check_or_set_type!(ret_type, body_ty, body.span)?; // TODO: better span if `body` is a block
             Type::Function(func.into())
         };
-        self.symbols.close_scope();
+        self.close_scope()?;
         self.function_stack.pop();
         res
     }
 
     fn analyze_var_decl(&mut self, decl: &mut VarDecl) -> SemaResult {
-        let var = self.analyze_var_decl2(decl)?;
-        if self
-            .symbols
-            .insert(&*decl.ident.text, Some(var))
-            .is_some_and(|sym| sym.is_some())
-        {
+        let s = self.analyze_var_decl2(decl).inspect_err(|e| {
+            let s = SemaSymbol::Err(Ptr::from(Box::leak(Box::new(e.clone())))); // TODO: don't use Box
+            self.symbols.insert(&*decl.ident.text, Some(s));
+        })?;
+        let prev = self.symbols.insert(&*decl.ident.text, Some(s));
+        if prev.is_some_and(|sym| sym.is_some()) {
             // println!("INFO: '{}' was shadowed in the same scope",
             // &*decl.ident.text);
         }
@@ -496,12 +543,34 @@ impl<'c> Sema<'c> {
     fn get_ident_symbol(&self, i: Ident) -> SemaResult<&SemaSymbol> {
         self.get_symbol(i.text, i.span)
     }
+
+    fn open_scope(&mut self) {
+        self.symbols.open_scope();
+        self.defer_stack.open_scope();
+    }
+
+    fn close_scope(&mut self) -> SemaResult<()> {
+        let res = self.analyze_defer_exprs();
+        self.symbols.close_scope();
+        self.defer_stack.close_scope();
+        res
+    }
+
+    #[inline]
+    fn analyze_defer_exprs(&mut self) -> SemaResult<()> {
+        let exprs = unsafe { forget_lifetime(self.defer_stack.get_cur_scope()) };
+        for expr in exprs.iter().rev() {
+            self.analyze(*expr)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum SemaSymbol {
     Variable { markers: DeclMarkers, ty: Type },
     // Function { expr: Ptr<Expr> },
+    Err(Ptr<SemaError>),
 }
 
 impl SemaSymbol {
@@ -509,6 +578,7 @@ impl SemaSymbol {
         match self {
             SemaSymbol::Variable { ty, .. } => *ty,
             // SemaSymbol::Function { expr } => Type::Function(*expr),
+            SemaSymbol::Err(..) => Type::Never,
         }
     }
 }

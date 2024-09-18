@@ -73,3 +73,8 @@ pub fn collect_all_result_errors<T, E>(
     }
     res
 }
+
+#[inline]
+pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
+    unsafe { &*(r as *const T) }
+}

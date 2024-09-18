@@ -73,7 +73,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn expr_(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
-        let mut lhs = self.ws0().value(min_precedence).context("expr lhs")?;
+        let mut lhs = self.ws0().value().context("expr lhs")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) => lhs = node,
@@ -233,7 +233,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// anything which has higher precedence than any operator
-    pub fn value(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
+    pub fn value(&mut self) -> ParseResult<Ptr<Expr>> {
         let Token { kind, span } = self.next_tok().context("expected value")?;
 
         macro_rules! expr {
@@ -307,7 +307,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(While { condition, body }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let expr = match self.expr_(min_precedence) {
+                let expr = match self.expr() {
                     Ok(expr) => Some(expr),
                     Err(ParseError {
                         kind: ParseErrorKind::NoInput | ParseErrorKind::Finished,
@@ -319,6 +319,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::Keyword(Keyword::Break) => todo!(),
             TokenKind::Keyword(Keyword::Continue) => todo!(),
+            TokenKind::Keyword(Keyword::Defer) => {
+                let expr = self.expr().context("defer expr")?;
+                expr!(Defer(expr), span)
+            },
             //TokenKind::Keyword(_) => todo!("//TokenKind::Keyword(_)"),
             TokenKind::Literal(kind) => {
                 expr!(Literal { kind, code: self.get_text_from_span(span) })
@@ -453,7 +457,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             .inspect(|_| self.lex.advance())
             .map(|_| self.expr_(IF_PRECEDENCE).context("else body"))
             .transpose()?;
-        self.alloc(expr!(If { condition, then_body, else_body }, start_span)) // TODO: correct span
+        self.alloc(expr!(If { condition, then_body, else_body }, start_span))
     }
 
     /// `... ( ... )`
@@ -666,15 +670,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     #[inline]
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> ParseResult<Ptr<T>> {
-        // println!("alloc {:?} bytes", std::mem::size_of::<T>());
-        // println!("alloc {:#?} ", val);
-        let a = match self.alloc.try_alloc(val) {
+        match self.alloc.try_alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
-        };
-
-        // println!("{:?}", self.alloc.allocated_bytes() - self.alloc.chunk_capacity());
-        a
+        }
     }
 
     /// # Source
@@ -1189,6 +1188,7 @@ impl DebugAst for Expr {
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Defer(expr) => format!("defer {}", expr.to_text()),
             ExprKind::Return { expr } => {
                 format!("return{}", debug::opt_to_text(expr, |e| format!(" {}", e.to_text())))
             },
@@ -1377,6 +1377,10 @@ impl DebugAst for Expr {
                 }
             },
             ExprKind::VarDecl(decl) => debug::var_decl_write_tree(decl, lines),
+            ExprKind::Defer(expr) => {
+                lines.write("defer ");
+                lines.write_tree(expr);
+            },
             ExprKind::Return { expr } => {
                 lines.write("return");
                 if let Some(expr) = expr {

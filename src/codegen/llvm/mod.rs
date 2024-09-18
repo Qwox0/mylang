@@ -4,10 +4,11 @@ use self::jit::Jit;
 use crate::{
     ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, Type, VarDecl},
     cli::DebugOptions,
+    defer_stack::DeferStack,
     parser::{lexer::Code, ParseError, StmtIter},
     ptr::Ptr,
     symbol_table::SymbolTable,
-    util::UnwrapDebug,
+    util::{forget_lifetime, UnwrapDebug},
 };
 use inkwell::{
     basic_block::BasicBlock,
@@ -32,7 +33,7 @@ use inkwell::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, GlobalValue, IntValue, PointerValue, StructValue,
     },
-    FloatPredicate, OptimizationLevel,
+    FloatPredicate, IntPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
 
@@ -70,6 +71,7 @@ pub struct Codegen<'ctx> {
     pub module: Module<'ctx>,
 
     symbols: SymbolTable<Symbol<'ctx>>,
+    defer_stack: DeferStack,
 
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
@@ -88,6 +90,7 @@ impl<'ctx> Codegen<'ctx> {
             builder,
             module,
             symbols: SymbolTable::with_one_scope(),
+            defer_stack: DeferStack::default(),
             cur_fn: None,
             cur_var_ident: None,
             // errors: vec![],
@@ -181,23 +184,24 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Fn(_) => todo!(),
             ExprKind::Parenthesis { expr } => self.compile_expr(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
-                self.symbols.open_scope();
+                self.open_scope();
                 let res = try {
-                    let mut out = CodegenValue::new_void(Type::Void);
+                    let mut out = CodegenValue::new_zst(Type::Void);
                     for s in stmts.iter() {
                         out = self.compile_expr(*s)?;
                         if out.ty == Type::Never {
                             break;
                         }
                     }
-                    debug_assert!(expr.ty == out.ty);
+                    debug_assert!(expr.ty == out.ty || out.ty == Type::Never);
                     if !*has_trailing_semicolon || out.ty == Type::Never {
                         out
                     } else {
-                        CodegenValue::new_void(expr.ty)
+                        debug_assert!(expr.ty == Type::Void);
+                        CodegenValue::new_zst(Type::Void)
                     }
                 };
-                self.symbols.close_scope();
+                self.close_scope();
                 res
             },
             ExprKind::StructDef(_) => todo!(),
@@ -246,13 +250,13 @@ impl<'ctx> Codegen<'ctx> {
                 let lhs = self.compile_expr(*lhs)?;
                 let rhs = self.compile_expr(*rhs)?;
                 debug_assert!(lhs.ty == rhs.ty);
-                v!(match lhs.ty {
-                    Type::Float { .. } => {
-                        self.build_float_binop(lhs.float_val(), rhs.float_val(), *op)?
-                            .as_value_ref()
+                match lhs.ty {
+                    t @ Type::Float { .. } => {
+                        self.build_float_binop(lhs.float_val(), rhs.float_val(), *op, t)
                     },
+                    Type::Bool => self.build_bool_binop(lhs.bool_val(), rhs.bool_val(), *op),
                     _ => todo!(),
-                })
+                }
             },
             ExprKind::Assign { lhs, rhs, .. } => {
                 debug_assert!(lhs.ty == rhs.ty);
@@ -265,7 +269,7 @@ impl<'ctx> Codegen<'ctx> {
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
                 }
-                Ok(CodegenValue::new_void(expr.ty))
+                Ok(CodegenValue::new_zst(expr.ty))
             },
             ExprKind::BinOpAssign { lhs: lhs_expr, op, rhs: rhs_expr, .. } => {
                 debug_assert!(lhs_expr.ty == rhs_expr.ty);
@@ -276,17 +280,20 @@ impl<'ctx> Codegen<'ctx> {
                         let lhs = self.builder.build_load(lhs_ty, stack_var, "lhs")?;
                         let rhs = self.compile_expr(*rhs_expr)?;
                         let binop_res = match lhs_expr.ty {
-                            Type::Float { .. } => self
-                                .build_float_binop(lhs.into_float_value(), rhs.float_val(), *op)?
-                                .as_basic_value_enum(),
+                            t @ Type::Float { .. } => self.build_float_binop(
+                                lhs.into_float_value(),
+                                rhs.float_val(),
+                                *op,
+                                t,
+                            )?,
                             _ => todo!(),
                         };
-                        self.builder.build_store(stack_var, binop_res)?;
+                        self.builder.build_store(stack_var, binop_res.basic_val())?;
                     },
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
                 }
-                Ok(CodegenValue::new_void(expr.ty))
+                Ok(CodegenValue::new_zst(expr.ty))
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
                 let var_name = &*ident.text;
@@ -310,17 +317,11 @@ impl<'ctx> Codegen<'ctx> {
                     //println!("LOG: '{}' was shadowed in the same scope",
                     // var_name);
                 }
-                Ok(CodegenValue::new_void(expr.ty))
+                Ok(CodegenValue::new_zst(expr.ty))
             },
             ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap_debug();
-                //let zero = self.context.f64_type().const_float(0.0);
-
-                let condition = self.compile_expr(*condition)?;
-                debug_assert!(condition.ty == Type::Bool);
-                //let condition = self.builder.build_float_compare( FloatPredicate::ONE,
-                // condition, zero, "ifcond",)?;
-                let condition = condition.bool_val();
+                let condition = self.compile_expr(*condition)?.bool_val();
 
                 let mut then_bb = self.context.append_basic_block(func, "then");
                 let mut else_bb = self.context.append_basic_block(func, "else");
@@ -330,42 +331,47 @@ impl<'ctx> Codegen<'ctx> {
 
                 self.builder.position_at_end(then_bb);
                 let then_val = self.compile_expr(*then_body)?;
-                self.builder.build_unconditional_branch(merge_bb)?;
+                if !then_val.is_never() {
+                    self.builder.build_unconditional_branch(merge_bb)?;
+                }
                 then_bb = self.builder.get_insert_block().expect("has block");
 
                 self.builder.position_at_end(else_bb);
                 let else_val = if let Some(else_body) = else_body {
                     self.compile_expr(*else_body)?
                 } else {
-                    CodegenValue::new_void(Type::Void)
+                    CodegenValue::new_zst(Type::Void)
                 };
-                debug_assert!(then_val.ty == else_val.ty);
-                debug_assert!(then_val.ty == expr.ty);
-                self.builder.build_unconditional_branch(merge_bb)?;
+                debug_assert!(
+                    then_val.ty == else_val.ty && then_val.ty == expr.ty
+                        || then_val.is_never() && else_val.ty == expr.ty
+                        || else_val.is_never() && then_val.ty == expr.ty
+                );
+                if !else_val.is_never() {
+                    self.builder.build_unconditional_branch(merge_bb)?;
+                }
                 else_bb = self.builder.get_insert_block().expect("has block");
 
                 self.builder.position_at_end(merge_bb);
-                if expr.ty == Type::Void {
-                    Ok(CodegenValue::new_void(expr.ty))
-                } else {
+                CodegenValue::try_new_zst(expr.ty).ok_or(()).or_else(|_| {
                     let out_ty = self.llvm_type(expr.ty).basic_ty();
-
                     let phi = self.builder.build_phi(out_ty, "ifexpr")?;
                     phi.add_incoming(&[
                         (&then_val.basic_val(), then_bb),
                         (&else_val.basic_val(), else_bb),
                     ]);
-
-                    // self.module.print_to_stderr();
-
-                    v!(phi.as_value_ref())
-                }
+                    v!(phi.as_basic_value().as_value_ref())
+                })
             },
             ExprKind::Match { val, else_body } => todo!(),
             ExprKind::For { source, iter_var, body } => todo!(),
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),
+            ExprKind::Defer(expr) => {
+                self.defer_stack.push_expr(*expr);
+                Ok(CodegenValue::new_zst(Type::Void))
+            },
             ExprKind::Return { expr: val } => {
                 if let Some(val) = val {
                     let val = self.compile_expr(*val)?;
@@ -373,28 +379,30 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     self.builder.build_return(None)?;
                 }
-                Ok(self.never(expr.ty))
+                debug_assert!(expr.ty == Type::Never);
+                Ok(CodegenValue::new_zst(expr.ty))
             },
             ExprKind::Semicolon(_) => todo!(),
         }
     }
 
     pub fn compile_fn(&mut self, name: &str, f: &Fn) -> CodegenResult<FunctionValue<'ctx>> {
-        let fn_val = self.compile_prototype(name, f.params);
+        let fn_val = self.compile_prototype(name, f);
         self.compile_fn_body(fn_val, f)
     }
 
-    pub fn compile_prototype(&mut self, name: &str, params: Ptr<[VarDecl]>) -> FunctionValue<'ctx> {
-        let ret_type = self.context.f64_type();
-        let args_types = params
+    pub fn compile_prototype(&mut self, name: &str, f: &Fn) -> FunctionValue<'ctx> {
+        let ret_type = self.llvm_type(f.ret_type).basic_ty();
+        let args_types = f
+            .params
             .iter()
-            .map(|VarDecl { .. }| BasicMetadataTypeEnum::FloatType(self.context.f64_type()))
+            .map(|VarDecl { ty, .. }| self.llvm_type(*ty).basic_metadata_ty())
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
 
         for (idx, param) in fn_val.get_param_iter().enumerate() {
-            param.set_name(&params[idx].ident.text)
+            param.set_name(&f.params[idx].ident.text)
         }
 
         // self.symbols
@@ -413,23 +421,26 @@ impl<'ctx> Codegen<'ctx> {
 
         self.cur_fn = Some(func);
 
-        self.symbols.open_scope();
+        self.open_scope();
         let res = try {
             self.symbols.reserve(f.params.len());
 
             for (param, param_def) in func.get_param_iter().zip(f.params.iter()) {
                 let pname = &param_def.ident.text;
-                self.symbols.insert(
-                    pname.to_string(),
-                    if param_def.markers.is_mut {
-                        let alloca = self.create_entry_block_alloca(func, pname);
-                        self.builder.build_store(alloca, param)?;
-                        Symbol::Stack(alloca)
-                    } else {
-                        let reg_val = param.as_any_value_enum();
-                        Symbol::Register(reg_val)
-                    },
-                );
+                let s = if param_def.markers.is_mut {
+                    let entry = func.get_first_basic_block().unwrap_debug();
+                    match entry.get_first_instruction() {
+                        Some(first_instr) => self.builder.position_before(&first_instr),
+                        None => self.builder.position_at_end(entry),
+                    }
+                    let alloca = self.builder.build_alloca(param.get_type(), pname).unwrap_debug();
+                    self.builder.build_store(alloca, param)?;
+                    Symbol::Stack(alloca)
+                } else {
+                    let reg_val = param.as_any_value_enum();
+                    Symbol::Register(reg_val)
+                };
+                self.symbols.insert(pname.to_string(), s);
             }
 
             let body = self.compile_expr(f.body)?;
@@ -445,7 +456,7 @@ impl<'ctx> Codegen<'ctx> {
                 Err(CodegenError::InvalidGeneratedFunction)?
             }
         };
-        self.symbols.close_scope();
+        self.close_scope();
         res
     }
 
@@ -462,7 +473,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_return(Some(&val.basic_val()))?;
             },
         }
-        Ok(self.never(Type::Never))
+        Ok(CodegenValue::new_zst(Type::Never))
     }
 
     pub fn build_float_binop(
@@ -470,52 +481,90 @@ impl<'ctx> Codegen<'ctx> {
         lhs: FloatValue<'ctx>,
         rhs: FloatValue<'ctx>,
         op: BinOpKind,
-    ) -> CodegenResult<FloatValue<'ctx>> {
+        ty: Type,
+    ) -> CodegenResult<CodegenValue<'ctx>> {
+        macro_rules! f {
+            ($val:expr) => {
+                Ok(CodegenValue::new($val.as_value_ref(), ty))
+            };
+            ($val:expr, $ty:expr) => {
+                Ok(CodegenValue::new($val.as_value_ref(), $ty))
+            };
+        }
+        fn b<'ctx>(bool_val: IntValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
+            Ok(CodegenValue::new(bool_val.as_value_ref(), Type::Bool))
+        }
+
         match op {
-            BinOpKind::Mul => Ok(self.builder.build_float_mul(lhs, rhs, "mul")?),
-            BinOpKind::Div => Ok(self.builder.build_float_div(lhs, rhs, "div")?),
-            BinOpKind::Mod => Ok(self.builder.build_float_rem(lhs, rhs, "mod")?),
-            BinOpKind::Add => Ok(self.builder.build_float_add(lhs, rhs, "add")?),
-            BinOpKind::Sub => Ok(self.builder.build_float_sub(lhs, rhs, "sub")?),
+            BinOpKind::Mul => f!(self.builder.build_float_mul(lhs, rhs, "mul")?),
+            BinOpKind::Div => f!(self.builder.build_float_div(lhs, rhs, "div")?),
+            BinOpKind::Mod => f!(self.builder.build_float_rem(lhs, rhs, "mod")?),
+            BinOpKind::Add => f!(self.builder.build_float_add(lhs, rhs, "add")?),
+            BinOpKind::Sub => f!(self.builder.build_float_sub(lhs, rhs, "sub")?),
             BinOpKind::ShiftL => todo!(),
             BinOpKind::ShiftR => todo!(),
             BinOpKind::BitAnd => todo!(),
             BinOpKind::BitXor => todo!(),
             BinOpKind::BitOr => todo!(),
-            BinOpKind::Eq => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
-            BinOpKind::Ne => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::ONE, lhs, rhs, "ne")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
-            BinOpKind::Lt => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::OLT, lhs, rhs, "lt")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
-            BinOpKind::Le => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::OLE, lhs, rhs, "le")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
-            BinOpKind::Gt => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::OGT, lhs, rhs, "gt")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
-            BinOpKind::Ge => Ok(self.builder.build_signed_int_to_float(
-                self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?,
-                self.context.f64_type(),
-                "floatcast",
-            )?),
+            BinOpKind::Eq => {
+                b(self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?)
+            },
+            BinOpKind::Ne => {
+                b(self.builder.build_float_compare(FloatPredicate::ONE, lhs, rhs, "ne")?)
+            },
+            BinOpKind::Lt => {
+                b(self.builder.build_float_compare(FloatPredicate::OLT, lhs, rhs, "lt")?)
+            },
+            BinOpKind::Le => {
+                b(self.builder.build_float_compare(FloatPredicate::OLE, lhs, rhs, "le")?)
+            },
+            BinOpKind::Gt => {
+                b(self.builder.build_float_compare(FloatPredicate::OGT, lhs, rhs, "gt")?)
+            },
+            BinOpKind::Ge => {
+                b(self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?)
+            },
             BinOpKind::And => todo!(),
             BinOpKind::Or => todo!(),
             BinOpKind::Range => todo!(),
             BinOpKind::RangeInclusive => todo!(),
+        }
+    }
+
+    pub fn build_bool_binop(
+        &mut self,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        op: BinOpKind,
+    ) -> CodegenResult<CodegenValue<'ctx>> {
+        fn b<'ctx>(bool_val: IntValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
+            Ok(CodegenValue::new(bool_val.as_value_ref(), Type::Bool))
+        }
+
+        match op {
+            BinOpKind::Eq => b(self.builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq")?),
+            BinOpKind::Ne => b(self.builder.build_int_compare(IntPredicate::NE, lhs, rhs, "ne")?),
+
+            // false = 0, true = 1
+            BinOpKind::Lt => {
+                b(self.builder.build_int_compare(IntPredicate::ULT, lhs, rhs, "lt")?)
+            },
+            BinOpKind::Le => {
+                b(self.builder.build_int_compare(IntPredicate::ULE, lhs, rhs, "le")?)
+            },
+            BinOpKind::Gt => {
+                b(self.builder.build_int_compare(IntPredicate::UGT, lhs, rhs, "gt")?)
+            },
+            BinOpKind::Ge => {
+                b(self.builder.build_int_compare(IntPredicate::UGE, lhs, rhs, "ge")?)
+            },
+
+            BinOpKind::And | BinOpKind::BitAnd => b(self.builder.build_and(lhs, rhs, "and")?),
+            BinOpKind::Or | BinOpKind::BitOr => b(self.builder.build_or(lhs, rhs, "or")?),
+            BinOpKind::BitXor => b(self.builder.build_xor(lhs, rhs, "xor")?),
+            BinOpKind::Range => todo!(),
+            BinOpKind::RangeInclusive => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -528,7 +577,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Int { bits: 32, .. } => self.context.i32_type(),
             Type::Int { bits: 64, .. } => self.context.i64_type(),
             Type::Int { bits: 128, .. } => self.context.i128_type(),
-            Type::Int { .. } => todo!("other float bits"),
+            Type::Int { .. } => todo!("other int bits"),
             _ => panic!(),
         }
     }
@@ -550,50 +599,15 @@ impl<'ctx> Codegen<'ctx> {
                 Type::Void => self.context.void_type().as_type_ref(),
                 Type::Never => todo!(),
                 Type::Int { bits, is_signed } => self.int_type(ty).as_type_ref(),
-                Type::IntLiteral => todo!(),
+                Type::IntLiteral => self.context.i64_type().as_type_ref(), /* TODO: infer type or set correct type during sema */
                 Type::Bool => self.context.bool_type().as_type_ref(),
                 Type::Float { bits } => self.float_type(ty).as_type_ref(),
-                Type::FloatLiteral => todo!(),
+                Type::FloatLiteral => self.context.f64_type().as_type_ref(), /* TODO: infer type or set correct type during sema */
                 Type::Function(_) => todo!(),
-                Type::Unset => todo!(),
-                Type::Unevaluated(_) => todo!(),
+                Type::Unset | Type::Unevaluated(_) => panic!("unvalid type"),
             },
             ty,
         )
-    }
-
-    fn never(&self, ty: Type) -> CodegenValue<'ctx> {
-        debug_assert!(ty == Type::Never);
-        CodegenValue::new(std::ptr::null_mut(), ty)
-    }
-
-    /// Creates a new stack allocation instruction in the entry block of the
-    /// function. <https://github.com/TheDan64/inkwell/blob/5c9f7fcbb0a667f7391b94beb65f1a670ad13221/examples/kaleidoscope/implementation_typed_pointers.rs#L845-L857>
-    fn create_entry_block_alloca(
-        &self,
-        fn_value: FunctionValue<'ctx>,
-        name: &str,
-    ) -> PointerValue<'ctx> {
-        let entry = fn_value.get_first_basic_block().unwrap();
-
-        match entry.get_first_instruction() {
-            Some(first_instr) => self.builder.position_before(&first_instr),
-            None => self.builder.position_at_end(entry),
-        }
-
-        self.builder.build_alloca(self.context.f64_type(), name).unwrap()
-        /*
-        let builder = self.context.create_builder();
-
-        let entry = fn_value.get_first_basic_block().unwrap();
-
-        match entry.get_first_instruction() {
-            Some(first_instr) => builder.position_before(&first_instr),
-            None => builder.position_at_end(entry),
-        }
-
-        builder.build_alloca(self.context.f64_type(), name).unwrap()
-            */
     }
 
     pub fn init_target_machine() -> TargetMachine {
@@ -619,6 +633,27 @@ impl<'ctx> Codegen<'ctx> {
                 CodeModel::Default,
             )
             .unwrap()
+    }
+
+    fn open_scope(&mut self) {
+        self.symbols.open_scope();
+        self.defer_stack.open_scope();
+    }
+
+    fn close_scope(&mut self) -> CodegenResult<()> {
+        let res = self.compile_defer_exprs();
+        self.symbols.close_scope();
+        self.defer_stack.close_scope();
+        res
+    }
+
+    #[inline]
+    fn compile_defer_exprs(&mut self) -> CodegenResult<()> {
+        let exprs = unsafe { forget_lifetime(self.defer_stack.get_cur_scope()) };
+        for expr in exprs.iter().rev() {
+            self.compile_expr(*expr)?;
+        }
+        Ok(())
     }
 }
 
@@ -694,9 +729,17 @@ impl<'ctx> CodegenValue<'ctx> {
         CodegenValue { val, ty, _marker: PhantomData }
     }
 
-    pub fn new_void(ty: Type) -> CodegenValue<'ctx> {
-        debug_assert!(ty == Type::Void);
+    /// for zero sized types: `self.val == null`
+    pub fn new_zst(ty: Type) -> CodegenValue<'ctx> {
+        debug_assert!(matches!(ty, Type::Void | Type::Never));
         CodegenValue::new(std::ptr::null_mut(), ty)
+    }
+
+    pub fn try_new_zst(ty: Type) -> Option<CodegenValue<'ctx>> {
+        match ty {
+            Type::Void | Type::Never => Some(CodegenValue::new_zst(ty)),
+            _ => None,
+        }
     }
 
     pub fn as_type(&self) -> CodegenType {
@@ -737,6 +780,10 @@ impl<'ctx> CodegenValue<'ctx> {
         // TODO: debug_assert?
         unsafe { AnyValueEnum::new(self.val) }
     }
+
+    pub fn is_never(&self) -> bool {
+        self.ty == Type::Never
+    }
 }
 
 pub struct CodegenType<'ctx> {
@@ -772,6 +819,10 @@ impl<'ctx> CodegenType<'ctx> {
 
     pub fn basic_ty(&self) -> BasicTypeEnum<'ctx> {
         unsafe { BasicTypeEnum::new(self.inner) }
+    }
+
+    pub fn basic_metadata_ty(&self) -> BasicMetadataTypeEnum<'ctx> {
+        BasicMetadataTypeEnum::try_from(self.any_ty()).unwrap_debug()
     }
 
     pub fn any_ty(&self) -> AnyTypeEnum<'ctx> {

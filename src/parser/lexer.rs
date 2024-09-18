@@ -226,6 +226,7 @@ keywords! {
     Return = "return",
     Break = "break",
     Continue = "continue",
+    Defer = "defer",
 }
 
 /// byte range offset for a [`Code`].

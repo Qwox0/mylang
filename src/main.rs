@@ -187,15 +187,36 @@ pub sub :: (a: f64, b: f64, ) -> -b + a;
 mymain :: -> {
     mut a := test(1);
     mut a := 10;
-    a = false | if test(1) else (10 | sub(1)) | sub(3);
+    a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
     b := test();
+
+    if defer_test() return 10000;
 
     //sub2(Sub.{ a = a, b })
     return sub(a, b);
+    // this is unreachable but is checked anyway
+    x := 1 + 1;
+    x
 };
 pub test :: (mut x := 1) -> {
     x += 1;
     1+2*x
+};
+
+pub defer_test :: -> {
+    mut out := 1;
+    {
+        defer out *= 10;
+        out += 1;
+    }; // TODO: no `;` here
+    t1 := out == 20;
+    out = 1;
+    {
+        defer out += 1;
+        defer out *= 10;
+    };
+    t2 := out == 11;
+    return t1 && t2;
 };
 
 // pub infer_problem1 :: () -> infer_problem2();

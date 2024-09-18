@@ -1,3 +1,4 @@
+#![feature(test)]
 #![feature(try_trait_v2)]
 #![feature(never_type)]
 #![feature(iter_intersperse)]
@@ -14,6 +15,7 @@ pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+pub mod defer_stack;
 pub mod error;
 pub mod parser;
 pub mod ptr;
