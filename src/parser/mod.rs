@@ -1414,23 +1414,17 @@ impl DebugAst for Type {
             Type::Float { bits } => format!("f{}", bits),
             Type::FloatLiteral => "float lit".to_string(),
             Type::Function(_) => "fn".to_string(), // TODO: fn type as text
+            Type::Custom(name) => name.to_string(),
             Type::Unset => String::default(),
             Type::Unevaluated(expr) => expr.to_text(),
         }
     }
 
     fn write_tree(&self, lines: &mut TreeLines) {
-        match self {
-            Type::Void
-            | Type::Never
-            | Type::Int { .. }
-            | Type::IntLiteral
-            | Type::Bool
-            | Type::Float { .. }
-            | Type::FloatLiteral => lines.write(&self.to_text()),
-            Type::Function(_) => lines.write(&self.to_text()), // TODO: fn type as text
-            Type::Unset => {},
-            Type::Unevaluated(expr) => expr.write_tree(lines),
+        if let Type::Unevaluated(expr) = self {
+            expr.write_tree(lines);
+        } else {
+            lines.write(&self.to_text())
         }
     }
 }

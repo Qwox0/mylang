@@ -232,7 +232,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 v!(self.builder.build_call(func, &args, "call")?.as_value_ref())
             },
-            ExprKind::PreOp { kind, expr, .. } => {
+            ExprKind::PreOp { kind, expr } => {
                 let expr = self.compile_expr(*expr)?;
                 v!(match kind {
                     PreOpKind::AddrOf => todo!(),
@@ -246,7 +246,7 @@ impl<'ctx> Codegen<'ctx> {
                     },
                 }) // TODO: maybe different return types possible in the future
             },
-            ExprKind::BinOp { lhs, op, rhs, .. } => {
+            ExprKind::BinOp { lhs, op, rhs } => {
                 let lhs = self.compile_expr(*lhs)?;
                 let rhs = self.compile_expr(*rhs)?;
                 debug_assert!(lhs.ty == rhs.ty);
@@ -258,7 +258,7 @@ impl<'ctx> Codegen<'ctx> {
                     _ => todo!(),
                 }
             },
-            ExprKind::Assign { lhs, rhs, .. } => {
+            ExprKind::Assign { lhs, rhs } => {
                 debug_assert!(lhs.ty == rhs.ty);
                 let var_name = &*lhs.try_to_ident().unwrap_debug().text;
                 match self.symbols.get(var_name).unwrap_debug() {
@@ -271,7 +271,7 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Ok(CodegenValue::new_zst(expr.ty))
             },
-            ExprKind::BinOpAssign { lhs: lhs_expr, op, rhs: rhs_expr, .. } => {
+            ExprKind::BinOpAssign { lhs: lhs_expr, op, rhs: rhs_expr } => {
                 debug_assert!(lhs_expr.ty == rhs_expr.ty);
                 let var_name = &*lhs_expr.try_to_ident().unwrap_debug().text;
                 match self.symbols.get(var_name).unwrap_debug() {
@@ -501,11 +501,6 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::Mod => f!(self.builder.build_float_rem(lhs, rhs, "mod")?),
             BinOpKind::Add => f!(self.builder.build_float_add(lhs, rhs, "add")?),
             BinOpKind::Sub => f!(self.builder.build_float_sub(lhs, rhs, "sub")?),
-            BinOpKind::ShiftL => todo!(),
-            BinOpKind::ShiftR => todo!(),
-            BinOpKind::BitAnd => todo!(),
-            BinOpKind::BitXor => todo!(),
-            BinOpKind::BitOr => todo!(),
             BinOpKind::Eq => {
                 b(self.builder.build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eq")?)
             },
@@ -524,12 +519,28 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::Ge => {
                 b(self.builder.build_float_compare(FloatPredicate::OGE, lhs, rhs, "ge")?)
             },
-            BinOpKind::And => todo!(),
-            BinOpKind::Or => todo!(),
+
             BinOpKind::Range => todo!(),
             BinOpKind::RangeInclusive => todo!(),
+            _ => unreachable!(),
         }
     }
+
+    // TODO: short-circuiting logical operators
+    // for a in [true, false] {
+    //     for b in [true, false] {
+    //         println!("{:>5} && {:>5}                 = {:>5}", a, b, a && b);
+    //         println!("if {:>5} then {:>5} else false = {:>5}", a, b, if a { b }
+    // else { false });         assert_eq!(a && b, if a { b } else { false });
+    //     }
+    // }
+    // for a in [true, false] {
+    //     for b in [true, false] {
+    //         println!("{:>5} || {:>5}                 = {:>5}", a, b, a || b);
+    //         println!("if !{:>5} then {:>5} else true = {:>5}", a, b, if a { true
+    // } else { b });         assert_eq!(a || b, if a { true } else { b });
+    //     }
+    // }
 
     pub fn build_bool_binop(
         &mut self,
@@ -604,6 +615,7 @@ impl<'ctx> Codegen<'ctx> {
                 Type::Float { bits } => self.float_type(ty).as_type_ref(),
                 Type::FloatLiteral => self.context.f64_type().as_type_ref(), /* TODO: infer type or set correct type during sema */
                 Type::Function(_) => todo!(),
+                Type::Custom(_) => todo!(),
                 Type::Unset | Type::Unevaluated(_) => panic!("unvalid type"),
             },
             ty,

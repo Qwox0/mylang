@@ -6,7 +6,7 @@ use crate::{
     parser::lexer::{Code, Span},
     ptr::Ptr,
     symbol_table::SymbolTable,
-    util::{display_span_in_code_with_label, forget_lifetime},
+    util::{display_span_in_code_with_label, forget_lifetime, OkOrWithTry},
 };
 use std::ops::{FromResidual, Try};
 use SemaResult::*;
@@ -145,7 +145,7 @@ macro_rules! err {
 }
 
 /// ```rust
-/// fn check_or_set_type(target: &mut Type, new_ty: Type, err_span: Span) -> Sema<'c>
+/// fn check_or_set_type(target: &mut Type, new_ty: Type, err_span: Span) -> SemaResult<()>
 /// ```
 macro_rules! check_or_set_type {
     ($target:expr, $new_ty:expr, $err_span:expr $(,)?) => {{
@@ -167,7 +167,7 @@ macro_rules! check_or_set_type {
 pub struct Sema<'c> {
     code: &'c Code,
 
-    pub symbols: SymbolTable<Option<SemaSymbol>>,
+    pub symbols: SymbolTable<SemaSymbol>,
     function_stack: Vec<Ptr<Fn>>,
     defer_stack: DeferStack,
 
@@ -195,7 +195,7 @@ impl<'c> Sema<'c> {
             debug_assert!(decl.is_const);
             debug_assert!(decl.default.is_some());
 
-            if self.symbols.insert(&*decl.ident.text, None).is_some() {
+            if self.symbols.insert(&*decl.ident.text, SemaSymbol::new_unevaluated()).is_some() {
                 err!(TopLevelDuplicate, decl.ident.span)?
             }
         };
@@ -261,20 +261,20 @@ impl<'c> Sema<'c> {
             ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => todo!(),
             ExprKind::Call { func: fn_expr, args } => {
-                self.analyze(*fn_expr)?;
-                debug_assert!(fn_expr.ty.is_valid());
+                // self.analyze(*fn_expr)?;
+                // debug_assert!(fn_expr.ty.is_valid());
                 let Result::Ok(func) = fn_expr.try_to_ident() else {
                     todo!("non ident function call")
                 };
                 match self.get_ident_symbol(func)? {
-                    SemaSymbol::Variable { markers, ty: Type::Function(mut func) } => {
+                    SemaSymbol::Ty(Type::Function(mut func)) => {
                         let Fn { params, ret_type, body } = func.as_mut();
                         self.validate_call(*params, *args)?;
                         debug_assert!(ret_type.is_valid());
                         Ok(*ret_type)
                     },
+                    SemaSymbol::Ty(_) => todo!(),
                     SemaSymbol::Err(_) => Ok(Type::Never),
-                    _ => todo!(),
                 }
             },
             &mut ExprKind::PreOp { kind, expr, .. } => {
@@ -314,6 +314,7 @@ impl<'c> Sema<'c> {
                         | Type::FloatLiteral,
                     ) => true,
                     (PreOpKind::Neg, Type::Bool | Type::Function(_)) => false,
+                    (_, Type::Custom(_)) => todo!(),
                 };
                 if is_valid { Ok(ty) } else { err!(InvalidPreOp { ty, kind }, span) }
             },
@@ -322,7 +323,7 @@ impl<'c> Sema<'c> {
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs)?;
                 debug_assert!(rhs_ty.is_valid());
-                if lhs_ty == rhs_ty {
+                if lhs_ty.matches(&rhs_ty) {
                     // todo: check if binop can be applied to type
                     Ok(match op {
                         BinOpKind::Mul
@@ -360,7 +361,7 @@ impl<'c> Sema<'c> {
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs)?;
                 debug_assert!(rhs_ty.is_valid());
-                if lhs_ty == rhs_ty {
+                if lhs_ty.matches(&rhs_ty) {
                     Ok(Type::Void) // todo: check if binop can be applied to type
                 } else {
                     err!(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.span)
@@ -371,7 +372,7 @@ impl<'c> Sema<'c> {
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs)?;
                 debug_assert!(rhs_ty.is_valid());
-                if lhs_ty == rhs_ty {
+                if lhs_ty.matches(&rhs_ty) {
                     Ok(Type::Void) // todo: check if binop can be applied to type
                 } else {
                     err!(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span)
@@ -392,16 +393,12 @@ impl<'c> Sema<'c> {
                 if let Some(else_body) = else_body {
                     let else_ty = self.analyze(*else_body)?;
                     debug_assert!(else_ty.is_valid());
-                    if then_ty == else_ty || else_ty == Type::Never {
-                        Ok(then_ty)
-                    } else if then_ty == Type::Never {
-                        Ok(else_ty)
-                    } else {
+                    then_ty.common_type(else_ty).ok_or_else2(|| {
                         err!(
                             IncompatibleBranches { expected: then_ty, got: else_ty },
                             else_body.full_span()
                         )
-                    }
+                    })
                 } else if matches!(then_ty, Type::Void | Type::Never) {
                     Ok(Type::Void)
                 } else {
@@ -464,9 +461,36 @@ impl<'c> Sema<'c> {
     }
 
     fn analyze_var_decl(&mut self, decl: &mut VarDecl) -> SemaResult {
+        let name = &*decl.ident.text;
+        let ty = &mut decl.ty;
+        self.eval_type(ty)?;
+        let init_res = try {
+            if let Some(init) = &mut decl.default {
+                let init_ty = self.analyze(*init)?;
+                check_or_set_type!(ty, init_ty, init.span)?;
+            } else if !ty.is_valid() {
+                err!(VarDeclNoType, decl.ident.span)?;
+            };
+        };
+
+        let s = match &init_res {
+            Ok(()) | NotFinished => SemaSymbol::Ty(*ty),
+            Err(e) => {
+                SemaSymbol::Err(Ptr::from(Box::leak(Box::new(e.clone())))) // TODO: don't use Box
+            },
+        };
+
+        if self.symbols.insert(name, s).is_some() {
+            // println!("INFO: '{}' was shadowed in the same scope",
+            // &*decl.ident.text);
+        }
+
+        init_res.map_ok(|_| Type::Void)
+
+        /*
         let s = self.analyze_var_decl2(decl).inspect_err(|e| {
-            let s = SemaSymbol::Err(Ptr::from(Box::leak(Box::new(e.clone())))); // TODO: don't use Box
-            self.symbols.insert(&*decl.ident.text, Some(s));
+            let e = SemaSymbol::Err(Ptr::from(Box::leak(Box::new(e.clone())))); // TODO: don't use Box
+            self.symbols.insert(&*decl.ident.text, Some(e));
         })?;
         let prev = self.symbols.insert(&*decl.ident.text, Some(s));
         if prev.is_some_and(|sym| sym.is_some()) {
@@ -474,18 +498,7 @@ impl<'c> Sema<'c> {
             // &*decl.ident.text);
         }
         Ok(Type::Void)
-    }
-
-    fn analyze_var_decl2(&mut self, decl: &mut VarDecl) -> SemaResult<SemaSymbol> {
-        let ty = &mut decl.ty;
-        self.eval_type(ty)?;
-        if let Some(init) = &mut decl.default {
-            let init_ty = self.analyze(*init)?;
-            check_or_set_type!(ty, init_ty, init.span)?;
-        } else if !ty.is_valid() {
-            return err!(VarDeclNoType, decl.ident.span);
-        };
-        Ok(SemaSymbol::Variable { markers: decl.markers, ty: *ty })
+        */
     }
 
     /// works for function calls and call initializers
@@ -515,7 +528,7 @@ impl<'c> Sema<'c> {
         match ty_expr.kind {
             ExprKind::Ident(code) => match &*code {
                 "f64" => Ok(Type::Float { bits: 64 }),
-                _ => todo!(),
+                _ => Ok(Type::Custom(code)),
             },
             _ => todo!(),
         }
@@ -532,11 +545,18 @@ impl<'c> Sema<'c> {
 
     #[inline]
     fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<&SemaSymbol> {
+        //self.symbols.get(&name).ok_or2(err!(UnknownIdent(name), err_span))
         match self.symbols.get(&name) {
-            Some(None) => NotFinished,
-            Some(Some(sym)) => Ok(&sym),
+            Some(SemaSymbol::Ty(ty)) if !ty.is_valid() => NotFinished,
+            Some(sym) => Ok(sym),
             None => err!(UnknownIdent(name), err_span),
         }
+
+        // match self.symbols.get(&name) {
+        //     Some(None) => NotFinished,
+        //     Some(Some(sym)) => Ok(&sym),
+        //     None => err!(UnknownIdent(name), err_span),
+        // }
     }
 
     #[inline]
@@ -568,17 +588,31 @@ impl<'c> Sema<'c> {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SemaSymbol {
-    Variable { markers: DeclMarkers, ty: Type },
-    // Function { expr: Ptr<Expr> },
+    /// This variant doesn't mean the symbol was fully analyzed
+    Ty(Type),
     Err(Ptr<SemaError>),
 }
+// pub enum SemaSymbol {
+//     Variable { ty: Type },
+//     // Function { expr: Ptr<Expr> },
+//     Err(Ptr<SemaError>),
+// }
 
 impl SemaSymbol {
+    pub fn new_unevaluated() -> SemaSymbol {
+        SemaSymbol::Ty(Type::Unset)
+    }
+
     pub fn get_type(&self) -> Type {
         match self {
-            SemaSymbol::Variable { ty, .. } => *ty,
-            // SemaSymbol::Function { expr } => Type::Function(*expr),
-            SemaSymbol::Err(..) => Type::Never,
+            SemaSymbol::Ty(ty) => *ty,
+            SemaSymbol::Err(_) => Type::Never,
         }
+
+        // match self {
+        //     SemaSymbol::Variable { ty } => *ty,
+        //     // SemaSymbol::Function { expr } => Type::Function(*expr),
+        //     SemaSymbol::Err(..) => Type::Never,
+        // }
     }
 }

@@ -495,6 +495,8 @@ pub enum Type {
     },
     FloatLiteral,
     Function(Ptr<Fn>),
+    Custom(Ptr<str>),
+
     //Literal(LitKind),
     /// The type was not explicitly set in the original source code and must
     /// still be inferred.
@@ -518,6 +520,7 @@ impl fmt::Debug for Type {
             Type::FloatLiteral => write!(f, "float lit"),
             Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
             // Type::Literal(kind) => write!(f, "{:?}Lit", kind),
+            Type::Custom(name) => f.debug_tuple("Custom").field(&&**name).finish(),
             Type::Unset => write!(f, "Unset"),
             Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
         }
@@ -537,5 +540,25 @@ impl Type {
     #[inline]
     pub fn into_valid(self) -> Option<Type> {
         if self.is_valid() { Some(self) } else { None }
+    }
+
+    /// Checks if the two types equal or can be coerced into a common type.
+    ///
+    /// For exact equality use `==`.
+    pub fn matches(&self, rhs_ty: &Type) -> bool {
+        // TODO: more type coercion
+        self == rhs_ty || self == &Type::Never || rhs_ty == &Type::Never
+    }
+
+    /// Returns the common type after type coercion or [`None`] if the types
+    /// don't match (see [`Type::matches`]).
+    pub fn common_type(self, rhs_ty: Type) -> Option<Type> {
+        if self == rhs_ty || rhs_ty == Type::Never {
+            Some(self)
+        } else if self == Type::Never {
+            Some(rhs_ty)
+        } else {
+            None
+        }
     }
 }

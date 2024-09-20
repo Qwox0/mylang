@@ -3,6 +3,7 @@ use crate::{
     parser::lexer::{Code, Span},
 };
 use core::fmt;
+use std::ops::Try;
 
 pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
     eprintln!("ERROR: {:?}", err);
@@ -77,4 +78,32 @@ pub fn collect_all_result_errors<T, E>(
 #[inline]
 pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }
+}
+
+pub trait OkOrWithTry<T> {
+    fn ok_or2<Result>(self, err: Result::Residual) -> Result
+    where Result: Try<Output = T>;
+
+    fn ok_or_else2<Result>(self, err: impl FnOnce() -> Result::Residual) -> Result
+    where Result: Try<Output = T>;
+}
+
+impl<T> OkOrWithTry<T> for Option<T> {
+    #[inline]
+    fn ok_or2<Result>(self, err: Result::Residual) -> Result
+    where Result: Try<Output = T> {
+        match self {
+            Some(t) => Result::from_output(t),
+            None => Result::from_residual(err),
+        }
+    }
+
+    #[inline]
+    fn ok_or_else2<Result>(self, err: impl FnOnce() -> Result::Residual) -> Result
+    where Result: Try<Output = T> {
+        match self {
+            Some(t) => Result::from_output(t),
+            None => Result::from_residual(err()),
+        }
+    }
 }
