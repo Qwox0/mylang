@@ -1,10 +1,11 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Fn, Ident, PostOpKind, PreOpKind,
-        Type, VarDecl,
+        VarDecl,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
+    type_::Type,
 };
 use debug::TreeLines;
 pub use error::*;
@@ -72,7 +73,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         self.expr_(MIN_PRECEDENCE)
     }
 
-    pub fn expr_(&mut self, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
+    pub fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
         let mut lhs = self.ws0().value().context("expr lhs")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
@@ -83,20 +84,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
     }
 
-    pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: usize) -> ParseResult<Ptr<Expr>> {
+    pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
         let Some(Token { kind, span }) = self.ws0().lex.peek() else {
             return err!(Finished, self.lex.pos_span());
         };
 
         let op = match FollowingOperator::new(kind) {
-            None => return err!(Finished, span),
-            Some(FollowingOperator::BinOp(binop)) if binop.precedence() <= min_precedence => {
-                return err!(Finished, span);
-            },
-            Some(FollowingOperator::Pipe) if PIPE_PRECEDENCE <= min_precedence => {
-                return err!(Finished, span);
-            },
-            Some(op) => op,
+            Some(op) if op.precedence() > min_precedence => op,
+            _ => return err!(Finished, span),
         };
         self.lex.advance();
 
@@ -385,17 +380,28 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::OpenBrace => return self.block(span),
             TokenKind::Bang => {
-                let expr = self.expr_(usize::MAX).context("! expr")?;
+                let expr = self.expr_(PREOP_PRECEDENCE).context("! expr")?;
                 expr!(PreOp { kind: PreOpKind::Not, expr }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
-                let expr = self.expr_(usize::MAX).context("- expr")?;
+                let expr = self.expr_(PREOP_PRECEDENCE).context("- expr")?;
                 expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
             },
             TokenKind::Arrow => return self.function_tail(self.alloc_empty_slice(), span),
-            TokenKind::Asterisk => todo!("TokenKind::Asterisk"),
-            TokenKind::Ampersand => todo!("TokenKind::Ampersand"),
+            TokenKind::Asterisk => {
+                let is_mut =
+                    self.ws0().lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
+                let pointee = self.expr().context("pointee type")?;
+                expr!(Ptr { is_mut, ty: ty(pointee) })
+            },
+            TokenKind::Ampersand => {
+                let is_mut =
+                    self.ws0().lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
+                let kind = if is_mut { PreOpKind::AddrMutOf } else { PreOpKind::AddrOf };
+                let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
+                expr!(PreOp { kind, expr })
+            },
             //TokenKind::Pipe => todo!("TokenKind::Pipe"),
             //TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
             //TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
@@ -617,12 +623,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         markers: DeclMarkers,
         ident: Ident,
     ) -> ParseResult<(VarDecl, Span)> {
-        let ty_expr = self.expr().context("decl type")?;
-        let t = self.ws0().lex.peek();
-        let init = t
-            .filter(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon))
-            .map(|_| self.expr().context("variable initialization"))
-            .transpose()?;
+        let ty_expr = self.expr_(DECL_TYPE_PRECEDENCE).context("decl type")?;
+        let t = self.ws0().lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
+        let init = t.map(|_| self.expr().context("variable initialization")).transpose()?;
         let is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
         let ty = ty(ty_expr);
         Ok((VarDecl { markers, ident, ty, default: init, is_const }, ty_expr.span))
@@ -716,14 +719,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 }
 
 pub enum FollowingOperator {
-    /// a.b
-    /// `^`
+    /// `a.b`
+    /// ` ^`
     Dot,
-    /// a(b)
-    /// `^`
+    /// `a(b)`
+    /// ` ^`
     Call,
-    /// a[b]
-    /// `^`
+    /// `a[b]`
+    /// ` ^`
     Index,
 
     /// `alloc(MyStruct).{ a = 1, b = "asdf" }`
@@ -824,14 +827,35 @@ impl FollowingOperator {
             _ => return None,
         })
     }
+
+    fn precedence(&self) -> u8 {
+        match self {
+            FollowingOperator::Dot
+            | FollowingOperator::Call
+            | FollowingOperator::Index
+            | FollowingOperator::Initializer
+            | FollowingOperator::SingleArgNoParenFn
+            | FollowingOperator::PostOp(_) => 21,
+            FollowingOperator::BinOp(k) => k.precedence(),
+            FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 2,
+            FollowingOperator::VarDecl
+            | FollowingOperator::ConstDecl
+            | FollowingOperator::TypedDecl => 1,
+            FollowingOperator::Pipe => 3, // TODO: higher or lower then decl?
+        }
+    }
 }
 
-const MIN_PRECEDENCE: usize = 0;
-const PIPE_PRECEDENCE: usize = 1;
-const IF_PRECEDENCE: usize = 2;
+const MIN_PRECEDENCE: u8 = 0;
+const IF_PRECEDENCE: u8 = 4;
+const PREOP_PRECEDENCE: u8 = 20;
+/// `a: ty = init`
+/// `   ^^`
+/// needs to be higher than [`FollowingOperator::Assign`]!
+const DECL_TYPE_PRECEDENCE: u8 = 3;
 
 impl BinOpKind {
-    pub fn precedence(self) -> usize {
+    pub fn precedence(self) -> u8 {
         match self {
             BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod => 19,
             BinOpKind::Add | BinOpKind::Sub => 18,
@@ -895,10 +919,7 @@ fn is_close_paren(t: Token) -> bool {
 
 pub mod debug {
     use super::{DebugAst, Ident};
-    use crate::{
-        ast::{Type, VarDecl},
-        ptr::Ptr,
-    };
+    use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
 
     #[derive(Default)]
     pub struct TreeLine(pub String);
@@ -1406,6 +1427,7 @@ impl DebugAst for Type {
         match self {
             Type::Void => "void".to_string(),
             Type::Never => "!".to_string(),
+            Type::Ptr(pointee) => format!("*{}", pointee.to_text()),
             Type::Int { bits, is_signed } => {
                 format!("{}{}", if *is_signed { "i" } else { "u" }, bits)
             },
@@ -1414,7 +1436,11 @@ impl DebugAst for Type {
             Type::Float { bits } => format!("f{}", bits),
             Type::FloatLiteral => "float lit".to_string(),
             Type::Function(_) => "fn".to_string(), // TODO: fn type as text
-            Type::Custom(name) => name.to_string(),
+            // Type::Custom(name) => name.to_string(),
+            Type::Struct { .. } => todo!(),
+            Type::Union { .. } => todo!(),
+            Type::Enum { .. } => todo!(),
+            Type::Type(_) => "type".to_string(),
             Type::Unset => String::default(),
             Type::Unevaluated(expr) => expr.to_text(),
         }

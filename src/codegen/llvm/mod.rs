@@ -2,12 +2,13 @@
 
 use self::jit::Jit;
 use crate::{
-    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, Type, VarDecl},
+    ast::{BinOpKind, DeclMarkers, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, VarDecl},
     cli::DebugOptions,
     defer_stack::DeferStack,
     parser::{lexer::Code, ParseError, StmtIter},
     ptr::Ptr,
     symbol_table::SymbolTable,
+    type_::Type,
     util::{forget_lifetime, UnwrapDebug},
 };
 use inkwell::{
@@ -27,13 +28,13 @@ use inkwell::{
     targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{
         AnyType, AnyTypeEnum, AsTypeRef, BasicMetadataTypeEnum, BasicType, BasicTypeEnum,
-        FloatType, IntType, PointerType,
+        FloatType, IntType, PointerType, StructType,
     },
     values::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, GlobalValue, IntValue, PointerValue, StructValue,
     },
-    FloatPredicate, IntPredicate, OptimizationLevel,
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
 
@@ -49,6 +50,8 @@ pub enum CodegenError {
     FunctionLookupError(FunctionLookupError),
     CouldntCreateJit(LLVMString),
     CannotMutateRegister,
+
+    AllocErr(bumpalo::AllocErr),
 }
 
 type CodegenResult<T> = Result<T, CodegenError>;
@@ -65,42 +68,50 @@ impl From<FunctionLookupError> for CodegenError {
     }
 }
 
-pub struct Codegen<'ctx> {
+pub struct Codegen<'ctx, 'alloc> {
     pub context: &'ctx Context,
     pub builder: Builder<'ctx>,
     pub module: Module<'ctx>,
 
     symbols: SymbolTable<Symbol<'ctx>>,
+    type_table: HashMap<Ptr<[VarDecl]>, StructType<'ctx>>,
     defer_stack: DeferStack,
 
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_var_ident: Option<Ident>,
-    // errors: Vec<CodegenError>,
+
+    alloc: &'alloc bumpalo::Bump,
 }
 
-impl<'ctx> Codegen<'ctx> {
+impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     pub fn new(
         context: &'ctx Context,
         builder: Builder<'ctx>,
         module: Module<'ctx>,
-    ) -> Codegen<'ctx> {
+        alloc: &'alloc bumpalo::Bump,
+    ) -> Codegen<'ctx, 'alloc> {
         Codegen {
             context,
             builder,
             module,
             symbols: SymbolTable::with_one_scope(),
+            type_table: HashMap::new(),
             defer_stack: DeferStack::default(),
             cur_fn: None,
             cur_var_ident: None,
-            // errors: vec![],
+            alloc,
         }
     }
 
-    pub fn new_module(context: &'ctx Context, module_name: &str) -> Self {
+    pub fn new_module(
+        context: &'ctx Context,
+        module_name: &str,
+        alloc: &'alloc bumpalo::Bump,
+    ) -> Self {
         let builder = context.create_builder();
         let module = context.create_module(module_name);
-        Codegen::new(context, builder, module)
+        Codegen::new(context, builder, module, alloc)
     }
 
     pub fn replace_mod_with_new(&mut self, new_mod_name: &str) -> Module<'ctx> {
@@ -152,14 +163,7 @@ impl<'ctx> Codegen<'ctx> {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 // TODO: ident which is not a variable
-                v!(match self.symbols.get(name).unwrap_debug() {
-                    Symbol::Stack(ptr) => {
-                        let ty = self.llvm_type(expr.ty).basic_ty();
-                        self.builder.build_load(ty, *ptr, name)?.as_value_ref()
-                    },
-                    Symbol::Register(reg) => reg.as_value_ref(),
-                    _ => todo!(),
-                })
+                self.get_symbol_as_val(&**name, expr.ty)
             },
             ExprKind::Literal { kind, code } => {
                 v!(match kind {
@@ -181,7 +185,7 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
-            ExprKind::Fn(_) => todo!(),
+            ExprKind::Fn(_) => todo!("todo: runtime fn"),
             ExprKind::Parenthesis { expr } => self.compile_expr(*expr),
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 self.open_scope();
@@ -204,13 +208,87 @@ impl<'ctx> Codegen<'ctx> {
                 self.close_scope();
                 res
             },
-            ExprKind::StructDef(_) => todo!(),
+            ExprKind::StructDef(_) => {
+                todo!()
+            },
             ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
-            ExprKind::Initializer { lhs, fields } => panic!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
+            ExprKind::Initializer { lhs, fields: values } => {
+                let lhs = lhs.expect("todo: infer struct type");
+                let t = match lhs.ty {
+                    Type::Type(t) => t,
+                    _ => todo!("todo: initializer: more complex lhs"),
+                };
+                let Type::Struct { fields } = *t else { panic!() };
+                let struct_ty = self.type_table[&fields];
+                let struct_ptr = self.builder.build_alloca(struct_ty, "struct")?;
+
+                let mut is_initialized_field = vec![false; fields.len()];
+                for (f, init) in values.iter() {
+                    let field = f.text;
+                    let (f_idx, field_def) = fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, f)| *f.ident.text == *field)
+                        .unwrap_debug();
+
+                    is_initialized_field[f_idx] = true;
+
+                    let init_val = match init {
+                        Some(init) => self.compile_expr(*init)?,
+                        None => self.get_symbol_as_val(&*field, field_def.ty)?,
+                    };
+
+                    let field_ptr = self.builder.build_struct_gep(
+                        struct_ty,
+                        struct_ptr,
+                        f_idx as u32,
+                        &*field,
+                    )?;
+                    self.builder.build_store(field_ptr, init_val.basic_val())?;
+                }
+                for (f_idx, _) in
+                    is_initialized_field.into_iter().enumerate().filter(|(_, is_init)| !is_init)
+                {
+                    let field = fields[f_idx];
+                    let field_ptr = self.builder.build_struct_gep(
+                        struct_ty,
+                        struct_ptr,
+                        f_idx as u32,
+                        &field.ident.text,
+                    )?;
+                    let init_val = self.compile_expr(field.default.unwrap_debug())?;
+                    self.builder.build_store(field_ptr, init_val.basic_val())?;
+                }
+                v!(struct_ptr.as_value_ref(), Type::Ptr(self.alloc(lhs.ty)?))
+                // let a = self.builder.build_load(struct_ty, struct_ptr,
+                // "struct_in_reg").unwrap();
+                // v!(a.as_value_ref())
+            },
+            ExprKind::Dot { lhs, rhs } => {
+                let Type::Struct { fields } = lhs.ty else { panic!() };
+                let lhs_ty = self.type_table[&fields];
+                //let lhs_val = self.compile_expr(*lhs)?.ptr_val();
+                let lhs_val = unsafe { PointerValue::new(self.compile_expr(*lhs)?.val) };
+                let (field_idx, field) = fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.ident.text_eq(rhs))
+                    .expect("could find field");
+                let field_ptr = self.builder.build_struct_gep(
+                    lhs_ty,
+                    lhs_val,
+                    field_idx as u32,
+                    &format!("{}_ptr", &*rhs.text),
+                )?;
+                let a = self
+                    .builder
+                    .build_load(self.llvm_type(field.ty).basic_ty(), field_ptr, &rhs.text)?
+                    .as_value_ref();
+                Ok(CodegenValue::new(a, field.ty))
+            },
             //ExprKind::Colon { lhs, rhs } => todo!(),
             ExprKind::PostOp { kind, expr } => todo!(),
             ExprKind::Index { lhs, idx } => todo!(),
@@ -226,7 +304,12 @@ impl<'ctx> Codegen<'ctx> {
                     .enumerate()
                     .map(|(idx, param)| {
                         let arg = args.get(idx).copied().or(param.default).unwrap_debug();
-                        self.compile_expr(arg).map(|v| v.basic_metadata_val())
+                        let v = self.compile_expr(arg)?;
+                        Ok::<_, CodegenError>(if matches!(param.ty, Type::Struct { .. }) {
+                            BasicMetadataValueEnum::from(v.ptr_val())
+                        } else {
+                            v.basic_metadata_val()
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -268,6 +351,7 @@ impl<'ctx> Codegen<'ctx> {
                     },
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
+                    Symbol::StructDef { .. } => panic!("cannot assign to struct definition"),
                 }
                 Ok(CodegenValue::new_zst(expr.ty))
             },
@@ -292,12 +376,46 @@ impl<'ctx> Codegen<'ctx> {
                     },
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
+                    Symbol::StructDef { .. } => panic!("cannot assign to struct definition"),
                 }
                 Ok(CodegenValue::new_zst(expr.ty))
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
                 let var_name = &*ident.text;
                 let is_mut = markers.is_mut;
+                let v = match init.map(|p| &p.as_ref().kind) {
+                    Some(ExprKind::Fn(f)) => {
+                        Symbol::Function { params: f.params, val: self.compile_fn(var_name, f)? }
+                    },
+                    Some(&ExprKind::StructDef(fields)) => {
+                        let ty = self.context.opaque_struct_type(var_name);
+                        let field_types = fields
+                            .iter()
+                            .map(|f| self.llvm_type(f.ty).basic_ty())
+                            .collect::<Vec<_>>();
+                        if !ty.set_body(&field_types, false) {
+                            panic!()
+                        }
+                        //let ty = self.context.struct_type(&field_types, false);
+                        self.type_table.insert(fields, ty);
+                        Symbol::StructDef { fields, ty }
+                    },
+                    _ => {
+                        if !is_mut && let Some(init) = init {
+                            Symbol::Register(self.compile_expr(*init)?.any_val())
+                        } else {
+                            let ty = self.llvm_type(*ty).basic_ty();
+                            let stack_var = self.builder.build_alloca(ty, &var_name)?;
+                            if let Some(init) = init {
+                                let init = self.compile_expr(*init)?.basic_val();
+                                self.builder.build_store(stack_var, init)?;
+                            }
+                            Symbol::Stack(stack_var)
+                        }
+                    },
+                };
+
+                /*
                 let v = if let Some(Expr { kind: ExprKind::Fn(f), .. }) = init.map(|p| p.as_ref()) {
                     let val = self.compile_fn(var_name, f)?;
                     Symbol::Function { params: f.params, val }
@@ -312,12 +430,14 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     Symbol::Stack(stack_var)
                 };
+                */
                 let old = self.symbols.insert(var_name.to_string(), v);
                 if old.is_some() {
                     //println!("LOG: '{}' was shadowed in the same scope",
                     // var_name);
                 }
-                Ok(CodegenValue::new_zst(expr.ty))
+                debug_assert!(expr.ty == Type::Void);
+                Ok(CodegenValue::new_zst(Type::Void))
             },
             ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap_debug();
@@ -396,7 +516,13 @@ impl<'ctx> Codegen<'ctx> {
         let args_types = f
             .params
             .iter()
-            .map(|VarDecl { ty, .. }| self.llvm_type(*ty).basic_metadata_ty())
+            .map(|VarDecl { ty, .. }| {
+                if matches!(ty, Type::Struct { .. }) {
+                    BasicMetadataTypeEnum::from(self.context.ptr_type(AddressSpace::default()))
+                } else {
+                    self.llvm_type(*ty).basic_metadata_ty()
+                }
+            })
             .collect::<Vec<_>>();
         let fn_type = ret_type.fn_type(&args_types, false);
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
@@ -458,6 +584,14 @@ impl<'ctx> Codegen<'ctx> {
         };
         self.close_scope();
         res
+    }
+
+    pub fn compile_struct_def(&self, fields: Ptr<[VarDecl]>) -> CodegenResult<StructType<'ctx>> {
+        let field_types =
+            fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
+        let s_ty = self.context.struct_type(&field_types, false);
+        println!("{:?}", s_ty);
+        Ok(s_ty)
     }
 
     // -----------------------
@@ -609,17 +743,35 @@ impl<'ctx> Codegen<'ctx> {
             match ty {
                 Type::Void => self.context.void_type().as_type_ref(),
                 Type::Never => todo!(),
+                Type::Ptr(_) => self.context.ptr_type(AddressSpace::default()).as_type_ref(),
                 Type::Int { bits, is_signed } => self.int_type(ty).as_type_ref(),
                 Type::IntLiteral => self.context.i64_type().as_type_ref(), /* TODO: infer type or set correct type during sema */
                 Type::Bool => self.context.bool_type().as_type_ref(),
                 Type::Float { bits } => self.float_type(ty).as_type_ref(),
                 Type::FloatLiteral => self.context.f64_type().as_type_ref(), /* TODO: infer type or set correct type during sema */
                 Type::Function(_) => todo!(),
-                Type::Custom(_) => todo!(),
+                //Type::Struct { .. } =>
+                // self.context.get_struct_type("Sub").unwrap().as_type_ref(),
+                Type::Struct { fields: ptr } => self.type_table[&ptr].as_type_ref(),
+                Type::Union { .. } => todo!(),
+                Type::Enum { .. } => todo!(),
+                Type::Type(_) => todo!(),
                 Type::Unset | Type::Unevaluated(_) => panic!("unvalid type"),
             },
             ty,
         )
+    }
+
+    pub fn get_symbol_as_val(&self, name: &str, ty: Type) -> CodegenResult<CodegenValue<'ctx>> {
+        let val = match self.symbols.get(name).unwrap_debug() {
+            Symbol::Stack(ptr) => {
+                let ty = self.llvm_type(ty).basic_ty();
+                self.builder.build_load(ty, *ptr, name)?.as_value_ref()
+            },
+            Symbol::Register(reg) => reg.as_value_ref(),
+            _ => todo!(),
+        };
+        Ok(CodegenValue::new(val, ty))
     }
 
     pub fn init_target_machine() -> TargetMachine {
@@ -666,6 +818,14 @@ impl<'ctx> Codegen<'ctx> {
             self.compile_expr(*expr)?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn alloc<T: core::fmt::Debug>(&self, val: T) -> CodegenResult<Ptr<T>> {
+        match self.alloc.try_alloc(val) {
+            Result::Ok(ok) => Ok(Ptr::from(ok)),
+            Result::Err(e) => Err(CodegenError::AllocErr(e)),
+        }
     }
 }
 
@@ -717,6 +877,10 @@ enum Symbol<'ctx> {
         /// TODO: think of a better way to store the fn definition
         params: Ptr<[VarDecl]>,
         val: FunctionValue<'ctx>,
+    },
+    StructDef {
+        fields: Ptr<[VarDecl]>,
+        ty: StructType<'ctx>,
     },
 }
 
@@ -774,8 +938,13 @@ impl<'ctx> CodegenValue<'ctx> {
     }
 
     pub fn ptr_val(&self) -> PointerValue<'ctx> {
-        debug_assert!(todo!());
+        debug_assert!(matches!(self.ty, Type::Ptr(_)));
         unsafe { PointerValue::new(self.val) }
+    }
+
+    pub fn struct_val(&self) -> StructValue<'ctx> {
+        debug_assert!(matches!(self.ty, Type::Struct { .. }));
+        unsafe { StructValue::new(self.val) }
     }
 
     pub fn basic_val(&self) -> BasicValueEnum<'ctx> {
@@ -825,7 +994,7 @@ impl<'ctx> CodegenType<'ctx> {
     }
 
     pub fn ptr_ty(&self) -> PointerType<'ctx> {
-        debug_assert!(todo!());
+        debug_assert!(matches!(self.ty, Type::Ptr(..)));
         unsafe { PointerType::new(self.inner) }
     }
 

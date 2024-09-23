@@ -15,6 +15,7 @@ pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+pub mod type_;
 pub mod defer_stack;
 pub mod error;
 pub mod parser;

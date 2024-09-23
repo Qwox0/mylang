@@ -38,6 +38,7 @@ pub trait UnwrapDebug {
 impl<T> UnwrapDebug for Option<T> {
     type Inner = T;
 
+    #[track_caller]
     fn unwrap_debug(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()

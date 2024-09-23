@@ -47,6 +47,10 @@ impl<T: ?Sized> From<&mut T> for Ptr<T> {
 }
 
 impl<T: ?Sized> Ptr<T> {
+    pub const fn new(ptr: NonNull<T>) -> Ptr<T> {
+        Self(ptr)
+    }
+
     #[inline]
     pub const fn as_ref<'a>(&self) -> &'a T {
         unsafe { self.0.as_ref() }
@@ -55,6 +59,11 @@ impl<T: ?Sized> Ptr<T> {
     #[inline]
     pub fn as_mut<'a>(&mut self) -> &'a mut T {
         unsafe { self.0.as_mut() }
+    }
+
+    #[inline]
+    pub const fn cast<U>(self) -> Ptr<U> {
+        Ptr(self.0.cast::<U>())
     }
 }
 
@@ -90,5 +99,11 @@ impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for Ptr<T> {
         } else {
             self.0.fmt(f)
         }
+    }
+}
+
+impl<T: ?Sized> std::hash::Hash for Ptr<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }

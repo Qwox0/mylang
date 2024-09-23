@@ -1,6 +1,7 @@
 use crate::{
     parser::{lexer::Span, DebugAst},
     ptr::Ptr,
+    type_::Type,
 };
 use std::fmt;
 
@@ -443,6 +444,10 @@ impl Ident {
     pub fn into_expr(self) -> Expr {
         Expr::new(ExprKind::Ident(self.text), self.span)
     }
+
+    pub fn text_eq(&self, other: &Self) -> bool {
+        *self.text == *other.text
+    }
 }
 
 #[allow(unused)]
@@ -478,87 +483,4 @@ pub enum LitKind {
     Float,
     /// `"literal"`
     Str,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Type {
-    Void,
-    Never,
-    Int {
-        bits: u8,
-        is_signed: bool,
-    },
-    IntLiteral,
-    Bool,
-    Float {
-        bits: u8,
-    },
-    FloatLiteral,
-    Function(Ptr<Fn>),
-    Custom(Ptr<str>),
-
-    //Literal(LitKind),
-    /// The type was not explicitly set in the original source code and must
-    /// still be inferred.
-    Unset,
-    /// The type was explicitly set in the original source code, but hasn't been
-    /// analyzed yet.
-    Unevaluated(Ptr<Expr>),
-}
-
-impl fmt::Debug for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Void => write!(f, "Void"),
-            Type::Never => write!(f, "Never"),
-            Type::Int { bits, is_signed } => {
-                write!(f, "{}{}", if *is_signed { "i" } else { "u" }, bits)
-            },
-            Type::IntLiteral => write!(f, "int lit"),
-            Type::Bool => write!(f, "bool"),
-            Type::Float { bits } => write!(f, "f{}", bits),
-            Type::FloatLiteral => write!(f, "float lit"),
-            Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            // Type::Literal(kind) => write!(f, "{:?}Lit", kind),
-            Type::Custom(name) => f.debug_tuple("Custom").field(&&**name).finish(),
-            Type::Unset => write!(f, "Unset"),
-            Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
-        }
-    }
-}
-
-impl Type {
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        match self {
-            Type::Unset | Type::Unevaluated(_) => false,
-            _ => true,
-        }
-    }
-
-    /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
-    #[inline]
-    pub fn into_valid(self) -> Option<Type> {
-        if self.is_valid() { Some(self) } else { None }
-    }
-
-    /// Checks if the two types equal or can be coerced into a common type.
-    ///
-    /// For exact equality use `==`.
-    pub fn matches(&self, rhs_ty: &Type) -> bool {
-        // TODO: more type coercion
-        self == rhs_ty || self == &Type::Never || rhs_ty == &Type::Never
-    }
-
-    /// Returns the common type after type coercion or [`None`] if the types
-    /// don't match (see [`Type::matches`]).
-    pub fn common_type(self, rhs_ty: Type) -> Option<Type> {
-        if self == rhs_ty || rhs_ty == Type::Never {
-            Some(self)
-        } else if self == Type::Never {
-            Some(rhs_ty)
-        } else {
-            None
-        }
-    }
 }

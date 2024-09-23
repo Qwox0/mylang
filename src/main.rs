@@ -164,24 +164,29 @@ fn read_code_file(path: &Path) -> String {
 
 fn dev() {
     const DEBUG_TOKENS: bool = false;
-    const DEBUG_AST: bool = false;
+    const DEBUG_AST: bool = true;
     const DEBUG_TYPES: bool = false;
-    const DEBUG_TYPED_AST: bool = true;
-    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
-    const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
+    const DEBUG_TYPED_AST: bool = false;
+    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
+    const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
 
     let alloc = bumpalo::Bump::new();
 
     let code = "
-// Sub :: struct {
-//     a: f64,
-//     b: f64,
-// }
-// pub sub2 :: (values: Sub) -> values.a - values.b;
+Sub :: struct {
+    a: f64,
+    b: f64,
+    c: f64 = 1,
+}
+pub sub2 :: (values: Sub) -> values.a - values.b - values.c;
+mymain :: -> {
+    b := 3;
+    sub2(Sub.{ a = 10, b, })
+};
 
-rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
-mymain :: -> factorial(10) == 3628800;
+// rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
+// mymain :: -> factorial(10) == 3628800;
 
 // TODO: This causes too many loops
 // a :: -> b();
@@ -228,9 +233,9 @@ mymain :: -> factorial(10) == 3628800;
     });
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
-    let sema = sema::Sema::new(code, DEBUG_TYPES);
+    let sema = sema::Sema::new(code, DEBUG_TYPES, &alloc);
     let context = Context::create();
-    let codegen = llvm::Codegen::new_module(&context, "dev");
+    let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
     let mut compiler = Compiler::new(sema, codegen);
 
     enum FrontendDurations {
@@ -363,7 +368,7 @@ mod benches {
     use test::*;
 
     #[inline]
-    fn bench(code: &str) {
+    fn bench_parse(code: &str) {
         let alloc = bumpalo::Bump::new();
         let code = code.as_ref();
         let mut stmts = StmtIter::parse(code, &alloc);
@@ -375,7 +380,7 @@ mod benches {
     /// old: 11ms  <- so bad
     /// new: 3000ns  (3667x faster)
     #[bench]
-    fn bench_parse(b: &mut Bencher) {
+    fn bench_parse1(b: &mut Bencher) {
         let code = "
 test :: x -> 1+2+x;
 main :: -> test(1) + test(2);
@@ -388,7 +393,7 @@ main :: -> {
 };
 */
 ";
-        b.iter(|| bench(code));
+        b.iter(|| bench_parse(code));
     }
 
     /// old: 23ms  <- so bad
@@ -403,7 +408,7 @@ test :: x -> {
 };
 main :: -> test(10);
 ";
-        b.iter(|| bench(code));
+        b.iter(|| bench_parse(code));
     }
 
     #[bench]
@@ -413,7 +418,7 @@ pub test :: x -> 1+2*x;
 pub sub :: (a, b) -> -b + a;
 main :: -> false | if test(1) else (10 | sub(3));
 ";
-        b.iter(|| bench(code));
+        b.iter(|| bench_parse(code));
     }
 
     #[bench]
@@ -429,6 +434,78 @@ mymain :: -> {
     a + b
 };
 ";
-        b.iter(|| bench(code));
+        b.iter(|| bench_parse(code));
+    }
+
+    #[bench]
+    fn bench_frontend1(b: &mut Bencher) {
+        b.iter(|| {
+            let code = "
+pub sub :: (a: f64, b: f64, ) -> -b + a;
+
+Sub :: struct {
+    a: f64,
+    b: f64,
+}
+pub sub2 :: (values: Sub) -> values.a - values.b;
+
+mymain :: -> {
+    mut a := test(1);
+    mut a := 10;
+    a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
+    b := test();
+
+    if defer_test() return 10000;
+
+    return sub2(Sub.{ a = a, b });
+    // this is unreachable but is checked anyway
+    x := 1 + 1;
+    x
+};
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
+};
+
+pub defer_test :: -> {
+    mut out := 1;
+    {
+        defer out *= 10;
+        out += 1;
+    }; // TODO: no `;` here
+    t1 := out == 20;
+    out = 1;
+    {
+        defer out += 1;
+        defer out *= 10;
+    };
+    t2 := out == 11;
+    return t1 && t2;
+};";
+            let code = code.as_ref();
+            let alloc = bumpalo::Bump::new();
+            let stmts = StmtIter::parse(code, &alloc);
+
+            let stmts = collect_all_result_errors(stmts).unwrap_or_else(|errors| {
+                for e in errors {
+                    display_spanned_error(&e, code);
+                }
+                panic!("Parse ERROR")
+            });
+
+            let sema = sema::Sema::new(code, false, &alloc);
+            let context = Context::create();
+            let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
+            let mut compiler = Compiler::new(sema, codegen);
+
+            compiler.compile_stmts(&stmts);
+
+            if !compiler.sema.errors.is_empty() {
+                for e in compiler.sema.errors {
+                    display_spanned_error(&e, code);
+                }
+                panic!("Semantic analysis ERROR")
+            }
+        })
     }
 }

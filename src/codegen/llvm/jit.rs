@@ -35,7 +35,7 @@ impl<'ctx> Jit<'ctx> {
         }
     }
 
-    pub fn take_module_from(&mut self, compiler: &mut Codegen<'ctx>) {
+    pub fn take_module_from<'alloc>(&mut self, compiler: &mut Codegen<'ctx, 'alloc>) {
         compiler.move_module_to(self)
     }
 
