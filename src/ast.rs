@@ -2,8 +2,12 @@ use crate::{
     parser::{lexer::Span, DebugAst},
     ptr::Ptr,
     type_::Type,
+    util::forget_lifetime,
 };
-use std::fmt;
+use std::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
@@ -47,9 +51,9 @@ pub enum ExprKind {
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(Ptr<[VarDecl]>),
+    StructDef(VarDeclList),
     /// `union { a: int, b: String, c: (u8, u32) }`
-    UnionDef(Ptr<[VarDecl]>),
+    UnionDef(VarDeclList),
     /// `enum { ... }`
     EnumDef {},
     /// `?<ty>`
@@ -378,7 +382,7 @@ pub enum PostOpKind {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Fn {
-    pub params: Ptr<[VarDecl]>,
+    pub params: VarDeclList,
     pub ret_type: Type,
     pub body: Ptr<Expr>,
 }
@@ -444,10 +448,6 @@ impl Ident {
     pub fn into_expr(self) -> Expr {
         Expr::new(ExprKind::Ident(self.text), self.span)
     }
-
-    pub fn text_eq(&self, other: &Self) -> bool {
-        *self.text == *other.text
-    }
 }
 
 #[allow(unused)]
@@ -483,4 +483,36 @@ pub enum LitKind {
     Float,
     /// `"literal"`
     Str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VarDeclList(pub Ptr<[VarDecl]>);
+
+impl VarDeclList {
+    pub fn find_field(self, name: &str) -> Option<(usize, &VarDecl)> {
+        unsafe { forget_lifetime(&*self.0) }
+            .into_iter()
+            .enumerate()
+            .find(|(_, f)| &*f.ident.text == name)
+    }
+}
+
+impl From<Ptr<[VarDecl]>> for VarDeclList {
+    fn from(value: Ptr<[VarDecl]>) -> Self {
+        VarDeclList(value)
+    }
+}
+
+impl Deref for VarDeclList {
+    type Target = [VarDecl];
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl DerefMut for VarDeclList {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
 }

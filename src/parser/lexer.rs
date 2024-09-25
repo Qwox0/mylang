@@ -411,7 +411,7 @@ impl<'c> Lexer<'c> {
     }
 
     pub fn pos_span(&self) -> Span {
-        Span::pos(self.code.pos) // TODO: fix this
+        self.next_tok.map(|t| t.span).unwrap_or(Span::pos(0))
     }
 
     pub fn span_to(&self, other: Lexer<'_>) -> Span {
@@ -632,6 +632,16 @@ impl<'c> Lexer<'c> {
             "false" => TokenKind::BoolLit(false),
             s => s.parse::<Keyword>().map(TokenKind::Keyword).unwrap_or(TokenKind::Ident),
         }
+    }
+
+    #[inline]
+    pub fn next_if_kind(&mut self, kind: TokenKind) -> Option<Token> {
+        self.next_if(|t| t.kind == kind)
+    }
+
+    #[inline]
+    pub fn advance_if_kind(&mut self, kind: TokenKind) -> bool {
+        self.advance_if(|t| t.kind == kind)
     }
 }
 

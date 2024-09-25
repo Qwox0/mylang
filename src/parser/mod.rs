@@ -1,13 +1,14 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Fn, Ident, PostOpKind, PreOpKind,
-        VarDecl,
+        VarDecl, VarDeclList,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
     type_::Type,
 };
 use debug::TreeLines;
+use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
@@ -34,7 +35,7 @@ impl Expr {
     pub fn try_to_ident(&self) -> ParseResult<Ident> {
         match self.kind {
             ExprKind::Ident(text) => Ok(Ident { text, span: self.span }),
-            _ => err!(NotAnIdent, self.span),
+            _ => err(NotAnIdent, self.span),
         }
     }
 }
@@ -74,7 +75,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
-        let mut lhs = self.ws0().value().context("expr lhs")?;
+        let mut lhs = self.ws0().value().context("expr first val")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) => lhs = node,
@@ -86,12 +87,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
         let Some(Token { kind, span }) = self.ws0().lex.peek() else {
-            return err!(Finished, self.lex.pos_span());
+            return err(Finished, self.lex.pos_span());
         };
 
         let op = match FollowingOperator::new(kind) {
             Some(op) if op.precedence() > min_precedence => op,
-            _ => return err!(Finished, span),
+            _ => return err(Finished, span),
         };
         self.lex.advance();
 
@@ -109,19 +110,17 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             FollowingOperator::Initializer => {
                 let mut fields = ScratchPool::new();
                 let close_b_span = loop {
-                    if let Some(t) = self.ws0().lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
+                    if let Some(t) = self.ws0().lex.next_if_kind(TokenKind::CloseBrace) {
                         break t.span;
                     }
                     let ident = self.ident().context("initializer field ident")?;
                     let init = self
                         .ws0()
                         .lex
-                        .next_if(|t| t.kind == TokenKind::Eq)
+                        .next_if_kind(TokenKind::Eq)
                         .map(|_| self.expr().context("init expr"))
                         .transpose()?;
-                    fields
-                        .push((ident, init))
-                        .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
+                    fields.push((ident, init)).map_err(|e| self.wrap_alloc_err(e))?;
 
                     match self.next_tok() {
                         Ok(Token { kind: TokenKind::Comma, .. }) => {},
@@ -143,9 +142,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     default: None,
                     is_const: false,
                 };
-                let params = ScratchPool::new_with_first_val(param)
-                    .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-                let params = self.clone_slice_from_scratch_pool(params)?;
+                let params =
+                    ScratchPool::new_with_first_val(param).map_err(|e| self.wrap_alloc_err(e))?;
+                let params = self.clone_slice_from_scratch_pool(params)?.into();
                 return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
@@ -216,7 +215,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                             .tok(TokenKind::OpenParenthesis)
                             .context("pipe call: expect '('")?;
                         let args = ScratchPool::new_with_first_val(lhs)
-                            .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
+                            .map_err(|e| self.wrap_alloc_err(e))?;
                         self.call(func, open_paren.span, args)
                     },
                     _ => ParseError::unexpected_token(t)
@@ -229,7 +228,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// anything which has higher precedence than any operator
     pub fn value(&mut self) -> ParseResult<Ptr<Expr>> {
-        let Token { kind, span } = self.next_tok().context("expected value")?;
+        let Token { kind, span } = self.peek_tok().context("expected value")?;
 
         macro_rules! expr {
             ($kind:ident) => {
@@ -239,7 +238,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr_!($kind($($val)*), span)
             };
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } ) => {
-                Expr::new(ExprKind::$kind{$($field $(:$val)?),*}, span)
+                expr_!($kind{$($field $(:$val)?),*}, span)
             };
             ($($t:tt)*) => {
                 expr_!($($t)*)
@@ -247,43 +246,36 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
 
         let expr = match kind {
-            TokenKind::Ident => expr!(Ident(self.get_text_from_span(span))),
-            TokenKind::Keyword(k @ Keyword::Mut | k @ Keyword::Rec | k @ Keyword::Pub) => {
-                self.ws0();
-                let markers = match k {
-                    Keyword::Mut => DeclMarkers { is_pub: false, is_mut: true, is_rec: false },
-                    Keyword::Rec => DeclMarkers { is_pub: false, is_mut: false, is_rec: true },
-                    Keyword::Pub => DeclMarkers { is_pub: true, is_mut: false, is_rec: false },
-                    _ => unreachable!(),
-                };
-                let (decl, span_end) = self.var_decl_with_markers(markers)?;
+            TokenKind::Ident => expr!(Ident(self.advanced().get_text_from_span(span))),
+            TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub) => {
+                let (decl, span_end) = self.var_decl()?;
                 expr!(VarDecl(decl), span.join(span_end))
             },
             TokenKind::Keyword(Keyword::Struct) => {
-                self.ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
-                let fields = self.ws0().struct_fields()?;
-                expr!(StructDef(fields), span)
+                self.advanced().ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
+                let fields = self.ws0().var_decl_list(TokenKind::Comma)?;
+                let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
+                expr!(StructDef(fields), span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Union) => {
-                self.ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
-                let fields = self.ws0().struct_fields()?;
-                let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
+                self.advanced().ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
+                let fields = self.ws0().var_decl_list(TokenKind::Comma)?;
+                let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
                 expr!(UnionDef(fields), span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Enum) => todo!("enum"),
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::If) => {
-                let condition = self.expr().context("if condition")?;
+                let condition = self.advanced().expr().context("if condition")?;
                 return self.if_after_cond(condition, span).context("if");
             },
-            //TokenKind::Keyword(Keyword::Else) => todo!("else"),
             TokenKind::Keyword(Keyword::Match) => {
                 todo!("match body");
-                let val = self.expr().context("match value")?;
+                let val = self.advanced().expr().context("match value")?;
                 let else_body = self
                     .ws0()
                     .lex
-                    .next_if(|t| t.kind == TokenKind::Keyword(Keyword::Else))
+                    .next_if_kind(TokenKind::Keyword(Keyword::Else))
                     .map(|_else| {
                         self.ws1()?;
                         self.expr().context("match else body")
@@ -297,39 +289,35 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 // expr!(For { source, iter_var, body }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
-                let condition = self.expr().context("while condition")?;
+                let condition = self.advanced().expr().context("while condition")?;
                 let body = self.expr().context("while body")?;
                 expr!(While { condition, body }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let expr = match self.expr() {
-                    Ok(expr) => Some(expr),
-                    Err(ParseError {
-                        kind: ParseErrorKind::NoInput | ParseErrorKind::Finished,
-                        ..
-                    }) => None,
-                    Err(err) => return Err(err).context("return expr"),
-                };
+                let expr = self.advanced().expr().opt().context("return expr")?;
                 expr!(Return { expr }, span)
             },
             TokenKind::Keyword(Keyword::Break) => todo!(),
             TokenKind::Keyword(Keyword::Continue) => todo!(),
             TokenKind::Keyword(Keyword::Defer) => {
-                let expr = self.expr().context("defer expr")?;
+                let expr = self.advanced().expr().context("defer expr")?;
                 expr!(Defer(expr), span)
             },
-            //TokenKind::Keyword(_) => todo!("//TokenKind::Keyword(_)"),
             TokenKind::Literal(kind) => {
+                self.lex.advance();
                 expr!(Literal { kind, code: self.get_text_from_span(span) })
             },
-            TokenKind::BoolLit(b) => expr!(BoolLit(b)),
+            TokenKind::BoolLit(b) => {
+                self.lex.advance();
+                expr!(BoolLit(b))
+            },
             TokenKind::OpenParenthesis => {
-                self.ws0();
+                self.advanced().ws0();
                 // TODO: currently no tuples allowed!
                 // () -> ...
-                if self.lex.advance_if(is_close_paren) {
+                if self.lex.advance_if_kind(TokenKind::CloseParenthesis) {
                     self.ws0().tok(TokenKind::Arrow).context("'->'")?;
-                    return self.function_tail(self.alloc_empty_slice(), span);
+                    return self.function_tail(self.alloc_empty_slice().into(), span);
                 }
                 let start_state = self.lex.get_state();
                 let first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
@@ -350,54 +338,43 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     },
                     _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
                 };
-                let mut params = ScratchPool::new();
-                loop {
-                    if self.lex.advance_if(|t| t.kind == TokenKind::CloseParenthesis) {
-                        break;
-                    }
-                    let (param, _end_span) = self.var_decl().context("function parameter")?;
-                    // TODO: use end_span
-                    params.push(param).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-                    match self.ws0().next_tok() {
-                        Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
-                        Ok(Token { kind: TokenKind::CloseParenthesis, .. }) => break,
-                        t => t
-                            .and_then(ParseError::unexpected_token)
-                            .context("expected ',' or ')'")?,
-                    };
-                }
-                let params = self.clone_slice_from_scratch_pool(params)?;
+                let params =
+                    self.var_decl_list(TokenKind::Comma).context("function parameter list")?;
+                self.ws0().tok(TokenKind::CloseParenthesis).context("')'")?;
                 self.ws0().tok(TokenKind::Arrow).context("'->'")?;
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
-                self.expr().context("[...]")?;
-                let Ok(Token { .. }) = self.ws0().next_tok() else {
-                    return err!(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
+                self.advanced().expr().context("[...]")?;
+                let Ok(Token { .. }) = self.advanced().ws0().next_tok() else {
+                    return err(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
                         .context("[...]");
                 };
                 todo!();
             },
-            TokenKind::OpenBrace => return self.block(span),
+            TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
-                let expr = self.expr_(PREOP_PRECEDENCE).context("! expr")?;
+                let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
                 expr!(PreOp { kind: PreOpKind::Not, expr }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
-                let expr = self.expr_(PREOP_PRECEDENCE).context("- expr")?;
+                let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
                 expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
             },
-            TokenKind::Arrow => return self.function_tail(self.alloc_empty_slice(), span),
+            TokenKind::Arrow => {
+                self.lex.advance();
+                return self.function_tail(self.alloc_empty_slice().into(), span);
+            },
             TokenKind::Asterisk => {
                 let is_mut =
-                    self.ws0().lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
+                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let pointee = self.expr().context("pointee type")?;
                 expr!(Ptr { is_mut, ty: ty(pointee) })
             },
             TokenKind::Ampersand => {
                 let is_mut =
-                    self.ws0().lex.advance_if(|t| t.kind == TokenKind::Keyword(Keyword::Mut));
+                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let kind = if is_mut { PreOpKind::AddrMutOf } else { PreOpKind::AddrOf };
                 let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
                 expr!(PreOp { kind, expr })
@@ -415,7 +392,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             //TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
             //TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
             TokenKind::Question => {
-                let type_ = self.expr().expect("type after ?");
+                let type_ = self.advanced().expr().expect("type after ?");
                 expr!(OptionShort(ty(type_)), span.join(type_.span))
             },
             TokenKind::Pound => todo!("TokenKind::Pound"),
@@ -425,24 +402,30 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
             TokenKind::BackTick => todo!("TokenKind::BackTick"),
 
-            // TokenKind::CloseParenthesis | TokenKind::CloseBracket | TokenKind::CloseBrace => {
-            //     return err!(NoInput, self.lex.pos_span());
-            // },
-            // TokenKind::Semicolon => return err!(NoInput, self.lex.pos_span()),
+            TokenKind::Keyword(Keyword::Else)
+            | TokenKind::CloseParenthesis
+            | TokenKind::CloseBracket
+            | TokenKind::CloseBrace
+            | TokenKind::Comma
+            | TokenKind::Semicolon => {
+                return err(UnexpectedStart(kind), self.lex.pos_span());
+            },
+            // TokenKind::Semicolon => return err(NoInput, self.lex.pos_span()),
             // TokenKind::Semicolon => expr!(Semicolon(None), span),
-            t => return err!(UnexpectedToken(t), span).context("expected valid value"),
+            t => return err(UnexpectedToken(t), span).context("expected valid value"),
         };
+
         self.alloc(expr)
     }
 
     /// parsing starts after the '->'
     pub fn function_tail(
         &mut self,
-        params: Ptr<[VarDecl]>,
+        params: VarDeclList,
         start_span: Span,
     ) -> ParseResult<Ptr<Expr>> {
         let expr = self.expr().context("fn return type or body")?;
-        let (ret_type, body) = match self.lex.next_if(|t| t.kind == TokenKind::OpenBrace) {
+        let (ret_type, body) = match self.lex.next_if_kind(TokenKind::OpenBrace) {
             Some(brace) => (ty(expr), self.block(brace.span).context("fn body")?),
             None => (Type::Unset, expr),
         };
@@ -458,9 +441,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         let else_body = self
             .ws0()
             .lex
-            .peek()
-            .filter(|t| t.kind == TokenKind::Keyword(Keyword::Else))
-            .inspect(|_| self.lex.advance())
+            .next_if_kind(TokenKind::Keyword(Keyword::Else))
             .map(|_| self.expr_(IF_PRECEDENCE).context("else body"))
             .transpose()?;
         self.alloc(expr!(If { condition, then_body, else_body }, start_span))
@@ -468,116 +449,72 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// `... ( ... )`
     /// `     ^` starts here
+    #[allow(unused_variables)]
     pub fn call(
         &mut self,
         func: Ptr<Expr>,
         open_paren_span: Span,
-        mut args: ScratchPool<Ptr<Expr>>,
+        args: ScratchPool<Ptr<Expr>>,
     ) -> ParseResult<Ptr<Expr>> {
-        let closing_paren_span = loop {
-            self.ws0();
-            if let Some(closing_paren) = self.lex.next_if(is_close_paren) {
-                break closing_paren.span;
-            }
-            args.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0().next_tok()? {
-                Token { kind: TokenKind::CloseParenthesis, span } => break span,
-                Token { kind: TokenKind::Comma, .. } => continue,
-                t => ParseError::unexpected_token(t).context("expect ',' or ')'")?,
-            };
-        };
-        let args = self.clone_slice_from_scratch_pool(args)?;
+        let (args, _) = self.expr_list(TokenKind::Comma, args).context("call args")?;
+        let closing_paren_span = self.tok(TokenKind::CloseParenthesis)?.span;
         self.alloc(expr!(Call { func, args }, closing_paren_span))
     }
 
     /// parses block context and '}', doesn't parse the '{'
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
-        let mut stmts = ScratchPool::new();
-        let (has_trailing_semicolon, closing_brace_span) = loop {
-            self.ws0();
-            if let Some(closing_brace) = self.lex.next_if(|t| t.kind == TokenKind::CloseBrace) {
-                break (true, closing_brace.span);
-            }
-            stmts.push(self.expr()?).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0().next_tok()? {
-                Token { kind: TokenKind::CloseBrace, span } => break (false, span),
-                Token { kind: TokenKind::Semicolon, .. } => continue,
-                t => ParseError::unexpected_token(t).context("expect ';' or '}'")?,
-            };
-        };
-        let stmts = self.clone_slice_from_scratch_pool(stmts)?;
+        let (stmts, has_trailing_semicolon) =
+            self.expr_list(TokenKind::Semicolon, ScratchPool::new())?;
+        let closing_brace_span = self.tok(TokenKind::CloseBrace)?.span;
         let span = open_brace_span.join(closing_brace_span);
         self.alloc(expr!(Block { stmts, has_trailing_semicolon }, span))
     }
 
-    /// `struct { ... }`
-    /// `         ^^^` Parses this
-    pub fn struct_fields(&mut self) -> ParseResult<Ptr<[VarDecl]>> {
-        let mut fields = ScratchPool::new();
+    /// Also returns a `has_trailing_sep` [`bool`].
+    pub fn expr_list(
+        &mut self,
+        sep: TokenKind,
+        mut list_pool: ScratchPool<Ptr<Expr>>,
+    ) -> ParseResult<(Ptr<[Ptr<Expr>]>, bool)> {
+        let mut has_trailing_sep = false;
         loop {
-            if self.lex.advance_if(|t| t.kind == TokenKind::CloseBrace) {
+            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
+            list_pool.push(expr).map_err(|e| self.wrap_alloc_err(e))?;
+            has_trailing_sep = self.ws0().lex.advance_if_kind(sep);
+            if !has_trailing_sep {
                 break;
             }
-            let (field, _end_span) = self.var_decl().context("struct field")?;
-            // TODO: use end_span
-            fields.push(field).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            match self.ws0().next_tok() {
-                Ok(Token { kind: TokenKind::Comma, .. }) => self.ws0(),
-                Ok(Token { kind: TokenKind::CloseBrace, .. }) => break,
-                t => t.and_then(ParseError::unexpected_token).context("expected ',' or '}'")?,
-            };
+            self.ws0();
         }
-        self.clone_slice_from_scratch_pool(fields)
+        Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
     }
 
-    /*
-    /// Parses [`ExprParser::var_decl`] multiple times, seperated by `sep`.
-    ///
-    /// `has_finished` receives two non-whitespace tokens behind each
-    /// [`ExprParser::var_decl`]. Only the first token is consumed.
-    pub fn var_decl_list(
-        &mut self,
-        mut has_finished: impl FnMut(ParseResult<Token>, Option<&Token>) -> ParseResult<bool>,
-    ) -> ParseResult<Ptr<[VarDecl]>> {
+    /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
+    /// allows a trailing `sep`.
+    pub fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<VarDeclList> {
         let mut list = ScratchPool::new();
         loop {
-            let decl = self.var_decl().context("var_decl")?;
-            list.push(decl).map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))?;
-            self.ws0();
-            let sep = self.next_tok();
-            self.ws0();
-            if has_finished(sep, self.lex.peek().as_ref())? {
+            let Some((decl, _end_span)) = self.var_decl().opt().context("var_decl")? else {
+                break;
+            };
+            list.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
+            if !self.ws0().lex.advance_if_kind(sep) {
                 break;
             }
+            self.ws0();
         }
-        self.clone_slice_from_scratch_pool(list)
+        self.clone_slice_from_scratch_pool(list).map(VarDeclList)
     }
-     */
 
-    /// These options are allowed in a lot of places:
-    /// * `[markers] ident`
-    /// * `[markers] ident: ty`
-    /// * `[markers] ident: ty = default`
-    /// * `[markers] ident := default`
-    ///
-    /// That is the reason why this doesn't return a [`Ptr<Expr>`].
     pub fn var_decl(&mut self) -> ParseResult<(VarDecl, Span)> {
-        self.var_decl_with_markers(DeclMarkers::default())
-    }
-
-    /// This will still parse more markers, if they exists.
-    /// Also returns a [`Span`] which is described by `expr.span` in
-    /// [`ExprKind::VarDecl`].
-    pub fn var_decl_with_markers(
-        &mut self,
-        mut markers: DeclMarkers,
-    ) -> ParseResult<(VarDecl, Span)> {
-        let mut t = self.next_tok().context("expected variable marker or ident")?;
+        let mut markers = DeclMarkers::default();
+        let mut t = self.peek_tok().context("expected variable marker or ident")?;
+        let mut is_first = true;
 
         macro_rules! set_marker {
             ($variant:ident $field:ident) => {
                 if markers.$field {
-                    return err!(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
+                    return err(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
                 } else {
                     markers.$field = true
                 }
@@ -586,14 +523,20 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
         let ident = loop {
             match t.kind {
-                TokenKind::Ident => break self.ident_from_span(t.span),
+                TokenKind::Ident => break self.advanced().ident_from_span(t.span),
                 TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
                 TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
                 TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
-                _ => ParseError::unexpected_token(t).context("expected decl marker or ident")?,
+                _ => if is_first {
+                    ParseError::unexpected_start_token(t)
+                } else {
+                    ParseError::unexpected_token(t)
+                }
+                .context("expected decl marker or ident")?,
             }
-            self.ws1()?;
-            t = self.next_tok().context("expected variable marker or ident")?;
+            self.advanced().ws1()?;
+            t = self.peek_tok().context("expected variable marker or ident")?;
+            is_first = false;
         };
 
         let t = self.ws0().lex.peek();
@@ -664,9 +607,19 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         if cond(t) { Ok(t) } else { ParseError::unexpected_token(t)? }
     }
 
+    pub fn advanced(&mut self) -> &mut Self {
+        self.lex.advance();
+        self
+    }
+
     #[inline]
     pub fn next_tok(&mut self) -> ParseResult<Token> {
-        self.lex.next().ok_or(err!(x NoInput, self.lex.pos_span()))
+        self.lex.next().ok_or(err_val(NoInput, self.lex.pos_span()))
+    }
+
+    #[inline]
+    pub fn peek_tok(&mut self) -> ParseResult<Token> {
+        self.lex.peek().ok_or(err_val(NoInput, self.lex.pos_span()))
     }
 
     // helpers:
@@ -675,7 +628,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> ParseResult<Ptr<T>> {
         match self.alloc.try_alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
-            Result::Err(err) => err!(AllocErr(err), self.lex.pos_span()),
+            Result::Err(e) => err(AllocErr(e), self.lex.pos_span()),
         }
     }
 
@@ -689,7 +642,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         let dst = self
             .alloc
             .try_alloc_layout(layout)
-            .map_err(|err| err!(x AllocErr(err), self.lex.pos_span()))?
+            .map_err(|err| self.wrap_alloc_err(err))?
             .cast::<T>();
 
         Ok(Ptr::from(unsafe {
@@ -705,7 +658,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     ) -> ParseResult<Ptr<[T]>> {
         scratch_pool
             .clone_to_slice_in_bump(&self.alloc)
-            .map_err(|e| err!(x AllocErr(e), self.lex.pos_span()))
+            .map_err(|e| self.wrap_alloc_err(e))
+    }
+
+    #[inline]
+    fn wrap_alloc_err(&self, err: bumpalo::AllocErr) -> ParseError {
+        err_val(AllocErr(err), self.lex.pos_span())
     }
 
     #[inline]
@@ -906,15 +864,10 @@ impl Ident {
     pub fn try_from_tok(t: Token, lex: &Lexer<'_>) -> ParseResult<Ident> {
         let text = &lex.get_code()[t.span];
         if Keyword::from_str(text).is_ok() {
-            return err!(NotAnIdent, lex.pos_span());
+            return err(NotAnIdent, lex.pos_span());
         }
         Ok(Ident { text: text.into(), span: t.span })
     }
-}
-
-#[inline]
-fn is_close_paren(t: Token) -> bool {
-    t.kind == TokenKind::CloseParenthesis
 }
 
 pub mod debug {
@@ -1051,7 +1004,7 @@ pub mod debug {
     }
 
     pub fn many_to_text<T>(
-        elements: &Ptr<[T]>,
+        elements: &[T],
         single_to_text: impl FnMut(&T) -> String,
         sep: &str,
     ) -> String {
@@ -1119,7 +1072,7 @@ impl DebugAst for Expr {
             },
             ExprKind::Fn(Fn { params, ret_type, body }) => format!(
                 "({})->{}{}",
-                debug::many_to_text(params, |decl| debug::var_decl_to_text(decl), ","),
+                debug::many_to_text(&*params, |decl| debug::var_decl_to_text(decl), ","),
                 ret_type.to_text(),
                 if matches!(body.kind, ExprKind::Block { .. }) {
                     body.to_text()

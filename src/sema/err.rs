@@ -22,7 +22,7 @@ pub enum SemaErrorKind {
         rhs_ty: Type,
     },
     /// rust error:
-    /// ```
+    /// ```notest
     /// error[E0600]: cannot apply unary operator `!` to type `&'static str`
     ///   --> src/sema/mod.rs:70:17
     ///    |

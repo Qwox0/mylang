@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 
 use crate::{
-    ast::{BinOpKind, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, VarDecl},
+    ast::{BinOpKind, Expr, ExprKind, Fn, Ident, LitKind, PreOpKind, VarDecl, VarDeclList},
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
     ptr::Ptr,
@@ -484,7 +484,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     /// paramN1, ... -> default values
     fn validate_call(
         &mut self,
-        params: Ptr<[VarDecl]>,
+        params: VarDeclList,
         args: Ptr<[Ptr<Expr>]>,
         is_const: bool,
     ) -> SemaResult<()> {
@@ -513,7 +513,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     fn validate_named_initializer(
         &mut self,
         ty: Type,
-        fields: Ptr<[VarDecl]>,
+        fields: VarDeclList,
         values: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
         is_const: bool,
         initializer_span: Span,
@@ -524,9 +524,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         for (f, init) in values.iter() {
             match try {
                 let field = f.text;
-                let Some((f_idx, f_decl)) =
-                    fields.iter().enumerate().find(|(_, f)| *f.ident.text == *field)
-                else {
+                let Some((f_idx, f_decl)) = fields.find_field(&*field) else {
                     err(UnknownField { ty, field }, f.span)?
                 };
 

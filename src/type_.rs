@@ -1,10 +1,8 @@
 use crate::{
-    ast::{Expr, Fn, VarDecl},
+    ast::{Expr, Fn, VarDeclList},
     ptr::Ptr,
-    util::UnwrapDebug,
 };
 use core::fmt;
-use std::hint::unreachable_unchecked;
 
 // TODO: benchmark this
 // pub type Type = Ptr<TypeInfo>;
@@ -29,10 +27,10 @@ pub enum TypeInfo {
     Function(Ptr<Fn>),
 
     Struct {
-        fields: Ptr<[VarDecl]>,
+        fields: VarDeclList,
     },
     Union {
-        fields: Ptr<[VarDecl]>,
+        fields: VarDeclList,
     },
     Enum {
         variants: (), // TODO

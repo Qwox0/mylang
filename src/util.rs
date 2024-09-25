@@ -3,7 +3,7 @@ use crate::{
     parser::lexer::{Code, Span},
 };
 use core::fmt;
-use std::ops::Try;
+use std::{hint::unreachable_unchecked, ops::Try};
 
 pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
     eprintln!("ERROR: {:?}", err);
@@ -24,21 +24,24 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
     let line = &code.0[span.start - start_offset..span.end + end_offset];
 
     let linecount_in_span = code[span].lines().count();
-    eprintln!(" {}", line.lines().intersperse("\\n").collect::<String>());
+    eprintln!("|");
+    eprintln!("| {}", line.lines().intersperse("\\n").collect::<String>());
     let offset = " ".repeat(start_offset);
-    eprintln!(" {offset}{} {label}", "^".repeat(span.len() + linecount_in_span - 1));
+    eprintln!("| {offset}{} {label}", "^".repeat(span.len() + linecount_in_span - 1));
+    eprintln!("|");
 }
 
 pub trait UnwrapDebug {
     type Inner;
 
+    /// like [`Option::unwrap`] but UB in release mode.
+    #[track_caller]
     fn unwrap_debug(self) -> Self::Inner;
 }
 
 impl<T> UnwrapDebug for Option<T> {
     type Inner = T;
 
-    #[track_caller]
     fn unwrap_debug(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()
@@ -57,6 +60,17 @@ impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
         } else {
             unsafe { self.unwrap_unchecked() }
         }
+    }
+}
+
+/// like [`unreachable`] but UB in release mode.
+#[track_caller]
+#[inline]
+pub fn unreachable_debug() -> ! {
+    if cfg!(debug_assertions) {
+        unreachable!()
+    } else {
+        unsafe { unreachable_unchecked() }
     }
 }
 

@@ -168,7 +168,7 @@ fn dev() {
     const DEBUG_TYPES: bool = false;
     const DEBUG_TYPED_AST: bool = false;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
-    const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
+    const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
 
     let alloc = bumpalo::Bump::new();
@@ -185,6 +185,15 @@ mymain :: -> {
     sub2(Sub.{ a = 10, b, })
 };
 
+test :: -> {
+    Sub.{
+        a = 1,
+        b = 2,
+        c = 5
+    };
+    if false return else {};
+}
+
 // rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
 // mymain :: -> factorial(10) == 3628800;
 
@@ -194,6 +203,50 @@ mymain :: -> {
 // c :: -> d();
 // d :: -> 10;
 ";
+    /*
+        let code = "
+pub sub :: (a: f64, b: f64, ) -> -b + a;
+
+Sub :: struct {
+    a: f64,
+    b: f64,
+}
+pub sub2 :: (values: Sub) -> values.a - values.b;
+
+mymain :: -> {
+    mut a := test(1);
+    mut a := 10;
+    a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
+    b := test();
+
+    if defer_test() return 10000;
+
+    return sub2(Sub.{ a = a, b });
+    // this is unreachable but is checked anyway
+    x := 1 + 1;
+    x
+};
+pub test :: (mut x := 1) -> {
+    x += 1;
+    1+2*x
+};
+
+pub defer_test :: -> {
+    mut out := 1;
+    {
+        defer out *= 10;
+        out += 1;
+    }; // TODO: no `;` here
+    t1 := out == 20;
+    out = 1;
+    {
+        defer out += 1;
+        defer out *= 10;
+    };
+    t2 := out == 11;
+    return t1 && t2;
+};";
+    */
 
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);

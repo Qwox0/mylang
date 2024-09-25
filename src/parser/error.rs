@@ -9,6 +9,9 @@ use core::fmt;
 pub enum ParseErrorKind {
     Unimplemented,
     NoInput,
+    /// Like [`ParseErrorKind::UnexpectedToken`] but this might not be a real
+    /// error is some cases.
+    UnexpectedStart(TokenKind),
     UnexpectedToken(TokenKind),
     MissingToken(TokenKind),
     NotAKeyword,
@@ -27,44 +30,13 @@ pub struct ParseError {
     pub context: anyhow::Error,
 }
 
-macro_rules! err_impl {
-    ($kind:ident, $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind , $span)
-    };
-    ($kind:ident ( $( $field:expr ),* $(,)? ), $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind ( $($field),* ) , $span)
-    };
-    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } , $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind { $($field $(: $val)?),* }, $span)
-    };
+pub fn err<T>(kind: ParseErrorKind, span: Span) -> ParseResult<T> {
+    Err(ParseError::new(kind, span))
 }
-pub(crate) use err_impl;
 
-macro_rules! err {
-    (x $($t:tt)*) => {
-        err_impl!($($t)*)
-    };
-    ($($t:tt)*) => {
-        Err(err_impl!($($t)*))
-    };
+pub fn err_val(kind: ParseErrorKind, span: Span) -> ParseError {
+    ParseError::new(kind, span)
 }
-/*
-macro_rules! err {
-    (x $kind:ident, $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind , $span)
-    };
-    (x $kind:ident ( $( $field:expr ),* $(,)? ), $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind ( $($field),* ) , $span)
-    };
-    (x $kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } , $span:expr) => {
-        ParseError::new(ParseErrorKind::$kind { $($field $(: $val)?),* }, $span)
-    };
-    ($($t:tt)*) => {
-        Err(err!(x $($t)*))
-    };
-}
-*/
-pub(crate) use err;
 
 impl std::fmt::Debug for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,8 +58,12 @@ impl ParseError {
         }
     }
 
-    pub fn unexpected_token(t: Token) -> Result<!, ParseError>{
+    pub fn unexpected_token(t: Token) -> Result<!, ParseError> {
         Err(ParseError::new(ParseErrorKind::UnexpectedToken(t.kind), t.span))
+    }
+
+    pub fn unexpected_start_token(t: Token) -> Result<!, ParseError> {
+        Err(ParseError::new(ParseErrorKind::UnexpectedStart(t.kind), t.span))
     }
 
     #[cfg(debug_assertions)]
@@ -103,6 +79,21 @@ impl ParseError {
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
+
+pub trait ParseResultExt<T> {
+    fn opt(self) -> ParseResult<Option<T>>;
+}
+
+impl<T> ParseResultExt<T> for ParseResult<T> {
+    /// [`ParseErrorKind::UnexpectedStart`] -> [`None`]
+    fn opt(self) -> ParseResult<Option<T>> {
+        match self {
+            Ok(t) => Ok(Some(t)),
+            Err(ParseError { kind: ParseErrorKind::UnexpectedStart(_), .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
 
 pub trait MyContext {
     fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self;
