@@ -1,5 +1,5 @@
 use crate::{
-    parser::{lexer::Span, DebugAst},
+    parser::{DebugAst, lexer::Span},
     ptr::Ptr,
     type_::Type,
     util::forget_lifetime,
@@ -19,6 +19,16 @@ pub enum ExprKind {
     /// `true`, `false`
     BoolLit(bool),
 
+    /// `[<count>]ty`
+    ArrayTy {
+        count: Ptr<Expr>,
+        ty: Ptr<Expr>,
+    },
+    /// `[]ty`
+    /// TODO: define meaning
+    ArrayTy2 {
+        ty: Ptr<Expr>,
+    },
     /// `[<val>; <count>]`
     /// both for types and literals
     ArraySemi {

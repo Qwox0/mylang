@@ -174,25 +174,16 @@ fn dev() {
     let alloc = bumpalo::Bump::new();
 
     let code = "
-Sub :: struct {
-    a: f64,
-    b: f64,
-    c: f64 = 1,
-}
-pub sub2 :: (values: Sub) -> values.a - values.b - values.c;
 mymain :: -> {
-    b := 3;
-    sub2(Sub.{ a = 10, b, })
-};
+    myarr: [5]f64 = [2; 5];
+    myarr: [5]f64 = [1, 2, 3, 4, 5];
 
-test :: -> {
-    Sub.{
-        a = 1,
-        b = 2,
-        c = 5
-    };
-    if false return else {};
-}
+    mut sum := 0;
+    myarr | for x {
+        sum += x;
+    }
+    sum
+};
 
 // rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
 // mymain :: -> factorial(10) == 3628800;
@@ -270,6 +261,7 @@ pub defer_test :: -> {
                 },
                 Err(e) => {
                     display_spanned_error(&e, code);
+                    panic!()
                 },
             }
         }

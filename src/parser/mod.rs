@@ -75,7 +75,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
-        let mut lhs = self.ws0().value().context("expr first val")?;
+        let mut lhs = self.ws0().value(min_precedence).context("expr first val")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) => lhs = node,
@@ -227,7 +227,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// anything which has higher precedence than any operator
-    pub fn value(&mut self) -> ParseResult<Ptr<Expr>> {
+    pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
         let Token { kind, span } = self.peek_tok().context("expected value")?;
 
         macro_rules! expr {
@@ -345,12 +345,34 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
-                self.advanced().expr().context("[...]")?;
-                let Ok(Token { .. }) = self.advanced().ws0().next_tok() else {
-                    return err(MissingToken(TokenKind::CloseBracket), self.lex.pos_span())
-                        .context("[...]");
-                };
-                todo!();
+                let mut elems =ScratchPool::new();
+                // []ty
+                // [count]ty
+                // []
+                // [expr]
+                // [expr,]
+                // [expr, expr, ...]
+                // [expr; count]
+
+                let (exprs, _) = self
+                    .advanced()
+                    .expr_list(TokenKind::Comma, elems)
+                    .context("[...]")?;
+                if self.lex.advance_if_kind(TokenKind::Semicolon) {
+
+                    self.tok(TokenKind::CloseBracket)?;
+                }
+                self.tok(TokenKind::CloseBracket)?;
+
+                if exprs.len() <= 1
+                    && let Some(ty) = self.expr_(min_precedence).opt()?
+                {
+                    return self.alloc(match exprs.first() {
+                        Some(&count) => expr!(ArrayTy { count, ty }),
+                        None => expr!(ArrayTy2 { ty }),
+                    });
+                }
+                return err(Unimplemented, self.lex.pos_span());
             },
             TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
@@ -1061,6 +1083,8 @@ impl DebugAst for Expr {
             ExprKind::Ident(text) => text.to_string(),
             ExprKind::Literal { kind: _, code } => code.to_string(),
             ExprKind::BoolLit(b) => b.to_string(),
+            ExprKind::ArrayTy { count, ty } => todo!(),
+            ExprKind::ArrayTy2 { ty } => todo!(),
             ExprKind::ArraySemi { val, count } => {
                 format!("[{};{}]", val.to_text(), count.to_text())
             },

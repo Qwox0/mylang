@@ -7,12 +7,12 @@ use crate::{
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{display_span_in_code_with_label, forget_lifetime, OkOrWithTry},
+    util::{OkOrWithTry, display_span_in_code_with_label, forget_lifetime},
 };
 pub use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
 use symbol::SemaSymbol;
-use value::{SemaValue, EMPTY_PTR};
+use value::{EMPTY_PTR, SemaValue};
 
 mod err;
 mod symbol;
@@ -124,6 +124,8 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }))
             },
             &mut ExprKind::BoolLit(val) => Ok(SemaValue::const_bool(self.alloc(val)?)),
+            ExprKind::ArrayTy { count, ty } => todo!(),
+            ExprKind::ArrayTy2 { ty } => todo!(),
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),

@@ -185,6 +185,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 let b_ty = self.context.bool_type();
                 reg(if *bool { b_ty.const_all_ones() } else { b_ty.const_zero() })
             },
+            ExprKind::ArrayTy { count, ty } => todo!(),
+            ExprKind::ArrayTy2 { ty } => todo!(),
             ExprKind::ArraySemi { val, count } => todo!(),
             ExprKind::ArrayComma { elements } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
