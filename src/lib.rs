@@ -24,3 +24,5 @@ mod scratch_pool;
 pub mod sema;
 pub mod symbol_table;
 pub mod util;
+#[cfg(test)]
+mod tests;

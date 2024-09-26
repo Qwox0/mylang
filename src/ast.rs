@@ -398,7 +398,7 @@ pub struct VarDecl {
     pub is_const: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclMarkers {
     pub is_pub: bool,
     pub is_mut: bool,

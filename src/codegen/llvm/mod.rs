@@ -7,21 +7,22 @@ use crate::{
     },
     cli::DebugOptions,
     defer_stack::DeferStack,
-    parser::{lexer::Code, ParseError, StmtIter},
+    parser::{ParseError, StmtIter, lexer::Code},
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{forget_lifetime, unreachable_debug, UnwrapDebug},
+    util::{UnwrapDebug, forget_lifetime, unreachable_debug},
 };
 use inkwell::{
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
     basic_block::BasicBlock,
     builder::{Builder, BuilderError},
     context::Context,
     execution_engine::{ExecutionEngine, FunctionLookupError},
     llvm_sys::{
+        LLVMPassManager, LLVMType, LLVMValue,
         core::LLVMTypeOf,
         prelude::{LLVMPassManagerRef, LLVMTypeRef, LLVMValueRef},
-        LLVMPassManager, LLVMType, LLVMValue,
     },
     module::{Linkage, Module},
     object_file::ObjectFile,
@@ -36,7 +37,6 @@ use inkwell::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, GlobalValue, IntValue, PointerValue, StructValue,
     },
-    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
 
@@ -68,6 +68,29 @@ impl From<FunctionLookupError> for CodegenError {
     fn from(e: FunctionLookupError) -> Self {
         CodegenError::FunctionLookupError(e)
     }
+}
+
+/// Returns [`Symbol::Never`] if it occurs
+macro_rules! try_compile_expr_as_val {
+    ($codegen:expr, $expr:expr) => {{
+        let codegen: &mut Codegen = $codegen;
+        let expr: Ptr<Expr> = $expr;
+        match codegen.compile_expr(expr)? {
+            sym @ Symbol::Never => return Ok(sym),
+            sym => codegen.sym_as_val(sym, expr.ty)?,
+        }
+    }};
+}
+
+/// Returns [`Symbol::Never`] if it occurs
+macro_rules! try_get_symbol_as_val {
+    ($codegen:expr, $name:expr, $ty:expr) => {{
+        let codegen: &mut Codegen = $codegen;
+        match codegen.get_symbol($name) {
+            sym @ Symbol::Never => return Ok(sym),
+            sym => codegen.sym_as_val(sym, $ty)?,
+        }
+    }};
 }
 
 pub struct Codegen<'ctx, 'alloc> {
@@ -144,11 +167,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         self.compile_expr(stmt).unwrap();
     }
 
-    fn compile_expr_as_val(&mut self, expr: Ptr<Expr>) -> CodegenResult<CodegenValue<'ctx>> {
-        let sym = self.compile_expr(expr)?;
-        self.sym_as_val(sym, expr.ty)
-    }
-
     fn compile_expr(&mut self, expr: Ptr<Expr>) -> CodegenResult<Symbol<'ctx>> {
         match &expr.kind {
             ExprKind::Ident(name) => Ok(self.get_symbol(&**name)),
@@ -192,7 +210,19 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 self.close_scope();
                 res
             },
-            ExprKind::StructDef(_) => {
+            &ExprKind::StructDef(fields) => {
+                // TODO: Is it possible to set the struct name
+                /*
+                // let ty = self.context.opaque_struct_type(var_name);
+                let field_types =
+                    fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
+                // if !ty.set_body(&field_types, false) {
+                //     panic!()
+                // }
+                let ty = self.context.struct_type(&field_types, false);
+                self.type_table.insert(fields, ty);
+                Symbol::StructDef { fields, ty }
+                */
                 todo!()
             },
             ExprKind::UnionDef(_) => todo!(),
@@ -219,12 +249,9 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     let init_val = match init {
                         Some(init) => {
                             debug_assert!(init.ty == field_def.ty || init.ty == Type::Never);
-                            match self.compile_expr(*init)? {
-                                s @ Symbol::Never => return Ok(s),
-                                sym => self.sym_as_val(sym, init.ty)?,
-                            }
+                            try_compile_expr_as_val!(self, *init)
                         },
-                        None => self.get_symbol_as_val(&*f.text, field_def.ty)?,
+                        None => try_get_symbol_as_val!(self, &*f.text, field_def.ty),
                     };
 
                     let field_ptr = self.builder.build_struct_gep(
@@ -295,23 +322,21 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 reg(self.builder.build_call(func, &args, "call")?)
             },
             ExprKind::PreOp { kind, expr } => {
-                let sym = self.compile_expr_as_val(*expr)?;
+                let v = try_compile_expr_as_val!(self, *expr);
                 reg(match kind {
                     PreOpKind::AddrOf => todo!(),
                     PreOpKind::AddrMutOf => todo!(),
                     PreOpKind::Deref => todo!(),
                     PreOpKind::Not => todo!(),
                     PreOpKind::Neg => match expr.ty {
-                        Type::Float { .. } => {
-                            self.builder.build_float_neg(sym.float_val(), "neg")?
-                        },
+                        Type::Float { .. } => self.builder.build_float_neg(v.float_val(), "neg")?,
                         _ => todo!(),
                     },
                 }) // TODO: maybe different return types possible in the future
             },
             ExprKind::BinOp { lhs, op, rhs } => {
-                let lhs_val = self.compile_expr_as_val(*lhs)?;
-                let rhs_val = self.compile_expr_as_val(*rhs)?;
+                let lhs_val = try_compile_expr_as_val!(self, *lhs);
+                let rhs_val = try_compile_expr_as_val!(self, *rhs);
                 match lhs.ty {
                     Type::Float { .. } => self
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), *op)
@@ -324,10 +349,10 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             },
             ExprKind::Assign { lhs, rhs } => {
                 debug_assert!(lhs.ty == rhs.ty);
-                let var_name = &*lhs.try_to_ident().unwrap_debug().text;
+                let var_name = &*lhs.try_to_ident().expect("todo: non-ident assign lhs").text;
                 match self.get_symbol(var_name) {
                     Symbol::Stack(stack_var) => {
-                        let rhs = self.compile_expr_as_val(*rhs)?;
+                        let rhs = try_compile_expr_as_val!(self, *rhs);
                         self.builder.build_store(stack_var, rhs)?;
                     },
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
@@ -342,7 +367,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     Symbol::Stack(stack_var) => {
                         let lhs_ty = self.llvm_type(lhs_expr.ty).basic_ty();
                         let lhs = self.builder.build_load(lhs_ty, stack_var, "lhs")?;
-                        let rhs = self.compile_expr_as_val(*rhs_expr)?;
+                        let rhs = try_compile_expr_as_val!(self, *rhs_expr);
                         let binop_res = match lhs_expr.ty {
                             Type::Float { .. } => self.build_float_binop(
                                 lhs.into_float_value(),
@@ -381,12 +406,12 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     },
                     _ => {
                         if !is_mut && let Some(init) = init {
-                            Symbol::Register(self.compile_expr_as_val(*init)?)
+                            Symbol::Register(try_compile_expr_as_val!(self, *init))
                         } else {
                             let ty = self.llvm_type(*ty).basic_ty();
                             let stack_var = self.builder.build_alloca(ty, &var_name)?;
                             if let Some(init) = init {
-                                let init = self.compile_expr_as_val(*init)?;
+                                let init = try_compile_expr_as_val!(self, *init);
                                 self.builder.build_store(stack_var, init)?;
                             }
                             Symbol::Stack(stack_var)
@@ -394,22 +419,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     },
                 };
 
-                /*
-                let v = if let Some(Expr { kind: ExprKind::Fn(f), .. }) = init.map(|p| p.as_ref()) {
-                    let val = self.compile_fn(var_name, f)?;
-                    Symbol::Function { params: f.params, val }
-                } else if !is_mut && let Some(init) = init {
-                    Symbol::Register(self.compile_expr(*init)?.any_val())
-                } else {
-                    let ty = self.llvm_type(*ty).basic_ty();
-                    let stack_var = self.builder.build_alloca(ty, &var_name)?;
-                    if let Some(init) = init {
-                        let init = self.compile_expr(*init)?.basic_val();
-                        self.builder.build_store(stack_var, init)?;
-                    }
-                    Symbol::Stack(stack_var)
-                };
-                */
                 let old = self.symbols.insert(var_name.to_string(), v);
                 if old.is_some() {
                     //println!("LOG: '{}' was shadowed in the same scope",
@@ -420,7 +429,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             },
             ExprKind::If { condition, then_body, else_body } => {
                 let func = self.cur_fn.unwrap_debug();
-                let condition = self.compile_expr_as_val(*condition)?.bool_val();
+                let condition = try_compile_expr_as_val!(self, *condition).bool_val();
 
                 let mut then_bb = self.context.append_basic_block(func, "then");
                 let mut else_bb = self.context.append_basic_block(func, "else");
@@ -765,10 +774,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     #[inline]
     fn get_symbol(&self, name: &str) -> Symbol<'ctx> {
         *self.symbols.get(name).unwrap_debug()
-    }
-
-    pub fn get_symbol_as_val(&self, name: &str, ty: Type) -> CodegenResult<CodegenValue<'ctx>> {
-        self.sym_as_val(self.get_symbol(name), ty)
     }
 
     fn is_register_passable(ty: Type) -> bool {
