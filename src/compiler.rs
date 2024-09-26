@@ -1,7 +1,7 @@
 use crate::{
-    ast::Expr,
+    ast::{debug::DebugAst, Expr},
     codegen::llvm,
-    parser::{lexer::Code, DebugAst},
+    parser::lexer::Code,
     ptr::Ptr,
     sema::{Sema, SemaError},
     util::display_spanned_error,
@@ -14,7 +14,10 @@ pub struct Compiler<'c, 'ctx, 'alloc> {
 }
 
 impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
-    pub fn new(sema: Sema<'c, 'alloc>, codegen: llvm::Codegen<'ctx, 'alloc>) -> Compiler<'c, 'ctx, 'alloc> {
+    pub fn new(
+        sema: Sema<'c, 'alloc>,
+        codegen: llvm::Codegen<'ctx, 'alloc>,
+    ) -> Compiler<'c, 'ctx, 'alloc> {
         Compiler { sema, codegen }
     }
 

@@ -7,7 +7,6 @@ use crate::{
     scratch_pool::ScratchPool,
     type_::Type,
 };
-use debug::TreeLines;
 use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
@@ -142,9 +141,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     default: None,
                     is_const: false,
                 };
-                let params =
-                    ScratchPool::new_with_first_val(param).map_err(|e| self.wrap_alloc_err(e))?;
-                let params = self.clone_slice_from_scratch_pool(params)?.into();
+                let params = self.alloc_one_val_slice(param)?.into();
                 return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
@@ -198,11 +195,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return match t.kind {
                     TokenKind::Keyword(Keyword::If) => self.if_after_cond(lhs, span).context("if"),
                     TokenKind::Keyword(Keyword::Match) => {
-                        todo!("match")
+                        todo!("| match")
                     },
                     TokenKind::Keyword(Keyword::For) => {
-                        let iter_var = self.ident().context("for iter var")?;
-                        let body = self.expr().context("for body")?;
+                        let iter_var = self.ws0().ident().context("for iter var")?;
+                        let body = self.ws0().expr().context("for body")?;
                         self.alloc(expr!(For { source: lhs, iter_var, body }, t.span))
                     },
                     TokenKind::Keyword(Keyword::While) => {
@@ -214,8 +211,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                         let open_paren = self
                             .tok(TokenKind::OpenParenthesis)
                             .context("pipe call: expect '('")?;
-                        let args = ScratchPool::new_with_first_val(lhs)
-                            .map_err(|e| self.wrap_alloc_err(e))?;
+                        let args = self.scratch_pool_with_first_val(lhs)?;
                         self.call(func, open_paren.span, args)
                     },
                     _ => ParseError::unexpected_token(t)
@@ -345,34 +341,54 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
-                let mut elems =ScratchPool::new();
-                // []ty
-                // [count]ty
-                // []
-                // [expr]
-                // [expr,]
-                // [expr, expr, ...]
-                // [expr; count]
+                let Some(first_expr) =
+                    self.advanced().ws0().expr().opt().context("first expr in [...]")?
+                else {
+                    // `[]` or `[]ty`
+                    let close_b = self.tok(TokenKind::CloseBracket)?;
+                    let arr = match self.expr_(min_precedence).opt()? {
+                        Some(ty) => expr!(ArrayTy2 { ty }),
+                        None => expr!(
+                            ArrayLit { elements: self.alloc_empty_slice() },
+                            span.join(close_b.span)
+                        ),
+                    };
+                    return self.alloc(arr);
+                };
 
-                let (exprs, _) = self
-                    .advanced()
-                    .expr_list(TokenKind::Comma, elems)
-                    .context("[...]")?;
-                if self.lex.advance_if_kind(TokenKind::Semicolon) {
+                let t = self.ws0().next_tok()?;
+                let kind = match t.kind {
+                    // `[count]ty` or `[expr]`
+                    TokenKind::CloseBracket => {
+                        let arr = match self.expr_(min_precedence).opt()? {
+                            Some(ty) => expr!(ArrayTy { count: first_expr, ty }),
+                            None => {
+                                let elements = self.scratch_pool_with_first_val(first_expr)?;
+                                let elements = self.clone_slice_from_scratch_pool(elements)?;
+                                let expr = expr!(ArrayLit { elements }, span.join(t.span));
+                                expr
+                            },
+                        };
+                        return self.alloc(arr);
+                    },
+                    // `[expr; count]`
+                    TokenKind::Semicolon => {
+                        let count = self.expr().context("array literal short count")?;
+                        ExprKind::ArrayLitShort { val: first_expr, count }
+                    },
+                    // `[expr,]` or `[expr, expr, ...]`
+                    TokenKind::Comma => {
+                        let elems = self.scratch_pool_with_first_val(first_expr)?;
+                        let (elements, _) = self.expr_list(TokenKind::Comma, elems)?;
+                        ExprKind::ArrayLit { elements }
+                    },
+                    _ => {
+                        return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
+                    },
+                };
 
-                    self.tok(TokenKind::CloseBracket)?;
-                }
-                self.tok(TokenKind::CloseBracket)?;
-
-                if exprs.len() <= 1
-                    && let Some(ty) = self.expr_(min_precedence).opt()?
-                {
-                    return self.alloc(match exprs.first() {
-                        Some(&count) => expr!(ArrayTy { count, ty }),
-                        None => expr!(ArrayTy2 { ty }),
-                    });
-                }
-                return err(Unimplemented, self.lex.pos_span());
+                let close_b = self.tok(TokenKind::CloseBracket)?;
+                Expr::new(kind, span.join(close_b.span))
             },
             TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
@@ -647,7 +663,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     // helpers:
 
     #[inline]
-    fn alloc<T: core::fmt::Debug>(&self, val: T) -> ParseResult<Ptr<T>> {
+    fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
         match self.alloc.try_alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(e) => err(AllocErr(e), self.lex.pos_span()),
@@ -673,6 +689,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }))
     }
 
+    fn scratch_pool_with_first_val<'bump, T>(
+        &self,
+        first: T,
+    ) -> ParseResult<ScratchPool<'bump, T>> {
+        ScratchPool::new_with_first_val(first).map_err(|e| self.wrap_alloc_err(e))
+    }
+
     #[inline]
     fn clone_slice_from_scratch_pool<T: Clone>(
         &self,
@@ -691,6 +714,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     #[inline]
     fn alloc_empty_slice<T>(&self) -> Ptr<[T]> {
         Ptr::from(&[] as &[T])
+    }
+
+    #[inline]
+    fn alloc_one_val_slice<T>(&self, val: T) -> ParseResult<Ptr<[T]>> {
+        let mut ptr = self.alloc(val)?;
+        Ok(unsafe { core::slice::from_raw_parts_mut(ptr.as_mut() as *mut T, 1).into() })
     }
 
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {
@@ -889,545 +918,5 @@ impl Ident {
             return err(NotAnIdent, lex.pos_span());
         }
         Ok(Ident { text: text.into(), span: t.span })
-    }
-}
-
-pub mod debug {
-    use super::{DebugAst, Ident};
-    use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
-
-    #[derive(Default)]
-    pub struct TreeLine(pub String);
-
-    impl TreeLine {
-        pub fn ensure_len(&mut self, len: usize) {
-            let pad = " ".repeat(len.saturating_sub(self.0.len()));
-            self.0.push_str(&pad);
-        }
-
-        pub fn overwrite(&mut self, offset: usize, text: &str) {
-            self.ensure_len(offset + text.len());
-            self.0.replace_range(offset..offset + text.len(), text);
-        }
-    }
-
-    #[derive(Default)]
-    pub struct TreeLines {
-        pub lines: Vec<TreeLine>,
-        cur_line: usize,
-        cur_offset: usize,
-    }
-
-    impl TreeLines {
-        pub fn ensure_lines(&mut self, idx: usize) {
-            while self.lines.get(idx).is_none() {
-                self.lines.push(TreeLine(String::new()))
-            }
-        }
-
-        pub fn get_cur(&mut self) -> &mut TreeLine {
-            self.ensure_lines(self.cur_line);
-            self.lines.get_mut(self.cur_line).unwrap()
-        }
-
-        pub fn get_cur_offset(&self) -> usize {
-            self.cur_offset
-        }
-
-        pub fn write(&mut self, text: &str) {
-            let offset = self.cur_offset;
-            self.get_cur().overwrite(offset, text);
-            self.cur_offset += text.len();
-        }
-
-        pub fn write_minus(&mut self, len: usize) {
-            self.write(&"-".repeat(len))
-        }
-
-        pub fn scope_next_line<O>(&mut self, f: impl FnOnce(&mut Self) -> O) -> O {
-            let state = (self.cur_line, self.cur_offset);
-            self.next_line();
-            let out = f(self);
-            self.cur_line = state.0;
-            self.cur_offset = state.1;
-            out
-        }
-
-        pub fn write_tree<T: DebugAst>(&mut self, expr: &T) {
-            self.scope_next_line(|l| expr.write_tree(l));
-            self.write_minus(expr.to_text().len());
-        }
-
-        pub fn write_ident(&mut self, ident: &Ident) {
-            self.scope_next_line(|l| l.write(&ident.text));
-            self.write_minus(ident.text.len());
-        }
-
-        pub fn next_line(&mut self) {
-            self.cur_line += 1;
-        }
-
-        pub fn prev_line(&mut self) {
-            self.cur_line -= 1;
-        }
-
-        pub fn set_offset(&mut self, offset: usize) {
-            self.cur_offset = offset;
-        }
-    }
-
-    pub fn var_decl_to_text(VarDecl { markers, ident, ty, default, is_const }: &VarDecl) -> String {
-        format!(
-            "{}{}{}{}{}{}{}",
-            if markers.is_pub { "pub " } else { "" },
-            mut_marker(markers.is_mut),
-            if markers.is_rec { "rec " } else { "" },
-            ident.text.as_ref(),
-            if *ty != Type::Unset { ":" } else { "" },
-            ty.to_text(),
-            default
-                .map(|default| format!(
-                    "{}{}{}",
-                    if *ty == Type::Unset { ":" } else { "" },
-                    if *is_const { ":" } else { "=" },
-                    default.to_text()
-                ))
-                .unwrap_or_default()
-        )
-    }
-
-    pub fn var_decl_write_tree(
-        VarDecl { markers, ident, ty, default, is_const }: &VarDecl,
-        lines: &mut TreeLines,
-    ) {
-        lines.write(&format!(
-            "{}{}{}",
-            if markers.is_pub { "pub " } else { "" },
-            mut_marker(markers.is_mut),
-            if markers.is_rec { "rec " } else { "" }
-        ));
-
-        lines.write_ident(ident);
-
-        if *ty != Type::Unset {
-            lines.write(":");
-            lines.write_tree(ty);
-        }
-
-        if let Some(default) = default {
-            let default = default;
-            lines.write(&format!(
-                "{}{}",
-                if *ty == Type::Unset { ":" } else { "" },
-                if *is_const { ":" } else { "=" },
-            ));
-            lines.write_tree(default);
-        }
-    }
-
-    pub fn many_to_text<T>(
-        elements: &[T],
-        single_to_text: impl FnMut(&T) -> String,
-        sep: &str,
-    ) -> String {
-        elements.iter().map(single_to_text).intersperse(sep.to_string()).collect()
-    }
-
-    pub fn many_expr_to_text<T: DebugAst>(elements: &Ptr<[T]>, sep: &str) -> String {
-        many_to_text(elements, |t| t.to_text(), sep)
-    }
-
-    pub fn opt_to_text<T>(opt_expr: &Option<T>, inner: impl FnOnce(&T) -> String) -> String {
-        opt_expr.as_ref().map(inner).unwrap_or_default()
-    }
-
-    pub fn opt_expr_to_text<T: DebugAst>(opt_expr: &Option<T>) -> String {
-        opt_to_text(opt_expr, |t| t.to_text())
-    }
-
-    #[inline]
-    pub fn mut_marker(is_mut: bool) -> &'static str {
-        if is_mut { "mut " } else { "" }
-    }
-}
-
-pub trait DebugAst {
-    fn to_text(&self) -> String;
-
-    fn write_tree(&self, lines: &mut TreeLines);
-
-    fn print_tree(&self) {
-        let mut lines = TreeLines::default();
-        self.write_tree(&mut lines);
-        println!("| {}", self.to_text());
-        for l in lines.lines {
-            println!("| {}", l.0);
-        }
-    }
-}
-
-impl<T: DebugAst> DebugAst for Ptr<T> {
-    fn to_text(&self) -> String {
-        self.as_ref().to_text()
-    }
-
-    fn write_tree(&self, lines: &mut TreeLines) {
-        self.as_ref().write_tree(lines)
-    }
-}
-
-impl DebugAst for Expr {
-    fn to_text(&self) -> String {
-        #[allow(unused)]
-        match &self.kind {
-            ExprKind::Ident(text) => text.to_string(),
-            ExprKind::Literal { kind: _, code } => code.to_string(),
-            ExprKind::BoolLit(b) => b.to_string(),
-            ExprKind::ArrayTy { count, ty } => todo!(),
-            ExprKind::ArrayTy2 { ty } => todo!(),
-            ExprKind::ArraySemi { val, count } => {
-                format!("[{};{}]", val.to_text(), count.to_text())
-            },
-            ExprKind::ArrayComma { elements } => {
-                format!("[{}]", debug::many_expr_to_text(elements, ","))
-            },
-            ExprKind::Tuple { elements } => {
-                format!("({})", debug::many_expr_to_text(elements, ","))
-            },
-            ExprKind::Fn(Fn { params, ret_type, body }) => format!(
-                "({})->{}{}",
-                debug::many_to_text(&*params, |decl| debug::var_decl_to_text(decl), ","),
-                ret_type.to_text(),
-                if matches!(body.kind, ExprKind::Block { .. }) {
-                    body.to_text()
-                } else {
-                    format!("{{{}}}", body.to_text())
-                }
-            ),
-            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
-            ExprKind::Block { stmts, has_trailing_semicolon } => {
-                format!(
-                    "{{{}{}}}",
-                    debug::many_to_text(stmts, |a| a.to_text(), ";"),
-                    if *has_trailing_semicolon { ";" } else { "" }
-                )
-            },
-            ExprKind::StructDef(fields) => {
-                format!(
-                    "struct {{ {} }}",
-                    debug::many_to_text(fields, |f| debug::var_decl_to_text(f), ",")
-                )
-            },
-            ExprKind::UnionDef(..) => panic!(),
-            ExprKind::EnumDef {} => panic!(),
-            ExprKind::OptionShort(ty) => {
-                format!("?{}", ty.to_text())
-            },
-            ExprKind::Ptr { is_mut, ty } => {
-                format!("*{}{}", debug::mut_marker(*is_mut), ty.to_text())
-            },
-            ExprKind::Initializer { lhs, fields } => {
-                format!(
-                    "{}.{{{}}}",
-                    debug::opt_expr_to_text(lhs),
-                    debug::many_to_text(
-                        fields,
-                        |(f, val)| format!(
-                            "{}{}",
-                            f.text.as_ref(),
-                            debug::opt_to_text(val, |v| format!("={}", v.to_text())),
-                        ),
-                        ","
-                    )
-                )
-            },
-            ExprKind::Dot { lhs, rhs } => {
-                format!("{}.{}", lhs.to_text(), rhs.text.as_ref())
-            },
-            //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(),
-            // rhs.to_text()) },
-            ExprKind::PostOp { kind, expr } => panic!(),
-            ExprKind::Index { lhs, idx } => panic!(),
-            //ExprKind::CompCall { func, args } => panic!(),
-            ExprKind::Call { func, args } => {
-                format!("{}({})", func.to_text(), debug::many_to_text(args, |e| e.to_text(), ","))
-            },
-            ExprKind::PreOp { kind, expr, .. } => format!(
-                "{}{}",
-                match kind {
-                    PreOpKind::AddrOf => "&",
-                    PreOpKind::AddrMutOf => "&mut ",
-                    PreOpKind::Deref => "*",
-                    PreOpKind::Not => "!",
-                    PreOpKind::Neg => "- ",
-                },
-                expr.to_text()
-            ),
-            ExprKind::BinOp { lhs, op, rhs, .. } => {
-                format!("{} {} {}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
-            },
-            ExprKind::Assign { lhs, rhs, .. } => {
-                format!("{}={}", lhs.to_text(), rhs.to_text())
-            },
-            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
-                format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
-            },
-            ExprKind::VarDecl(decl) => debug::var_decl_to_text(decl),
-            ExprKind::If { condition, then_body, else_body } => {
-                format!(
-                    "if {} {}{}",
-                    condition.to_text(),
-                    then_body.to_text(),
-                    debug::opt_to_text(else_body, |e| format!(" else {}", e.to_text()))
-                )
-            },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => todo!(),
-            ExprKind::While { condition, body } => todo!(),
-            ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
-            ExprKind::Defer(expr) => format!("defer {}", expr.to_text()),
-            ExprKind::Return { expr } => {
-                format!("return{}", debug::opt_to_text(expr, |e| format!(" {}", e.to_text())))
-            },
-            ExprKind::Semicolon(expr) => format!("{};", debug::opt_expr_to_text(expr)),
-        }
-    }
-
-    fn write_tree(&self, lines: &mut TreeLines) {
-        match &self.kind {
-            ExprKind::Ident(_) | ExprKind::Literal { .. } | ExprKind::BoolLit(_) => {
-                lines.write(&self.to_text())
-            },
-            /*
-            ExprKind::ArrayShort { val, count } => {
-                format!("[{};{}]", val.to_text(), count.to_text())
-            },
-            ExprKind::ArrayInit { elements } => format!(
-                "[{}]",
-                elements
-                    .iter()
-                    .map(|e| e.to_text())
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            */
-            ExprKind::Tuple { elements } => {
-                lines.write("(");
-                debug::many_expr_to_text(elements, ",");
-                lines.write(")");
-            },
-            ExprKind::Fn(Fn { params, ret_type, body }) => {
-                let body = body;
-                lines.write("(");
-
-                for (idx, decl) in params.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    debug::var_decl_write_tree(decl, lines)
-                }
-                lines.write(")->");
-                if *ret_type != Type::Unset {
-                    lines.write_tree(ret_type);
-                }
-                if matches!(body.kind, ExprKind::Block { .. }) {
-                    body.write_tree(lines);
-                } else {
-                    lines.write("{");
-                    lines.write_tree(body);
-                    lines.write("}");
-                }
-            },
-            ExprKind::Parenthesis { expr } => {
-                lines.write("(");
-                lines.write_tree(expr);
-                lines.write(")");
-            },
-            ExprKind::Block { stmts, has_trailing_semicolon } => {
-                lines.write("{");
-                let len = stmts.len();
-                for (idx, s) in stmts.iter().enumerate() {
-                    lines.write_tree(s);
-                    if idx + 1 < len || *has_trailing_semicolon {
-                        lines.write(";");
-                    }
-                }
-                lines.write("}");
-            },
-            ExprKind::StructDef(fields) => {
-                lines.write("struct { ");
-                for (idx, field) in fields.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    debug::var_decl_write_tree(field, lines)
-                }
-                lines.write(" }");
-            },
-            /*
-            ExprKind::StructInit { fields, span } => panic!(),
-            ExprKind::TupleStructDef { fields, span } => panic!(),
-            ExprKind::Union { span } => panic!(),
-            ExprKind::Enum { span } => panic!(),
-            */
-            ExprKind::OptionShort(ty) => {
-                lines.write("?");
-                lines.write_tree(ty);
-            },
-            ExprKind::Ptr { is_mut, ty } => {
-                lines.write("*");
-                if *is_mut {
-                    lines.write("mut ");
-                }
-                lines.write_tree(ty);
-            },
-            ExprKind::Initializer { lhs, fields } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
-                lines.write(".{");
-                for (idx, (field, val)) in fields.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-                    lines.write_ident(field);
-                    if let Some(val) = val {
-                        lines.write("=");
-                        lines.write_tree(val);
-                    }
-                }
-
-                lines.write("}");
-            },
-            ExprKind::Dot { lhs, rhs } => {
-                let lhs = lhs;
-                lines.write_tree(lhs);
-                lines.write(".");
-                lines.write_ident(rhs);
-            },
-            /*
-            ExprKind::PostOp { kind, expr, span } => panic!(),
-            ExprKind::Index { lhs, idx, span } => panic!(),
-            ExprKind::CompCall { func, args } => panic!(),
-            */
-            ExprKind::Call { func, args } => {
-                let func = func;
-                lines.write_tree(func);
-                lines.write("(");
-                let len = args.len();
-                for (idx, arg) in args.into_iter().enumerate() {
-                    let arg = arg;
-                    lines.write_tree(arg);
-                    if idx + 1 != len {
-                        lines.write(",");
-                    }
-                }
-                lines.write(")");
-            },
-            ExprKind::PreOp { kind, expr, .. } => {
-                let expr = expr;
-                lines.write(match kind {
-                    PreOpKind::AddrOf => "&",
-                    PreOpKind::AddrMutOf => "&mut ",
-                    PreOpKind::Deref => "*",
-                    PreOpKind::Not => "!",
-                    PreOpKind::Neg => "- ",
-                });
-                lines.write_tree(expr);
-            },
-            ExprKind::BinOp { lhs, op, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
-                lines.write_tree(lhs);
-                lines.write(" ");
-                lines.write(op.to_binop_text());
-                lines.write(" ");
-                lines.write_tree(rhs);
-            },
-            ExprKind::Assign { lhs, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
-                lines.write_tree(lhs);
-                lines.write("=");
-                lines.write_tree(rhs);
-            },
-            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
-                lines.write_tree(lhs);
-                lines.write(op.to_binop_assign_text());
-                lines.write_tree(rhs);
-            },
-            ExprKind::If { condition, then_body, else_body } => {
-                let condition = condition;
-                let then_body = then_body;
-                lines.write("if ");
-                lines.write_tree(condition);
-                lines.write(" ");
-                lines.write_tree(then_body);
-                if let Some(else_body) = else_body {
-                    let else_body = else_body;
-                    lines.write(" else ");
-                    lines.write_tree(else_body);
-                }
-            },
-            ExprKind::VarDecl(decl) => debug::var_decl_write_tree(decl, lines),
-            ExprKind::Defer(expr) => {
-                lines.write("defer ");
-                lines.write_tree(expr);
-            },
-            ExprKind::Return { expr } => {
-                lines.write("return");
-                if let Some(expr) = expr {
-                    let expr = expr;
-                    lines.write(" ");
-                    lines.write_tree(expr);
-                }
-            },
-            ExprKind::Semicolon(expr) => {
-                if let Some(expr) = expr {
-                    lines.write_tree(expr);
-                }
-                lines.write(";");
-            },
-
-            k => panic!("{:?}", k),
-        }
-    }
-}
-
-impl DebugAst for Type {
-    fn to_text(&self) -> String {
-        match self {
-            Type::Void => "void".to_string(),
-            Type::Never => "!".to_string(),
-            Type::Ptr(pointee) => format!("*{}", pointee.to_text()),
-            Type::Int { bits, is_signed } => {
-                format!("{}{}", if *is_signed { "i" } else { "u" }, bits)
-            },
-            Type::IntLiteral => "int lit".to_string(),
-            Type::Bool => "bool".to_string(),
-            Type::Float { bits } => format!("f{}", bits),
-            Type::FloatLiteral => "float lit".to_string(),
-            Type::Function(_) => "fn".to_string(), // TODO: fn type as text
-            // Type::Custom(name) => name.to_string(),
-            Type::Struct { .. } => todo!(),
-            Type::Union { .. } => todo!(),
-            Type::Enum { .. } => todo!(),
-            Type::Type(_) => "type".to_string(),
-            Type::Unset => String::default(),
-            Type::Unevaluated(expr) => expr.to_text(),
-        }
-    }
-
-    fn write_tree(&self, lines: &mut TreeLines) {
-        if let Type::Unevaluated(expr) = self {
-            expr.write_tree(lines);
-        } else {
-            lines.write(&self.to_text())
-        }
     }
 }

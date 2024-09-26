@@ -126,8 +126,8 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             &mut ExprKind::BoolLit(val) => Ok(SemaValue::const_bool(self.alloc(val)?)),
             ExprKind::ArrayTy { count, ty } => todo!(),
             ExprKind::ArrayTy2 { ty } => todo!(),
-            ExprKind::ArraySemi { val, count } => todo!(),
-            ExprKind::ArrayComma { elements } => todo!(),
+            ExprKind::ArrayLit { elements } => todo!(),
+            ExprKind::ArrayLitShort { val, count } => todo!(),
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(func) => {
                 assert!(is_const, "todo: non-const function");

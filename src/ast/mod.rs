@@ -1,13 +1,11 @@
-use crate::{
-    parser::{DebugAst, lexer::Span},
-    ptr::Ptr,
-    type_::Type,
-    util::forget_lifetime,
-};
+use crate::{parser::lexer::Span, ptr::Ptr, type_::Type, util::forget_lifetime};
+use debug::DebugAst;
 use std::{
     fmt,
     ops::{Deref, DerefMut},
 };
+
+pub mod debug;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
@@ -29,20 +27,19 @@ pub enum ExprKind {
     ArrayTy2 {
         ty: Ptr<Expr>,
     },
+    /// `[<expr>, <expr>, ..., <expr>,]`
+    ArrayLit {
+        elements: Ptr<[Ptr<Expr>]>,
+    },
     /// `[<val>; <count>]`
-    /// both for types and literals
-    ArraySemi {
+    ArrayLitShort {
         val: Ptr<Expr>,
         count: Ptr<Expr>,
-    },
-    /// `[<expr>, <expr>, ..., <expr>,]`
-    ArrayComma {
-        elements: Ptr<[Expr]>,
     },
     /// `(<expr>, <expr>, ..., <expr>,)`
     /// both for types and literals
     Tuple {
-        elements: Ptr<[Expr]>,
+        elements: Ptr<[Ptr<Expr>]>,
     },
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
@@ -210,6 +207,7 @@ pub enum ExprKind {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    /// TODO: is this needed?
     pub ty: Type,
 }
 

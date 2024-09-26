@@ -58,11 +58,11 @@ impl ParseError {
         }
     }
 
-    pub fn unexpected_token(t: Token) -> Result<!, ParseError> {
+    pub fn unexpected_token<T>(t: Token) -> Result<T, ParseError> {
         Err(ParseError::new(ParseErrorKind::UnexpectedToken(t.kind), t.span))
     }
 
-    pub fn unexpected_start_token(t: Token) -> Result<!, ParseError> {
+    pub fn unexpected_start_token<T>(t: Token) -> Result<T, ParseError> {
         Err(ParseError::new(ParseErrorKind::UnexpectedStart(t.kind), t.span))
     }
 
@@ -86,10 +86,14 @@ pub trait ParseResultExt<T> {
 
 impl<T> ParseResultExt<T> for ParseResult<T> {
     /// [`ParseErrorKind::UnexpectedStart`] -> [`None`]
+    /// [`ParseErrorKind::NoInput`] -> [`None`]
     fn opt(self) -> ParseResult<Option<T>> {
         match self {
             Ok(t) => Ok(Some(t)),
-            Err(ParseError { kind: ParseErrorKind::UnexpectedStart(_), .. }) => Ok(None),
+            Err(ParseError {
+                kind: ParseErrorKind::UnexpectedStart(_) | ParseErrorKind::NoInput,
+                ..
+            }) => Ok(None),
             Err(e) => Err(e),
         }
     }

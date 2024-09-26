@@ -2,10 +2,11 @@
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
 use mylang::{
+    ast::debug::DebugAst,
     cli::Cli,
     codegen::llvm,
     compiler::Compiler,
-    parser::{lexer::Lexer, parser_helper::ParserInterface, DebugAst, StmtIter},
+    parser::{lexer::Lexer, parser_helper::ParserInterface, StmtIter},
     sema,
     util::{collect_all_result_errors, display_spanned_error},
 };
@@ -181,7 +182,7 @@ mymain :: -> {
     mut sum := 0;
     myarr | for x {
         sum += x;
-    }
+    };
     sum
 };
 
@@ -261,7 +262,7 @@ pub defer_test :: -> {
                 },
                 Err(e) => {
                     display_spanned_error(&e, code);
-                    panic!()
+                    std::process::exit(1)
                 },
             }
         }

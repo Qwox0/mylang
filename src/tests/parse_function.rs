@@ -4,6 +4,7 @@ use crate::{
 };
 
 #[test]
+#[allow(unused_variables)]
 fn no_args() {
     let alloc = bumpalo::Bump::new();
     let code = "my_fn :: -> 1;";
