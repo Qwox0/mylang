@@ -89,7 +89,7 @@ impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
             for e in self.sema.errors.iter() {
                 display_spanned_error(e, code);
             }
-            panic!("Semantic analysis ERROR")
+            std::process::exit(1);
         }
 
         let sema_duration = sema_start.elapsed();

@@ -1,4 +1,9 @@
-use crate::{parser::lexer::Span, ptr::Ptr, type_::Type, util::forget_lifetime};
+use crate::{
+    parser::lexer::Span,
+    ptr::Ptr,
+    type_::Type,
+    util::{forget_lifetime, UnwrapDebug},
+};
 use debug::DebugAst;
 use std::{
     fmt,
@@ -491,6 +496,36 @@ pub enum LitKind {
     Float,
     /// `"literal"`
     Str,
+}
+
+impl LitKind {
+    pub fn parse(
+        self,
+        code: Ptr<str>,
+        alloc: &bumpalo::Bump,
+    ) -> Result<Ptr<()>, bumpalo::AllocErr> {
+        macro_rules! alloc {
+            ($val:expr) => {
+                alloc.try_alloc($val).map(Ptr::from).map(Ptr::cast)
+            };
+        }
+
+        match self {
+            LitKind::Char => {
+                let mut chars = code.chars();
+                let c = chars.next().unwrap_debug();
+                debug_assert!(c == '\'');
+                let val = chars.next().unwrap_debug();
+                let c = chars.next().unwrap_debug();
+                debug_assert!(c == '\'');
+                alloc!(val)
+            },
+            LitKind::BChar => todo!(),
+            LitKind::Int => alloc!(code.parse::<i128>().unwrap_debug()),
+            LitKind::Float => alloc!(code.parse::<f64>().unwrap_debug()),
+            LitKind::Str => todo!(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

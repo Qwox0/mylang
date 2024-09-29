@@ -4,7 +4,10 @@ use crate::{
     ptr::Ptr,
     type_::Type,
 };
-use std::ops::{FromResidual, Try};
+use std::{
+    convert::Infallible,
+    ops::{FromResidual, Try},
+};
 use SemaResult::*;
 
 #[derive(Debug, Clone)]
@@ -20,6 +23,9 @@ pub enum SemaErrorKind {
     MismatchedTypesBinOp {
         lhs_ty: Type,
         rhs_ty: Type,
+    },
+    ExpectedNumber {
+        got: Type,
     },
     /// rust error:
     /// ```notest
@@ -62,6 +68,10 @@ pub enum SemaErrorKind {
     UnexpectedTopLevelExpr(Ptr<Expr>),
 
     NotAConstExpr,
+
+    NegativeArrayLen,
+    CanOnlyIndexArrays,
+    CannotReturnFromLoop,
 
     AllocErr(bumpalo::AllocErr),
 }
@@ -125,10 +135,9 @@ impl<T> FromResidual<SemaResult<!>> for SemaResult<T> {
     }
 }
 
-impl<T> FromResidual<Result<!, SemaError>> for SemaResult<T> {
-    fn from_residual(residual: Result<!, SemaError>) -> Self {
+impl<T> FromResidual<Result<Infallible, SemaError>> for SemaResult<T> {
+    fn from_residual(residual: Result<Infallible, SemaError>) -> Self {
         match residual {
-            Result::Ok(never) => never,
             Result::Err(err) => Err(err),
         }
     }

@@ -28,16 +28,29 @@ impl_from! { Codegen(CodegenError) }
 
 pub trait SpannedError: Debug {
     fn span(&self) -> Span;
+
+    fn get_text(&self) -> String;
 }
 
 impl SpannedError for ParseError {
     fn span(&self) -> Span {
         self.span
     }
+
+    fn get_text(&self) -> String {
+        #[cfg(debug_assertions)]
+        return format!("{:?} ({})", self.kind, self.context);
+        #[cfg(not(debug_assertions))]
+        return format!("{:?}", self.kind);
+    }
 }
 
 impl SpannedError for SemaError {
     fn span(&self) -> Span {
         self.span
+    }
+
+    fn get_text(&self) -> String {
+        format!("{:?}", self.kind)
     }
 }

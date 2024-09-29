@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Expr, Fn, VarDeclList},
+    ast::{debug::DebugAst, Expr, Fn, VarDeclList},
     ptr::Ptr,
 };
 use core::fmt;
@@ -8,7 +8,7 @@ use core::fmt;
 // pub type Type = Ptr<TypeInfo>;
 pub type Type = TypeInfo;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq)]
 pub enum TypeInfo {
     Void,
     Never,
@@ -25,6 +25,11 @@ pub enum TypeInfo {
     FloatLiteral,
 
     Function(Ptr<Fn>),
+
+    Array {
+        len: usize,
+        elem_ty: Ptr<TypeInfo>,
+    },
 
     Struct {
         fields: VarDeclList,
@@ -49,22 +54,34 @@ pub enum TypeInfo {
     Unevaluated(Ptr<Expr>),
 }
 
+impl PartialEq for TypeInfo {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ptr(l), Self::Ptr(r)) => **l == **r,
+            (Self::Int { bits: lb, is_signed: ls }, Self::Int { bits: rb, is_signed: rs }) => {
+                lb == rb && ls == rs
+            },
+            (Self::Float { bits: l }, Self::Float { bits: r }) => l == r,
+            (Self::Function(l), Self::Function(r)) => l == r,
+            (
+                Self::Array { len: l_len, elem_ty: l_elem },
+                Self::Array { len: r_len, elem_ty: r_elem },
+            ) => l_len == r_len && **l_elem == **r_elem,
+            (Self::Struct { fields: l }, Self::Struct { fields: r }) => l == r,
+            (Self::Union { fields: l }, Self::Union { fields: r }) => l == r,
+            (Self::Enum { variants: l }, Self::Enum { variants: r }) => l == r,
+            (Self::Unevaluated(_), Self::Unevaluated(_)) => false,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
 impl fmt::Debug for TypeInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TypeInfo::Void => write!(f, "Void"),
             TypeInfo::Never => write!(f, "Never"),
             TypeInfo::Ptr(pointee) => write!(f, "*{:?}", &**pointee),
-            TypeInfo::Int { bits, is_signed } => {
-                write!(f, "{}{}", if *is_signed { "i" } else { "u" }, bits)
-            },
-            TypeInfo::IntLiteral => write!(f, "int lit"),
-            TypeInfo::Bool => write!(f, "bool"),
-            TypeInfo::Float { bits } => write!(f, "f{}", bits),
-            TypeInfo::FloatLiteral => write!(f, "float lit"),
             TypeInfo::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            // TypeInfo::Literal(kind) => write!(f, "{:?}Lit", kind),
-            //TypeInfo::Custom(name) => f.debug_tuple("Custom").field(&&**name).finish(),
             TypeInfo::Struct { fields } => write!(
                 f,
                 "struct{{{}}}",
@@ -76,9 +93,9 @@ impl fmt::Debug for TypeInfo {
             ),
             TypeInfo::Union { .. } => write!(f, "union {{ ... }}"),
             TypeInfo::Enum { .. } => write!(f, "enum {{ ... }}"),
-            TypeInfo::Type(_) => write!(f, "type"),
             TypeInfo::Unset => write!(f, "Unset"),
             TypeInfo::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
+            ti => write!(f, "{}", ti.to_text()),
         }
     }
 }
@@ -101,6 +118,21 @@ impl TypeInfo {
             Some(rhs_ty)
         } else {
             None
+        }
+    }
+
+    pub fn assign_matches(target: TypeInfo, val: TypeInfo) -> bool {
+        //target == val || val == TypeInfo::Never || (val == TypeInfo::In)
+        match (target, val) {
+            (t, v) if t == v => true,
+            (_, TypeInfo::Never) => true,
+            (TypeInfo::Int { .. } | TypeInfo::Float { .. }, Type::IntLiteral) => true,
+            (TypeInfo::Float { .. }, TypeInfo::FloatLiteral) => true,
+            (
+                TypeInfo::Array { len: l1, elem_ty: t1 },
+                TypeInfo::Array { len: l2, elem_ty: t2 },
+            ) => l1 == l2 && TypeInfo::assign_matches(*t1, *t2),
+            _ => false,
         }
     }
 }

@@ -6,7 +6,7 @@ use core::fmt;
 use std::{hint::unreachable_unchecked, ops::Try};
 
 pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
-    eprintln!("ERROR: {:?}", err);
+    eprintln!("ERROR: {}", err.get_text());
     display_span_in_code(err.span(), code)
 }
 

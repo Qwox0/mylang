@@ -175,15 +175,24 @@ fn dev() {
     let alloc = bumpalo::Bump::new();
 
     let code = "
-mymain :: -> {
-    myarr: [5]f64 = [2; 5];
-    myarr: [5]f64 = [1, 2, 3, 4, 5];
+A :: struct {
+    a: i64,
+    b: i64 = 2,
+}
 
-    mut sum := 0;
-    myarr | for x {
-        sum += x;
-    };
-    sum
+mymain :: -> {
+    myarr := [1.0, 2.0, 3.0, 4.0, 5.0];
+    myarr: [5]f64 = [2.0; 5];
+
+    a := A.{ a = 1};
+
+    myarr[4]
+
+    // mut sum := 0;
+    // myarr | for x {
+    //     sum += x;
+    // };
+    // sum
 };
 
 // rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
@@ -275,7 +284,7 @@ pub defer_test :: -> {
         for e in errors {
             display_spanned_error(&e, code);
         }
-        panic!("Parse ERROR")
+        std::process::exit(1);
     });
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
@@ -300,7 +309,7 @@ pub defer_test :: -> {
             for e in compiler.sema.errors {
                 display_spanned_error(&e, code);
             }
-            panic!("Semantic analysis ERROR")
+            std::process::exit(1);
         }
 
         let frontend2_duration = frontend2_start.elapsed();

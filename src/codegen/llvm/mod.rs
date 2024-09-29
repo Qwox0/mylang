@@ -7,22 +7,21 @@ use crate::{
     },
     cli::DebugOptions,
     defer_stack::DeferStack,
-    parser::{ParseError, StmtIter, lexer::Code},
+    parser::{lexer::Code, ParseError, StmtIter},
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{UnwrapDebug, forget_lifetime, unreachable_debug},
+    util::{forget_lifetime, unreachable_debug, UnwrapDebug},
 };
 use inkwell::{
-    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
     basic_block::BasicBlock,
     builder::{Builder, BuilderError},
     context::Context,
     execution_engine::{ExecutionEngine, FunctionLookupError},
     llvm_sys::{
-        LLVMPassManager, LLVMType, LLVMValue,
         core::LLVMTypeOf,
         prelude::{LLVMPassManagerRef, LLVMTypeRef, LLVMValueRef},
+        LLVMPassManager, LLVMType, LLVMValue,
     },
     module::{Linkage, Module},
     object_file::ObjectFile,
@@ -37,6 +36,7 @@ use inkwell::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, GlobalValue, IntValue, PointerValue, StructValue,
     },
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
 };
 use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
 
@@ -175,7 +175,10 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     LitKind::Char => todo!(),
                     LitKind::BChar => todo!(),
                     // TODO: int
-                    LitKind::Int => reg(self.float_type(expr.ty).const_float_from_string(code)),
+                    //LitKind::Int => reg(self.float_type(expr.ty).const_float_from_string(code)),
+                    LitKind::Int => {
+                        reg(self.int_type(expr.ty).const_int(code.parse().unwrap_debug(), false))
+                    },
                     LitKind::Float => reg(self.float_type(expr.ty).const_float_from_string(code)),
                     LitKind::Str => todo!(),
                 }
@@ -187,8 +190,54 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             },
             ExprKind::ArrayTy { count, ty } => todo!(),
             ExprKind::ArrayTy2 { ty } => todo!(),
-            ExprKind::ArrayLit { elements } => todo!(),
-            ExprKind::ArrayLitShort { val, count } => todo!(),
+            ExprKind::ArrayLit { elements } => {
+                let Type::Array { len, elem_ty } = expr.ty else { unreachable_debug() };
+                let elem_ty = self.llvm_type(*elem_ty);
+                let arr_ty = elem_ty.basic_ty().array_type(len as u32);
+                let arr_ptr = self.builder.build_array_alloca(
+                    arr_ty,
+                    self.context.i64_type().const_int(len as u64, false),
+                    "arr",
+                )?;
+                let idx_ty = self.context.i64_type();
+                for (idx, elem) in elements.iter().enumerate() {
+                    let elem_val = try_compile_expr_as_val!(self, *elem);
+                    let elem_ptr = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            arr_ty,
+                            arr_ptr,
+                            &[idx_ty.const_zero(), idx_ty.const_int(idx as u64, false)],
+                            "",
+                        )
+                    }?;
+                    self.builder.build_store(elem_ptr, elem_val)?;
+                }
+                stack_val(arr_ptr)
+            },
+            ExprKind::ArrayLitShort { val, count: _ } => {
+                let Type::Array { len, elem_ty } = expr.ty else { panic!() };
+                let elem_ty = self.llvm_type(*elem_ty);
+                let arr_ty = elem_ty.basic_ty().array_type(len as u32);
+                let arr_ptr = self.builder.build_array_alloca(
+                    arr_ty,
+                    self.context.i64_type().const_int(len as u64, false),
+                    "arr",
+                )?;
+                let elem_val = try_compile_expr_as_val!(self, *val);
+                let idx_ty = self.context.i64_type();
+                for idx in 0..len {
+                    let elem_ptr = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            arr_ty,
+                            arr_ptr,
+                            &[idx_ty.const_zero(), idx_ty.const_int(idx as u64, false)],
+                            "",
+                        )
+                    }?;
+                    self.builder.build_store(elem_ptr, elem_val)?;
+                }
+                stack_val(arr_ptr)
+            },
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(_) => todo!("todo: runtime fn"),
             ExprKind::Parenthesis { expr } => self.compile_expr(*expr),
@@ -250,7 +299,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
                     let init_val = match init {
                         Some(init) => {
-                            debug_assert!(init.ty == field_def.ty || init.ty == Type::Never);
+                            debug_assert!(Type::assign_matches(field_def.ty, init.ty));
                             try_compile_expr_as_val!(self, *init)
                         },
                         None => try_get_symbol_as_val!(self, &*f.text, field_def.ty),
@@ -291,18 +340,50 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     field_idx as u32,
                     &format!("{}_ptr", &*rhs.text),
                 )?;
-                if matches!(expr.ty, Type::Struct { .. }) {
-                    stack_val(field_ptr)
-                } else {
+                if Self::is_register_passable(expr.ty) {
                     reg(self.builder.build_load(
                         self.llvm_type(field.ty).basic_ty(),
                         field_ptr,
                         &rhs.text,
                     )?)
+                } else {
+                    stack_val(field_ptr)
                 }
             },
             ExprKind::PostOp { kind, expr } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
+            ExprKind::Index { lhs, idx } => {
+                let Type::Array { len, elem_ty } = lhs.ty else { panic!() };
+                let arr_ty = self.llvm_type(lhs.ty).basic_ty();
+                let a = self.compile_expr(*lhs)?;
+                let Symbol::Stack(arr_ptr) = a else { panic!() };
+                let i = try_compile_expr_as_val!(self, *idx);
+                //let i = match idx.ty {
+                //    Type::IntLiteral => {
+                //        // TODO!
+                //        reg(self
+                //            .context
+                //            .i64_type()
+                //            .const_int(self.code.parse().unwrap_debug(), false))
+                //    },
+                //};
+                let elem_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        arr_ty,
+                        arr_ptr,
+                        &[self.context.i64_type().const_zero(), i.int_val()],
+                        "",
+                    )?
+                };
+                if Self::is_register_passable(expr.ty) {
+                    reg(self.builder.build_load(
+                        self.llvm_type(*elem_ty).basic_ty(),
+                        elem_ptr,
+                        "",
+                    )?)
+                } else {
+                    stack_val(elem_ptr)
+                }
+            },
             ExprKind::Call { func, args } => {
                 let func = func.try_to_ident().unwrap_debug();
                 let (&params, &func) = self.get_symbol(&func.text).as_fn().unwrap_debug();
@@ -346,7 +427,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     Type::Bool => {
                         self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), *op)
                     },
-                    _ => todo!(),
+                    _ => todo!("{:?}", lhs.ty),
                 }
             },
             ExprKind::Assign { lhs, rhs } => {
@@ -376,7 +457,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                                 rhs.float_val(),
                                 *op,
                             )?,
-                            _ => todo!(),
+                            _ => todo!("{:?}", lhs_expr.ty),
                         };
                         self.builder.build_store(stack_var, binop_res)?;
                     },
@@ -408,7 +489,9 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     },
                     _ => {
                         if !is_mut && let Some(init) = init {
-                            Symbol::Register(try_compile_expr_as_val!(self, *init))
+                            self.compile_expr(*init)?
+                            //Symbol::Register(try_compile_expr_as_val!(self,
+                            // *init))
                         } else {
                             let ty = self.llvm_type(*ty).basic_ty();
                             let stack_var = self.builder.build_alloca(ty, &var_name)?;
@@ -710,6 +793,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Int { bits: 64, .. } => self.context.i64_type(),
             Type::Int { bits: 128, .. } => self.context.i128_type(),
             Type::Int { .. } => todo!("other int bits"),
+            Type::IntLiteral => self.context.i64_type(), // TODO
             _ => panic!(),
         }
     }
@@ -721,6 +805,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Float { bits: 64 } => self.context.f64_type(),
             Type::Float { bits: 128 } => self.context.f128_type(),
             Type::Float { .. } => todo!("other float bits"),
+            Type::FloatLiteral | Type::IntLiteral => self.context.f64_type(), // TODO
             _ => panic!(),
         }
     }
@@ -730,16 +815,16 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Void => self.context.void_type().as_type_ref(),
             Type::Never => todo!(),
             Type::Ptr(_) => self.context.ptr_type(AddressSpace::default()).as_type_ref(),
-            Type::Int { bits, is_signed } => self.int_type(ty).as_type_ref(),
             // TODO: infer type or set correct type during sema
-            Type::IntLiteral => self.context.i64_type().as_type_ref(),
+            Type::Int { .. } | Type::IntLiteral => self.int_type(ty).as_type_ref(),
             Type::Bool => self.context.bool_type().as_type_ref(),
             Type::Float { bits } => self.float_type(ty).as_type_ref(),
             // TODO: infer type or set correct type during sema
             Type::FloatLiteral => self.context.f64_type().as_type_ref(),
             Type::Function(_) => todo!(),
-            //Type::Struct { .. } =>
-            // self.context.get_struct_type("Sub").unwrap().as_type_ref(),
+            Type::Array { len: count, elem_ty: ty } => {
+                self.llvm_type(*ty).basic_ty().array_type(count as u32).as_type_ref()
+            },
             Type::Struct { fields: ptr } => self.type_table[&ptr].as_type_ref(),
             Type::Union { .. } => todo!(),
             Type::Enum { .. } => todo!(),
@@ -785,7 +870,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             | Type::IntLiteral
             | Type::Bool
             | Type::Float { .. }
-            | Type::FloatLiteral => true,
+            | Type::FloatLiteral
+            | Type::Array { .. } => true,
             Type::Void
             | Type::Never
             | Type::Function(_)

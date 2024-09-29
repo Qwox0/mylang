@@ -94,7 +94,7 @@ impl DebugAst for Expr {
             //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(),
             // rhs.to_text()) },
             ExprKind::PostOp { kind, expr } => panic!(),
-            ExprKind::Index { lhs, idx } => panic!(),
+            ExprKind::Index { lhs, idx } => format!("{}[{}]", lhs.to_text(), idx.to_text()),
             //ExprKind::CompCall { func, args } => panic!(),
             ExprKind::Call { func, args } => {
                 format!("{}({})", func.to_text(), many_to_text(args, |e| e.to_text(), ","))
@@ -270,7 +270,12 @@ impl DebugAst for Expr {
                 lines.write_ident(rhs);
             },
             ExprKind::PostOp { expr, kind } => todo!(),
-            ExprKind::Index { lhs, idx } => todo!(),
+            ExprKind::Index { lhs, idx } => {
+                lines.write_tree(lhs);
+                lines.write("[");
+                lines.write_tree(idx);
+                lines.write("]");
+            },
             ExprKind::Call { func, args } => {
                 let func = func;
                 lines.write_tree(func);
@@ -376,12 +381,12 @@ impl DebugAst for Type {
             Type::Int { bits, is_signed } => {
                 format!("{}{}", if *is_signed { "i" } else { "u" }, bits)
             },
-            Type::IntLiteral => "int lit".to_string(),
+            Type::IntLiteral => "int_lit".to_string(),
             Type::Bool => "bool".to_string(),
             Type::Float { bits } => format!("f{}", bits),
-            Type::FloatLiteral => "float lit".to_string(),
+            Type::FloatLiteral => "float_lit".to_string(),
             Type::Function(_) => "fn".to_string(), // TODO: fn type as text
-            // Type::Custom(name) => name.to_string(),
+            Type::Array { len: count, elem_ty: ty } => format!("[{count}]{}", ty.to_text()),
             Type::Struct { .. } => todo!(),
             Type::Union { .. } => todo!(),
             Type::Enum { .. } => todo!(),
