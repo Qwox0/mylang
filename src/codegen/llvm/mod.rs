@@ -792,7 +792,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Int { bits: 32, .. } => self.context.i32_type(),
             Type::Int { bits: 64, .. } => self.context.i64_type(),
             Type::Int { bits: 128, .. } => self.context.i128_type(),
-            Type::Int { .. } => todo!("other int bits"),
+            Type::Int { bits, .. } => self.context.custom_width_int_type(bits),
             Type::IntLiteral => self.context.i64_type(), // TODO
             _ => panic!(),
         }

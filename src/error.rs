@@ -39,7 +39,7 @@ impl SpannedError for ParseError {
 
     fn get_text(&self) -> String {
         #[cfg(debug_assertions)]
-        return format!("{:?} ({})", self.kind, self.context);
+        return format!("{:?} ({:#})", self.kind, self.context);
         #[cfg(not(debug_assertions))]
         return format!("{:?}", self.kind);
     }

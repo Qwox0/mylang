@@ -33,4 +33,4 @@ cmd="./target/test"
 info "$cmd"
 $cmd || error "Failed" 2
 
-cargo bench
+# cargo bench

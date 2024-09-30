@@ -1,5 +1,5 @@
 use super::{Expr, ExprKind, Fn, Ident, PreOpKind};
-use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
+use crate::{ast::VarDecl, error::SpannedError, ptr::Ptr, type_::Type};
 
 pub trait DebugAst {
     fn to_text(&self) -> String;
@@ -387,7 +387,7 @@ impl DebugAst for Type {
             Type::FloatLiteral => "float_lit".to_string(),
             Type::Function(_) => "fn".to_string(), // TODO: fn type as text
             Type::Array { len: count, elem_ty: ty } => format!("[{count}]{}", ty.to_text()),
-            Type::Struct { .. } => todo!(),
+            Type::Struct { fields } => format!("struct{:?}", fields.0),
             Type::Union { .. } => todo!(),
             Type::Enum { .. } => todo!(),
             Type::Type(_) => "type".to_string(),

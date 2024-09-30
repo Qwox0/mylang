@@ -14,7 +14,7 @@ pub enum TypeInfo {
     Never,
     Ptr(Ptr<TypeInfo>),
     Int {
-        bits: u8,
+        bits: u32,
         is_signed: bool,
     },
     IntLiteral,

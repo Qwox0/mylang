@@ -167,7 +167,7 @@ fn dev() {
     const DEBUG_TOKENS: bool = false;
     const DEBUG_AST: bool = true;
     const DEBUG_TYPES: bool = false;
-    const DEBUG_TYPED_AST: bool = false;
+    const DEBUG_TYPED_AST: bool = true;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
@@ -177,22 +177,20 @@ fn dev() {
     let code = "
 A :: struct {
     a: i64,
-    b: i64 = 2,
+    b := 2,
 }
 
 mymain :: -> {
     myarr := [1.0, 2.0, 3.0, 4.0, 5.0];
-    myarr: [5]f64 = [2.0; 5];
+    myarr: [5]i64 = [2; 5];
 
-    a := A.{ a = 1};
+    a := A.{ a = 0 };
 
-    myarr[4]
-
-    // mut sum := 0;
-    // myarr | for x {
-    //     sum += x;
-    // };
-    // sum
+    mut sum := a.a;
+    myarr | for x {
+        sum += x;
+    };
+    sum
 };
 
 // rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
