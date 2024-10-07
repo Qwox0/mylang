@@ -108,11 +108,6 @@ pub enum ExprKind {
         lhs: ExprWithTy,
         rhs: Ident,
     },
-    /// examples: `<expr>?`, `<expr>.*`
-    PostOp {
-        expr: ExprWithTy,
-        kind: PostOpKind,
-    },
     /// `<lhs> [ <idx> ]`
     Index {
         lhs: ExprWithTy,
@@ -133,10 +128,10 @@ pub enum ExprKind {
         args: Ptr<[Ptr<Expr>]>,
     },
 
-    /// examples: `&<expr>`, `- <expr>`
-    /// `          ^`        `^ expr.span`
-    PreOp {
-        kind: PreOpKind,
+    /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
+    /// `          ^` `             ^^` ` ^ expr.span`
+    UnaryOp {
+        kind: UnaryOpKind,
         expr: Ptr<Expr>,
     },
     /// `<lhs> op <lhs>`
@@ -148,13 +143,11 @@ pub enum ExprKind {
     },
     /// `<lhs> = <lhs>`
     Assign {
-        //lhs: Ptr<LValue>,
         lhs: ExprWithTy,
         rhs: Ptr<Expr>,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
-        //lhs: Ptr<LValue>,
         lhs: ExprWithTy,
         op: BinOpKind,
         rhs: Ptr<Expr>,
@@ -262,10 +255,9 @@ impl Expr {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
             },
             ExprKind::Dot { lhs, rhs } => lhs.expr.full_span().join(rhs.span),
-            ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => todo!(),
             ExprKind::Call { func, args } => func.full_span().join(self.span),
-            ExprKind::PreOp { kind: _, expr } => self.span.join(expr.full_span()),
+            ExprKind::UnaryOp { kind: _, expr } => self.span.join(expr.full_span()),
             ExprKind::BinOp { lhs, op: _, rhs }
             | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
             | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, op: _, rhs } => {
@@ -398,21 +390,27 @@ impl BinOpKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum PostOpKind {
-    /// `<expr>.&`
+pub enum UnaryOpKind {
+    /// `& <expr>`, `<expr>.&`
     AddrOf,
-    /// `<expr>.&mut`
+    /// `&mut <expr>`, `<expr>.&mut`
     AddrMutOf,
-    /// `<expr>.*`
+    /// `* <expr>`, `<expr>.*`
     Deref,
+    /// `! <expr>`
+    Not,
+    /// `- <expr>`
+    Neg,
     /// `<expr>?`
     Try,
+    /*
     /// `<expr>!`
     Force,
     /// `<expr>!unsafe`
     ForceUnsafe,
-    // /// `<expr>.type`
-    // TypeOf,
+    /// `<expr>.type`
+    TypeOf,
+    */
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -489,20 +487,6 @@ impl Ident {
 pub struct Pattern {
     kind: ExprKind, // TODO: own kind enum
     span: Span,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum PreOpKind {
-    /// `& <expr>`
-    AddrOf,
-    /// `&mut <expr>`
-    AddrMutOf,
-    /// `* <expr>`
-    Deref,
-    /// `! <expr>`
-    Not,
-    /// `- <expr>`
-    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

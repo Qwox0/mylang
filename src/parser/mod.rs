@@ -5,8 +5,8 @@
 
 use crate::{
     ast::{
-        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, PostOpKind,
-        PreOpKind, VarDecl, VarDeclList,
+        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind,
+        VarDecl, VarDeclList,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
@@ -129,10 +129,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let params = self.alloc_one_val_slice(param)?.into();
                 return self.function_tail(params, span);
             },
-            FollowingOperator::PostOp(kind) => {
-                let expr = ExprWithTy::untyped(lhs);
-                expr!(PostOp { expr, kind }, span)
-            },
+            FollowingOperator::PostOp(kind) => expr!(UnaryOp { kind, expr: lhs }, span),
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
                 expr!(BinOp { lhs, op, rhs }, span)
@@ -383,12 +380,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
-                expr!(PreOp { kind: PreOpKind::Not, expr }, span)
+                expr!(UnaryOp { kind: UnaryOpKind::Not, expr }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
-                expr!(PreOp { kind: PreOpKind::Neg, expr }, span)
+                expr!(UnaryOp { kind: UnaryOpKind::Neg, expr }, span)
             },
             TokenKind::Arrow => {
                 self.lex.advance();
@@ -403,9 +400,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Ampersand => {
                 let is_mut =
                     self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let kind = if is_mut { PreOpKind::AddrMutOf } else { PreOpKind::AddrOf };
+                let kind = if is_mut { UnaryOpKind::AddrMutOf } else { UnaryOpKind::AddrOf };
                 let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
-                expr!(PreOp { kind, expr })
+                expr!(UnaryOp { kind, expr })
             },
             //TokenKind::Pipe => todo!("TokenKind::Pipe"),
             //TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
@@ -774,7 +771,7 @@ pub enum FollowingOperator {
 
     /// `a op`
     /// `  ^^`
-    PostOp(PostOpKind),
+    PostOp(UnaryOpKind),
 
     /// `a op b`
     /// `  ^^`
@@ -845,14 +842,14 @@ impl FollowingOperator {
             TokenKind::Dot => FollowingOperator::Dot,
             TokenKind::DotDot => FollowingOperator::BinOp(BinOpKind::Range),
             TokenKind::DotDotEq => FollowingOperator::BinOp(BinOpKind::RangeInclusive),
-            TokenKind::DotAsterisk => FollowingOperator::PostOp(PostOpKind::Deref),
-            TokenKind::DotAmpersand => FollowingOperator::PostOp(PostOpKind::AddrOf),
+            TokenKind::DotAsterisk => FollowingOperator::PostOp(UnaryOpKind::Deref),
+            TokenKind::DotAmpersand => FollowingOperator::PostOp(UnaryOpKind::AddrOf),
             TokenKind::DotOpenBrace => FollowingOperator::Initializer,
             TokenKind::Colon => FollowingOperator::TypedDecl,
             TokenKind::ColonColon => FollowingOperator::ConstDecl,
             TokenKind::ColonEq => FollowingOperator::VarDecl,
             //TokenKind::Semicolon => todo!("TokenKind::Semicolon"),
-            TokenKind::Question => FollowingOperator::PostOp(PostOpKind::Try),
+            TokenKind::Question => FollowingOperator::PostOp(UnaryOpKind::Try),
             TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),

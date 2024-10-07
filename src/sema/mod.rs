@@ -6,8 +6,8 @@
 
 use crate::{
     ast::{
-        BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, PreOpKind, VarDecl,
-        VarDeclList,
+        BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
+        VarDecl, VarDeclList,
     },
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
@@ -351,7 +351,6 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)
                 }
             },
-            ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => {
                 assert!(!is_const, "todo: const index");
                 let arr = try_not_never!(self.analyze_typed(lhs, is_const)?);
@@ -391,7 +390,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     _ => err(CallOfANotFunction, span),
                 }
             },
-            &mut ExprKind::PreOp { kind, expr } => {
+            &mut ExprKind::UnaryOp { kind, expr } => {
                 assert!(!is_const, "todo: PreOp in const");
                 let ty = self.analyze(expr, is_const)?.ty;
                 let is_valid = match (kind, ty) {
@@ -399,7 +398,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     (_, Type::Void) => false,
                     (_, Type::Never) => true,
                     (
-                        PreOpKind::AddrOf | PreOpKind::AddrMutOf,
+                        UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf,
                         Type::Ptr(..)
                         | Type::Int { .. }
                         | Type::IntLiteral
@@ -411,10 +410,10 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         | Type::Union { .. }
                         | Type::Enum { .. },
                     ) => true,
-                    (PreOpKind::AddrOf | PreOpKind::AddrMutOf, Type::Function(_)) => todo!(),
-                    (PreOpKind::Deref, Type::Ptr(_)) => true,
+                    (UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf, Type::Function(_)) => todo!(),
+                    (UnaryOpKind::Deref, Type::Ptr(_)) => true,
                     (
-                        PreOpKind::Deref,
+                        UnaryOpKind::Deref,
                         Type::Int { .. }
                         | Type::IntLiteral
                         | Type::Bool
@@ -423,9 +422,9 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         | Type::Function(_)
                         | Type::Array { .. },
                     ) => false,
-                    (PreOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => true,
+                    (UnaryOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => true,
                     (
-                        PreOpKind::Not,
+                        UnaryOpKind::Not,
                         Type::Ptr(_)
                         | Type::Float { .. }
                         | Type::FloatLiteral
@@ -433,14 +432,14 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         | Type::Array { .. },
                     ) => false,
                     (
-                        PreOpKind::Neg,
+                        UnaryOpKind::Neg,
                         Type::Int { .. }
                         | Type::IntLiteral
                         | Type::Float { .. }
                         | Type::FloatLiteral,
                     ) => true,
                     (
-                        PreOpKind::Neg,
+                        UnaryOpKind::Neg,
                         Type::Ptr(_) | Type::Bool | Type::Function(_) | Type::Array { .. },
                     ) => false,
                     (
@@ -450,6 +449,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         | Type::Enum { .. }
                         | Type::Type(_),
                     ) => todo!(),
+                    (UnaryOpKind::Try, _) => todo!("try"),
                 };
                 if is_valid {
                     Ok(SemaValue::new(ty))

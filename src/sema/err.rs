@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Expr, PreOpKind},
+    ast::{Expr, UnaryOpKind},
     parser::lexer::Span,
     ptr::Ptr,
     type_::Type,
@@ -37,7 +37,7 @@ pub enum SemaErrorKind {
     /// ```
     InvalidPreOp {
         ty: Type,
-        kind: PreOpKind,
+        kind: UnaryOpKind,
     },
     CannotApplyInitializer {
         ty: Type,

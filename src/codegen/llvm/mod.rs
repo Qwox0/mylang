@@ -3,8 +3,8 @@
 use self::jit::Jit;
 use crate::{
     ast::{
-        BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, PreOpKind, VarDecl,
-        VarDeclList,
+        BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
+        VarDecl, VarDeclList,
     },
     cli::DebugOptions,
     defer_stack::DeferStack,
@@ -365,7 +365,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     stack_val(field_ptr)
                 }
             },
-            ExprKind::PostOp { expr, kind } => todo!(),
             &ExprKind::Index { lhs, idx } => {
                 let Type::Array { len, elem_ty } = lhs.ty else { panic!() };
                 let arr_ty = self.llvm_type(lhs.ty).arr_ty();
@@ -395,17 +394,18 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
                 reg(self.builder.build_call(func, &args, "call")?)
             },
-            ExprKind::PreOp { kind, expr } => {
+            ExprKind::UnaryOp { kind, expr } => {
                 let v = try_compile_expr_as_val!(self, *expr, expr_ty);
                 reg(match kind {
-                    PreOpKind::AddrOf => todo!(),
-                    PreOpKind::AddrMutOf => todo!(),
-                    PreOpKind::Deref => todo!(),
-                    PreOpKind::Not => todo!(),
-                    PreOpKind::Neg => match expr_ty {
+                    UnaryOpKind::AddrOf => todo!(),
+                    UnaryOpKind::AddrMutOf => todo!(),
+                    UnaryOpKind::Deref => todo!(),
+                    UnaryOpKind::Not => todo!(),
+                    UnaryOpKind::Neg => match expr_ty {
                         Type::Float { .. } => self.builder.build_float_neg(v.float_val(), "neg")?,
                         _ => todo!(),
                     },
+                    UnaryOpKind::Try => todo!(),
                 }) // TODO: maybe different return types possible in the future
             },
             ExprKind::BinOp { lhs, op, rhs } => {

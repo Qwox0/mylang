@@ -1,4 +1,4 @@
-use super::{Expr, ExprKind, ExprWithTy, Fn, Ident, PreOpKind};
+use super::{Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind};
 use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
 
 pub trait DebugAst {
@@ -91,25 +91,19 @@ impl DebugAst for Expr {
             ExprKind::Dot { lhs, rhs } => {
                 format!("{}.{}", lhs.to_text(), rhs.text.as_ref())
             },
-            //ExprKind::Colon { lhs, rhs } => { format!("{}:{}", lhs.to_text(),
-            // rhs.to_text()) },
-            ExprKind::PostOp { kind, expr } => panic!(),
             ExprKind::Index { lhs, idx } => format!("{}[{}]", lhs.to_text(), idx.to_text()),
             //ExprKind::CompCall { func, args } => panic!(),
             ExprKind::Call { func, args } => {
                 format!("{}({})", func.to_text(), many_to_text(args, |e| e.to_text(), ","))
             },
-            ExprKind::PreOp { kind, expr, .. } => format!(
-                "{}{}",
-                match kind {
-                    PreOpKind::AddrOf => "&",
-                    PreOpKind::AddrMutOf => "&mut ",
-                    PreOpKind::Deref => "*",
-                    PreOpKind::Not => "!",
-                    PreOpKind::Neg => "- ",
-                },
-                expr.to_text()
-            ),
+            ExprKind::UnaryOp { kind, expr, .. } => match kind {
+                UnaryOpKind::AddrOf => format!("{}{}", "&", expr.to_text()),
+                UnaryOpKind::AddrMutOf => format!("{}{}", "&mut ", expr.to_text()),
+                UnaryOpKind::Deref => expr.to_text() + ".*",
+                UnaryOpKind::Not => format!("{}{}", "!", expr.to_text()),
+                UnaryOpKind::Neg => format!("{}{}", "- ", expr.to_text()),
+                UnaryOpKind::Try => expr.to_text() + "?",
+            },
             ExprKind::BinOp { lhs, op, rhs, .. } => {
                 format!("{} {} {}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
             },
@@ -269,7 +263,6 @@ impl DebugAst for Expr {
                 lines.write(".");
                 lines.write_ident(rhs);
             },
-            ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => {
                 lines.write_tree(lhs);
                 lines.write("[");
@@ -290,16 +283,18 @@ impl DebugAst for Expr {
                 }
                 lines.write(")");
             },
-            ExprKind::PreOp { kind, expr, .. } => {
-                let expr = expr;
-                lines.write(match kind {
-                    PreOpKind::AddrOf => "&",
-                    PreOpKind::AddrMutOf => "&mut ",
-                    PreOpKind::Deref => "*",
-                    PreOpKind::Not => "!",
-                    PreOpKind::Neg => "- ",
-                });
+            ExprKind::UnaryOp { kind, expr, .. } => {
+                let (pre, post) = match kind {
+                    UnaryOpKind::AddrOf => ("&", ""),
+                    UnaryOpKind::AddrMutOf => ("&mut ", ""),
+                    UnaryOpKind::Deref => ("", ".*"),
+                    UnaryOpKind::Not => ("!", ""),
+                    UnaryOpKind::Neg => ("- ", ""),
+                    UnaryOpKind::Try => ("", "?"),
+                };
+                lines.write(pre);
                 lines.write_tree(expr);
+                lines.write(post);
             },
             ExprKind::BinOp { lhs, op, rhs, .. } => {
                 let lhs = lhs;
