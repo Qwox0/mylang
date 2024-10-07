@@ -1,5 +1,5 @@
-use super::{Expr, ExprKind, Fn, Ident, PreOpKind};
-use crate::{ast::VarDecl, error::SpannedError, ptr::Ptr, type_::Type};
+use super::{Expr, ExprKind, ExprWithTy, Fn, Ident, PreOpKind};
+use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
 
 pub trait DebugAst {
     fn to_text(&self) -> String;
@@ -369,6 +369,16 @@ impl DebugAst for Expr {
                 lines.write(";");
             },
         }
+    }
+}
+
+impl DebugAst for ExprWithTy {
+    fn to_text(&self) -> String {
+        self.expr.to_text()
+    }
+
+    fn write_tree(&self, lines: &mut TreeLines) {
+        self.expr.write_tree(lines);
     }
 }
 

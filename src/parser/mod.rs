@@ -1,7 +1,12 @@
+//! # Parser module
+//!
+//! The parser allocates the AST ([`Expr`]) and the stored [`Type`]s to
+//! [`Type::Unset`] or [`Type::Unevaluated`]
+
 use crate::{
     ast::{
-        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, Fn, Ident, PostOpKind, PreOpKind,
-        VarDecl, VarDeclList,
+        BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, PostOpKind,
+        PreOpKind, VarDecl, VarDeclList,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
@@ -97,39 +102,19 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
         let expr = match op {
             FollowingOperator::Dot => {
+                let lhs = ExprWithTy::untyped(lhs);
                 let rhs = self.ws0().ident().context("dot rhs")?;
                 expr!(Dot { lhs, rhs }, span.join(rhs.span))
             },
             FollowingOperator::Call => return self.call(lhs, span, ScratchPool::new()),
             FollowingOperator::Index => {
-                let idx = self.expr()?;
+                let lhs = ExprWithTy::untyped(lhs);
+                let idx = ExprWithTy::untyped(self.expr()?);
                 let close = self.tok(TokenKind::CloseBracket)?;
                 expr!(Index { lhs, idx }, span.join(close.span))
             },
             FollowingOperator::Initializer => {
-                let mut fields = ScratchPool::new();
-                let close_b_span = loop {
-                    if let Some(t) = self.ws0().lex.next_if_kind(TokenKind::CloseBrace) {
-                        break t.span;
-                    }
-                    let ident = self.ident().context("initializer field ident")?;
-                    let init = self
-                        .ws0()
-                        .lex
-                        .next_if_kind(TokenKind::Eq)
-                        .map(|_| self.expr().context("init expr"))
-                        .transpose()?;
-                    fields.push((ident, init)).map_err(|e| self.wrap_alloc_err(e))?;
-
-                    match self.next_tok() {
-                        Ok(Token { kind: TokenKind::Comma, .. }) => {},
-                        Ok(Token { kind: TokenKind::CloseBrace, span }) => break span,
-                        t => t
-                            .and_then(ParseError::unexpected_token)
-                            .context("expected '=', ',' or '}'")?,
-                    }
-                };
-                let fields = self.clone_slice_from_scratch_pool(fields)?;
+                let (fields, close_b_span) = self.parse_initializer_fields()?;
                 expr!(Initializer { lhs: Some(lhs), fields }, span.join(close_b_span))
             },
             FollowingOperator::SingleArgNoParenFn => {
@@ -145,17 +130,20 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
-                expr!(PostOp { expr: lhs, kind }, span)
+                let expr = ExprWithTy::untyped(lhs);
+                expr!(PostOp { expr, kind }, span)
             },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
                 expr!(BinOp { lhs, op, rhs }, span)
             },
             FollowingOperator::Assign => {
+                let lhs = ExprWithTy::untyped(lhs);
                 let rhs = self.expr()?;
                 expr!(Assign { lhs, rhs }, span)
             },
             FollowingOperator::BinOpAssign(op) => {
+                let lhs = ExprWithTy::untyped(lhs);
                 let rhs = self.expr()?;
                 expr!(BinOpAssign { lhs, op, rhs }, span)
             },
@@ -198,6 +186,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                         todo!("| match")
                     },
                     TokenKind::Keyword(Keyword::For) => {
+                        let lhs = ExprWithTy::untyped(lhs);
                         let iter_var = self.ws0().ident().context("for iter var")?;
                         let body = self.ws0().expr().context("for body")?;
                         self.alloc(expr!(For { source: lhs, iter_var, body }, t.span))
@@ -290,7 +279,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(While { condition, body }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let expr = self.advanced().expr().opt().context("return expr")?;
+                let expr =
+                    self.advanced().expr().opt().context("return expr")?.map(ExprWithTy::untyped);
                 expr!(Return { expr }, span)
             },
             TokenKind::Keyword(Keyword::Break) => todo!(),
@@ -425,6 +415,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Dot => todo!("TokenKind::Dot"),
             //TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
             //TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
+            TokenKind::DotOpenBrace => {
+                let (fields, close_b_span) = self.advanced().parse_initializer_fields()?;
+                expr!(Initializer { lhs: None, fields }, span.join(close_b_span))
+            },
             //TokenKind::Comma => todo!("TokenKind::Comma"),
             TokenKind::Colon => todo!("TokenKind::Colon"),
             //TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
@@ -454,6 +448,35 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         };
 
         self.alloc(expr)
+    }
+
+    /// also parses the `}`
+    pub fn parse_initializer_fields(
+        &mut self,
+    ) -> ParseResult<(Ptr<[(Ident, Option<Ptr<Expr>>)]>, Span)> {
+        let mut fields = ScratchPool::new();
+        let close_b_span = loop {
+            if let Some(t) = self.ws0().lex.next_if_kind(TokenKind::CloseBrace) {
+                break t.span;
+            }
+            let ident = self.ident().context("initializer field ident")?;
+            let init = self
+                .ws0()
+                .lex
+                .next_if_kind(TokenKind::Eq)
+                .map(|_| self.expr().context("init expr"))
+                .transpose()?;
+            fields.push((ident, init)).map_err(|e| self.wrap_alloc_err(e))?;
+
+            match self.next_tok() {
+                Ok(Token { kind: TokenKind::Comma, .. }) => {},
+                Ok(Token { kind: TokenKind::CloseBrace, span }) => break span,
+                t => {
+                    t.and_then(ParseError::unexpected_token).context("expected '=', ',' or '}'")?
+                },
+            }
+        };
+        Ok((self.clone_slice_from_scratch_pool(fields)?, close_b_span))
     }
 
     /// parsing starts after the '->'
@@ -494,8 +517,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         open_paren_span: Span,
         args: ScratchPool<Ptr<Expr>>,
     ) -> ParseResult<Ptr<Expr>> {
+        let func = ExprWithTy::untyped(func);
         let (args, _) = self.expr_list(TokenKind::Comma, args).context("call args")?;
-        let closing_paren_span = self.tok(TokenKind::CloseParenthesis)?.span;
+        let closing_paren_span =
+            self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
         self.alloc(expr!(Call { func, args }, closing_paren_span))
     }
 
@@ -503,7 +528,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
         let (stmts, has_trailing_semicolon) =
             self.expr_list(TokenKind::Semicolon, ScratchPool::new())?;
-        let closing_brace_span = self.tok(TokenKind::CloseBrace)?.span;
+        let closing_brace_span =
+            self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?.span;
         let span = open_brace_span.join(closing_brace_span);
         self.alloc(expr!(Block { stmts, has_trailing_semicolon }, span))
     }

@@ -6,7 +6,7 @@ use mylang::{
     cli::Cli,
     codegen::llvm,
     compiler::Compiler,
-    parser::{lexer::Lexer, parser_helper::ParserInterface, StmtIter},
+    parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
     sema,
     util::{collect_all_result_errors, display_spanned_error},
 };
@@ -180,15 +180,20 @@ A :: struct {
     b := 2,
 }
 
-mymain :: -> {
-    myarr := [1.0, 2.0, 3.0, 4.0, 5.0];
-    myarr: [5]i64 = [2; 5];
+add :: (a: i64, b: i64) -> a + b;
 
-    a := A.{ a = 0 };
+mymain :: -> {
+    three := 3;
+    myarr: [5]f32 = [2.0; 5];
+    myarr := [3, 30, three, 5, 5];
+
+    b := true || false;
+
+    a := A.{ a = 1 };
 
     mut sum := a.a;
     myarr | for x {
-        sum += x;
+        sum += add(x, 1);
     };
     sum
 };
@@ -363,9 +368,10 @@ pub defer_test :: -> {
     }
 
     const EXE_VAR: ExecutionVariant = ExecutionVariant::ObjectCode;
+    //const EXE_VAR: ExecutionVariant = ExecutionVariant::Jit;
     match EXE_VAR {
         ExecutionVariant::ObjectCode => compile(module.get_inner(), &target_machine),
-        ExecutionVariant::Jit => run_with_jit(module),
+        ExecutionVariant::Jit => run_with_jit(module, "mymain"),
     }
 
     println!("### Compilation time:");
@@ -387,14 +393,16 @@ pub defer_test :: -> {
 }
 
 fn compile(module: &Module, target_machine: &TargetMachine) {
-    let filename = "target/output.o";
+    let filename = "target/build_dev/output.o";
+    let p = Path::new(filename);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     target_machine
-        .write_to_file(module, inkwell::targets::FileType::Object, Path::new(filename))
+        .write_to_file(module, inkwell::targets::FileType::Object, p)
         .unwrap();
 }
 
-fn run_with_jit(mut module: llvm::CodegenModule) {
-    let out = module.jit_run_fn("main").expect("has main function");
+fn run_with_jit(mut module: llvm::CodegenModule, start_fn: &str) {
+    let out = module.jit_run_fn::<i64>(start_fn).expect("has main function");
     println!("main returned {}", out);
 }
 

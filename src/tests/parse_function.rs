@@ -12,7 +12,7 @@ fn no_args() {
     let f = stmts.next().expect("could parse function").expect("no parse error");
     assert!(stmts.next().is_none());
 
-    let Expr { kind, span, ty } = *f;
+    let Expr { kind, span } = *f;
     let ExprKind::VarDecl(decl) = kind else { panic!("extected to parse VarDecl") };
     let VarDecl { markers, ident, ty, default, is_const } = decl;
     assert!(markers == DeclMarkers::default());

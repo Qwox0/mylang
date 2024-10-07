@@ -2,7 +2,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     type_::Type,
-    util::{forget_lifetime, UnwrapDebug},
+    util::{UnwrapDebug, forget_lifetime},
 };
 use debug::DebugAst;
 use std::{
@@ -11,6 +11,26 @@ use std::{
 };
 
 pub mod debug;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExprWithTy {
+    pub expr: Ptr<Expr>,
+    pub ty: Type,
+}
+
+impl ExprWithTy {
+    pub fn untyped(expr: Ptr<Expr>) -> ExprWithTy {
+        ExprWithTy { expr, ty: Type::Unset }
+    }
+}
+
+impl Deref for ExprWithTy {
+    type Target = Expr;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.expr
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
@@ -85,18 +105,18 @@ pub enum ExprKind {
 
     /// [`expr`] . [`expr`]
     Dot {
-        lhs: Ptr<Expr>,
+        lhs: ExprWithTy,
         rhs: Ident,
     },
     /// examples: `<expr>?`, `<expr>.*`
     PostOp {
-        expr: Ptr<Expr>,
+        expr: ExprWithTy,
         kind: PostOpKind,
     },
     /// `<lhs> [ <idx> ]`
     Index {
-        lhs: Ptr<Expr>,
-        idx: Ptr<Expr>,
+        lhs: ExprWithTy,
+        idx: ExprWithTy,
     },
 
     /*
@@ -109,7 +129,7 @@ pub enum ExprKind {
     /// `<func> ( <expr>, ..., param=<expr>, ... )`
     /// `                                        ^ expr.span`
     Call {
-        func: Ptr<Expr>,
+        func: ExprWithTy,
         args: Ptr<[Ptr<Expr>]>,
     },
 
@@ -129,13 +149,13 @@ pub enum ExprKind {
     /// `<lhs> = <lhs>`
     Assign {
         //lhs: Ptr<LValue>,
-        lhs: Ptr<Expr>,
+        lhs: ExprWithTy,
         rhs: Ptr<Expr>,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
         //lhs: Ptr<LValue>,
-        lhs: Ptr<Expr>,
+        lhs: ExprWithTy,
         op: BinOpKind,
         rhs: Ptr<Expr>,
     },
@@ -173,7 +193,7 @@ pub enum ExprKind {
     /// TODO: normal syntax
     /// `<source> | for <iter_var> <body>`
     For {
-        source: Ptr<Expr>,
+        source: ExprWithTy,
         iter_var: Ident,
         body: Ptr<Expr>,
     },
@@ -202,7 +222,7 @@ pub enum ExprKind {
     /// `return <expr>`
     /// `^^^^^^` expr.span
     Return {
-        expr: Option<Ptr<Expr>>,
+        expr: Option<ExprWithTy>,
     },
 
     Semicolon(Option<Ptr<Expr>>),
@@ -212,21 +232,20 @@ pub enum ExprKind {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
-    /// TODO: is this needed?
-    pub ty: Type,
 }
 
 impl From<(ExprKind, Span)> for Expr {
     #[inline]
     fn from((kind, span): (ExprKind, Span)) -> Self {
-        Expr { kind, span, ty: Type::Unset }
+        Expr::new(kind, span)
     }
 }
 
 impl Expr {
     #[inline]
     pub fn new(kind: ExprKind, span: Span) -> Self {
-        Self { kind, span, ty: Type::Unset }
+        //Self { kind, span, ty: Type::Unset }
+        Self { kind, span }
     }
 
     /// Returns a [`Span`] representing the entire expression.
@@ -235,20 +254,23 @@ impl Expr {
         match self.kind {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
-            ExprKind::StructDef(_) => todo!(),
             ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
-            ExprKind::Initializer { lhs, fields } => todo!(),
-            ExprKind::Dot { lhs, rhs } => todo!(),
+            ExprKind::Initializer { lhs, fields } => {
+                lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
+            },
+            ExprKind::Dot { lhs, rhs } => lhs.expr.full_span().join(rhs.span),
             ExprKind::PostOp { expr, kind } => todo!(),
             ExprKind::Index { lhs, idx } => todo!(),
             ExprKind::Call { func, args } => func.full_span().join(self.span),
             ExprKind::PreOp { kind: _, expr } => self.span.join(expr.full_span()),
             ExprKind::BinOp { lhs, op: _, rhs }
-            | ExprKind::Assign { lhs, rhs }
-            | ExprKind::BinOpAssign { lhs, op: _, rhs } => lhs.full_span().join(rhs.full_span()),
+            | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
+            | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, op: _, rhs } => {
+                lhs.full_span().join(rhs.full_span())
+            },
             ExprKind::VarDecl(decl) => match &decl.default {
                 Some(e) => self.span.join(e.full_span()),
                 None => self.span,
@@ -257,7 +279,7 @@ impl Expr {
                 self.span.join(else_body.unwrap_or(then_body).full_span())
             },
             ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => todo!(),
+            ExprKind::For { source, iter_var, body } => self.span.join(body.full_span()),
             ExprKind::While { condition, body } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Pipe { lhs } => todo!(),

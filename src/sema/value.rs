@@ -47,6 +47,25 @@ impl SemaValue {
             super::err(SemaErrorKind::NotAConstExpr, span)
         }
     }
+
+    pub fn is_int(self) -> bool {
+        matches!(self.ty, Type::Int { .. } | Type::IntLiteral)
+    }
+
+    pub fn int(self) -> Result<i128, SemaErrorKind> {
+        if !self.is_int() {
+            return Err(SemaErrorKind::ExpectedNumber { got: self.ty });
+        }
+        let Some(count_val) = self.const_val else {
+            return Err(SemaErrorKind::NotAConstExpr);
+        };
+        Ok(*count_val.cast::<i128>())
+    }
+
+    pub fn finalize_ty(mut self) -> SemaValue {
+        self.ty = self.ty.finalize();
+        self
+    }
 }
 
 const EMPTY: () = ();

@@ -4,11 +4,11 @@ use crate::{
     ptr::Ptr,
     type_::Type,
 };
+use SemaResult::*;
 use std::{
     convert::Infallible,
     ops::{FromResidual, Try},
 };
-use SemaResult::*;
 
 #[derive(Debug, Clone)]
 pub enum SemaErrorKind {
@@ -42,6 +42,8 @@ pub enum SemaErrorKind {
     CannotApplyInitializer {
         ty: Type,
     },
+    CannotInferInitializerTy,
+    MultiplePossibleInitializerTy,
     DuplicateInInitializer,
     MissingFieldInInitializer {
         field: Ptr<str>,
@@ -105,6 +107,13 @@ impl<T> SemaResult<T> {
             f(e);
         }
         self
+    }
+
+    pub fn ok(self) -> Option<T> {
+        match self {
+            Ok(t) => Some(t),
+            _ => None,
+        }
     }
 }
 

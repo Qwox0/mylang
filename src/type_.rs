@@ -1,18 +1,17 @@
 use crate::{
-    ast::{debug::DebugAst, Expr, Fn, VarDeclList},
+    ast::{Expr, Fn, VarDeclList, debug::DebugAst},
     ptr::Ptr,
+    util::panic_debug,
 };
 use core::fmt;
 
 // TODO: benchmark this
 // pub type Type = Ptr<TypeInfo>;
-pub type Type = TypeInfo;
-
-#[derive(Clone, Copy, Eq)]
-pub enum TypeInfo {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Type {
     Void,
     Never,
-    Ptr(Ptr<TypeInfo>),
+    Ptr(Ptr<Type>),
     Int {
         bits: u32,
         is_signed: bool,
@@ -20,7 +19,7 @@ pub enum TypeInfo {
     IntLiteral,
     Bool,
     Float {
-        bits: u8,
+        bits: u32,
     },
     FloatLiteral,
 
@@ -28,7 +27,7 @@ pub enum TypeInfo {
 
     Array {
         len: usize,
-        elem_ty: Ptr<TypeInfo>,
+        elem_ty: Ptr<Type>,
     },
 
     Struct {
@@ -44,7 +43,7 @@ pub enum TypeInfo {
     /// `a :: int`
     /// -> type of `a`: [`Type::Type`]
     /// -> value of `a`: [`Type::Int`]
-    Type(Ptr<TypeInfo>),
+    Type(Ptr<Type>),
 
     /// The type was not explicitly set in the original source code and must
     /// still be inferred.
@@ -54,35 +53,13 @@ pub enum TypeInfo {
     Unevaluated(Ptr<Expr>),
 }
 
-impl PartialEq for TypeInfo {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Ptr(l), Self::Ptr(r)) => **l == **r,
-            (Self::Int { bits: lb, is_signed: ls }, Self::Int { bits: rb, is_signed: rs }) => {
-                lb == rb && ls == rs
-            },
-            (Self::Float { bits: l }, Self::Float { bits: r }) => l == r,
-            (Self::Function(l), Self::Function(r)) => l == r,
-            (
-                Self::Array { len: l_len, elem_ty: l_elem },
-                Self::Array { len: r_len, elem_ty: r_elem },
-            ) => l_len == r_len && **l_elem == **r_elem,
-            (Self::Struct { fields: l }, Self::Struct { fields: r }) => l == r,
-            (Self::Union { fields: l }, Self::Union { fields: r }) => l == r,
-            (Self::Enum { variants: l }, Self::Enum { variants: r }) => l == r,
-            (Self::Unevaluated(_), Self::Unevaluated(_)) => false,
-            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
-        }
-    }
-}
-
-impl fmt::Debug for TypeInfo {
+impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TypeInfo::Never => write!(f, "Never"),
-            TypeInfo::Ptr(pointee) => write!(f, "*{:?}", &**pointee),
-            TypeInfo::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            TypeInfo::Struct { fields } => write!(
+            Type::Never => write!(f, "Never"),
+            Type::Ptr(pointee) => write!(f, "*{:?}", &**pointee),
+            Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
+            Type::Struct { fields } => write!(
                 f,
                 "struct{{{}}}",
                 fields
@@ -91,48 +68,72 @@ impl fmt::Debug for TypeInfo {
                     .intersperse(",".to_string())
                     .collect::<String>()
             ),
-            TypeInfo::Union { .. } => write!(f, "union {{ ... }}"),
-            TypeInfo::Enum { .. } => write!(f, "enum {{ ... }}"),
-            TypeInfo::Unset => write!(f, "Unset"),
-            TypeInfo::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
+            Type::Union { .. } => write!(f, "union {{ ... }}"),
+            Type::Enum { .. } => write!(f, "enum {{ ... }}"),
+            Type::Unset => write!(f, "Unset"),
+            Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
             ti => write!(f, "{}", ti.to_text()),
         }
     }
 }
 
-impl TypeInfo {
+impl Type {
     /// Checks if the two types equal or can be coerced into a common type.
     ///
     /// For exact equality use `==`.
-    pub fn matches(self, rhs_ty: TypeInfo) -> bool {
-        // TODO: more type coercion
-        self == rhs_ty || self == TypeInfo::Never || rhs_ty == TypeInfo::Never
+    pub fn matches(self, other: Self) -> bool {
+        self.common_type(other).is_some()
     }
 
     /// Returns the common type after type coercion or [`None`] if the types
-    /// don't match (see [`TypeInfo::matches`]).
-    pub fn common_type(self, rhs_ty: TypeInfo) -> Option<TypeInfo> {
-        if self == rhs_ty || rhs_ty == TypeInfo::Never {
-            Some(self)
-        } else if self == TypeInfo::Never {
-            Some(rhs_ty)
-        } else {
-            None
+    /// don't match (see [`Type::matches`]).
+    pub fn common_type(self, other: Self) -> Option<Type> {
+        enum Selection {
+            Left,
+            Right,
         }
+        use Selection::*;
+
+        fn inner(s: Type, other: Type) -> Option<Selection> {
+            match (s, other) {
+                (t, v) if t == v => Some(Left),
+                (Type::Never, _) => Some(Right),
+                (_, Type::Never) => Some(Left),
+                (Type::Array { len: l1, elem_ty: t1 }, Type::Array { len: l2, elem_ty: t2 })
+                    if l1 == l2 =>
+                {
+                    inner(*t1, *t2)
+                },
+                (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => {
+                    Some(Left)
+                },
+                (Type::IntLiteral, Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral) => {
+                    Some(Right)
+                },
+                (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
+                (Type::FloatLiteral, Type::Float { .. }) => Some(Right),
+                _ => None,
+            }
+        }
+
+        inner(self, other).map(|s| match s {
+            Selection::Left => self,
+            Selection::Right => other,
+        })
     }
 
-    pub fn assign_matches(target: TypeInfo, val: TypeInfo) -> bool {
-        //target == val || val == TypeInfo::Never || (val == TypeInfo::In)
-        match (target, val) {
-            (t, v) if t == v => true,
-            (_, TypeInfo::Never) => true,
-            (TypeInfo::Int { .. } | TypeInfo::Float { .. }, Type::IntLiteral) => true,
-            (TypeInfo::Float { .. }, TypeInfo::FloatLiteral) => true,
-            (
-                TypeInfo::Array { len: l1, elem_ty: t1 },
-                TypeInfo::Array { len: l2, elem_ty: t2 },
-            ) => l1 == l2 && TypeInfo::assign_matches(*t1, *t2),
-            _ => false,
+    /// This might mutate values behind [`Ptr`]s in `self`.
+    /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
+    pub fn finalize(self) -> Self {
+        match self {
+            Type::IntLiteral => Type::Int { bits: 64, is_signed: true },
+            Type::FloatLiteral => Type::Float { bits: 64 },
+            Type::Array { mut elem_ty, .. } => {
+                *elem_ty = elem_ty.finalize();
+                self
+            },
+            Type::Unset | Type::Unevaluated(_) => panic_debug("cannot finalize invalid type"),
+            t => t,
         }
     }
 }
@@ -141,62 +142,164 @@ impl Type {
     #[inline]
     pub fn is_valid(&self) -> bool {
         match self {
-            TypeInfo::Unset | TypeInfo::Unevaluated(_) => false,
+            Type::Unset | Type::Unevaluated(_) => false,
             _ => true,
         }
     }
 
     /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
     #[inline]
-    pub fn into_valid(self) -> Option<TypeInfo> {
+    pub fn into_valid(self) -> Option<Type> {
         match self {
-            TypeInfo::Unset | TypeInfo::Unevaluated(_) => None,
+            Type::Unset | Type::Unevaluated(_) => None,
             t => Some(t),
         }
     }
 }
 
-// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// pub enum MaybeType {
-//     Ok(TypeInfo),
-//     /// The type was not explicitly set in the original source code and must
-//     /// still be inferred.
-//     Unset,
-//     /// The type was explicitly set in the original source code, but hasn't
-// been     /// analyzed yet.
-//     Unevaluated(Ptr<Expr>),
-// }
-//
-// impl MaybeType {
-//     #[inline]
-//     pub fn is_valid(&self) -> bool {
-//         matches!(self, MaybeType::Ok(_))
-//     }
-//
-//     /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise
-// [`None`]     #[inline]
-//     pub fn into_valid(self) -> Option<TypeInfo> {
-//         match self {
-//             MaybeType::Ok(ty) => Some(ty),
-//             _ => None,
-//         }
-//     }
-// }
-//
-// impl UnwrapDebug for MaybeType {
-//     type Inner = TypeInfo;
-//
-//     #[inline]
-//     fn unwrap_debug(self) -> Self::Inner {
-//         match self {
-//             MaybeType::Ok(ty) => ty,
-//             _ => {
-//                 if cfg!(debug_assertions) {
-//                     panic!("called unwrap_debug on an invalid MaybeType
-// variant")                 } else {
-//                     unsafe { unreachable_unchecked() }
-//                 }
-//             },
-//         }
-//     }
-// }
+/*
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaybeType {
+    Valid(TypeInfo),
+
+    IntLiteral,
+    FloatLiteral,
+
+    /// The type was not explicitly set in the original source code and must
+    /// still be inferred.
+    Unset,
+    /// The type was explicitly set in the original source code, but hasn't been
+    /// analyzed yet.
+    Unevaluated(Ptr<Expr>),
+}
+
+impl MaybeType {
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        matches!(self, MaybeType::Valid(_))
+    }
+
+    /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
+    #[inline]
+    pub fn into_valid(self) -> Option<TypeInfo> {
+        match self {
+            MaybeType::Valid(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    // a: f64 = 1 + 1.0 + 1
+    //          ^           int_lit
+    //              ^^^     float_lit
+    //          ^^^^^^^     float_lit
+    //                    ^ int_lit
+    //          ^^^^^^^^^^^ float_lit
+    //          ^^^^^^^^^^^ f64
+
+    /// expects both types to be valid
+    pub fn common_type_valid(self, other: MaybeType) -> Option<MaybeType> {
+        match (self, other) {
+            (MaybeType::Valid(a), MaybeType::Valid(b)) => a.common_type(b).map(MaybeType::Valid),
+            (MaybeType::Valid(t), MaybeType::IntLiteral)
+            | (MaybeType::IntLiteral, MaybeType::Valid(t)) => match t {
+                TypeInfo::Never | TypeInfo::Int { .. } | TypeInfo::Float { .. } => {
+                    Some(MaybeType::Valid(t))
+                },
+                _ => None,
+            },
+            (MaybeType::Valid(t), MaybeType::FloatLiteral)
+            | (MaybeType::FloatLiteral, MaybeType::Valid(t)) => match t {
+                TypeInfo::Never | TypeInfo::Float { .. } => Some(MaybeType::Valid(t)),
+                _ => None,
+            },
+            (MaybeType::IntLiteral, MaybeType::IntLiteral) => Some(MaybeType::IntLiteral),
+            (
+                MaybeType::IntLiteral | MaybeType::FloatLiteral,
+                MaybeType::IntLiteral | MaybeType::FloatLiteral,
+            ) => Some(MaybeType::FloatLiteral),
+            (MaybeType::Unset | MaybeType::Unevaluated(_), _)
+            | (_, MaybeType::Unset | MaybeType::Unevaluated(_)) => {
+                panic_debug("common_type_valid expects valid types")
+            },
+        }
+    }
+
+    /*
+    /// expects both types to be valid
+    pub fn common_type_valid(self, other: MaybeType) -> Option<MaybeType> {
+        match (self, other) {
+            (MaybeType::Valid(a), MaybeType::Valid(b)) => a.common_type(b).map(MaybeType::Valid),
+            (MaybeType::Valid(t), MaybeType::NumLiteral { kind, real_ty })
+            | (MaybeType::NumLiteral { kind, real_ty }, MaybeType::Valid(t)) => {
+                if let Some(real_ty) = *real_ty {
+                    return real_ty.common_type(t).map(MaybeType::Valid);
+                }
+                let matches = match kind {
+                    NumLiteralKind::Int => {
+                        matches!(t, TypeInfo::Int { .. } | TypeInfo::Float { .. })
+                    },
+                    NumLiteralKind::Float => matches!(t, TypeInfo::Float { .. }),
+                };
+                if matches {
+                    *real_ty.as_mut() = Some(t);
+                }
+                Some(t)
+            },
+            (
+                MaybeType::NumLiteral { kind: k1, real_ty: t1 },
+                MaybeType::NumLiteral { kind: k2, real_ty: t2 },
+            ) => match ((k1, *t1), (k2, *t2)) {
+                ((_, Some(t1)), (_, Some(t2))) => t1.common_type(t2).map(MaybeType::Valid),
+                ((_, Some(t)), (k, None)) | ((k, None), (_, Some(t))) => match (t, k) {
+                    (TypeInfo::Void, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Void, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Never, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Never, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Ptr(ptr), NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Ptr(ptr), NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Int { bits, is_signed }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Int { bits, is_signed }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Bool, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Bool, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Float { bits }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Float { bits }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Function(ptr), NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Function(ptr), NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Array { len, elem_ty }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Array { len, elem_ty }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Struct { fields }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Struct { fields }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Union { fields }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Union { fields }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Enum { variants }, NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Enum { variants }, NumLiteralKind::Float) => todo!(),
+                    (TypeInfo::Type(ptr), NumLiteralKind::Int) => todo!(),
+                    (TypeInfo::Type(ptr), NumLiteralKind::Float) => todo!(),
+                },
+                ((k1, None), (k2, None)) => {
+                    let is_float = k1 == NumLiteralKind::Float || k2 == NumLiteralKind::Float;
+                    let kind = if is_float { NumLiteralKind::Float } else { NumLiteralKind::Int };
+                    Some(MaybeType::NumLiteral { kind, real_ty: t1 })
+                },
+            },
+            (MaybeType::Unset | MaybeType::Unevaluated(_), _)
+            | (_, MaybeType::Unset | MaybeType::Unevaluated(_)) => {
+                panic_debug("common_type_valid expects valid types")
+            },
+        }
+    }
+    */
+}
+
+impl UnwrapDebug for MaybeType {
+    type Inner = TypeInfo;
+
+    #[inline]
+    fn unwrap_debug(self) -> Self::Inner {
+        match self {
+            MaybeType::Valid(ty) => ty,
+            _ => panic_debug("called unwrap_debug on an invalid MaybeType variant"),
+        }
+    }
+}
+*/

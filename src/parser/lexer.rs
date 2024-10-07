@@ -280,6 +280,10 @@ impl Span {
         let last = iter.last();
         first.map(|first| last.map(|last| first.join(last)).unwrap_or(first))
     }
+
+    pub fn start_pos(self) -> Span {
+        Span::pos(self.start)
+    }
 }
 
 impl From<Range<usize>> for Span {

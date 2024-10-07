@@ -1,6 +1,6 @@
 use super::{
-    lexer::{Token, TokenKind},
     DeclMarkerKind,
+    lexer::{Token, TokenKind},
 };
 use crate::parser::lexer::Span;
 use core::fmt;
@@ -84,7 +84,7 @@ pub trait ParseResultExt<T> {
     fn opt(self) -> ParseResult<Option<T>>;
 }
 
-impl<T> ParseResultExt<T> for ParseResult<T> {
+impl<T: core::fmt::Debug> ParseResultExt<T> for ParseResult<T> {
     /// [`ParseErrorKind::UnexpectedStart`] -> [`None`]
     /// [`ParseErrorKind::NoInput`] -> [`None`]
     fn opt(self) -> ParseResult<Option<T>> {

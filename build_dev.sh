@@ -17,7 +17,7 @@ error() {
 
 cd "$script_dir"
 
-rm "target/output.o" "target/test" 2>/dev/null
+rm "target/build_dev/output.o" "target/build_dev/test" 2>/dev/null
 
 cmd="cargo run"
 info "$cmd"
@@ -25,12 +25,12 @@ info "$cmd"
 #RUST_BACKTRACE=1 $cmd || error "Failed" 0 # slows down the Frontend (especially in non-release mode)
 $cmd || error "Failed" 0
 
-cmd="gcc test.c target/output.o -o target/test"
+cmd="gcc test.c target/build_dev/output.o -o target/build_dev/test"
 info "$cmd"
 $cmd || error "Failed" 1
 
-cmd="./target/test"
+cmd="./target/build_dev/test"
 info "$cmd"
 $cmd || error "Failed" 2
 
-# cargo bench
+cargo bench

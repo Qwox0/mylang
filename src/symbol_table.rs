@@ -36,4 +36,8 @@ impl<Symbol> SymbolTable<Symbol> {
     pub fn get(&self, name: &str) -> Option<&Symbol> {
         self.0.iter().rev().find_map(|scope| scope.get(name))
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Symbol> {
+        self.0.iter().flat_map(|m| m.iter().map(|(_, v)| v))
+    }
 }

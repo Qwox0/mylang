@@ -74,6 +74,17 @@ pub fn unreachable_debug() -> ! {
     }
 }
 
+/// like [`panic`] but UB in release mode.
+#[track_caller]
+#[inline]
+pub fn panic_debug(msg: &str) -> ! {
+    if cfg!(debug_assertions) {
+        panic!("{}", msg)
+    } else {
+        unsafe { unreachable_unchecked() }
+    }
+}
+
 pub fn collect_all_result_errors<T, E>(
     i: impl IntoIterator<Item = Result<T, E>>,
 ) -> Result<Vec<T>, Vec<E>> {
