@@ -27,7 +27,7 @@ mod value;
 
 /// This is a macro because `err_span` should only be evaluated when an error
 /// happens.
-/// ```rust
+/// ```ignore
 /// fn check_or_set_type(target: &mut Type, new_ty: Type, err_span: Span) -> SemaResult<()>
 /// ```
 macro_rules! check_or_set_type {
@@ -57,31 +57,25 @@ macro_rules! try_not_never {
 }
 
 /// Semantic analyzer
-pub struct Sema<'c, 'alloc> {
+pub struct Sema<'c, 'alloc, const DEBUG_TYPES: bool = false> {
     code: &'c Code,
 
     pub symbols: SymbolTable<SemaSymbol>,
     function_stack: Vec<Ptr<Fn>>,
     defer_stack: DeferStack,
 
-    debug_types: bool,
     pub errors: Vec<SemaError>,
 
     alloc: &'alloc bumpalo::Bump,
 }
 
-impl<'c, 'alloc> Sema<'c, 'alloc> {
-    pub fn new(
-        code: &'c Code,
-        debug_types: bool,
-        alloc: &'alloc bumpalo::Bump,
-    ) -> Sema<'c, 'alloc> {
+impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
+    pub fn new(code: &'c Code, alloc: &'alloc bumpalo::Bump) -> Sema<'c, 'alloc, DEBUG_TYPES> {
         Sema {
             code,
             symbols: SymbolTable::with_one_scope(),
             function_stack: vec![],
             defer_stack: DeferStack::default(),
-            debug_types,
             errors: vec![],
             alloc,
         }
@@ -104,14 +98,13 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         }
     }
 
-    /// Returns if `s` was fully analyzed
-    pub fn analyze_top_level(&mut self, s: Ptr<Expr>) -> bool {
+    pub fn analyze_top_level(&mut self, s: Ptr<Expr>) -> SemaResult<(), ()> {
         match self.analyze(s, true) {
-            Ok(_) => true,
-            NotFinished => false,
+            Ok(_) => Ok(()),
+            NotFinished => NotFinished,
             Err(e) => {
                 self.errors.push(e);
-                true
+                Err(())
             },
         }
     }
@@ -124,10 +117,17 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
 
         #[allow(unused_variables)]
         let res = match &mut expr.kind {
-            ExprKind::Ident(text) => match self.get_symbol(*text, expr.span)? {
-                SemaSymbol::Finished(v) => v.into_const_checked(is_const, span),
-                SemaSymbol::NotFinished(Some(ty)) if !is_const => Ok(SemaValue::new(*ty)),
-                SemaSymbol::NotFinished(_) => NotFinished,
+            ExprKind::Ident(text) => {
+                if let Some(internal_ty) = self.try_internal_ty(*text) {
+                    let t = self.alloc(internal_ty)?;
+                    return Ok(SemaValue::new_const(Type::Type(t), EMPTY_PTR));
+                }
+
+                match self.get_symbol(*text, expr.span)? {
+                    SemaSymbol::Finished(v) => v.into_const_checked(is_const, span),
+                    SemaSymbol::NotFinished(Some(ty)) if !is_const => Ok(SemaValue::new(*ty)),
+                    SemaSymbol::NotFinished(_) => NotFinished,
+                }
             },
             &mut ExprKind::Literal { kind, code } => {
                 let ty = match kind {
@@ -153,8 +153,15 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }
             },
             &mut ExprKind::BoolLit(val) => Ok(SemaValue::const_bool(self.alloc(val)?)),
-            ExprKind::ArrayTy { count, ty } => todo!(),
-            ExprKind::ArrayTy2 { ty } => todo!(),
+            ExprKind::ArrayTy { count, ty } => {
+                let count_val = self.analyze(*count, true)?;
+                let count = count_val.int().map_err(|kind| SemaError { kind, span: count.span })?;
+                let count = count.try_into().expect("todo: array to long");
+                let ty = self.analyze_type_expr(*ty)?;
+                let arr_ty = Type::Array { len: count, elem_ty: ty };
+                self.alloc(arr_ty).map_ok(SemaValue::type_)
+            },
+            ExprKind::ArrayTy2 { ty } => todo!("[]ty"),
             ExprKind::ArrayLit { elements } => {
                 let mut val_ty: Option<Type> = None;
                 for elem in elements.iter() {
@@ -224,9 +231,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 self.open_scope();
                 let res: SemaResult<SemaValue> = try {
                     let mut val = SemaValue::void();
-                    for s in stmts.iter() {
-                        match self.analyze(*s, is_const) {
+                    for s in stmts.iter_mut() {
+                        match self.analyze(s.expr, is_const) {
                             Ok(new_val) => {
+                                s.ty = new_val.ty.finalize();
+                                debug_assert!(s.ty.is_valid());
                                 debug_assert!(new_val.check_constness(is_const));
                                 val = new_val
                             },
@@ -268,7 +277,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 assert!(!is_const, "todo: const initializer");
 
                 let struct_ty = if let Some(ty_expr) = lhs {
-                    match self.eval_type_expr(*ty_expr)? {
+                    match self.analyze(*ty_expr, false)?.ty {
                         Type::Never => return Ok(SemaValue::never()),
                         Type::Type(t) | Type::Ptr(t) => *t,
                         ty => return err(CannotApplyInitializer { ty }, ty_expr.full_span()),
@@ -361,7 +370,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 assert!(idx.is_int(), "todo: non-int index");
                 Ok(SemaValue::new(*elem_ty))
             },
-            ExprKind::Call { func: f, args } => {
+            ExprKind::Call { func: f, args, .. } => {
                 assert!(!is_const, "todo: const call");
                 // self.analyze(*fn_expr)?;
                 // debug_assert!(fn_expr.ty.is_valid());
@@ -457,20 +466,21 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     err(InvalidPreOp { ty, kind }, span)
                 }
             },
-            &mut ExprKind::BinOp { lhs, op, rhs } => {
+            ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
                 assert!(!is_const, "todo: BinOp in const");
-                let lhs_ty = self.analyze(lhs, is_const)?.ty;
+                let lhs_ty = self.analyze(*lhs, is_const)?.ty;
                 debug_assert!(lhs_ty.is_valid());
-                let rhs_ty = self.analyze(rhs, is_const)?.ty;
+                let rhs_ty = self.analyze(*rhs, is_const)?.ty;
                 debug_assert!(rhs_ty.is_valid());
-                if lhs_ty.matches(rhs_ty) {
+                if let Some(common_ty) = lhs_ty.common_type(rhs_ty) {
+                    *ty = common_ty;
                     // todo: check if binop can be applied to type
                     Ok(match op {
                         BinOpKind::Mul
                         | BinOpKind::Div
                         | BinOpKind::Mod
                         | BinOpKind::Add
-                        | BinOpKind::Sub => lhs_ty,
+                        | BinOpKind::Sub => common_ty,
                         BinOpKind::ShiftL => todo!(),
                         BinOpKind::ShiftR => todo!(),
                         BinOpKind::BitAnd => todo!(),
@@ -481,9 +491,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         | BinOpKind::Lt
                         | BinOpKind::Le
                         | BinOpKind::Gt
-                        | BinOpKind::Ge => Type::Bool,
+                        | BinOpKind::Ge => {
+                            *ty = common_ty.finalize();
+                            Type::Bool
+                        },
                         BinOpKind::And | BinOpKind::Or => {
-                            if lhs_ty == Type::Bool {
+                            if common_ty == Type::Bool {
                                 Type::Bool
                             } else {
                                 todo!()
@@ -507,7 +520,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     // todo: check if binop can be applied to type
                     Ok(SemaValue::void())
                 } else {
-                    err(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.span)
+                    err(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.full_span())
                 }
             },
             ExprKind::BinOpAssign { lhs, op, rhs } => {
@@ -530,7 +543,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 self.analyze_var_decl(decl)?;
                 Ok(SemaValue::void())
             },
-            ExprKind::If { condition, then_body, else_body } => {
+            ExprKind::If { condition, then_body, else_body, .. } => {
                 assert!(!is_const, "todo: if in const");
                 let cond = self.analyze(*condition, is_const)?.ty;
                 debug_assert!(cond.is_valid());
@@ -557,8 +570,8 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     err(MissingElseBranch, expr.full_span())
                 }
             },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => {
+            ExprKind::Match { val, else_body, .. } => todo!(),
+            ExprKind::For { source, iter_var, body, .. } => {
                 let arr = try_not_never!(self.analyze_typed(source, is_const)?);
                 let Type::Array { len: count, elem_ty } = arr.ty else {
                     todo!("for over non-array")
@@ -579,18 +592,15 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 self.close_scope()?;
                 Ok(body_ty)
             },
-            ExprKind::While { condition, body } => todo!(),
+            ExprKind::While { condition, body, .. } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Defer(expr) => {
                 self.defer_stack.push_expr(*expr);
                 Ok(SemaValue::void())
             },
             ExprKind::Return { expr: val } => {
                 let ret_type = if let Some(val) = val {
-                    let t = self.analyze_typed(val, is_const)?.ty;
-                    debug_assert!(t.is_valid());
-                    t
+                    self.analyze_typed(val, is_const)?.ty
                 } else {
                     Type::Void
                 };
@@ -599,9 +609,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 };
                 check_or_set_type!(
                     &mut func.ret_type,
-                    ret_type,
-                    val.map(|v| v.full_span()).unwrap_or(expr.full_span()),
+                    ret_type.finalize(),
+                    val.map(|v| v.full_span()).unwrap_or(span),
                 )?;
+                if let Some(val) = val {
+                    val.ty = func.ret_type;
+                }
                 Ok(SemaValue::never())
             },
             ExprKind::Semicolon(_) => todo!(),
@@ -609,7 +622,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         // if let Ok(val) = res {
         //     expr.ty = val.ty;
         // }
-        if self.debug_types {
+        if DEBUG_TYPES {
             display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {res:?}")); // TODO: remove this
         }
         res
@@ -696,42 +709,16 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         Ok(())
     }
 
-    fn eval_type_expr(&mut self, mut ty_expr: Ptr<Expr>) -> SemaResult<Type> {
-        match &mut ty_expr.kind {
-            &mut ExprKind::Ident(name) => {
-                if let Some(internal_ty) = self.try_internal_ty(name) {
-                    return Ok(internal_ty);
-                }
-                match self.get_symbol(name, ty_expr.full_span())? {
-                    SemaSymbol::Finished(SemaValue { ty, const_val }) => {
-                        if matches!(ty, Type::Never | Type::Type(_)) {
-                            Ok(*ty)
-                        } else {
-                            err(NotAType, ty_expr.span)
-                        }
-                    },
-                    SemaSymbol::NotFinished(_) => NotFinished,
-                }
-            },
-            ExprKind::ArrayTy { count, ty } => {
-                let count_val = self.analyze(*count, true)?;
-                let count = count_val.int().map_err(|kind| SemaError { kind, span: count.span })?;
-                let count = count.try_into().expect("todo: array to long");
-                let ty = self.eval_type_expr(*ty)?;
-                let ty = self.alloc(ty)?;
-                Ok(Type::Array { len: count, elem_ty: ty })
-            },
-            ExprKind::ArrayTy2 { ty } => todo!("[]ty"),
-            ExprKind::Ptr { is_mut, ty } => {
-                let pointee = self.eval_type(ty)?;
-                Ok(Type::Ptr(self.alloc(pointee)?)) // TODO: no alloc here
-            },
-
-            kind => todo!("{kind:?}"),
+    /// expects the [`Type`] of `ty_expr` to be [`Type::Type`]. This returns the
+    /// inner type of [`Type::Type`].
+    ///
+    /// If you want the [`Type`] itself, use [`Sema::analyze`].
+    fn analyze_type_expr(&mut self, ty_expr: Ptr<Expr>) -> SemaResult<Ptr<Type>> {
+        match self.analyze(ty_expr, true)?.ty {
+            Type::Never => todo!(),
+            Type::Type(t) => Ok(t),
+            _ => err(NotAType, ty_expr.full_span()),
         }
-        // if let Ok(ty) = res {
-        //     ty_expr.ty = Type::Type(self.alloc(ty)?);
-        // }
     }
 
     fn try_internal_ty(&mut self, name: Ptr<str>) -> Option<Type> {
@@ -743,10 +730,10 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         }
     }
 
-    /// [`Type::Unevaluated`] -> [`Type`]
+    /// [`Type::Unevaluated`] -> a valid [`Type`]
     fn eval_type(&mut self, ty: &mut Type) -> SemaResult<Type> {
         if let Type::Unevaluated(ty_expr) = *ty {
-            *ty = self.eval_type_expr(ty_expr)?;
+            *ty = *self.analyze_type_expr(ty_expr)?;
             debug_assert!(ty.is_valid());
         }
         Ok(*ty)

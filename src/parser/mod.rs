@@ -11,6 +11,7 @@ use crate::{
     ptr::Ptr,
     scratch_pool::ScratchPool,
     type_::Type,
+    util::{collect_all_result_errors, display_spanned_error},
 };
 use error::ParseErrorKind::*;
 pub use error::*;
@@ -106,7 +107,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let rhs = self.ws0().ident().context("dot rhs")?;
                 expr!(Dot { lhs, rhs }, span.join(rhs.span))
             },
-            FollowingOperator::Call => return self.call(lhs, span, ScratchPool::new()),
+            FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None),
             FollowingOperator::Index => {
                 let lhs = ExprWithTy::untyped(lhs);
                 let idx = ExprWithTy::untyped(self.expr()?);
@@ -132,7 +133,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             FollowingOperator::PostOp(kind) => expr!(UnaryOp { kind, expr: lhs }, span),
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
-                expr!(BinOp { lhs, op, rhs }, span)
+                expr!(BinOp { lhs, op, rhs, val_ty: Type::Unset }, span)
             },
             FollowingOperator::Assign => {
                 let lhs = ExprWithTy::untyped(lhs);
@@ -178,27 +179,27 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             FollowingOperator::Pipe => {
                 let t = self.ws0().next_tok()?;
                 return match t.kind {
-                    TokenKind::Keyword(Keyword::If) => self.if_after_cond(lhs, span).context("if"),
+                    TokenKind::Keyword(Keyword::If) => {
+                        self.if_after_cond(lhs, span, true).context("if")
+                    },
                     TokenKind::Keyword(Keyword::Match) => {
                         todo!("| match")
                     },
                     TokenKind::Keyword(Keyword::For) => {
-                        let lhs = ExprWithTy::untyped(lhs);
+                        let source = ExprWithTy::untyped(lhs);
                         let iter_var = self.ws0().ident().context("for iter var")?;
                         let body = self.ws0().expr().context("for body")?;
-                        self.alloc(expr!(For { source: lhs, iter_var, body }, t.span))
+                        self.alloc(expr!(For { source, iter_var, body, was_piped: true }, t.span))
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         let body = self.expr().context("while body")?;
-                        self.alloc(expr!(While { condition: lhs, body }, t.span))
+                        self.alloc(expr!(While { condition: lhs, body, was_piped: true }, t.span))
                     },
                     TokenKind::Ident => {
                         let func = self.alloc(self.ident_from_span(t.span).into_expr())?;
-                        let open_paren = self
-                            .tok(TokenKind::OpenParenthesis)
-                            .context("pipe call: expect '('")?;
+                        self.tok(TokenKind::OpenParenthesis).context("pipe call: expect '('")?;
                         let args = self.scratch_pool_with_first_val(lhs)?;
-                        self.call(func, open_paren.span, args)
+                        self.call(func, args, Some(0))
                     },
                     _ => ParseError::unexpected_token(t)
                         .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
@@ -249,7 +250,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.advanced().expr().context("if condition")?;
-                return self.if_after_cond(condition, span).context("if");
+                return self.if_after_cond(condition, span, false).context("if");
             },
             TokenKind::Keyword(Keyword::Match) => {
                 todo!("match body");
@@ -263,7 +264,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                         self.expr().context("match else body")
                     })
                     .transpose()?;
-                expr!(Match { val, else_body }, span)
+                expr!(Match { val, else_body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::For) => {
                 todo!("for");
@@ -273,7 +274,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr().context("while condition")?;
                 let body = self.expr().context("while body")?;
-                expr!(While { condition, body }, span)
+                expr!(While { condition, body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
                 let expr =
@@ -494,6 +495,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         &mut self,
         condition: Ptr<Expr>,
         start_span: Span,
+        was_piped: bool,
     ) -> ParseResult<Ptr<Expr>> {
         let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
         let else_body = self
@@ -502,29 +504,28 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             .next_if_kind(TokenKind::Keyword(Keyword::Else))
             .map(|_| self.expr_(IF_PRECEDENCE).context("else body"))
             .transpose()?;
-        self.alloc(expr!(If { condition, then_body, else_body }, start_span))
+        self.alloc(expr!(If { condition, then_body, else_body, was_piped }, start_span))
     }
 
     /// `... ( ... )`
     /// `     ^` starts here
-    #[allow(unused_variables)]
     pub fn call(
         &mut self,
         func: Ptr<Expr>,
-        open_paren_span: Span,
         args: ScratchPool<Ptr<Expr>>,
+        pipe_idx: Option<usize>,
     ) -> ParseResult<Ptr<Expr>> {
         let func = ExprWithTy::untyped(func);
         let (args, _) = self.expr_list(TokenKind::Comma, args).context("call args")?;
         let closing_paren_span =
             self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
-        self.alloc(expr!(Call { func, args }, closing_paren_span))
+        self.alloc(expr!(Call { func, args, pipe_idx }, closing_paren_span))
     }
 
     /// parses block context and '}', doesn't parse the '{'
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
         let (stmts, has_trailing_semicolon) =
-            self.expr_list(TokenKind::Semicolon, ScratchPool::new())?;
+            self.expr_with_ty_list(TokenKind::Semicolon, ScratchPool::new())?;
         let closing_brace_span =
             self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?.span;
         let span = open_brace_span.join(closing_brace_span);
@@ -541,6 +542,24 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         loop {
             let Some(expr) = self.expr().opt().context("expr in list")? else { break };
             list_pool.push(expr).map_err(|e| self.wrap_alloc_err(e))?;
+            has_trailing_sep = self.ws0().lex.advance_if_kind(sep);
+            if !has_trailing_sep {
+                break;
+            }
+            self.ws0();
+        }
+        Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
+    }
+
+    pub fn expr_with_ty_list(
+        &mut self,
+        sep: TokenKind,
+        mut list_pool: ScratchPool<ExprWithTy>,
+    ) -> ParseResult<(Ptr<[ExprWithTy]>, bool)> {
+        let mut has_trailing_sep = false;
+        loop {
+            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
+            list_pool.push(ExprWithTy::untyped(expr)).map_err(|e| self.wrap_alloc_err(e))?;
             has_trailing_sep = self.ws0().lex.advance_if_kind(sep);
             if !has_trailing_sep {
                 break;
@@ -927,10 +946,26 @@ impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
 impl<'code, 'alloc> StmtIter<'code, 'alloc> {
     /// Parses top-level items until the end of the [`Code`] or until an
     /// [`PError`] occurs.
+    #[inline]
     pub fn parse(code: &'code Code, alloc: &'alloc bumpalo::Bump) -> Self {
         let mut parser = Parser::new(Lexer::new(code), alloc);
         parser.ws0();
         Self { parser }
+    }
+
+    #[inline]
+    pub fn collect_or_fail(self, code: &'code Code) -> Vec<Ptr<Expr>> {
+        collect_all_result_errors(self).unwrap_or_else(|errors| {
+            for e in errors {
+                display_spanned_error(&e, code);
+            }
+            std::process::exit(1);
+        })
+    }
+
+    #[inline]
+    pub fn parse_all_or_fail(code: &'code Code, alloc: &'alloc bumpalo::Bump) -> Vec<Ptr<Expr>> {
+        Self::parse(code, alloc).collect_or_fail(code)
     }
 }
 

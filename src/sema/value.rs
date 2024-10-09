@@ -28,6 +28,10 @@ impl SemaValue {
         SemaValue::new_const(Type::Void, EMPTY_PTR)
     }
 
+    pub fn type_(ty: Ptr<Type>) -> SemaValue {
+        SemaValue::new_const(Type::Type(ty), EMPTY_PTR)
+    }
+
     pub fn const_bool(p: Ptr<bool>) -> SemaValue {
         SemaValue::new_const(Type::Bool, p.cast())
     }

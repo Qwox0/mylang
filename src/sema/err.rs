@@ -84,17 +84,17 @@ pub struct SemaError {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[must_use]
-pub enum SemaResult<T> {
+pub enum SemaResult<T, E = SemaError> {
     Ok(T),
     //NotFinished(Option<Type>),
     NotFinished,
-    Err(SemaError),
+    Err(E),
 }
 
-impl<T> SemaResult<T> {
-    pub fn map_ok<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U> {
+impl<T, E> SemaResult<T, E> {
+    pub fn map_ok<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U, E> {
         match self {
             Ok(t) => Ok(f(t)),
             NotFinished => NotFinished,
@@ -102,7 +102,7 @@ impl<T> SemaResult<T> {
         }
     }
 
-    pub fn inspect_err(self, f: impl FnOnce(&SemaError)) -> Self {
+    pub fn inspect_err(self, f: impl FnOnce(&E)) -> Self {
         if let Err(e) = &self {
             f(e);
         }

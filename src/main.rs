@@ -1,6 +1,6 @@
 #![feature(test)]
 
-use inkwell::{context::Context, module::Module, targets::TargetMachine};
+use inkwell::context::Context;
 use mylang::{
     ast::debug::DebugAst,
     cli::Cli,
@@ -8,7 +8,8 @@ use mylang::{
     compiler::Compiler,
     parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
     sema,
-    util::{collect_all_result_errors, display_spanned_error},
+    type_::Type,
+    util::display_spanned_error,
 };
 use std::{
     io::Read,
@@ -165,12 +166,13 @@ fn read_code_file(path: &Path) -> String {
 
 fn dev() {
     const DEBUG_TOKENS: bool = false;
-    const DEBUG_AST: bool = true;
+    const DEBUG_AST: bool = false;
     const DEBUG_TYPES: bool = false;
-    const DEBUG_TYPED_AST: bool = true;
-    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = true;
+    const DEBUG_TYPED_AST: bool = false;
+    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 1;
+    type MyMainRetTy = i64;
 
     let alloc = bumpalo::Bump::new();
 
@@ -207,51 +209,6 @@ mymain :: -> {
 // c :: -> d();
 // d :: -> 10;
 ";
-    /*
-        let code = "
-pub sub :: (a: f64, b: f64, ) -> -b + a;
-
-Sub :: struct {
-    a: f64,
-    b: f64,
-}
-pub sub2 :: (values: Sub) -> values.a - values.b;
-
-mymain :: -> {
-    mut a := test(1);
-    mut a := 10;
-    a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
-    b := test();
-
-    if defer_test() return 10000;
-
-    return sub2(Sub.{ a = a, b });
-    // this is unreachable but is checked anyway
-    x := 1 + 1;
-    x
-};
-pub test :: (mut x := 1) -> {
-    x += 1;
-    1+2*x
-};
-
-pub defer_test :: -> {
-    mut out := 1;
-    {
-        defer out *= 10;
-        out += 1;
-    }; // TODO: no `;` here
-    t1 := out == 20;
-    out = 1;
-    {
-        defer out += 1;
-        defer out *= 10;
-    };
-    t2 := out == 11;
-    return t1 && t2;
-};";
-    */
-
     let code = code.as_ref();
     let stmts = StmtIter::parse(code, &alloc);
 
@@ -283,15 +240,10 @@ pub defer_test :: -> {
 
     println!("### Frontend:");
     let frontend_parse_start = Instant::now();
-    let stmts = collect_all_result_errors(stmts).unwrap_or_else(|errors| {
-        for e in errors {
-            display_spanned_error(&e, code);
-        }
-        std::process::exit(1);
-    });
+    let stmts = stmts.collect_or_fail(code);
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
-    let sema = sema::Sema::new(code, DEBUG_TYPES, &alloc);
+    let sema = sema::Sema::<DEBUG_TYPES>::new(code, &alloc);
     let context = Context::create();
     let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
     let mut compiler = Compiler::new(sema, codegen);
@@ -306,7 +258,7 @@ pub defer_test :: -> {
         FrontendDurations::Detailed { sema, codegen }
     } else {
         let frontend2_start = Instant::now();
-        compiler.compile_stmts(&stmts);
+        let _ = compiler.compile_stmts(&stmts);
 
         if !compiler.sema.errors.is_empty() {
             for e in compiler.sema.errors {
@@ -334,10 +286,8 @@ pub defer_test :: -> {
             FrontendDurations::Combined(d) => d,
         };
 
-    let module = compiler.codegen.into_module();
-
     print!("functions:");
-    for a in module.get_functions() {
+    for a in compiler.codegen.module.get_functions() {
         print!("{:?},", a.get_name());
     }
     println!("\n");
@@ -346,18 +296,18 @@ pub defer_test :: -> {
 
     if DEBUG_LLVM_IR_UNOPTIMIZED {
         println!("### Unoptimized LLVM IR:");
-        module.print_to_stderr();
+        compiler.codegen.module.print_to_stderr();
         println!();
     }
 
     let backend_start = Instant::now();
-    module.run_passes(&target_machine, LLVM_OPTIMIZATION_LEVEL);
+    compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL).unwrap();
     let backend_duration = backend_start.elapsed();
     let total_duration = total_frontend_duration + backend_duration;
 
     if DEBUG_LLVM_IR_OPTIMIZED {
         println!("### Optimized LLVM IR:");
-        module.print_to_stderr();
+        compiler.codegen.module.print_to_stderr();
         println!();
     }
 
@@ -370,8 +320,30 @@ pub defer_test :: -> {
     const EXE_VAR: ExecutionVariant = ExecutionVariant::ObjectCode;
     //const EXE_VAR: ExecutionVariant = ExecutionVariant::Jit;
     match EXE_VAR {
-        ExecutionVariant::ObjectCode => compile(module.get_inner(), &target_machine),
-        ExecutionVariant::Jit => run_with_jit(module, "mymain"),
+        ExecutionVariant::ObjectCode => {
+            let Type::Function(f) =
+                compiler.sema.symbols.get("mymain").unwrap().get_type().ok().unwrap()
+            else {
+                panic!()
+            };
+            let c_file = match f.ret_type {
+                Type::Int { .. } => "../../test-int.c",
+                Type::Float { .. } => "../../test-double.c",
+                _ => todo!(),
+            };
+            std::fs::remove_file("target/build_dev/test.c").unwrap();
+            std::os::unix::fs::symlink(c_file, "target/build_dev/test.c").unwrap();
+            let filename = "target/build_dev/output.o";
+            compiler.codegen.compile_to_obj_file(&target_machine, filename).unwrap();
+        },
+        ExecutionVariant::Jit => {
+            let fn_name = "mymain";
+            let out = compiler
+                .codegen
+                .jit_run_fn::<MyMainRetTy>(fn_name, inkwell::OptimizationLevel::None)
+                .unwrap();
+            println!("{fn_name} returned {}", out);
+        },
     }
 
     println!("### Compilation time:");
@@ -390,20 +362,6 @@ pub defer_test :: -> {
 
     println!("  LLVM Backend (LLVM pass pipeline):    {:?}", backend_duration);
     println!("  Total:                                {:?}", total_duration);
-}
-
-fn compile(module: &Module, target_machine: &TargetMachine) {
-    let filename = "target/build_dev/output.o";
-    let p = Path::new(filename);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    target_machine
-        .write_to_file(module, inkwell::targets::FileType::Object, p)
-        .unwrap();
-}
-
-fn run_with_jit(mut module: llvm::CodegenModule, start_fn: &str) {
-    let out = module.jit_run_fn::<i64>(start_fn).expect("has main function");
-    println!("main returned {}", out);
 }
 
 /// old (clone in Lexer::peek)
@@ -426,6 +384,7 @@ mod benches {
     extern crate test;
 
     use super::*;
+    use mylang::util::collect_all_result_errors;
     use test::*;
 
     #[inline]
@@ -512,19 +471,20 @@ pub sub2 :: (values: Sub) -> values.a - values.b;
 
 mymain :: -> {
     mut a := test(1);
-    mut a := 10;
+    mut a := 10.0;
     a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
     b := test();
 
-    if defer_test() return 10000;
+    if defer_test() return 10000.0;
 
     return sub2(Sub.{ a = a, b });
     // this is unreachable but is checked anyway
-    x := 1 + 1;
+    x: f64 = 1 + 1;
     x
 };
-pub test :: (mut x := 1) -> {
+pub test :: (mut x := 1.0) -> {
     x += 1;
+    420;
     1+2*x
 };
 
@@ -554,12 +514,12 @@ pub defer_test :: -> {
                 panic!("Parse ERROR")
             });
 
-            let sema = sema::Sema::new(code, false, &alloc);
+            let sema = sema::Sema::new(code, &alloc);
             let context = Context::create();
             let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
             let mut compiler = Compiler::new(sema, codegen);
 
-            compiler.compile_stmts(&stmts);
+            let _ = compiler.compile_stmts(&stmts);
 
             if !compiler.sema.errors.is_empty() {
                 for e in compiler.sema.errors {

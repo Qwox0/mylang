@@ -1,3 +1,4 @@
+/*
 use crate::{
     ast::{DeclMarkers, Expr, ExprKind, VarDecl},
     parser::StmtIter,
@@ -24,3 +25,4 @@ fn no_args() {
     println!("{:#?}", f);
     panic!()
 }
+*/

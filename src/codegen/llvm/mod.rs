@@ -12,8 +12,9 @@ use crate::{
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{UnwrapDebug, forget_lifetime, panic_debug, unreachable_debug},
+    util::{UnwrapDebug, display_span_in_code, forget_lifetime, panic_debug, unreachable_debug},
 };
+pub use inkwell::targets::TargetMachine;
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
     basic_block::BasicBlock,
@@ -29,7 +30,7 @@ use inkwell::{
     object_file::ObjectFile,
     passes::{PassBuilderOptions, PassManager},
     support::LLVMString,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
+    targets::{CodeModel, InitializationConfig, RelocMode, Target},
     types::{
         AnyType, AnyTypeEnum, ArrayType, AsTypeRef, BasicMetadataTypeEnum, BasicType,
         BasicTypeEnum, FloatType, IntType, PointerType, StructType,
@@ -39,7 +40,10 @@ use inkwell::{
         FloatValue, FunctionValue, GlobalValue, IntValue, PointerValue, StructValue,
     },
 };
-use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit};
+use std::{
+    assert_matches::debug_assert_matches, collections::HashMap, marker::PhantomData,
+    mem::MaybeUninit, path::Path,
+};
 
 pub mod jit;
 
@@ -51,7 +55,9 @@ pub enum CodegenError {
     InvalidGeneratedFunction,
     InvalidCallProduced,
     FunctionLookupError(FunctionLookupError),
-    CouldntCreateJit(LLVMString),
+    CannotOptimizeModule(LLVMString),
+    CannotCompileObjFile(LLVMString),
+    CannotCreateJit(LLVMString),
     CannotMutateRegister,
 
     AllocErr(bumpalo::AllocErr),
@@ -172,10 +178,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         jit.add_module(module);
     }
 
-    pub fn into_module(self) -> CodegenModule<'ctx> {
-        CodegenModule(self.module)
-    }
-
     pub fn compile_top_level(&mut self, stmt: Ptr<Expr>) {
         // if let Err(err) = self.compile_expr_to_float(stmt) {
         //     self.errors.push(err);
@@ -186,21 +188,17 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     fn compile_expr(&mut self, expr: Ptr<Expr>, expr_ty: Type) -> CodegenResult<Symbol<'ctx>> {
         match &expr.kind {
             ExprKind::Ident(name) => Ok(self.get_symbol(&**name)),
-            ExprKind::Literal { kind, code } => {
-                match kind {
-                    LitKind::Char => todo!(),
-                    LitKind::BChar => todo!(),
-                    // TODO: int
-                    //LitKind::Int => reg(self.float_type(expr.ty).const_float_from_string(code)),
-                    LitKind::Int => {
-                        reg(self.int_type(expr_ty).const_int(code.parse().unwrap_debug(), false))
-                    },
-                    LitKind::Float => reg(self.float_type(expr_ty).const_float_from_string(code)),
-                    LitKind::Str => todo!(),
-                }
+            ExprKind::Literal { kind, code } => match expr_ty {
+                Type::Never => Ok(Symbol::Never),
+                Type::Int { bits, .. } => {
+                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), false))
+                },
+                Type::Float { bits } => reg(self.float_type(bits).const_float_from_string(code)),
+                t => panic!("{t:?}"),
+                _ => unreachable_debug(),
             },
             ExprKind::BoolLit(bool) => {
-                debug_assert!(expr_ty == Type::Bool);
+                debug_assert_matches!(expr_ty, Type::Bool | Type::Unset);
                 let b_ty = self.context.bool_type();
                 reg(if *bool { b_ty.const_all_ones() } else { b_ty.const_zero() })
             },
@@ -262,7 +260,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 let res = try {
                     let mut out = Symbol::Void;
                     for s in stmts.iter() {
-                        out = self.compile_expr(*s, Type::Unset)?;
+                        out = self.compile_typed_expr(*s)?;
                         if out == Symbol::Never {
                             break;
                         }
@@ -270,7 +268,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     if !*has_trailing_semicolon || out == Symbol::Never {
                         out
                     } else {
-                        debug_assert!(expr_ty == Type::Void);
+                        debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                         Symbol::Void
                     }
                 };
@@ -374,7 +372,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 debug_assert!(expr_ty == *elem_ty);
                 self.build_index(arr_ty, arr_ptr, idx_val.int_val(), *elem_ty)
             },
-            ExprKind::Call { func, args } => {
+            ExprKind::Call { func, args, .. } => {
                 let func = func.try_to_ident().unwrap_debug();
                 let (&params, &func) = self.get_symbol(&func.text).as_fn().unwrap_debug();
 
@@ -396,31 +394,38 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             },
             ExprKind::UnaryOp { kind, expr } => {
                 let v = try_compile_expr_as_val!(self, *expr, expr_ty);
-                reg(match kind {
+                match kind {
                     UnaryOpKind::AddrOf => todo!(),
                     UnaryOpKind::AddrMutOf => todo!(),
                     UnaryOpKind::Deref => todo!(),
-                    UnaryOpKind::Not => todo!(),
+                    UnaryOpKind::Not => match expr_ty {
+                        Type::Bool => reg(self.builder.build_not(v.bool_val(), "not")?),
+                        _ => todo!(),
+                    },
                     UnaryOpKind::Neg => match expr_ty {
-                        Type::Float { .. } => self.builder.build_float_neg(v.float_val(), "neg")?,
+                        Type::Float { .. } => {
+                            reg(self.builder.build_float_neg(v.float_val(), "neg")?)
+                        },
                         _ => todo!(),
                     },
                     UnaryOpKind::Try => todo!(),
-                }) // TODO: maybe different return types possible in the future
+                } // TODO: maybe different return types possible in the future
             },
-            ExprKind::BinOp { lhs, op, rhs } => {
-                let lhs_val = try_compile_expr_as_val!(self, *lhs, expr_ty);
-                let rhs_val = try_compile_expr_as_val!(self, *rhs, expr_ty);
-                match expr_ty {
+            ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
+                let ty = if op.has_independent_out_ty() { *ty } else { expr_ty };
+                if ty == Type::Bool && matches!(op, BinOpKind::And | BinOpKind::Or) {
+                    return self.build_bool_short_circuit_binop(*lhs, *rhs, *op);
+                }
+                let lhs_val = try_compile_expr_as_val!(self, *lhs, ty);
+                let rhs_val = try_compile_expr_as_val!(self, *rhs, ty);
+                match ty {
                     Type::Int { is_signed, .. } => self
                         .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, *op)
                         .map(reg_sym),
                     Type::Float { .. } => self
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), *op)
                         .map(reg_sym),
-                    Type::Bool => {
-                        self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), *op)
-                    },
+                    Type::Bool => unreachable_debug(),
                     t => todo!("{:?}", t),
                 }
             },
@@ -508,10 +513,10 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     //println!("LOG: '{}' was shadowed in the same scope",
                     // var_name);
                 }
-                debug_assert!(matches!(expr_ty, Type::Void | Type::Unset));
+                debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
-            ExprKind::If { condition, then_body, else_body } => {
+            ExprKind::If { condition, then_body, else_body, .. } => {
                 let func = self.cur_fn.unwrap_debug();
                 let condition = try_compile_expr_as_val!(self, *condition, Type::Bool).bool_val();
 
@@ -565,8 +570,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 }
                 reg(phi)
             },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => {
+            ExprKind::Match { val, else_body, .. } => todo!(),
+            ExprKind::For { source, iter_var, body, .. } => {
                 let Type::Array { len, elem_ty } = source.ty else {
                     panic!("for loop over other types")
                 };
@@ -622,15 +627,14 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
                 // end
                 self.builder.position_at_end(end_bb);
-                debug_assert!(matches!(expr_ty, Type::Void | Type::Unset));
+                debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
-            ExprKind::While { condition, body } => todo!(),
+            ExprKind::While { condition, body, .. } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Defer(inner) => {
                 self.defer_stack.push_expr(*inner);
-                debug_assert!(expr_ty == Type::Void);
+                debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
             ExprKind::Return { expr: val } => {
@@ -640,7 +644,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 } else {
                     self.builder.build_return(None)?;
                 }
-                debug_assert!(expr_ty == Type::Never);
+                // debug_assert_matches!(expr_ty, Type::Never | Type::Unset);
                 Ok(Symbol::Never)
             },
             ExprKind::Semicolon(_) => todo!(),
@@ -895,6 +899,29 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             BinOpKind::Ge => {
                 ret(self.builder.build_int_compare(IntPredicate::UGE, lhs, rhs, "ge")?)
             },
+            BinOpKind::And | BinOpKind::Or => unreachable_debug(),
+            BinOpKind::BitAnd => ret(self.builder.build_and(lhs, rhs, "and")?),
+            BinOpKind::BitOr => ret(self.builder.build_or(lhs, rhs, "or")?),
+            BinOpKind::BitXor => ret(self.builder.build_xor(lhs, rhs, "xor")?),
+            BinOpKind::Range => todo!(),
+            BinOpKind::RangeInclusive => todo!(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn build_bool_short_circuit_binop(
+        &mut self,
+        lhs: Ptr<Expr>,
+        rhs: Ptr<Expr>,
+        op: BinOpKind,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<Symbol<'ctx>> {
+            Ok(Symbol::Register(CodegenValue::new(val.as_value_ref())))
+        }
+
+        let lhs = try_compile_expr_as_val!(self, lhs, Type::Bool).bool_val();
+
+        match op {
             BinOpKind::And => ret({
                 let func = self.cur_fn.unwrap_debug();
                 let entry_bb = self.builder.get_insert_block().unwrap_debug();
@@ -904,6 +931,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 self.builder.build_conditional_branch(lhs, rhs_bb, merge_bb)?;
 
                 self.builder.position_at_end(rhs_bb);
+                let rhs = try_compile_expr_as_val!(self, rhs, Type::Bool);
                 self.builder.build_unconditional_branch(merge_bb)?;
                 rhs_bb = self.builder.get_insert_block().expect("has block");
 
@@ -913,7 +941,6 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 phi.add_incoming(&[(&false_, entry_bb), (&rhs, rhs_bb)]);
                 phi
             }),
-            BinOpKind::BitAnd => ret(self.builder.build_and(lhs, rhs, "and")?),
             BinOpKind::Or => ret({
                 let func = self.cur_fn.unwrap_debug();
                 let entry_bb = self.builder.get_insert_block().unwrap_debug();
@@ -923,6 +950,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 self.builder.build_conditional_branch(lhs, merge_bb, rhs_bb)?;
 
                 self.builder.position_at_end(rhs_bb);
+                let rhs = try_compile_expr_as_val!(self, rhs, Type::Bool);
                 self.builder.build_unconditional_branch(merge_bb)?;
                 rhs_bb = self.builder.get_insert_block().expect("has block");
 
@@ -932,41 +960,30 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 phi.add_incoming(&[(&true_, entry_bb), (&rhs, rhs_bb)]);
                 phi
             }),
-
-            BinOpKind::BitOr => ret(self.builder.build_or(lhs, rhs, "or")?),
-            BinOpKind::BitXor => ret(self.builder.build_xor(lhs, rhs, "xor")?),
-            BinOpKind::Range => todo!(),
-            BinOpKind::RangeInclusive => todo!(),
             _ => unreachable!(),
         }
     }
 
     /// LLVM does not make a distinction between signed and unsigned integer
     /// type
-    fn int_type(&self, ty: Type) -> IntType<'ctx> {
-        match ty {
-            Type::Int { bits: 8, .. } => self.context.i8_type(),
-            Type::Int { bits: 16, .. } => self.context.i16_type(),
-            Type::Int { bits: 32, .. } => self.context.i32_type(),
-            Type::Int { bits: 64, .. } => self.context.i64_type(),
-            Type::Int { bits: 128, .. } => self.context.i128_type(),
-            Type::Int { bits, .. } => self.context.custom_width_int_type(bits),
-            Type::IntLiteral => panic_debug("int literal type should have been resolved already"),
-            _ => panic_debug("not an int type"),
+    fn int_type(&self, bits: u32) -> IntType<'ctx> {
+        match bits {
+            8 => self.context.i8_type(),
+            16 => self.context.i16_type(),
+            32 => self.context.i32_type(),
+            64 => self.context.i64_type(),
+            128 => self.context.i128_type(),
+            bits => self.context.custom_width_int_type(bits),
         }
     }
 
-    fn float_type(&self, ty: Type) -> FloatType<'ctx> {
-        match ty {
-            Type::Float { bits: 16 } => self.context.f16_type(),
-            Type::Float { bits: 32 } => self.context.f32_type(),
-            Type::Float { bits: 64 } => self.context.f64_type(),
-            Type::Float { bits: 128 } => self.context.f128_type(),
-            Type::Float { .. } => todo!("other float bits"),
-            Type::IntLiteral | Type::FloatLiteral => {
-                panic_debug("float literal type should have been resolved already")
-            },
-            _ => panic_debug("not an float type"),
+    fn float_type(&self, bits: u32) -> FloatType<'ctx> {
+        match bits {
+            16 => self.context.f16_type(),
+            32 => self.context.f32_type(),
+            64 => self.context.f64_type(),
+            128 => self.context.f128_type(),
+            bits => todo!("{bits}-bit float"),
         }
     }
 
@@ -975,9 +992,13 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Void => self.context.void_type().as_type_ref(),
             Type::Never => todo!(),
             Type::Ptr(_) => self.context.ptr_type(AddressSpace::default()).as_type_ref(),
-            Type::Int { .. } => self.int_type(ty).as_type_ref(),
+            Type::Int { bits, .. } => self.int_type(bits).as_type_ref(),
+            Type::IntLiteral => panic_debug("int literal type should have been resolved already"),
             Type::Bool => self.context.bool_type().as_type_ref(),
-            Type::Float { bits } => self.float_type(ty).as_type_ref(),
+            Type::Float { bits } => self.float_type(bits).as_type_ref(),
+            Type::FloatLiteral => {
+                panic_debug("float literal type should have been resolved already")
+            },
             Type::Function(_) => todo!(),
             Type::Array { len: count, elem_ty: ty } => {
                 self.llvm_type(*ty).basic_ty().array_type(count as u32).as_type_ref()
@@ -1119,10 +1140,13 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     }
 }
 
-pub struct CodegenModule<'ctx>(Module<'ctx>);
-
-impl<'ctx> CodegenModule<'ctx> {
-    pub fn run_passes(&self, target_machine: &TargetMachine, level: u8) {
+// optimizations
+impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
+    pub fn optimize_module(
+        &self,
+        target_machine: &TargetMachine,
+        level: u8,
+    ) -> Result<(), CodegenError> {
         assert!((0..=3).contains(&level));
         let passes = format!("default<O{}>", level);
 
@@ -1132,30 +1156,30 @@ impl<'ctx> CodegenModule<'ctx> {
         //   ["instcombine", "reassociate", "gvn", "simplifycfg",
         //"mem2reg",].join(","), );
 
-        self.0
+        self.module
             .run_passes(&passes, target_machine, PassBuilderOptions::create())
-            .unwrap();
+            .map_err(|err| CodegenError::CannotOptimizeModule(err))
     }
 
-    pub fn jit_run_fn<Ret>(&mut self, fn_name: &str) -> CodegenResult<Ret> {
-        match self.0.create_jit_execution_engine(OptimizationLevel::None) {
+    pub fn compile_to_obj_file(
+        &self,
+        target_machine: &TargetMachine,
+        filename: &str,
+    ) -> Result<(), CodegenError> {
+        let p = Path::new(filename);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        target_machine
+            .write_to_file(&self.module, inkwell::targets::FileType::Object, p)
+            .map_err(|err| CodegenError::CannotCompileObjFile(err))
+    }
+
+    pub fn jit_run_fn<Ret>(&mut self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
+        match self.module.create_jit_execution_engine(opt) {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>(fn_name)?.call() })
             },
-            Err(err) => Err(CodegenError::CouldntCreateJit(err)),
+            Err(err) => Err(CodegenError::CannotCreateJit(err)),
         }
-    }
-
-    pub fn get_functions(&self) -> inkwell::module::FunctionIterator {
-        self.0.get_functions()
-    }
-
-    pub fn print_to_stderr(&self) {
-        self.0.print_to_stderr()
-    }
-
-    pub fn get_inner(&self) -> &Module<'ctx> {
-        &self.0
     }
 }
 
@@ -1199,7 +1223,7 @@ impl<'ctx> CodegenValue<'ctx> {
 
     // /// for zero sized types: `self.val == null`
     // pub fn new_zst(ty: Type) -> CodegenValue<'ctx> {
-    //     debug_assert!(matches!(ty, Type::Void | Type::Never));
+    //     debug_assert_matches!(ty, Type::Void | Type::Never);
     //     CodegenValue::new(std::ptr::null_mut(), ty)
     // }
 
@@ -1215,27 +1239,27 @@ impl<'ctx> CodegenValue<'ctx> {
     // }
 
     pub fn int_val(&self) -> IntValue<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Int { .. }));
+        // debug_assert_matches!(self.ty, Type::Int { .. });
         unsafe { IntValue::new(self.val) }
     }
 
     pub fn bool_val(&self) -> IntValue<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Int { .. }));
+        // debug_assert_matches!(self.ty, Type::Int { .. });
         unsafe { IntValue::new(self.val) }
     }
 
     pub fn float_val(&self) -> FloatValue<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Float { .. }));
+        // debug_assert_matches!(self.ty, Type::Float { .. });
         unsafe { FloatValue::new(self.val) }
     }
 
     pub fn ptr_val(&self) -> PointerValue<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Ptr(_)));
+        // debug_assert_matches!(self.ty, Type::Ptr(_));
         unsafe { PointerValue::new(self.val) }
     }
 
     pub fn struct_val(&self) -> StructValue<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Struct { .. }));
+        // debug_assert_matches!(self.ty, Type::Struct { .. });
         unsafe { StructValue::new(self.val) }
     }
 
@@ -1279,22 +1303,22 @@ impl<'ctx> CodegenType<'ctx> {
     }
 
     pub fn int_ty(&self) -> IntType<'ctx> {
-        // // debug_assert!(matches!(self.ty, Type::Int { .. }));
+        // // debug_assert_matches!(self.ty, Type::Int { .. });
         unsafe { IntType::new(self.inner) }
     }
 
     pub fn bool_ty(&self) -> IntType<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Bool));
+        // debug_assert_matches!(self.ty, Type::Bool);
         unsafe { IntType::new(self.inner) }
     }
 
     pub fn float_ty(&self) -> FloatType<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Float { .. }));
+        // debug_assert_matches!(self.ty, Type::Float { .. });
         unsafe { FloatType::new(self.inner) }
     }
 
     pub fn ptr_ty(&self) -> PointerType<'ctx> {
-        // debug_assert!(matches!(self.ty, Type::Ptr(..)));
+        // debug_assert_matches!(self.ty, Type::Ptr(..));
         unsafe { PointerType::new(self.inner) }
     }
 

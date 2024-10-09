@@ -78,7 +78,7 @@ pub enum ExprKind {
     },
     /// `{ <stmt>`*` }`
     Block {
-        stmts: Ptr<[Ptr<Expr>]>,
+        stmts: Ptr<[ExprWithTy]>,
         has_trailing_semicolon: bool,
     },
 
@@ -126,6 +126,8 @@ pub enum ExprKind {
     Call {
         func: ExprWithTy,
         args: Ptr<[Ptr<Expr>]>,
+        /// which argument was piped into this [`ExprKind::Call`]
+        pipe_idx: Option<usize>,
     },
 
     /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
@@ -140,6 +142,7 @@ pub enum ExprKind {
         lhs: Ptr<Expr>,
         op: BinOpKind,
         rhs: Ptr<Expr>,
+        val_ty: Type,
     },
     /// `<lhs> = <lhs>`
     Assign {
@@ -175,12 +178,14 @@ pub enum ExprKind {
         condition: Ptr<Expr>,
         then_body: Ptr<Expr>,
         else_body: Option<Ptr<Expr>>,
+        was_piped: bool,
     },
     /// `match <val> <body>` (`else <else>`)
     Match {
         val: Ptr<Expr>,
         // TODO
         else_body: Option<Ptr<Expr>>,
+        was_piped: bool,
     },
 
     /// TODO: normal syntax
@@ -189,11 +194,13 @@ pub enum ExprKind {
         source: ExprWithTy,
         iter_var: Ident,
         body: Ptr<Expr>,
+        was_piped: bool,
     },
     /// `while <cond> <body>`
     While {
         condition: Ptr<Expr>,
         body: Ptr<Expr>,
+        was_piped: bool,
     },
 
     /// `lhs catch ...`
@@ -202,6 +209,7 @@ pub enum ExprKind {
         // TODO
     },
 
+    /*
     /// `lhs | rhs`
     /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
     /// `lhs | while ...` are inlined during parsing
@@ -209,7 +217,7 @@ pub enum ExprKind {
         lhs: Ptr<Expr>,
         // TODO
     },
-
+    */
     Defer(Ptr<Expr>),
 
     /// `return <expr>`
@@ -256,9 +264,12 @@ impl Expr {
             },
             ExprKind::Dot { lhs, rhs } => lhs.expr.full_span().join(rhs.span),
             ExprKind::Index { lhs, idx } => todo!(),
-            ExprKind::Call { func, args } => func.full_span().join(self.span),
+            ExprKind::Call { func, args, pipe_idx } => match pipe_idx {
+                Some(i) => args[i].full_span().join(self.span),
+                None => func.full_span().join(self.span),
+            },
             ExprKind::UnaryOp { kind: _, expr } => self.span.join(expr.full_span()),
-            ExprKind::BinOp { lhs, op: _, rhs }
+            ExprKind::BinOp { lhs, rhs, .. }
             | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
             | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, op: _, rhs } => {
                 lhs.full_span().join(rhs.full_span())
@@ -267,14 +278,16 @@ impl Expr {
                 Some(e) => self.span.join(e.full_span()),
                 None => self.span,
             },
-            ExprKind::If { condition, then_body, else_body } => {
-                self.span.join(else_body.unwrap_or(then_body).full_span())
+            ExprKind::If { condition, then_body, else_body, was_piped } => {
+                let r_span = else_body.unwrap_or(then_body).full_span();
+                if was_piped { condition.full_span() } else { self.span }.join(r_span)
             },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => self.span.join(body.full_span()),
-            ExprKind::While { condition, body } => todo!(),
+            ExprKind::Match { val, else_body, was_piped } => todo!(),
+            ExprKind::For { source: ExprWithTy { expr: l, .. }, iter_var: _, body, was_piped }
+            | ExprKind::While { condition: l, body, was_piped } => {
+                if was_piped { l.full_span() } else { self.span }.join(body.full_span())
+            },
             ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Return { expr } => match expr {
                 Some(expr) => self.span.join(expr.full_span()),
                 None => self.span,
@@ -385,6 +398,31 @@ impl BinOpKind {
             BinOpKind::BitXor => "^=",
             BinOpKind::BitOr => "|=",
             k => panic!("Unexpected binop kind: {:?}", k),
+        }
+    }
+
+    pub fn has_independent_out_ty(&self) -> bool {
+        match self {
+            BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::Lt
+            | BinOpKind::Le
+            | BinOpKind::Gt
+            | BinOpKind::Ge => true,
+            BinOpKind::Mul
+            | BinOpKind::Div
+            | BinOpKind::Mod
+            | BinOpKind::Add
+            | BinOpKind::Sub
+            | BinOpKind::ShiftL
+            | BinOpKind::ShiftR
+            | BinOpKind::BitAnd
+            | BinOpKind::BitXor
+            | BinOpKind::BitOr
+            | BinOpKind::And
+            | BinOpKind::Or
+            | BinOpKind::Range
+            | BinOpKind::RangeInclusive => false,
         }
     }
 }

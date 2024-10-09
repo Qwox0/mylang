@@ -6,6 +6,7 @@
 #![feature(unsigned_is_multiple_of)]
 #![feature(let_chains)]
 #![feature(try_blocks)]
+#![feature(assert_matches)]
 #![allow(unreachable_code)]
 
 pub mod ast;

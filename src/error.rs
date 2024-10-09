@@ -1,7 +1,8 @@
 use crate::{
     codegen::llvm::CodegenError,
-    parser::{lexer::Span, ParseError},
+    parser::{ParseError, lexer::Span},
     sema::SemaError,
+    util::panic_debug,
 };
 use std::fmt::Debug;
 
@@ -10,6 +11,25 @@ pub enum Error {
     Parsing(ParseError),
     Sema(SemaError),
     Codegen(CodegenError),
+}
+
+macro_rules! impl_convert_method {
+    ($fn_name:ident, $variant:ident -> $err_ty:ty) => {
+        pub fn $fn_name(self) -> $err_ty {
+            match self {
+                Error::$variant(err) => err,
+                _ => panic_debug("called"),
+            }
+        }
+    };
+}
+
+impl Error {
+    impl_convert_method! { parse, Parsing -> ParseError }
+
+    impl_convert_method! { sema, Sema -> SemaError }
+
+    impl_convert_method! { codegen, Codegen -> CodegenError }
 }
 
 macro_rules! impl_from {

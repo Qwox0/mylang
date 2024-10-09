@@ -93,7 +93,7 @@ impl DebugAst for Expr {
             },
             ExprKind::Index { lhs, idx } => format!("{}[{}]", lhs.to_text(), idx.to_text()),
             //ExprKind::CompCall { func, args } => panic!(),
-            ExprKind::Call { func, args } => {
+            ExprKind::Call { func, args, pipe_idx } => {
                 format!("{}({})", func.to_text(), many_to_text(args, |e| e.to_text(), ","))
             },
             ExprKind::UnaryOp { kind, expr, .. } => match kind {
@@ -114,7 +114,7 @@ impl DebugAst for Expr {
                 format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
             },
             ExprKind::VarDecl(decl) => var_decl_to_text(decl),
-            ExprKind::If { condition, then_body, else_body } => {
+            ExprKind::If { condition, then_body, else_body, was_piped } => {
                 format!(
                     "if {} {}{}",
                     condition.to_text(),
@@ -122,14 +122,13 @@ impl DebugAst for Expr {
                     opt_to_text(else_body, |e| format!(" else {}", e.to_text()))
                 )
             },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => {
+            ExprKind::Match { val, else_body, was_piped } => todo!(),
+            ExprKind::For { source, iter_var, body, was_piped } => {
                 // TODO: normal syntax
                 format!("{}|for {} {}", source.to_text(), &*iter_var.text, body.to_text())
             },
-            ExprKind::While { condition, body } => todo!(),
+            ExprKind::While { condition, body, was_piped } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Defer(expr) => format!("defer {}", expr.to_text()),
             ExprKind::Return { expr } => {
                 format!("return{}", opt_to_text(expr, |e| format!(" {}", e.to_text())))
@@ -269,7 +268,7 @@ impl DebugAst for Expr {
                 lines.write_tree(idx);
                 lines.write("]");
             },
-            ExprKind::Call { func, args } => {
+            ExprKind::Call { func, args, pipe_idx } => {
                 let func = func;
                 lines.write_tree(func);
                 lines.write("(");
@@ -320,7 +319,7 @@ impl DebugAst for Expr {
                 lines.write_tree(rhs);
             },
             ExprKind::VarDecl(decl) => var_decl_write_tree(decl, lines),
-            ExprKind::If { condition, then_body, else_body } => {
+            ExprKind::If { condition, then_body, else_body, .. } => {
                 let condition = condition;
                 let then_body = then_body;
                 lines.write("if ");
@@ -333,8 +332,8 @@ impl DebugAst for Expr {
                     lines.write_tree(else_body);
                 }
             },
-            ExprKind::Match { val, else_body } => todo!(),
-            ExprKind::For { source, iter_var, body } => {
+            ExprKind::Match { val, else_body, .. } => todo!(),
+            ExprKind::For { source, iter_var, body, .. } => {
                 // TODO: normal syntax
                 lines.write_tree(source);
                 lines.write("|for ");
@@ -342,9 +341,8 @@ impl DebugAst for Expr {
                 lines.write(" ");
                 lines.write_tree(body);
             },
-            ExprKind::While { condition, body } => todo!(),
+            ExprKind::While { condition, body, .. } => todo!(),
             ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Pipe { lhs } => todo!(),
             ExprKind::Defer(expr) => {
                 lines.write("defer ");
                 lines.write_tree(expr);
