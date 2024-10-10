@@ -298,11 +298,32 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 let fields = match expr_ty {
                     Type::Never => return Ok(Symbol::Never),
                     Type::Struct { fields } => fields,
-                    // Type::Ptr(target) => {},
+                    Type::Ptr(target) => {
+                        let Type::Struct { fields } = *target else { unreachable_debug() };
+                        fields
+                    },
+                    _ => todo!("todo: initializer: more complex lhs"),
+                };
+                let struct_ty = self.type_table[&fields];
+                let struct_ptr = if let Some(lhs) = lhs
+                    && matches!(expr_ty, Type::Ptr(_))
+                {
+                    try_compile_expr_as_val!(self, *lhs, expr_ty).ptr_val()
+                } else {
+                    debug_assert_matches!(expr_ty, Type::Struct { .. });
+                    self.builder.build_alloca(struct_ty, "struct")?
+                };
+
+                /*
+                let fields = match expr_ty {
+                    Type::Never => return Ok(Symbol::Never),
+                    Type::Struct { fields } => fields,
+                    Type::Ptr(target) => todo!(),
                     _ => todo!("todo: initializer: more complex lhs"),
                 };
                 let struct_ty = self.type_table[&fields];
                 let struct_ptr = self.builder.build_alloca(struct_ty, "struct")?;
+                */
 
                 let mut is_initialized_field = vec![false; fields.len()];
                 for (f, init) in values.iter() {
@@ -353,6 +374,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     field_idx as u32,
                     &format!("{}_ptr", &*rhs.text),
                 )?;
+                /*
                 if Self::is_register_passable(expr_ty) {
                     reg(self.builder.build_load(
                         self.llvm_type(field.ty).basic_ty(),
@@ -362,6 +384,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 } else {
                     stack_val(field_ptr)
                 }
+                */
+                stack_val(field_ptr)
             },
             &ExprKind::Index { lhs, idx } => {
                 let Type::Array { len, elem_ty } = lhs.ty else { panic!() };
@@ -392,12 +416,32 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
                 reg(self.builder.build_call(func, &args, "call")?)
             },
-            ExprKind::UnaryOp { kind, expr } => {
-                let v = try_compile_expr_as_val!(self, *expr, expr_ty);
+            ExprKind::UnaryOp { kind, expr, .. } => {
+                //let v = try_compile_expr_as_val!(self, *expr, expr_ty);
+                let v = try_not_never!(self.compile_expr(*expr, expr_ty)?);
                 match kind {
-                    UnaryOpKind::AddrOf => todo!(),
+                    UnaryOpKind::AddrOf => {
+                        return reg(match v {
+                            Symbol::Stack(ptr_value) => ptr_value,
+                            Symbol::Register(val) => self.build_stack_alloc_as_ptr(val)?,
+                            _ => todo!(),
+                        });
+                    },
                     UnaryOpKind::AddrMutOf => todo!(),
-                    UnaryOpKind::Deref => todo!(),
+                    _ => {},
+                }
+
+                let v = self.sym_as_val(v, expr_ty)?;
+                match kind {
+                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => unreachable_debug(),
+                    /*
+                    UnaryOpKind::Deref => reg(self.builder.build_load(
+                        self.llvm_type(expr_ty).basic_ty(),
+                        v.ptr_val(),
+                        "deref",
+                    )?),
+                    */
+                    UnaryOpKind::Deref => stack_val(v.ptr_val()),
                     UnaryOpKind::Not => match expr_ty {
                         Type::Bool => reg(self.builder.build_not(v.bool_val(), "not")?),
                         _ => todo!(),
@@ -409,7 +453,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                         _ => todo!(),
                     },
                     UnaryOpKind::Try => todo!(),
-                } // TODO: maybe different return types possible in the future
+                }
             },
             ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
                 let ty = if op.has_independent_out_ty() { *ty } else { expr_ty };
@@ -465,6 +509,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                         };
                         self.builder.build_store(stack_var, binop_res)?;
                     },
+                    Symbol::Register(a) => panic!("{a:?}"),
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
                     Symbol::StructDef { .. } => panic!("cannot assign to struct definition"),
@@ -1125,10 +1170,17 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     }
 
     fn build_stack_alloc(&self, v: impl BasicValue<'ctx>) -> CodegenResult<Symbol<'ctx>> {
+        self.build_stack_alloc_as_ptr(v).and_then(stack_val)
+    }
+
+    fn build_stack_alloc_as_ptr(
+        &self,
+        v: impl BasicValue<'ctx>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
         let v = v.as_basic_value_enum();
         let alloca = self.builder.build_alloca(v.get_type(), "").unwrap_debug();
         self.builder.build_store(alloca, v)?;
-        stack_val(alloca)
+        Ok(alloca)
     }
 
     #[inline]

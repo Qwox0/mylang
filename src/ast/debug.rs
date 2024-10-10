@@ -1,5 +1,5 @@
 use super::{Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind};
-use crate::{ast::VarDecl, ptr::Ptr, type_::Type};
+use crate::{ast::VarDecl, ptr::Ptr, type_::Type, util::unreachable_debug};
 
 pub trait DebugAst {
     fn to_text(&self) -> String;
@@ -96,13 +96,26 @@ impl DebugAst for Expr {
             ExprKind::Call { func, args, pipe_idx } => {
                 format!("{}({})", func.to_text(), many_to_text(args, |e| e.to_text(), ","))
             },
-            ExprKind::UnaryOp { kind, expr, .. } => match kind {
-                UnaryOpKind::AddrOf => format!("{}{}", "&", expr.to_text()),
-                UnaryOpKind::AddrMutOf => format!("{}{}", "&mut ", expr.to_text()),
-                UnaryOpKind::Deref => expr.to_text() + ".*",
-                UnaryOpKind::Not => format!("{}{}", "!", expr.to_text()),
-                UnaryOpKind::Neg => format!("{}{}", "- ", expr.to_text()),
-                UnaryOpKind::Try => expr.to_text() + "?",
+            ExprKind::UnaryOp { kind, expr, is_postfix: false } => {
+                let op = match kind {
+                    UnaryOpKind::AddrOf => "&",
+                    UnaryOpKind::AddrMutOf => "&mut ",
+                    UnaryOpKind::Deref => "*",
+                    UnaryOpKind::Not => "!",
+                    UnaryOpKind::Neg => "-",
+                    UnaryOpKind::Try => unreachable_debug(),
+                };
+                format!("{op}{}", expr.to_text())
+            },
+            ExprKind::UnaryOp { kind, expr, is_postfix: true } => {
+                let op = match kind {
+                    UnaryOpKind::AddrOf => ".&",
+                    UnaryOpKind::AddrMutOf => ".&mut",
+                    UnaryOpKind::Deref => ".*",
+                    UnaryOpKind::Try => "?",
+                    UnaryOpKind::Not | UnaryOpKind::Neg => unreachable_debug(),
+                };
+                format!("{}{op}", expr.to_text())
             },
             ExprKind::BinOp { lhs, op, rhs, .. } => {
                 format!("{} {} {}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
@@ -282,18 +295,26 @@ impl DebugAst for Expr {
                 }
                 lines.write(")");
             },
-            ExprKind::UnaryOp { kind, expr, .. } => {
-                let (pre, post) = match kind {
-                    UnaryOpKind::AddrOf => ("&", ""),
-                    UnaryOpKind::AddrMutOf => ("&mut ", ""),
-                    UnaryOpKind::Deref => ("", ".*"),
-                    UnaryOpKind::Not => ("!", ""),
-                    UnaryOpKind::Neg => ("- ", ""),
-                    UnaryOpKind::Try => ("", "?"),
-                };
-                lines.write(pre);
+            ExprKind::UnaryOp { kind, expr, is_postfix: false } => {
+                lines.write(match kind {
+                    UnaryOpKind::AddrOf => "&",
+                    UnaryOpKind::AddrMutOf => "&mut ",
+                    UnaryOpKind::Deref => "*",
+                    UnaryOpKind::Not => "!",
+                    UnaryOpKind::Neg => "-",
+                    UnaryOpKind::Try => unreachable_debug(),
+                });
                 lines.write_tree(expr);
-                lines.write(post);
+            },
+            ExprKind::UnaryOp { kind, expr, is_postfix: true } => {
+                lines.write_tree(expr);
+                lines.write(match kind {
+                    UnaryOpKind::AddrOf => ".&",
+                    UnaryOpKind::AddrMutOf => ".&mut ",
+                    UnaryOpKind::Deref => ".*",
+                    UnaryOpKind::Try => "?",
+                    UnaryOpKind::Not | UnaryOpKind::Neg => unreachable_debug(),
+                });
             },
             ExprKind::BinOp { lhs, op, rhs, .. } => {
                 let lhs = lhs;

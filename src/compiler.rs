@@ -8,16 +8,16 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
-pub struct Compiler<'c, 'ctx, 'alloc> {
-    pub sema: Sema<'c, 'alloc>,
+pub struct Compiler<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> {
+    pub sema: Sema<'c, 'alloc, DEBUG_TYPES>,
     pub codegen: llvm::Codegen<'ctx, 'alloc>,
 }
 
-impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
+impl<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> Compiler<'c, 'ctx, 'alloc, DEBUG_TYPES> {
     pub fn new(
-        sema: Sema<'c, 'alloc>,
+        sema: Sema<'c, 'alloc, DEBUG_TYPES>,
         codegen: llvm::Codegen<'ctx, 'alloc>,
-    ) -> Compiler<'c, 'ctx, 'alloc> {
+    ) -> Compiler<'c, 'ctx, 'alloc, DEBUG_TYPES> {
         Compiler { sema, codegen }
     }
 

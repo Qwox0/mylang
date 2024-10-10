@@ -131,15 +131,8 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             },
             &mut ExprKind::Literal { kind, code } => {
                 let ty = match kind {
-                    // TODO: better literal handling
                     LitKind::Char => todo!(),
                     LitKind::BChar => todo!(),
-
-                    // use this for the `benches::bench_frontend1` benchmark
-                    // LitKind::Int => Type::Float { bits: 64 },
-                    // LitKind::Float => Type::Float { bits: 64 },
-
-                    // LitKind::Int => Type::Int { bits: 64, is_signed: true },
                     LitKind::Int => Type::IntLiteral,
                     LitKind::Float => Type::FloatLiteral,
                     LitKind::Str => todo!(),
@@ -261,10 +254,10 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     todo!()
                 }
                 for field in fields.iter_mut() {
-                    let f = self.var_decl_to_value(field)?;
-                    if f.is_const() {
-                        todo!()
+                    if field.is_const {
+                        todo!("const struct field")
                     }
+                    let f = self.var_decl_to_value(field)?;
                 }
                 let ty = self.alloc(Type::Struct { fields: *fields })?;
                 Ok(SemaValue::new_const(Type::Type(ty), EMPTY_PTR))
@@ -273,79 +266,45 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
-            ExprKind::Initializer { lhs, fields: values } => {
+            ExprKind::Initializer { lhs: Some(ty_expr), fields: values } => {
                 assert!(!is_const, "todo: const initializer");
-
-                let struct_ty = if let Some(ty_expr) = lhs {
-                    match self.analyze(*ty_expr, false)?.ty {
-                        Type::Never => return Ok(SemaValue::never()),
-                        Type::Type(t) | Type::Ptr(t) => *t,
-                        ty => return err(CannotApplyInitializer { ty }, ty_expr.full_span()),
-                    }
-                } else {
-                    // TODO: benchmark this
-                    let mut a = self
-                        .symbols
-                        .iter()
-                        .filter_map(|s| match s.get_type().ok() {
-                            Some(Type::Type(struct_ty)) => Some(*struct_ty),
-                            _ => None,
-                        })
-                        .filter(|struct_ty| match struct_ty {
-                            Type::Struct { fields } => values
-                                .iter()
-                                .all(|(i, _)| fields.iter().any(|f| *f.ident.text == *i.text)),
-                            _ => false,
-                        });
-                    let Some(fields) = a.next() else {
-                        return err(CannotInferInitializerTy, expr.span.start_pos());
-                    };
-                    if a.next().is_some() {
-                        return err(MultiplePossibleInitializerTy, expr.span.start_pos());
-                    }
-                    fields
+                let lhs_val = self.analyze(*ty_expr, false)?;
+                match lhs_val.ty {
+                    Type::Never => return Ok(SemaValue::never()),
+                    Type::Type(t) => {
+                        self.analyze_initializer(*t, *values, is_const, span)?;
+                        Ok(SemaValue::new(*t))
+                    },
+                    Type::Ptr(t) => {
+                        self.analyze_initializer(*t, *values, is_const, span)?;
+                        Ok(lhs_val)
+                    },
+                    ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
+                }
+            },
+            ExprKind::Initializer { lhs: None, fields: values } => {
+                // TODO: benchmark this
+                let mut struct_ty_iter = self
+                    .symbols
+                    .iter()
+                    .filter_map(|s| match s.get_type().ok() {
+                        Some(Type::Type(struct_ty)) => Some(*struct_ty),
+                        _ => None,
+                    })
+                    .filter(|struct_ty| match struct_ty {
+                        Type::Struct { fields } => values
+                            .iter()
+                            .all(|(i, _)| fields.iter().any(|f| *f.ident.text == *i.text)),
+                        _ => false,
+                    });
+                let Some(struct_ty) = struct_ty_iter.next() else {
+                    return err(CannotInferInitializerTy, expr.span.start_pos());
                 };
-                let Type::Struct { fields } = struct_ty else { panic!("todo: error") };
-
-                let mut is_initialized_field = vec![false; fields.len()];
-                for (f, init) in values.iter() {
-                    match try {
-                        let field = f.text;
-                        let Some((f_idx, f_decl)) = fields.find_field(&*field) else {
-                            err(UnknownField { ty: struct_ty, field }, f.span)?
-                        };
-
-                        if is_initialized_field[f_idx] {
-                            err(DuplicateInInitializer, f.span)?
-                        }
-                        is_initialized_field[f_idx] = true;
-
-                        let (init_ty, span) = match init {
-                            Some(expr) => (self.analyze(*expr, is_const)?.ty, expr.full_span()),
-                            None => (self.get_symbol(field, f.span)?.get_type()?, f.span),
-                        };
-                        debug_assert!(f_decl.ty.is_valid() && f_decl.ty != Type::Never);
-                        debug_assert!(init_ty.is_valid());
-                        if !f_decl.ty.matches(init_ty) {
-                            err(MismatchedTypes { expected: f_decl.ty, got: init_ty }, span)?
-                        }
-                    } {
-                        Ok(()) => {},
-                        NotFinished => NotFinished?,
-                        Err(err) => self.errors.push(err),
-                    }
+                if struct_ty_iter.next().is_some() {
+                    return err(MultiplePossibleInitializerTy, expr.span.start_pos());
                 }
-
-                for missing_field in is_initialized_field
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(_, is_init)| !is_init)
-                    .map(|(idx, _)| fields[idx])
-                    .filter(|f| f.default.is_none())
-                {
-                    let field = missing_field.ident.text;
-                    self.errors.push(err_val(MissingFieldInInitializer { field }, expr.span))
-                }
+                drop(struct_ty_iter);
+                self.analyze_initializer(struct_ty, *values, is_const, span)?;
                 Ok(SemaValue::new(struct_ty))
             },
             ExprKind::Dot { lhs, rhs } => {
@@ -399,13 +358,13 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     _ => err(CallOfANotFunction, span),
                 }
             },
-            &mut ExprKind::UnaryOp { kind, expr } => {
+            &mut ExprKind::UnaryOp { kind, expr, .. } => {
                 assert!(!is_const, "todo: PreOp in const");
                 let ty = self.analyze(expr, is_const)?.ty;
-                let is_valid = match (kind, ty) {
+                let out_ty = match (kind, ty) {
                     (_, Type::Unset | Type::Unevaluated(_)) => return err(CannotInfer, span),
-                    (_, Type::Void) => false,
-                    (_, Type::Never) => true,
+                    (_, Type::Void) => None,
+                    (_, Type::Never) => Some(ty),
                     (
                         UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf,
                         Type::Ptr(..)
@@ -418,9 +377,9 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         | Type::Struct { .. }
                         | Type::Union { .. }
                         | Type::Enum { .. },
-                    ) => true,
+                    ) => Some(Type::Ptr(self.alloc(ty)?)),
                     (UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf, Type::Function(_)) => todo!(),
-                    (UnaryOpKind::Deref, Type::Ptr(_)) => true,
+                    (UnaryOpKind::Deref, Type::Ptr(pointee)) => Some(*pointee),
                     (
                         UnaryOpKind::Deref,
                         Type::Int { .. }
@@ -430,8 +389,10 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         | Type::FloatLiteral
                         | Type::Function(_)
                         | Type::Array { .. },
-                    ) => false,
-                    (UnaryOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => true,
+                    ) => None,
+                    (UnaryOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => {
+                        Some(ty)
+                    },
                     (
                         UnaryOpKind::Not,
                         Type::Ptr(_)
@@ -439,31 +400,30 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         | Type::FloatLiteral
                         | Type::Function(_)
                         | Type::Array { .. },
-                    ) => false,
+                    ) => None,
                     (
                         UnaryOpKind::Neg,
                         Type::Int { .. }
                         | Type::IntLiteral
                         | Type::Float { .. }
                         | Type::FloatLiteral,
-                    ) => true,
+                    ) => Some(ty),
                     (
                         UnaryOpKind::Neg,
                         Type::Ptr(_) | Type::Bool | Type::Function(_) | Type::Array { .. },
-                    ) => false,
+                    ) => None,
                     (
                         _,
                         Type::Struct { .. }
                         | Type::Union { .. }
                         | Type::Enum { .. }
                         | Type::Type(_),
-                    ) => todo!(),
+                    ) => todo!("UnaryOp {kind:?} for {ty:?}"),
                     (UnaryOpKind::Try, _) => todo!("try"),
                 };
-                if is_valid {
-                    Ok(SemaValue::new(ty))
-                } else {
-                    err(InvalidPreOp { ty, kind }, span)
+                match out_ty {
+                    Some(t) => Ok(SemaValue::new(t)),
+                    None => err(InvalidPreOp { ty, kind }, span),
                 }
             },
             ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
@@ -573,7 +533,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             ExprKind::Match { val, else_body, .. } => todo!(),
             ExprKind::For { source, iter_var, body, .. } => {
                 let arr = try_not_never!(self.analyze_typed(source, is_const)?);
-                let Type::Array { len: count, elem_ty } = arr.ty else {
+                let Type::Array { len: count, elem_ty } = arr.ty.finalize() else {
                     todo!("for over non-array")
                 };
 
@@ -638,6 +598,57 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             expr.ty = val.ty;
         }
         res
+    }
+
+    pub fn analyze_initializer(
+        &mut self,
+        struct_ty: Type,
+        initializer_values: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
+        is_const: bool,
+        initializer_span: Span,
+    ) -> SemaResult<()> {
+        let Type::Struct { fields } = struct_ty else { panic!("todo: error") };
+
+        let mut is_initialized_field = vec![false; fields.len()];
+        for (f, init) in initializer_values.iter() {
+            match try {
+                let field = f.text;
+                let Some((f_idx, f_decl)) = fields.find_field(&*field) else {
+                    err(UnknownField { ty: struct_ty, field }, f.span)?
+                };
+
+                if is_initialized_field[f_idx] {
+                    err(DuplicateInInitializer, f.span)?
+                }
+                is_initialized_field[f_idx] = true;
+
+                let (init_ty, span) = match init {
+                    Some(expr) => (self.analyze(*expr, is_const)?.ty, expr.full_span()),
+                    None => (self.get_symbol(field, f.span)?.get_type()?, f.span),
+                };
+                debug_assert!(f_decl.ty.is_valid() && f_decl.ty != Type::Never);
+                debug_assert!(init_ty.is_valid());
+                if !f_decl.ty.matches(init_ty) {
+                    err(MismatchedTypes { expected: f_decl.ty, got: init_ty }, span)?
+                }
+            } {
+                Ok(()) => {},
+                NotFinished => NotFinished?,
+                Err(err) => self.errors.push(err),
+            }
+        }
+
+        for missing_field in is_initialized_field
+            .into_iter()
+            .enumerate()
+            .filter(|(_, is_init)| !is_init)
+            .map(|(idx, _)| fields[idx])
+            .filter(|f| f.default.is_none())
+        {
+            let field = missing_field.ident.text;
+            self.errors.push(err_val(MissingFieldInInitializer { field }, initializer_span))
+        }
+        Ok(())
     }
 
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire

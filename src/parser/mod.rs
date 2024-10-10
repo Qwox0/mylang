@@ -6,7 +6,7 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkerKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind,
-        VarDecl, VarDeclList,
+        VarDecl, VarDeclList, debug::DebugAst,
     },
     ptr::Ptr,
     scratch_pool::ScratchPool,
@@ -130,7 +130,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let params = self.alloc_one_val_slice(param)?.into();
                 return self.function_tail(params, span);
             },
-            FollowingOperator::PostOp(kind) => expr!(UnaryOp { kind, expr: lhs }, span),
+            FollowingOperator::PostOp(kind) => {
+                expr!(UnaryOp { kind, expr: lhs, is_postfix: true }, span)
+            },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
                 expr!(BinOp { lhs, op, rhs, val_ty: Type::Unset }, span)
@@ -381,20 +383,21 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
-                expr!(UnaryOp { kind: UnaryOpKind::Not, expr }, span)
+                expr!(UnaryOp { kind: UnaryOpKind::Not, expr, is_postfix: false }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
-                expr!(UnaryOp { kind: UnaryOpKind::Neg, expr }, span)
+                expr!(UnaryOp { kind: UnaryOpKind::Neg, expr, is_postfix: false }, span)
             },
             TokenKind::Arrow => {
                 self.lex.advance();
                 return self.function_tail(self.alloc_empty_slice().into(), span);
             },
             TokenKind::Asterisk => {
-                let is_mut =
-                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                // TODO: deref prefix
+                self.advanced().ws0();
+                let is_mut = self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let pointee = self.expr().context("pointee type")?;
                 expr!(Ptr { is_mut, ty: ty(pointee) })
             },
@@ -403,7 +406,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let kind = if is_mut { UnaryOpKind::AddrMutOf } else { UnaryOpKind::AddrOf };
                 let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
-                expr!(UnaryOp { kind, expr })
+                expr!(UnaryOp { kind, expr, is_postfix: false })
             },
             //TokenKind::Pipe => todo!("TokenKind::Pipe"),
             //TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
@@ -966,6 +969,30 @@ impl<'code, 'alloc> StmtIter<'code, 'alloc> {
     #[inline]
     pub fn parse_all_or_fail(code: &'code Code, alloc: &'alloc bumpalo::Bump) -> Vec<Ptr<Expr>> {
         Self::parse(code, alloc).collect_or_fail(code)
+    }
+
+    pub fn try_parse_all(
+        code: &'code Code,
+        alloc: &'alloc bumpalo::Bump,
+    ) -> Result<Vec<Ptr<Expr>>, Vec<ParseError>> {
+        collect_all_result_errors(Self::parse(code, alloc))
+    }
+
+    pub fn parse_and_debug(code: &'code Code) -> Result<(), ()> {
+        let mut has_err = false;
+        for s in StmtIter::parse(code, &bumpalo::Bump::new()) {
+            match s {
+                Ok(s) => {
+                    println!("stmt @ {:?}", s);
+                    s.print_tree();
+                },
+                Err(e) => {
+                    display_spanned_error(&e, code);
+                    has_err = true;
+                },
+            }
+        }
+        if has_err { Err(()) } else { Ok(()) }
     }
 }
 

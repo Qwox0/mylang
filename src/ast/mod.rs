@@ -98,6 +98,9 @@ pub enum ExprKind {
     },
 
     /// `alloc(MyStruct).{ a = <expr>, b, }`
+    ///
+    /// [`Type`] -> value
+    /// `*T` -> `*T`
     Initializer {
         lhs: Option<Ptr<Expr>>,
         fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
@@ -135,6 +138,7 @@ pub enum ExprKind {
     UnaryOp {
         kind: UnaryOpKind,
         expr: Ptr<Expr>,
+        is_postfix: bool,
     },
     /// `<lhs> op <lhs>`
     /// `      ^^ expr.span`
@@ -268,7 +272,7 @@ impl Expr {
                 Some(i) => args[i].full_span().join(self.span),
                 None => func.full_span().join(self.span),
             },
-            ExprKind::UnaryOp { kind: _, expr } => self.span.join(expr.full_span()),
+            ExprKind::UnaryOp { expr, .. } => self.span.join(expr.full_span()),
             ExprKind::BinOp { lhs, rhs, .. }
             | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
             | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, op: _, rhs } => {

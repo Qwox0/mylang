@@ -210,7 +210,6 @@ mymain :: -> {
 // d :: -> 10;
 ";
     let code = code.as_ref();
-    let stmts = StmtIter::parse(code, &alloc);
 
     if DEBUG_TOKENS {
         println!("### Tokens:");
@@ -223,24 +222,15 @@ mymain :: -> {
 
     if DEBUG_AST {
         println!("### AST Nodes:");
-        for s in stmts.clone() {
-            match s {
-                Ok(s) => {
-                    println!("stmt @ {:?}", s);
-                    s.print_tree();
-                },
-                Err(e) => {
-                    display_spanned_error(&e, code);
-                    std::process::exit(1)
-                },
-            }
+        if let Err(()) = StmtIter::parse_and_debug(code) {
+            std::process::exit(1)
         }
         println!();
     }
 
     println!("### Frontend:");
     let frontend_parse_start = Instant::now();
-    let stmts = stmts.collect_or_fail(code);
+    let stmts = StmtIter::parse_all_or_fail(code, &alloc);
     let frontend_parse_duration = frontend_parse_start.elapsed();
 
     let sema = sema::Sema::<DEBUG_TYPES>::new(code, &alloc);
@@ -514,7 +504,7 @@ pub defer_test :: -> {
                 panic!("Parse ERROR")
             });
 
-            let sema = sema::Sema::new(code, &alloc);
+            let sema = sema::Sema::<false>::new(code, &alloc);
             let context = Context::create();
             let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
             let mut compiler = Compiler::new(sema, codegen);
