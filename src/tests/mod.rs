@@ -16,7 +16,7 @@ pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = false;
-const DEBUG_TYPES: bool = true;
+const DEBUG_TYPES: bool = false;
 
 pub fn jit_run_test_impl<RetTy>(code: &impl std::fmt::Display) -> Result<RetTy, Error> {
     use crate::{
@@ -28,7 +28,7 @@ pub fn jit_run_test_impl<RetTy>(code: &impl std::fmt::Display) -> Result<RetTy, 
 
     let alloc = bumpalo::Bump::new();
 
-    let code = format!("test :: -> {code};");
+    let code = format!("test :: -> {{ {code} }};");
     let code = code.as_ref();
 
     if DEBUG_TOKENS {

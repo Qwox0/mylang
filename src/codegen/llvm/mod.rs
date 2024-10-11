@@ -276,54 +276,41 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 res
             },
             &ExprKind::StructDef(fields) => {
-                // TODO: Is it possible to set the struct name
-                /*
-                // let ty = self.context.opaque_struct_type(var_name);
+                // TODO: Is it possible to set the struct name?
                 let field_types =
                     fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
-                // if !ty.set_body(&field_types, false) {
-                //     panic!()
-                // }
                 let ty = self.context.struct_type(&field_types, false);
                 self.type_table.insert(fields, ty);
-                Symbol::StructDef { fields, ty }
-                */
-                todo!()
+                Ok(Symbol::StructDef { fields, ty })
             },
             ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs, fields: values } => {
-                let fields = match expr_ty {
-                    Type::Never => return Ok(Symbol::Never),
-                    Type::Struct { fields } => fields,
-                    Type::Ptr(target) => {
-                        let Type::Struct { fields } = *target else { unreachable_debug() };
-                        fields
+                let (fields, struct_ty, struct_ptr) = match (lhs, expr_ty) {
+                    (_, Type::Never) => return Ok(Symbol::Never),
+                    (lhs, t @ Type::Struct { fields }) => {
+                        if let Some(lhs) = lhs {
+                            self.compile_expr(*lhs, t)?;
+                        }
+                        let struct_ty = self.type_table[&fields];
+                        let ptr = self.builder.build_alloca(struct_ty, "struct")?;
+                        (fields, struct_ty, ptr)
                     },
-                    _ => todo!("todo: initializer: more complex lhs"),
+                    (Some(lhs), Type::Ptr(pointee)) => {
+                        let Type::Struct { fields } = *pointee else { unreachable_debug() };
+                        let struct_ty = self.type_table[&fields];
+                        let ptr = try_compile_expr_as_val!(self, *lhs, expr_ty).ptr_val();
+                        (fields, struct_ty, ptr)
+                    },
+                    (Some(lhs), Type::Struct { fields }) => {
+                        let struct_ty = self.type_table[&fields];
+                        let ptr = self.builder.build_alloca(struct_ty, "struct")?;
+                        (fields, struct_ty, ptr)
+                    },
+                    _ => unreachable_debug(),
                 };
-                let struct_ty = self.type_table[&fields];
-                let struct_ptr = if let Some(lhs) = lhs
-                    && matches!(expr_ty, Type::Ptr(_))
-                {
-                    try_compile_expr_as_val!(self, *lhs, expr_ty).ptr_val()
-                } else {
-                    debug_assert_matches!(expr_ty, Type::Struct { .. });
-                    self.builder.build_alloca(struct_ty, "struct")?
-                };
-
-                /*
-                let fields = match expr_ty {
-                    Type::Never => return Ok(Symbol::Never),
-                    Type::Struct { fields } => fields,
-                    Type::Ptr(target) => todo!(),
-                    _ => todo!("todo: initializer: more complex lhs"),
-                };
-                let struct_ty = self.type_table[&fields];
-                let struct_ptr = self.builder.build_alloca(struct_ty, "struct")?;
-                */
 
                 let mut is_initialized_field = vec![false; fields.len()];
                 for (f, init) in values.iter() {

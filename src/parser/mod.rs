@@ -105,14 +105,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             FollowingOperator::Dot => {
                 let lhs = ExprWithTy::untyped(lhs);
                 let rhs = self.ws0().ident().context("dot rhs")?;
-                expr!(Dot { lhs, rhs }, span.join(rhs.span))
+                expr!(Dot { lhs, rhs }, span)
             },
             FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None),
             FollowingOperator::Index => {
                 let lhs = ExprWithTy::untyped(lhs);
                 let idx = ExprWithTy::untyped(self.expr()?);
                 let close = self.tok(TokenKind::CloseBracket)?;
-                expr!(Index { lhs, idx }, span.join(close.span))
+                expr!(Index { lhs, idx }, close.span)
             },
             FollowingOperator::Initializer => {
                 let (fields, close_b_span) = self.parse_initializer_fields()?;

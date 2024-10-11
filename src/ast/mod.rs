@@ -98,6 +98,7 @@ pub enum ExprKind {
     },
 
     /// `alloc(MyStruct).{ a = <expr>, b, }`
+    /// `               ^^^^^^^^^^^^^^^^^^^` expr.span
     ///
     /// [`Type`] -> value
     /// `*T` -> `*T`
@@ -106,12 +107,14 @@ pub enum ExprKind {
         fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
     },
 
-    /// [`expr`] . [`expr`]
+    /// `expr . ident`
+    /// `     ^` expr.span
     Dot {
         lhs: ExprWithTy,
         rhs: Ident,
     },
     /// `<lhs> [ <idx> ]`
+    /// `              ^` expr.span
     Index {
         lhs: ExprWithTy,
         idx: ExprWithTy,
@@ -266,8 +269,8 @@ impl Expr {
             ExprKind::Initializer { lhs, fields } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
             },
-            ExprKind::Dot { lhs, rhs } => lhs.expr.full_span().join(rhs.span),
-            ExprKind::Index { lhs, idx } => todo!(),
+            ExprKind::Dot { lhs, rhs } => lhs.full_span().join(rhs.span),
+            ExprKind::Index { lhs, idx } => lhs.full_span().join(self.span),
             ExprKind::Call { func, args, pipe_idx } => match pipe_idx {
                 Some(i) => args[i].full_span().join(self.span),
                 None => func.full_span().join(self.span),

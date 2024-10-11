@@ -250,9 +250,9 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 })
             },
             ExprKind::StructDef(fields) => {
-                if !is_const {
-                    todo!()
-                }
+                // if !is_const {
+                //     todo!()
+                // }
                 for field in fields.iter_mut() {
                     if field.is_const {
                         todo!("const struct field")
@@ -325,8 +325,9 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 let Type::Array { len, elem_ty } = arr.ty else {
                     return err(CanOnlyIndexArrays, lhs.full_span());
                 };
-                let idx = try_not_never!(self.analyze_typed(idx, is_const)?);
-                assert!(idx.is_int(), "todo: non-int index");
+                let idx_val = try_not_never!(self.analyze_typed(idx, is_const)?).finalize_ty();
+                assert!(idx_val.is_int(), "todo: non-int index");
+                idx.ty = idx_val.ty;
                 Ok(SemaValue::new(*elem_ty))
             },
             ExprKind::Call { func: f, args, .. } => {
