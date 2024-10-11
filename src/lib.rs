@@ -24,4 +24,6 @@ pub mod type_;
 pub mod util;
 
 #[cfg(test)]
+mod benches;
+#[cfg(test)]
 mod tests;

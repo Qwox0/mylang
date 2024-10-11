@@ -46,7 +46,7 @@ impl DebugAst for Expr {
             },
             ExprKind::Fn(Fn { params, ret_type, body }) => format!(
                 "({})->{}{}",
-                many_to_text(&*params, |decl| var_decl_to_text(decl), ","),
+                many_to_text(&*params, |decl, _| var_decl_to_text(decl), ","),
                 ret_type.to_text(),
                 if matches!(body.kind, ExprKind::Block { .. }) {
                     body.to_text()
@@ -58,12 +58,12 @@ impl DebugAst for Expr {
             ExprKind::Block { stmts, has_trailing_semicolon } => {
                 format!(
                     "{{{}{}}}",
-                    many_to_text(stmts, |a| a.to_text(), ";"),
+                    many_to_text(stmts, |a, _| a.to_text(), ";"),
                     if *has_trailing_semicolon { ";" } else { "" }
                 )
             },
             ExprKind::StructDef(fields) => {
-                format!("struct {{ {} }}", many_to_text(fields, |f| var_decl_to_text(f), ","))
+                format!("struct {{ {} }}", many_to_text(fields, |f, _| var_decl_to_text(f), ","))
             },
             ExprKind::UnionDef(..) => panic!(),
             ExprKind::EnumDef {} => panic!(),
@@ -79,7 +79,7 @@ impl DebugAst for Expr {
                     opt_expr_to_text(lhs),
                     many_to_text(
                         fields,
-                        |(f, val)| format!(
+                        |(f, val), _| format!(
                             "{}{}",
                             f.text.as_ref(),
                             opt_to_text(val, |v| format!("={}", v.to_text())),
@@ -94,7 +94,22 @@ impl DebugAst for Expr {
             ExprKind::Index { lhs, idx } => format!("{}[{}]", lhs.to_text(), idx.to_text()),
             //ExprKind::CompCall { func, args } => panic!(),
             ExprKind::Call { func, args, pipe_idx } => {
-                format!("{}({})", func.to_text(), many_to_text(args, |e| e.to_text(), ","))
+                format!(
+                    "{}{}({})",
+                    pipe_idx.map(|idx| args[idx].to_text() + "|").unwrap_or_default(),
+                    func.to_text(),
+                    many_to_text(
+                        args,
+                        |e, idx| {
+                            if pipe_idx.is_some_and(|i| i == idx) {
+                                "^".to_string()
+                            } else {
+                                e.to_text()
+                            }
+                        },
+                        ","
+                    )
+                )
             },
             ExprKind::UnaryOp { kind, expr, is_postfix: false } => {
                 let op = match kind {
@@ -282,13 +297,19 @@ impl DebugAst for Expr {
                 lines.write("]");
             },
             ExprKind::Call { func, args, pipe_idx } => {
-                let func = func;
+                if let Some(idx) = *pipe_idx {
+                    lines.write_tree(&args[idx]);
+                    lines.write("|");
+                }
                 lines.write_tree(func);
                 lines.write("(");
                 let len = args.len();
                 for (idx, arg) in args.into_iter().enumerate() {
-                    let arg = arg;
-                    lines.write_tree(arg);
+                    if pipe_idx.is_some_and(|i| i == idx) {
+                        lines.write("^");
+                    } else {
+                        lines.write_tree(arg);
+                    }
                     if idx + 1 != len {
                         lines.write(",");
                     }
@@ -340,11 +361,14 @@ impl DebugAst for Expr {
                 lines.write_tree(rhs);
             },
             ExprKind::VarDecl(decl) => var_decl_write_tree(decl, lines),
-            ExprKind::If { condition, then_body, else_body, .. } => {
-                let condition = condition;
-                let then_body = then_body;
-                lines.write("if ");
-                lines.write_tree(condition);
+            ExprKind::If { condition, then_body, else_body, was_piped } => {
+                if *was_piped {
+                    lines.write_tree(condition);
+                    lines.write("|if ");
+                } else {
+                    lines.write("if ");
+                    lines.write_tree(condition);
+                }
                 lines.write(" ");
                 lines.write_tree(then_body);
                 if let Some(else_body) = else_body {
@@ -353,8 +377,11 @@ impl DebugAst for Expr {
                     lines.write_tree(else_body);
                 }
             },
-            ExprKind::Match { val, else_body, .. } => todo!(),
-            ExprKind::For { source, iter_var, body, .. } => {
+            ExprKind::Match { val, else_body, was_piped } => todo!(),
+            ExprKind::For { source, iter_var, body, was_piped } => {
+                if !was_piped {
+                    todo!()
+                }
                 // TODO: normal syntax
                 lines.write_tree(source);
                 lines.write("|for ");
@@ -560,14 +587,19 @@ pub fn var_decl_write_tree(
 
 pub fn many_to_text<T>(
     elements: &[T],
-    single_to_text: impl FnMut(&T) -> String,
+    mut single_to_text: impl FnMut(&T, usize) -> String,
     sep: &str,
 ) -> String {
-    elements.iter().map(single_to_text).intersperse(sep.to_string()).collect()
+    elements
+        .iter()
+        .enumerate()
+        .map(|(idx, t)| single_to_text(t, idx))
+        .intersperse(sep.to_string())
+        .collect()
 }
 
 pub fn many_expr_to_text<T: DebugAst>(elements: &Ptr<[T]>, sep: &str) -> String {
-    many_to_text(elements, |t| t.to_text(), sep)
+    many_to_text(elements, |t, _| t.to_text(), sep)
 }
 
 pub fn opt_to_text<T>(opt_expr: &Option<T>, inner: impl FnOnce(&T) -> String) -> String {

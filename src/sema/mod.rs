@@ -334,7 +334,6 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 assert!(!is_const, "todo: const call");
                 // self.analyze(*fn_expr)?;
                 // debug_assert!(fn_expr.ty.is_valid());
-                //todo!("test: {:?}", f.ty);
                 let Result::Ok(func) = f.try_to_ident() else {
                     todo!("non ident function call")
                 };
