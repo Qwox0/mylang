@@ -4,7 +4,7 @@ use self::jit::Jit;
 use crate::{
     ast::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
-        VarDecl, VarDeclList,
+        VarDecl, VarDeclList, debug::DebugAst,
     },
     cli::DebugOptions,
     defer_stack::DeferStack,
@@ -126,6 +126,7 @@ pub struct Codegen<'ctx, 'alloc> {
 
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
+    cur_loop: Option<Loop<'ctx>>,
 
     alloc: &'alloc bumpalo::Bump,
 }
@@ -145,6 +146,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             type_table: HashMap::new(),
             defer_stack: DeferStack::default(),
             cur_fn: None,
+            cur_loop: None,
             alloc,
         }
     }
@@ -496,7 +498,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                         };
                         self.builder.build_store(stack_var, binop_res)?;
                     },
-                    Symbol::Register(a) => panic!("{a:?}"),
+                    Symbol::Register(_) => todo!("mut sema check"),
                     Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
                     Symbol::Function { .. } => panic!("cannot assign to function"),
                     Symbol::StructDef { .. } => panic!("cannot assign to struct definition"),
@@ -647,8 +649,12 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 let val = self.build_index(arr_ty, arr_ptr, idx_int, *elem_ty)?;
                 self.symbols.insert(&*iter_var.text, val);
 
-                try_not_never!(self.compile_expr(*body, Type::Void)?);
-                self.builder.build_unconditional_branch(inc_bb);
+                let outer_loop = self.cur_loop.replace(Loop { continue_bb: inc_bb, end_bb });
+                let out = self.compile_expr(*body, Type::Void)?;
+                self.cur_loop = outer_loop;
+                if !matches!(out, Symbol::Never) {
+                    self.builder.build_unconditional_branch(inc_bb);
+                }
 
                 // inc
                 self.builder.position_at_end(inc_bb);
@@ -662,7 +668,36 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
-            ExprKind::While { condition, body, .. } => todo!(),
+            ExprKind::While { condition, body, .. } => {
+                let func = self.cur_fn.unwrap_debug();
+                let cond_bb = self.context.append_basic_block(func, "while.cond");
+                let body_bb = self.context.append_basic_block(func, "while.body");
+                let end_bb = self.context.append_basic_block(func, "while.end");
+
+                // entry
+                self.builder.build_unconditional_branch(cond_bb);
+
+                // cond
+                self.builder.position_at_end(cond_bb);
+                let cond = try_compile_expr_as_val!(self, *condition, Type::Bool).bool_val();
+                self.builder.build_conditional_branch(cond, body_bb, end_bb)?;
+
+                // body
+                self.builder.position_at_end(body_bb);
+                let outer_loop = self.cur_loop.replace(Loop { continue_bb: cond_bb, end_bb });
+                // try_not_never!(self.compile_expr(*body, Type::Void)?);
+                let out = self.compile_expr(*body, Type::Void)?;
+                self.cur_loop = outer_loop;
+                if !matches!(out, Symbol::Never) {
+                    self.builder.build_unconditional_branch(cond_bb);
+                }
+
+                // end
+                self.builder.position_at_end(end_bb);
+                debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
+                println!("while body: {:?}", expr_ty);
+                Ok(Symbol::Void)
+            },
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Defer(inner) => {
                 self.defer_stack.push_expr(*inner);
@@ -677,6 +712,19 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     self.builder.build_return(None)?;
                 }
                 // debug_assert_matches!(expr_ty, Type::Never | Type::Unset);
+                Ok(Symbol::Never)
+            },
+            ExprKind::Break { expr } => {
+                if expr.is_some() {
+                    todo!("break with expr")
+                }
+                let bb = self.cur_loop.unwrap_debug().end_bb;
+                self.builder.build_unconditional_branch(bb);
+                Ok(Symbol::Never)
+            },
+            ExprKind::Continue => {
+                let bb = self.cur_loop.unwrap_debug().continue_bb;
+                self.builder.build_unconditional_branch(bb);
                 Ok(Symbol::Never)
             },
             ExprKind::Semicolon(_) => todo!(),
@@ -732,7 +780,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
-        self.cur_fn = Some(func);
+        let outer_fn = self.cur_fn.replace(func);
 
         self.open_scope();
         let res = try {
@@ -763,10 +811,12 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 #[cfg(debug_assertions)]
                 self.module.print_to_stderr();
                 unsafe { func.delete() };
+                unreachable_debug();
                 Err(CodegenError::InvalidGeneratedFunction)?
             }
         };
         self.close_scope();
+        self.cur_fn = outer_fn;
         res
     }
 
@@ -1388,4 +1438,10 @@ fn reg_sym<'ctx>(v: impl AnyValue<'ctx>) -> Symbol<'ctx> {
 
 fn stack_val<'ctx>(ptr: PointerValue<'ctx>) -> CodegenResult<Symbol<'ctx>> {
     Ok(Symbol::Stack(ptr))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Loop<'ctx> {
+    continue_bb: BasicBlock<'ctx>,
+    end_bb: BasicBlock<'ctx>,
 }

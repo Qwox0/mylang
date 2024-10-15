@@ -1,5 +1,3 @@
-#![feature(test)]
-
 use inkwell::context::Context;
 use mylang::{
     ast::debug::DebugAst,
@@ -166,8 +164,8 @@ fn read_code_file(path: &Path) -> String {
 
 fn dev() {
     const DEBUG_TOKENS: bool = false;
-    const DEBUG_AST: bool = false;
-    const DEBUG_TYPES: bool = false;
+    const DEBUG_AST: bool = true;
+    const DEBUG_TYPES: bool = true;
     const DEBUG_TYPED_AST: bool = false;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = false;
@@ -321,7 +319,8 @@ mymain :: -> {
                 Type::Float { .. } => "../../test-double.c",
                 _ => todo!(),
             };
-            std::fs::remove_file("target/build_dev/test.c").unwrap();
+            let _ = std::fs::create_dir("target/build_dev");
+            let _ = std::fs::remove_file("target/build_dev/test.c");
             std::os::unix::fs::symlink(c_file, "target/build_dev/test.c").unwrap();
             let filename = "target/build_dev/output.o";
             compiler.codegen.compile_to_obj_file(&target_machine, filename).unwrap();

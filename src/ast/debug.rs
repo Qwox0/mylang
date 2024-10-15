@@ -155,12 +155,22 @@ impl DebugAst for Expr {
                 // TODO: normal syntax
                 format!("{}|for {} {}", source.to_text(), &*iter_var.text, body.to_text())
             },
-            ExprKind::While { condition, body, was_piped } => todo!(),
+            ExprKind::While { condition, body, was_piped } => {
+                if *was_piped {
+                    format!("{}|while {}", condition.to_text(), body.to_text())
+                } else {
+                    format!("while {} {}", condition.to_text(), body.to_text())
+                }
+            },
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Defer(expr) => format!("defer {}", expr.to_text()),
             ExprKind::Return { expr } => {
                 format!("return{}", opt_to_text(expr, |e| format!(" {}", e.to_text())))
             },
+            ExprKind::Break { expr } => {
+                format!("break{}", opt_to_text(expr, |e| format!(" {}", e.to_text())))
+            },
+            ExprKind::Continue => format!("continue"),
             ExprKind::Semicolon(expr) => format!("{};", opt_expr_to_text(expr)),
         }
     }
@@ -389,7 +399,17 @@ impl DebugAst for Expr {
                 lines.write(" ");
                 lines.write_tree(body);
             },
-            ExprKind::While { condition, body, .. } => todo!(),
+            ExprKind::While { condition, body, was_piped } => {
+                if *was_piped {
+                    lines.write_tree(condition);
+                    lines.write("|while");
+                } else {
+                    lines.write("while ");
+                    lines.write_tree(condition);
+                }
+                lines.write(" ");
+                lines.write_tree(body);
+            },
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Defer(expr) => {
                 lines.write("defer ");
@@ -403,6 +423,15 @@ impl DebugAst for Expr {
                     lines.write_tree(expr);
                 }
             },
+            ExprKind::Break { expr } => {
+                lines.write("break");
+                if let Some(expr) = expr {
+                    let expr = expr;
+                    lines.write(" ");
+                    lines.write_tree(expr);
+                }
+            },
+            ExprKind::Continue => lines.write("continue"),
             ExprKind::Semicolon(expr) => {
                 if let Some(expr) = expr {
                     lines.write_tree(expr);

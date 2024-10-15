@@ -1,11 +1,13 @@
 use crate::{error::Error, parser::parser_helper::ParserInterface, util::display_spanned_error};
 
+mod for_loop;
 mod initializer;
 mod logic_op;
 mod parse_array;
 mod parse_function;
 mod ptr;
 mod todo;
+mod while_loop;
 
 macro_rules! jit_run_test {
     ($code:expr => $ret_type:ty) => {
@@ -15,7 +17,7 @@ macro_rules! jit_run_test {
 pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
-const DEBUG_AST: bool = false;
+const DEBUG_AST: bool = true;
 const DEBUG_TYPES: bool = false;
 
 pub fn jit_run_test_impl<RetTy>(code: &impl std::fmt::Display) -> Result<RetTy, Error> {

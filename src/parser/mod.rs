@@ -283,8 +283,15 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     self.advanced().expr().opt().context("return expr")?.map(ExprWithTy::untyped);
                 expr!(Return { expr }, span)
             },
-            TokenKind::Keyword(Keyword::Break) => todo!(),
-            TokenKind::Keyword(Keyword::Continue) => todo!(),
+            TokenKind::Keyword(Keyword::Break) => {
+                let expr =
+                    self.advanced().expr().opt().context("break expr")?.map(ExprWithTy::untyped);
+                expr!(Break { expr }, span)
+            },
+            TokenKind::Keyword(Keyword::Continue) => {
+                self.lex.advance();
+                expr!(Continue, span)
+            },
             TokenKind::Keyword(Keyword::Defer) => {
                 let expr = self.advanced().expr().context("defer expr")?;
                 expr!(Defer(expr), span)
@@ -941,6 +948,12 @@ impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.parser.top_level_item() {
             Err(ParseError { kind: ParseErrorKind::Finished, .. }) => return None,
+            res @ Err(ParseError { kind: ParseErrorKind::UnexpectedStart(_), .. }) => {
+                // HACK: If the next Token results in an UnexpectedStart error, this Iterator
+                // becomes infinite. I'm not sure if this solution is valid in general.
+                self.parser.lex.advance();
+                Some(res)
+            },
             res => Some(res),
         }
     }

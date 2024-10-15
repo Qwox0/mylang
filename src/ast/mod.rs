@@ -232,6 +232,10 @@ pub enum ExprKind {
     Return {
         expr: Option<ExprWithTy>,
     },
+    Break {
+        expr: Option<ExprWithTy>,
+    },
+    Continue,
 
     Semicolon(Option<Ptr<Expr>>),
 }

@@ -27,15 +27,15 @@ cmd="cargo run"
 info "$cmd"
 #RUSTFLAGS=-Awarnings $cmd || error "Failed" 0
 #RUST_BACKTRACE=1 $cmd || error "Failed" 0 # slows down the Frontend (especially in non-release mode)
-$cmd || error "Failed" 0
+$cmd || error "Failed" 1
 
 cmd="gcc target/build_dev/test.c target/build_dev/output.o -o target/build_dev/test"
 info "$cmd"
-$cmd || error "Failed" 1
+$cmd || error "Failed" 2
 
 cmd="./target/build_dev/test"
 info "$cmd"
-$cmd || error "Failed" 2
+$cmd || error "Failed" 3
 
 cmd="cargo bench -q"
 info "$cmd"

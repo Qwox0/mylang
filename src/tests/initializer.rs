@@ -104,3 +104,5 @@ sum";
     let out = jit_run_test!(&code => f64).unwrap();
     assert_eq!(out, 10.5);
 }
+
+// TODO: test errors for invalid cases

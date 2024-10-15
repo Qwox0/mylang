@@ -550,9 +550,24 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     return err(CannotReturnFromLoop, body.full_span());
                 }
                 self.close_scope()?;
-                Ok(body_ty)
+                //Ok(body_ty)
+                Ok(SemaValue::void())
             },
-            ExprKind::While { condition, body, .. } => todo!(),
+            ExprKind::While { condition, body, .. } => {
+                let cond_ty = try_not_never!(self.analyze(*condition, is_const)?).ty.finalize();
+                if cond_ty != Type::Bool {
+                    let span = condition.full_span();
+                    return err(MismatchedTypes { expected: Type::Bool, got: cond_ty }, span);
+                }
+                self.open_scope();
+                let body_ty = self.analyze(*body, is_const)?;
+                if !matches!(body_ty.ty, Type::Void | Type::Never) {
+                    return err(CannotReturnFromLoop, body.full_span());
+                }
+                self.close_scope()?;
+                //Ok(body_ty)
+                Ok(SemaValue::void())
+            },
             ExprKind::Catch { lhs } => todo!(),
             ExprKind::Defer(expr) => {
                 self.defer_stack.push_expr(*expr);
@@ -575,6 +590,17 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 if let Some(val) = val {
                     val.ty = func.ret_type;
                 }
+                Ok(SemaValue::never())
+            },
+            ExprKind::Break { expr } => {
+                if expr.is_some() {
+                    todo!("break with value")
+                }
+                // check if in loop
+                Ok(SemaValue::never())
+            },
+            ExprKind::Continue => {
+                // check if in loop
                 Ok(SemaValue::never())
             },
             ExprKind::Semicolon(_) => todo!(),
