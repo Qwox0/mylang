@@ -192,8 +192,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             ExprKind::Ident(name) => Ok(self.get_symbol(&**name)),
             ExprKind::Literal { kind, code } => match expr_ty {
                 Type::Never => Ok(Symbol::Never),
-                Type::Int { bits, .. } => {
-                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), false))
+                Type::Int { bits, is_signed } => {
+                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
                 },
                 Type::Float { bits } => reg(self.float_type(bits).const_float_from_string(code)),
                 t => panic!("{t:?}"),
@@ -899,6 +899,11 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             }),
             BinOpKind::Add => ret(self.builder.build_int_add(lhs, rhs, "add")?),
             BinOpKind::Sub => ret(self.builder.build_int_sub(lhs, rhs, "sub")?),
+            BinOpKind::ShiftL => ret(self.builder.build_left_shift(lhs, rhs, "shl")?),
+            BinOpKind::ShiftR => ret(self.builder.build_right_shift(lhs, rhs, is_signed, "shr")?),
+            BinOpKind::BitAnd => ret(self.builder.build_and(lhs, rhs, "bitand")?),
+            BinOpKind::BitXor => ret(self.builder.build_xor(lhs, rhs, "bitxor")?),
+            BinOpKind::BitOr => ret(self.builder.build_or(lhs, rhs, "bitor")?),
             BinOpKind::Eq => cmp!(EQ, "eq"),
             BinOpKind::Ne => cmp!(NE, "ne"),
             BinOpKind::Lt if is_signed => cmp!(SLT, "lt"),
@@ -910,9 +915,10 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             BinOpKind::Ge if is_signed => cmp!(SGE, "ge"),
             BinOpKind::Ge => cmp!(UGE, "ge"),
 
+            BinOpKind::And | BinOpKind::Or => unreachable!(),
+
             BinOpKind::Range => todo!(),
             BinOpKind::RangeInclusive => todo!(),
-            _ => unreachable!(),
         }
     }
 

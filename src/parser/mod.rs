@@ -55,8 +55,6 @@ pub struct Parser<'code, 'alloc> {
     alloc: &'alloc bumpalo::Bump,
 }
 
-// methods may advance the parser even on error
-// resetting is done by the callee
 impl<'code, 'alloc> Parser<'code, 'alloc> {
     pub fn new(lex: Lexer<'code>, alloc: &'alloc bumpalo::Bump) -> Parser<'code, 'alloc> {
         Self { lex, alloc }
@@ -189,11 +187,25 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     },
                     TokenKind::Keyword(Keyword::For) => {
                         let source = ExprWithTy::untyped(lhs);
-                        let iter_var = self.ws0().ident().context("for iter var")?;
+                        let iter_var = self.ws0().ident().context("for iteration variable");
+                        // TODO: better compiler errors
+                        // println!("{:?}", iter_var);
+                        // println!("{:?}", self.lex.peek());
+                        // println!("{:?}", self.lex.pos_span());
+                        // display_span_in_code_with_label(
+                        //     self.lex.pos_span(),
+                        //     self.lex.get_code(),
+                        //     "pos",
+                        // );
+                        // todo!();
+                        let iter_var = iter_var?;
+
+                        self.ws0().opt_do();
                         let body = self.ws0().expr().context("for body")?;
                         self.alloc(expr!(For { source, iter_var, body, was_piped: true }, t.span))
                     },
                     TokenKind::Keyword(Keyword::While) => {
+                        self.ws0().opt_do();
                         let body = self.expr().context("while body")?;
                         self.alloc(expr!(While { condition: lhs, body, was_piped: true }, t.span))
                     },
@@ -275,6 +287,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr().context("while condition")?;
+                self.ws0().opt_do();
                 let body = self.expr().context("while body")?;
                 expr!(While { condition, body, was_piped: false }, span)
             },
@@ -507,6 +520,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         start_span: Span,
         was_piped: bool,
     ) -> ParseResult<Ptr<Expr>> {
+        self.ws0().opt_do();
         let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
         let else_body = self
             .ws0()
@@ -673,6 +687,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         Ident { text: self.lex.get_code()[span].into(), span }
     }
 
+    /// Parses the `do` keyword 0 or 1 times.
+    fn opt_do(&mut self) {
+        #[allow(unused_must_use)] // `do` is optional
+        self.tok(TokenKind::Keyword(Keyword::Do));
+    }
+
     // -------
 
     /// 0+ whitespace
@@ -693,8 +713,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn tok_where(&mut self, cond: impl FnOnce(Token) -> bool) -> ParseResult<Token> {
-        let t = self.next_tok()?;
-        if cond(t) { Ok(t) } else { ParseError::unexpected_token(t)? }
+        let t = self.peek_tok()?;
+        if cond(t) {
+            self.lex.advance();
+            Ok(t)
+        } else {
+            ParseError::unexpected_token(t)?
+        }
     }
 
     pub fn advanced(&mut self) -> &mut Self {
@@ -898,22 +923,22 @@ impl FollowingOperator {
             | FollowingOperator::SingleArgNoParenFn
             | FollowingOperator::PostOp(_) => 21,
             FollowingOperator::BinOp(k) => k.precedence(),
-            FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 2,
+            FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 3,
             FollowingOperator::VarDecl
             | FollowingOperator::ConstDecl
-            | FollowingOperator::TypedDecl => 1,
-            FollowingOperator::Pipe => 3, // TODO: higher or lower then decl?
+            | FollowingOperator::TypedDecl => 2,
+            FollowingOperator::Pipe => 4, // TODO: higher or lower then decl?
         }
     }
 }
 
 const MIN_PRECEDENCE: u8 = 0;
-const IF_PRECEDENCE: u8 = 4;
+const IF_PRECEDENCE: u8 = 1;
 const PREOP_PRECEDENCE: u8 = 20;
 /// `a: ty = init`
 /// `   ^^`
-/// needs to be higher than [`FollowingOperator::Assign`]!
-const DECL_TYPE_PRECEDENCE: u8 = 3;
+/// must be higher than [`FollowingOperator::Assign`]!
+const DECL_TYPE_PRECEDENCE: u8 = 4;
 
 impl BinOpKind {
     pub fn precedence(self) -> u8 {

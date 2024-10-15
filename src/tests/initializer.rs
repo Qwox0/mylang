@@ -20,7 +20,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(&code => bool).unwrap();
+    let ok = jit_run_test!(code => bool).unwrap();
     assert!(ok);
 }
 
@@ -44,7 +44,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(&code => bool).unwrap();
+    let ok = jit_run_test!(code => bool).unwrap();
     assert!(ok);
 }
 
@@ -62,7 +62,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(&code => bool).unwrap();
+    let ok = jit_run_test!(code => bool).unwrap();
     assert!(ok);
 }
 
@@ -77,7 +77,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(&code => bool).unwrap();
+    let ok = jit_run_test!(code => bool).unwrap();
     assert!(ok);
 }
 
@@ -101,7 +101,7 @@ ptr.*.c | for x {
     sum += x;
 };
 sum";
-    let out = jit_run_test!(&code => f64).unwrap();
+    let out = jit_run_test!(code => f64).unwrap();
     assert_eq!(out, 10.5);
 }
 

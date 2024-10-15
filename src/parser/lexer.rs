@@ -223,6 +223,7 @@ keywords! {
     Match = "match",
     For = "for",
     While = "while",
+    Do = "do",
     Return = "return",
     Break = "break",
     Continue = "continue",

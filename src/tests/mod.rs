@@ -1,6 +1,7 @@
 use crate::{error::Error, parser::parser_helper::ParserInterface, util::display_spanned_error};
 
 mod for_loop;
+mod if_;
 mod initializer;
 mod logic_op;
 mod parse_array;
@@ -20,7 +21,7 @@ const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = true;
 const DEBUG_TYPES: bool = false;
 
-pub fn jit_run_test_impl<RetTy>(code: &impl std::fmt::Display) -> Result<RetTy, Error> {
+pub fn jit_run_test_impl<RetTy>(code: impl std::fmt::Display) -> Result<RetTy, Error> {
     use crate::{
         codegen::llvm,
         compiler::Compiler,
