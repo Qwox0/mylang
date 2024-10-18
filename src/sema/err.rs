@@ -65,6 +65,7 @@ pub enum SemaErrorKind {
         field: Ptr<str>,
     },
     CannotInfer,
+    UnionFieldWithDefaultValue,
 
     TopLevelDuplicate,
     UnexpectedTopLevelExpr(Ptr<Expr>),

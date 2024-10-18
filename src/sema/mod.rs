@@ -250,9 +250,6 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 })
             },
             ExprKind::StructDef(fields) => {
-                // if !is_const {
-                //     todo!()
-                // }
                 for field in fields.iter_mut() {
                     if field.is_const {
                         todo!("const struct field")
@@ -262,7 +259,19 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 let ty = self.alloc(Type::Struct { fields: *fields })?;
                 Ok(SemaValue::new_const(Type::Type(ty), EMPTY_PTR))
             },
-            ExprKind::UnionDef(_) => todo!(),
+            ExprKind::UnionDef(fields) => {
+                for field in fields.iter_mut() {
+                    if field.is_const {
+                        todo!("const struct field")
+                    }
+                    if let Some(d) = field.default {
+                        return err(UnionFieldWithDefaultValue, d.full_span());
+                    }
+                    let f = self.var_decl_to_value(field)?;
+                }
+                let ty = self.alloc(Type::Union { fields: *fields })?;
+                Ok(SemaValue::new_const(Type::Type(ty), EMPTY_PTR))
+            },
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
@@ -426,14 +435,14 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     None => err(InvalidPreOp { ty, kind }, span),
                 }
             },
-            ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
+            ExprKind::BinOp { lhs, op, rhs, arg_ty } => {
                 assert!(!is_const, "todo: BinOp in const");
                 let lhs_ty = self.analyze(*lhs, is_const)?.ty;
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs, is_const)?.ty;
                 debug_assert!(rhs_ty.is_valid());
                 if let Some(common_ty) = lhs_ty.common_type(rhs_ty) {
-                    *ty = common_ty;
+                    *arg_ty = common_ty;
                     // todo: check if binop can be applied to type
                     Ok(match op {
                         BinOpKind::Mul
@@ -452,7 +461,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         | BinOpKind::Le
                         | BinOpKind::Gt
                         | BinOpKind::Ge => {
-                            *ty = common_ty.finalize();
+                            *arg_ty = common_ty.finalize();
                             Type::Bool
                         },
                         BinOpKind::And | BinOpKind::Or => {
@@ -489,7 +498,8 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs, is_const)?.ty;
                 debug_assert!(rhs_ty.is_valid());
-                if lhs_ty.matches(rhs_ty) {
+                if let Some(common_ty) = lhs_ty.common_type(rhs_ty) {
+                    lhs.ty = common_ty;
                     // todo: check if binop can be applied to type
                     Ok(SemaValue::void())
                 } else {
@@ -633,7 +643,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         is_const: bool,
         initializer_span: Span,
     ) -> SemaResult<()> {
-        let Type::Struct { fields } = struct_ty else { panic!("todo: error") };
+        let Type::Struct { fields } = struct_ty else { todo!("error") };
 
         let mut is_initialized_field = vec![false; fields.len()];
         for (f, init) in initializer_values.iter() {

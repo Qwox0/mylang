@@ -133,7 +133,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
-                expr!(BinOp { lhs, op, rhs, val_ty: Type::Unset }, span)
+                expr!(BinOp { lhs, op, rhs, arg_ty: Type::Unset }, span)
             },
             FollowingOperator::Assign => {
                 let lhs = ExprWithTy::untyped(lhs);
@@ -804,6 +804,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 }
 
+#[derive(Debug)]
 pub enum FollowingOperator {
     /// `a.b`
     /// ` ^`
@@ -885,11 +886,15 @@ impl FollowingOperator {
             TokenKind::PercentEq => FollowingOperator::BinOpAssign(BinOpKind::Mod),
             TokenKind::Ampersand => FollowingOperator::BinOp(BinOpKind::BitAnd),
             TokenKind::AmpersandAmpersand => FollowingOperator::BinOp(BinOpKind::And),
+            TokenKind::AmpersandAmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::And),
             TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
-            TokenKind::Pipe => FollowingOperator::Pipe, /* TODO: find a solution for pipe vs */
-            // bitor (currently bitand, bitxor and
-            // bitor are ignored)
+            TokenKind::Pipe => {
+                // TODO: find a solution for pipe vs bitor (currently bitand, bitxor and bitor
+                // are ignored)
+                FollowingOperator::Pipe
+            },
             TokenKind::PipePipe => FollowingOperator::BinOp(BinOpKind::Or),
+            TokenKind::PipePipeEq => FollowingOperator::BinOpAssign(BinOpKind::Or),
             TokenKind::PipeEq => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
             TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),
             TokenKind::CaretEq => FollowingOperator::BinOpAssign(BinOpKind::BitXor),

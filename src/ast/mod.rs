@@ -149,7 +149,7 @@ pub enum ExprKind {
         lhs: Ptr<Expr>,
         op: BinOpKind,
         rhs: Ptr<Expr>,
-        val_ty: Type,
+        arg_ty: Type,
     },
     /// `<lhs> = <lhs>`
     Assign {
@@ -282,7 +282,7 @@ impl Expr {
             ExprKind::UnaryOp { expr, .. } => self.span.join(expr.full_span()),
             ExprKind::BinOp { lhs, rhs, .. }
             | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
-            | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, op: _, rhs } => {
+            | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, rhs, .. } => {
                 lhs.full_span().join(rhs.full_span())
             },
             ExprKind::VarDecl(decl) => match &decl.default {
@@ -358,10 +358,10 @@ pub enum BinOpKind {
     /// `>=`
     Ge,
 
-    /// `&&`
+    /// `&&`, `&&=`
     And,
 
-    /// `||`
+    /// `||`, `||=`
     Or,
 
     /// `..`
@@ -408,6 +408,8 @@ impl BinOpKind {
             BinOpKind::BitAnd => "&=",
             BinOpKind::BitXor => "^=",
             BinOpKind::BitOr => "|=",
+            BinOpKind::And => "&&=",
+            BinOpKind::Or => "||=",
             k => panic!("Unexpected binop kind: {:?}", k),
         }
     }

@@ -62,10 +62,14 @@ impl DebugAst for Expr {
                     if *has_trailing_semicolon { ";" } else { "" }
                 )
             },
-            ExprKind::StructDef(fields) => {
-                format!("struct {{ {} }}", many_to_text(fields, |f, _| var_decl_to_text(f), ","))
+            ExprKind::StructDef(fields) | ExprKind::UnionDef(fields) => {
+                let is_struct = matches!(self.kind, ExprKind::StructDef(_));
+                format!(
+                    "{}{{{}}}",
+                    if is_struct { "struct" } else { "union" },
+                    many_to_text(fields, |f, _| var_decl_to_text(f), ",")
+                )
             },
-            ExprKind::UnionDef(..) => panic!(),
             ExprKind::EnumDef {} => panic!(),
             ExprKind::OptionShort(ty) => {
                 format!("?{}", ty.to_text())
@@ -252,8 +256,9 @@ impl DebugAst for Expr {
                 }
                 lines.write("}");
             },
-            ExprKind::StructDef(fields) => {
-                lines.write("struct { ");
+            ExprKind::StructDef(fields) | ExprKind::UnionDef(fields) => {
+                let is_struct = matches!(self.kind, ExprKind::StructDef(_));
+                lines.write(if is_struct { "struct{" } else { "union{" });
                 for (idx, field) in fields.into_iter().enumerate() {
                     if idx != 0 {
                         lines.write(",");
@@ -261,9 +266,8 @@ impl DebugAst for Expr {
 
                     var_decl_write_tree(field, lines)
                 }
-                lines.write(" }");
+                lines.write("}");
             },
-            ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(ty) => {
                 lines.write("?");

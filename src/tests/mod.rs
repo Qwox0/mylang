@@ -1,13 +1,16 @@
 use crate::{error::Error, parser::parser_helper::ParserInterface, util::display_spanned_error};
 
+mod binop;
 mod for_loop;
 mod if_;
 mod initializer;
-mod logic_op;
+mod logic_binop;
 mod parse_array;
 mod parse_function;
 mod ptr;
+mod struct_;
 mod todo;
+mod union_;
 mod while_loop;
 
 macro_rules! jit_run_test {

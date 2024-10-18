@@ -278,14 +278,15 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 res
             },
             &ExprKind::StructDef(fields) => {
-                // TODO: Is it possible to set the struct name?
-                let field_types =
-                    fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
-                let ty = self.context.struct_type(&field_types, false);
-                self.type_table.insert(fields, ty);
-                Ok(Symbol::StructDef { fields, ty })
+                Ok(Symbol::StructDef { fields, ty: self.struct_type(fields, None) })
             },
-            ExprKind::UnionDef(_) => todo!(),
+            &ExprKind::UnionDef(fields) => {
+                let size = Type::Union { fields }.stack_size();
+                let field = self.context.i8_type().array_type(size as u32);
+                let ty = self.context.struct_type(&[field.as_basic_type_enum()], false);
+                self.type_table.insert(fields, ty);
+                Ok(Symbol::UnionDef { fields, ty })
+            },
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
@@ -349,33 +350,39 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 }
                 stack_val(struct_ptr)
             },
-            &ExprKind::Dot { lhs, rhs } => {
-                let Type::Struct { fields } = lhs.ty else { panic!() };
-                let struct_ty = self.type_table[&fields];
-                let Symbol::Stack(struct_ptr) = try_not_never!(self.compile_typed_expr(lhs)?)
-                else {
-                    panic!()
-                };
-                let (field_idx, field) = fields.find_field(&rhs.text).unwrap_debug();
-                let field_ptr = self.builder.build_struct_gep(
-                    struct_ty,
-                    struct_ptr,
-                    field_idx as u32,
-                    &format!("{}_ptr", &*rhs.text),
-                )?;
-                /*
-                if Self::is_register_passable(expr_ty) {
-                    reg(self.builder.build_load(
-                        self.llvm_type(field.ty).basic_ty(),
-                        field_ptr,
+            &ExprKind::Dot { lhs, rhs } => stack_val(match lhs.ty {
+                Type::Never => return Ok(Symbol::Never),
+                Type::Ptr(ptr) => todo!(),
+                Type::Int { bits, is_signed } => todo!(),
+                Type::Bool => todo!(),
+                Type::Float { bits } => todo!(),
+                Type::Array { len, elem_ty } => todo!(),
+                Type::Struct { fields } => {
+                    let struct_ty = self.type_table[&fields];
+                    let Symbol::Stack(struct_ptr) = try_not_never!(self.compile_typed_expr(lhs)?)
+                    else {
+                        panic!()
+                    };
+                    let (field_idx, field) = fields.find_field(&rhs.text).unwrap_debug();
+                    self.builder.build_struct_gep(
+                        struct_ty,
+                        struct_ptr,
+                        field_idx as u32,
                         &rhs.text,
-                    )?)
-                } else {
-                    stack_val(field_ptr)
-                }
-                */
-                stack_val(field_ptr)
-            },
+                    )?
+                },
+                Type::Union { fields } => {
+                    let union_ty = self.type_table[&fields];
+                    let Symbol::Stack(union_ptr) = try_not_never!(self.compile_typed_expr(lhs)?)
+                    else {
+                        panic!()
+                    };
+                    self.builder.build_struct_gep(union_ty, union_ptr, 0, &rhs.text)?
+                },
+                Type::Enum { variants } => todo!(),
+                Type::Type(ptr) => todo!(),
+                _ => unreachable_debug(),
+            }),
             &ExprKind::Index { lhs, idx } => {
                 let Type::Array { len, elem_ty } = lhs.ty else { panic!() };
                 let arr_ty = self.llvm_type(lhs.ty).arr_ty();
@@ -444,89 +451,77 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                     UnaryOpKind::Try => todo!(),
                 }
             },
-            ExprKind::BinOp { lhs, op, rhs, val_ty: ty } => {
-                let ty = if op.has_independent_out_ty() { *ty } else { expr_ty };
-                if ty == Type::Bool && matches!(op, BinOpKind::And | BinOpKind::Or) {
-                    return self.build_bool_short_circuit_binop(*lhs, *rhs, *op);
+            &ExprKind::BinOp { lhs, op, rhs, arg_ty } => {
+                let lhs_val = try_compile_expr_as_val!(self, lhs, arg_ty);
+                if arg_ty == Type::Bool && matches!(op, BinOpKind::And | BinOpKind::Or) {
+                    return self.build_bool_short_circuit_binop(lhs_val.bool_val(), rhs, op);
                 }
-                let lhs_val = try_compile_expr_as_val!(self, *lhs, ty);
-                let rhs_val = try_compile_expr_as_val!(self, *rhs, ty);
-                match ty {
+                let ty = if op.has_independent_out_ty() { arg_ty } else { expr_ty };
+                let rhs_val = try_compile_expr_as_val!(self, rhs, ty);
+                match arg_ty {
                     Type::Int { is_signed, .. } => self
-                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, *op)
+                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, op)
                         .map(reg_sym),
                     Type::Float { .. } => self
-                        .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), *op)
+                        .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
                         .map(reg_sym),
-                    Type::Bool => unreachable_debug(),
+                    Type::Bool => self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), op),
                     t => todo!("{:?}", t),
                 }
             },
-            ExprKind::Assign { lhs, rhs } => {
-                let var_name = &*lhs.try_to_ident().expect("todo: non-ident assign lhs").text;
-                match self.get_symbol(var_name) {
-                    Symbol::Stack(stack_var) => {
-                        let rhs = try_compile_expr_as_val!(self, *rhs, lhs.ty);
-                        self.builder.build_store(stack_var, rhs)?;
-                    },
-                    Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
-                    _ => panic_debug("unexpected symbol"),
-                }
+            &ExprKind::Assign { lhs, rhs } => {
+                let Symbol::Stack(stack_var) = self.compile_typed_expr(lhs)? else {
+                    unreachable_debug()
+                };
+                let rhs = try_compile_expr_as_val!(self, rhs, lhs.ty);
+                self.builder.build_store(stack_var, rhs)?;
                 Ok(Symbol::Void)
             },
-            ExprKind::BinOpAssign { lhs, op, rhs } => {
-                let ExprWithTy { expr: lhs_expr, ty: lhs_ty } = lhs;
-                let var_name = &*lhs_expr.try_to_ident().unwrap_debug().text;
-                match self.get_symbol(var_name) {
-                    Symbol::Stack(stack_var) => {
-                        let lhs_llvm_ty = self.llvm_type(*lhs_ty).basic_ty();
-                        let lhs = self.builder.build_load(lhs_llvm_ty, stack_var, "lhs")?;
-                        let rhs = try_compile_expr_as_val!(self, *rhs, *lhs_ty);
-                        let binop_res = match lhs_ty {
-                            Type::Int { is_signed, .. } => self.build_int_binop(
-                                lhs.into_int_value(),
-                                rhs.int_val(),
-                                *is_signed,
-                                *op,
-                            )?,
-                            Type::Float { .. } => self.build_float_binop(
-                                lhs.into_float_value(),
-                                rhs.float_val(),
-                                *op,
-                            )?,
-                            t => todo!("{:?}", t),
-                        };
-                        self.builder.build_store(stack_var, binop_res)?;
-                    },
-                    Symbol::Register(_) => todo!("mut sema check"),
-                    Symbol::Register(_) => return Err(CodegenError::CannotMutateRegister),
-                    Symbol::Function { .. } => panic!("cannot assign to function"),
-                    Symbol::StructDef { .. } => panic!("cannot assign to struct definition"),
-                    Symbol::Void => todo!(),
-                    Symbol::Never => todo!(),
+            &ExprKind::BinOpAssign { lhs, op, rhs } => {
+                let Symbol::Stack(stack_var) = self.compile_typed_expr(lhs)? else {
+                    unreachable_debug()
+                };
+                let ExprWithTy { expr: lhs_expr, ty: arg_ty } = lhs;
+                let lhs_llvm_ty = self.llvm_type(arg_ty).basic_ty();
+                let lhs_val = self.builder.build_load(lhs_llvm_ty, stack_var, "lhs")?;
+
+                if arg_ty == Type::Bool && matches!(op, BinOpKind::And | BinOpKind::Or) {
+                    return self.build_bool_short_circuit_binop(lhs_val.into_int_value(), rhs, op);
                 }
+                let ty = if op.has_independent_out_ty() { arg_ty } else { expr_ty };
+
+                let rhs_val = try_compile_expr_as_val!(self, rhs, arg_ty);
+                let binop_res = match arg_ty {
+                    Type::Int { is_signed, .. } => self.build_int_binop(
+                        lhs_val.into_int_value(),
+                        rhs_val.int_val(),
+                        is_signed,
+                        op,
+                    )?,
+                    Type::Float { .. } => {
+                        self.build_float_binop(lhs_val.into_float_value(), rhs_val.float_val(), op)?
+                    },
+                    Type::Bool { .. } => {
+                        panic!("{ty:?} {:#?}", expr.kind);
+                        //self.build_bool_binop(lhs.into_int_value(),
+                        // rhs.bool_val(), op)?
+                    },
+                    t => todo!("{:?}", t),
+                };
+                self.builder.build_store(stack_var, binop_res)?;
                 Ok(Symbol::Void)
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
                 let var_name = &*ident.text;
-                let is_mut = markers.is_mut;
                 let v = match init.map(|p| &p.as_ref().kind) {
                     Some(ExprKind::Fn(f)) => self.compile_fn(var_name, f)?,
                     Some(&ExprKind::StructDef(fields)) => {
-                        let ty = self.context.opaque_struct_type(var_name);
-                        let field_types = fields
-                            .iter()
-                            .map(|f| self.llvm_type(f.ty).basic_ty())
-                            .collect::<Vec<_>>();
-                        if !ty.set_body(&field_types, false) {
-                            panic!()
-                        }
-                        //let ty = self.context.struct_type(&field_types, false);
-                        self.type_table.insert(fields, ty);
-                        Symbol::StructDef { fields, ty }
+                        Symbol::StructDef { fields, ty: self.struct_type(fields, Some(var_name)) }
                     },
                     _ => {
-                        if !is_mut && let Some(init) = init {
+                        if !markers.is_mut
+                            && let Some(init) = init
+                        {
                             self.compile_expr(*init, *ty)?
                             //Symbol::Register(try_compile_expr_as_val!(self,
                             // *init))
@@ -820,17 +815,9 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         res
     }
 
-    pub fn compile_struct_def(&self, fields: Ptr<[VarDecl]>) -> CodegenResult<StructType<'ctx>> {
-        let field_types =
-            fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
-        let s_ty = self.context.struct_type(&field_types, false);
-        println!("{:?}", s_ty);
-        Ok(s_ty)
-    }
-
     // -----------------------
 
-    fn build_return(&self, ret_sym: Symbol<'ctx>, ret_ty: Type) -> CodegenResult<Symbol> {
+    fn build_return(&mut self, ret_sym: Symbol<'ctx>, ret_ty: Type) -> CodegenResult<Symbol> {
         match ret_sym {
             Symbol::Never => {},
             Symbol::Void => {
@@ -845,7 +832,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     }
 
     fn build_index(
-        &self,
+        &mut self,
         arr_ty: ArrayType<'ctx>,
         arr_ptr: PointerValue<'ctx>,
         idx_val: IntValue<'ctx>,
@@ -860,9 +847,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             )?
         };
         if Self::is_register_passable(elem_ty) {
-            reg(self
-                .builder
-                .build_load(self.llvm_type(elem_ty).basic_ty(), elem_ptr, "idx_val")?)
+            let ty = self.llvm_type(elem_ty).basic_ty();
+            reg(self.builder.build_load(ty, elem_ptr, "idx_val")?)
         } else {
             stack_val(elem_ptr)
         }
@@ -999,15 +985,13 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
     fn build_bool_short_circuit_binop(
         &mut self,
-        lhs: Ptr<Expr>,
+        lhs: IntValue<'ctx>,
         rhs: Ptr<Expr>,
         op: BinOpKind,
     ) -> CodegenResult<Symbol<'ctx>> {
         fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<Symbol<'ctx>> {
             Ok(Symbol::Register(CodegenValue::new(val.as_value_ref())))
         }
-
-        let lhs = try_compile_expr_as_val!(self, lhs, Type::Bool).bool_val();
 
         match op {
             BinOpKind::And => ret({
@@ -1075,7 +1059,24 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         }
     }
 
-    fn llvm_type(&self, ty: Type) -> CodegenType<'ctx> {
+    fn struct_type(&mut self, fields: VarDeclList, name: Option<&str>) -> StructType<'ctx> {
+        let field_types =
+            fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
+        let ty = match name {
+            Some(name) => {
+                let ty = self.context.opaque_struct_type(name);
+                if !ty.set_body(&field_types, false) {
+                    panic!("invalid struct type")
+                }
+                ty
+            },
+            None => self.context.struct_type(&field_types, false),
+        };
+        self.type_table.insert(fields, ty);
+        ty
+    }
+
+    fn llvm_type(&mut self, ty: Type) -> CodegenType<'ctx> {
         CodegenType::new(match ty {
             Type::Void => self.context.void_type().as_type_ref(),
             Type::Never => todo!(),
@@ -1091,8 +1092,17 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Array { len: count, elem_ty: ty } => {
                 self.llvm_type(*ty).basic_ty().array_type(count as u32).as_type_ref()
             },
-            Type::Struct { fields: ptr } => self.type_table[&ptr].as_type_ref(),
-            Type::Union { .. } => todo!(),
+            Type::Struct { fields: ptr } | Type::Union { fields: ptr } => {
+                match self.type_table.get(&ptr) {
+                    Some(ty) => *ty,
+                    None => {
+                        let ty = self.struct_type(ptr, None);
+                        self.type_table.insert(ptr, ty);
+                        ty
+                    },
+                }
+                .as_type_ref()
+            },
             Type::Enum { .. } => todo!(),
             Type::Type(_) => todo!(),
             Type::Unset | Type::Unevaluated(_) => panic_debug("unvalid type"),
@@ -1100,7 +1110,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         })
     }
 
-    fn sym_as_val(&self, sym: Symbol<'ctx>, ty: Type) -> CodegenResult<CodegenValue<'ctx>> {
+    fn sym_as_val(&mut self, sym: Symbol<'ctx>, ty: Type) -> CodegenResult<CodegenValue<'ctx>> {
         Ok(match sym {
             Symbol::Stack(ptr) => {
                 let ty = self.llvm_type(ty).basic_ty();
@@ -1204,7 +1214,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
     }
 
     fn load_stack_val(
-        &self,
+        &mut self,
         ptr: PointerValue<'ctx>,
         ty: Type,
     ) -> CodegenResult<CodegenValue<'ctx>> {
@@ -1291,6 +1301,10 @@ enum Symbol<'ctx> {
         val: FunctionValue<'ctx>,
     },
     StructDef {
+        fields: VarDeclList,
+        ty: StructType<'ctx>,
+    },
+    UnionDef {
         fields: VarDeclList,
         ty: StructType<'ctx>,
     },

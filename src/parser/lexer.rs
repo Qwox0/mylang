@@ -107,12 +107,16 @@ pub enum TokenKind {
     Ampersand,
     /// `&&`
     AmpersandAmpersand,
+    /// `&&=`
+    AmpersandAmpersandEq,
     /// `&=`
     AmpersandEq,
     /// `|`
     Pipe,
     /// `||`
     PipePipe,
+    /// `||=`
+    PipePipeEq,
     /// `|=`
     PipeEq,
     /// `^`
@@ -516,12 +520,18 @@ impl<'c> Lexer<'c> {
 
             '&' => maybe_followed_by! {
                 default: TokenKind::Ampersand,
-                '&' => TokenKind::AmpersandAmpersand,
+                '&' => maybe_followed_by! {
+                    default: TokenKind::AmpersandAmpersand,
+                    '=' => TokenKind::AmpersandAmpersandEq,
+                },
                 '=' => TokenKind::AmpersandEq,
             },
             '|' => maybe_followed_by! {
                 default: TokenKind::Pipe,
-                '|' => TokenKind::PipePipe,
+                '|' => maybe_followed_by! {
+                    default: TokenKind::PipePipe,
+                    '=' => TokenKind::PipePipeEq,
+                },
                 '=' => TokenKind::PipeEq,
             },
             '^' => maybe_followed_by! {

@@ -78,6 +78,24 @@ impl fmt::Debug for Type {
 }
 
 impl Type {
+    pub fn stack_size(&self) -> usize {
+        match self {
+            Type::Void => 0,
+            Type::Never => 0,
+            Type::Ptr(_) => 8,
+            Type::Int { bits, .. } | Type::Float { bits } => (*bits as usize).div_ceil(8),
+            Type::Bool => 1,
+            Type::Function(_) => todo!(),
+            Type::Array { len, elem_ty } => elem_ty.stack_size() * len,
+            Type::Struct { fields } => fields.iter().map(|f| f.ty.stack_size()).max().unwrap_or(0),
+            // TODO: struct might contain padding
+            Type::Union { fields } => fields.iter().map(|f| f.ty.stack_size()).sum(),
+            Type::Enum { .. } => todo!(),
+            Type::Type(_) => 0,
+            _ => panic_debug("cannot find stack size"),
+        }
+    }
+
     /// Checks if the two types equal or can be coerced into a common type.
     ///
     /// For exact equality use `==`.
