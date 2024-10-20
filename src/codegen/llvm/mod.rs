@@ -452,13 +452,13 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 }
             },
             &ExprKind::BinOp { lhs, op, rhs, arg_ty } => {
-                let lhs_val = try_compile_expr_as_val!(self, lhs, arg_ty);
+                let ty = if op.has_independent_out_ty() { arg_ty } else { expr_ty };
+                let lhs_val = try_compile_expr_as_val!(self, lhs, ty);
                 if arg_ty == Type::Bool && matches!(op, BinOpKind::And | BinOpKind::Or) {
                     return self.build_bool_short_circuit_binop(lhs_val.bool_val(), rhs, op);
                 }
-                let ty = if op.has_independent_out_ty() { arg_ty } else { expr_ty };
                 let rhs_val = try_compile_expr_as_val!(self, rhs, ty);
-                match arg_ty {
+                match ty {
                     Type::Int { is_signed, .. } => self
                         .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, op)
                         .map(reg_sym),

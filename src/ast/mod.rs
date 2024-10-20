@@ -266,7 +266,6 @@ impl Expr {
         match self.kind {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
-            ExprKind::UnionDef(_) => todo!(),
             ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),

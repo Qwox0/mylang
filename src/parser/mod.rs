@@ -310,8 +310,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(Defer(expr), span)
             },
             TokenKind::Literal(kind) => {
-                self.lex.advance();
-                expr!(Literal { kind, code: self.get_text_from_span(span) })
+                expr!(Literal { kind, code: self.advanced().get_text_from_span(span) })
             },
             TokenKind::BoolLit(b) => {
                 self.lex.advance();
@@ -452,8 +451,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
-            TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
-            TokenKind::BackTick => todo!("TokenKind::BackTick"),
+            TokenKind::Backslash => todo!("TokenKind::BackSlash"),
+            TokenKind::Backtick => todo!("TokenKind::BackTick"),
 
             TokenKind::Keyword(Keyword::Else)
             | TokenKind::CloseParenthesis
@@ -913,8 +912,8 @@ impl FollowingOperator {
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
-            TokenKind::BackSlash => todo!("TokenKind::BackSlash"),
-            TokenKind::BackTick => todo!("TokenKind::BackTick"),
+            TokenKind::Backslash => todo!("TokenKind::BackSlash"),
+            TokenKind::Backtick => todo!("TokenKind::BackTick"),
             _ => return None,
         })
     }

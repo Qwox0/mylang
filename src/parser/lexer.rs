@@ -158,9 +158,9 @@ pub enum TokenKind {
     Tilde,
     /// `\`
     /// maybe: <https://ziglang.org/documentation/0.11.0/#Multiline-String-Literals>
-    BackSlash,
+    Backslash,
     /// `
-    BackTick,
+    Backtick,
 
     Unknown,
 }

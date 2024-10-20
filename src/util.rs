@@ -133,3 +133,25 @@ impl<T> OkOrWithTry<T> for Option<T> {
         }
     }
 }
+
+pub fn variant_count_to_tag_size_bits(variant_count: usize) -> u32 {
+    if variant_count <= 1 { 0 } else { (variant_count - 1).ilog2() + 1 }
+}
+
+pub fn variant_count_to_tag_size_bytes(variant_count: usize) -> u32 {
+    variant_count_to_tag_size_bits(variant_count).div_ceil(8)
+}
+
+#[test]
+fn test_variant_count_to_tag_size_bits() {
+    assert_eq!(variant_count_to_tag_size_bits(0), 0);
+    assert_eq!(variant_count_to_tag_size_bits(1), 0);
+    assert_eq!(variant_count_to_tag_size_bits(2), 1);
+    assert_eq!(variant_count_to_tag_size_bits(3), 2);
+    assert_eq!(variant_count_to_tag_size_bits(4), 2);
+    assert_eq!(variant_count_to_tag_size_bits(5), 3);
+    assert_eq!(variant_count_to_tag_size_bits(8), 3);
+    assert_eq!(variant_count_to_tag_size_bits(9), 4);
+    assert_eq!(variant_count_to_tag_size_bits(256), 8);
+    assert_eq!(variant_count_to_tag_size_bits(257), 9);
+}

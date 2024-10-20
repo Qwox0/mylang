@@ -12,6 +12,6 @@ a.a == 123";
 }
 
 #[test]
-fn anon_struct_no_init() {
-    jit_run_test!("a: struct { a: i64 }" => ()).unwrap();
+fn anon_struct_on_decl() {
+    jit_run_test!("a: struct { a: i64 };" => ()).unwrap();
 }

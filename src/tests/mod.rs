@@ -1,7 +1,9 @@
 use crate::{error::Error, parser::parser_helper::ParserInterface, util::display_spanned_error};
 
 mod binop;
+mod enum_;
 mod for_loop;
+mod function;
 mod if_;
 mod initializer;
 mod logic_binop;
@@ -22,7 +24,7 @@ pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = true;
-const DEBUG_TYPES: bool = false;
+const DEBUG_TYPES: bool = true;
 
 pub fn jit_run_test_impl<RetTy>(code: impl std::fmt::Display) -> Result<RetTy, Error> {
     use crate::{
