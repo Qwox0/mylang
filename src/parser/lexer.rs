@@ -169,6 +169,32 @@ impl TokenKind {
     pub fn is_whitespace(&self) -> bool {
         matches!(self, TokenKind::Whitespace(_))
     }
+
+    /// `true` also means the token ends parsing of the previous expression
+    /// independent of precedence.
+    #[inline]
+    pub fn is_invalid_start(self) -> bool {
+        use TokenKind as K;
+        match self {
+            //K::Whitespace(whitespace) => todo!(),
+            K::Keyword(Keyword::Else) | K::CloseParenthesis | K::CloseBracket | K::CloseBrace |
+            //K::FatArrow => todo!(),
+            //K::Arrow => todo!(),
+            //K::Pipe => todo!(),
+            K::Comma |
+            //K::Colon => todo!(),
+            //K::ColonColon => todo!(),
+            //K::ColonEq => todo!(),
+            K::Semicolon => true,
+            //K::Pound => todo!(),
+            //K::Dollar => todo!(),
+            //K::At => todo!(),
+            //K::Tilde => todo!(),
+            //K::Backslash => todo!(),
+            //K::Backtick => todo!(),
+            _ => false,
+        }
+    }
 }
 
 /// Stores the type of the token and it's position in the original code `&str`
@@ -182,6 +208,13 @@ pub struct Token {
 impl Token {
     pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
         Self { kind, span: Span::from(span) }
+    }
+
+    /// `true` also means the token ends parsing of the previous expression
+    /// independent of precedence.
+    #[inline]
+    pub fn is_invalid_start(&self) -> bool {
+        self.kind.is_invalid_start()
     }
 }
 

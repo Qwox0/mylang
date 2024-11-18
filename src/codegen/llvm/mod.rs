@@ -12,7 +12,9 @@ use crate::{
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{UnwrapDebug, display_span_in_code, forget_lifetime, panic_debug, unreachable_debug},
+    util::{
+        self, UnwrapDebug, display_span_in_code, forget_lifetime, panic_debug, unreachable_debug,
+    },
 };
 pub use inkwell::targets::TargetMachine;
 use inkwell::{
@@ -41,8 +43,13 @@ use inkwell::{
     },
 };
 use std::{
-    assert_matches::debug_assert_matches, collections::HashMap, marker::PhantomData,
-    mem::MaybeUninit, path::Path,
+    assert_matches::debug_assert_matches,
+    collections::HashMap,
+    io::{Read, Write},
+    marker::PhantomData,
+    mem::MaybeUninit,
+    os::fd::AsRawFd,
+    path::Path,
 };
 
 pub mod jit;
@@ -127,6 +134,7 @@ pub struct Codegen<'ctx, 'alloc> {
     /// the current fn being compiled
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_loop: Option<Loop<'ctx>>,
+    cur_var_name: Option<Ptr<str>>,
 
     alloc: &'alloc bumpalo::Bump,
 }
@@ -147,6 +155,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             defer_stack: DeferStack::default(),
             cur_fn: None,
             cur_loop: None,
+            cur_var_name: None,
             alloc,
         }
     }
@@ -195,7 +204,9 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 Type::Int { bits, is_signed } => {
                     reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
                 },
-                Type::Float { bits } => reg(self.float_type(bits).const_float_from_string(code)),
+                Type::Float { bits } => {
+                    reg(unsafe { self.float_type(bits).const_float_from_string(code) })
+                },
                 t => panic!("{t:?}"),
                 _ => unreachable_debug(),
             },
@@ -278,16 +289,14 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 res
             },
             &ExprKind::StructDef(fields) => {
-                Ok(Symbol::StructDef { fields, ty: self.struct_type(fields, None) })
+                Ok(Symbol::StructDef { fields, ty: self.struct_type(fields, self.cur_var_name) })
             },
             &ExprKind::UnionDef(fields) => {
-                let size = Type::Union { fields }.stack_size();
-                let field = self.context.i8_type().array_type(size as u32);
-                let ty = self.context.struct_type(&[field.as_basic_type_enum()], false);
-                self.type_table.insert(fields, ty);
-                Ok(Symbol::UnionDef { fields, ty })
+                Ok(Symbol::UnionDef { fields, ty: self.union_type(fields, self.cur_var_name) })
             },
-            ExprKind::EnumDef {} => todo!(),
+            &ExprKind::EnumDef(variants) => {
+                Ok(Symbol::EnumDef { variants, ty: self.enum_type(variants, self.cur_var_name) })
+            },
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs, fields: values } => {
@@ -301,8 +310,8 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                         let ptr = self.builder.build_alloca(struct_ty, "struct")?;
                         (fields, struct_ty, ptr)
                     },
-                    (Some(lhs), Type::Ptr(pointee)) => {
-                        let Type::Struct { fields } = *pointee else { unreachable_debug() };
+                    (Some(lhs), Type::Ptr { pointee_ty }) => {
+                        let Type::Struct { fields } = *pointee_ty else { unreachable_debug() };
                         let struct_ty = self.type_table[&fields];
                         let ptr = try_compile_expr_as_val!(self, *lhs, expr_ty).ptr_val();
                         (fields, struct_ty, ptr)
@@ -350,39 +359,53 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 }
                 stack_val(struct_ptr)
             },
-            &ExprKind::Dot { lhs, rhs } => stack_val(match lhs.ty {
+            &ExprKind::Dot { lhs, lhs_ty, rhs } => match lhs_ty {
                 Type::Never => return Ok(Symbol::Never),
-                Type::Ptr(ptr) => todo!(),
+                Type::Ptr { pointee_ty } => todo!(),
                 Type::Int { bits, is_signed } => todo!(),
                 Type::Bool => todo!(),
                 Type::Float { bits } => todo!(),
                 Type::Array { len, elem_ty } => todo!(),
                 Type::Struct { fields } => {
+                    let lhs = lhs.unwrap_debug();
                     let struct_ty = self.type_table[&fields];
-                    let Symbol::Stack(struct_ptr) = try_not_never!(self.compile_typed_expr(lhs)?)
+                    let Symbol::Stack(struct_ptr) = try_not_never!(self.compile_expr(lhs, lhs_ty)?)
                     else {
                         panic!()
                     };
                     let (field_idx, field) = fields.find_field(&rhs.text).unwrap_debug();
-                    self.builder.build_struct_gep(
+                    stack_val(self.builder.build_struct_gep(
                         struct_ty,
                         struct_ptr,
                         field_idx as u32,
                         &rhs.text,
-                    )?
+                    )?)
                 },
                 Type::Union { fields } => {
+                    let lhs = lhs.unwrap_debug();
                     let union_ty = self.type_table[&fields];
-                    let Symbol::Stack(union_ptr) = try_not_never!(self.compile_typed_expr(lhs)?)
+                    let Symbol::Stack(union_ptr) = try_not_never!(self.compile_expr(lhs, lhs_ty)?)
                     else {
                         panic!()
                     };
-                    self.builder.build_struct_gep(union_ty, union_ptr, 0, &rhs.text)?
+                    stack_val(self.builder.build_struct_gep(union_ty, union_ptr, 0, &rhs.text)?)
                 },
                 Type::Enum { variants } => todo!(),
-                Type::Type(ptr) => todo!(),
+                Type::Type(ty) => match expr_ty {
+                    Type::Enum { variants } => {
+                        let (tag, d) = variants.find_field(&rhs.text).unwrap_debug();
+                        let enum_ty = self.llvm_type(*ty).struct_ty();
+                        self.compile_enum_val(variants, tag, None)
+                    },
+                    Type::EnumVariant { enum_ty, idx } => {
+                        let Type::Enum { variants } = *enum_ty else { unreachable_debug() };
+                        let variant = variants[idx];
+                        Ok(Symbol::EnumVariant { variants, idx })
+                    },
+                    _ => unreachable_debug(),
+                },
                 _ => unreachable_debug(),
-            }),
+            },
             &ExprKind::Index { lhs, idx } => {
                 let Type::Array { len, elem_ty } = lhs.ty else { panic!() };
                 let arr_ty = self.llvm_type(lhs.ty).arr_ty();
@@ -392,25 +415,28 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 debug_assert!(expr_ty == *elem_ty);
                 self.build_index(arr_ty, arr_ptr, idx_val.int_val(), *elem_ty)
             },
-            ExprKind::Call { func, args, .. } => {
-                let func = func.try_to_ident().unwrap_debug();
-                let (&params, &func) = self.get_symbol(&func.text).as_fn().unwrap_debug();
-
-                let args = params
-                    .as_ref()
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, param)| {
-                        let arg = args.get(idx).copied().or(param.default).unwrap_debug();
-                        Ok(match self.compile_expr(arg, param.ty)? {
-                            Symbol::Stack(ptr) => BasicMetadataValueEnum::from(ptr),
-                            Symbol::Register(val) => val.basic_metadata_val(),
-                            _ => todo!(),
+            ExprKind::Call { func, args, .. } => match self.compile_typed_expr(*func)? {
+                Symbol::Function { params, val: func } => {
+                    let args = params
+                        .as_ref()
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, param)| {
+                            let arg = args.get(idx).copied().or(param.default).unwrap_debug();
+                            Ok(match self.compile_expr(arg, param.ty)? {
+                                Symbol::Stack(ptr) => BasicMetadataValueEnum::from(ptr),
+                                Symbol::Register(val) => val.basic_metadata_val(),
+                                _ => todo!(),
+                            })
                         })
-                    })
-                    .collect::<CodegenResult<Vec<_>>>()?;
-
-                reg(self.builder.build_call(func, &args, "call")?)
+                        .collect::<CodegenResult<Vec<_>>>()?;
+                    reg(self.builder.build_call(func, &args, "call")?)
+                },
+                Symbol::EnumVariant { variants, idx } => {
+                    debug_assert!(args.len() <= 1);
+                    self.compile_enum_val(variants, idx, args.get(0).copied())
+                },
+                _ => unreachable_debug(),
             },
             ExprKind::UnaryOp { kind, expr, .. } => {
                 //let v = try_compile_expr_as_val!(self, *expr, expr_ty);
@@ -443,6 +469,9 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                         _ => todo!(),
                     },
                     UnaryOpKind::Neg => match expr_ty {
+                        Type::Int { bits, is_signed: true } => {
+                            reg(self.builder.build_int_neg(v.int_val(), "neg")?)
+                        },
                         Type::Float { .. } => {
                             reg(self.builder.build_float_neg(v.float_val(), "neg")?)
                         },
@@ -513,35 +542,37 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
                 let var_name = &*ident.text;
-                let v = match init.map(|p| &p.as_ref().kind) {
-                    Some(ExprKind::Fn(f)) => self.compile_fn(var_name, f)?,
-                    Some(&ExprKind::StructDef(fields)) => {
-                        Symbol::StructDef { fields, ty: self.struct_type(fields, Some(var_name)) }
-                    },
-                    _ => {
-                        if !markers.is_mut
-                            && let Some(init) = init
-                        {
-                            self.compile_expr(*init, *ty)?
-                            //Symbol::Register(try_compile_expr_as_val!(self,
-                            // *init))
-                        } else {
-                            let stack_ty = self.llvm_type(*ty).basic_ty();
-                            let stack_var = self.builder.build_alloca(stack_ty, &var_name)?;
-                            if let Some(init) = init {
-                                let init = try_compile_expr_as_val!(self, *init, *ty);
-                                self.builder.build_store(stack_var, init)?;
-                            }
-                            Symbol::Stack(stack_var)
-                        }
-                    },
+                let prev_var_name = self.cur_var_name.replace(Ptr::from(var_name));
+
+                let sym = if let Some(ExprKind::Fn(f)) = init.map(|p| &p.as_ref().kind) {
+                    self.compile_fn(var_name, f)?
+                } else if let Some(init) = init {
+                    let init = try_not_never!(self.compile_expr(*init, *ty)?);
+                    if markers.is_mut
+                        && let Symbol::Register(init_val) = init
+                    {
+                        let stack_ty = self.llvm_type(*ty).basic_ty();
+                        let stack_ptr = self.builder.build_alloca(stack_ty, &var_name)?;
+                        self.builder.build_store(stack_ptr, init_val)?;
+                        Symbol::Stack(stack_ptr)
+                    } else {
+                        init
+                    }
+                } else {
+                    let stack_ty = self.llvm_type(*ty).basic_ty();
+                    let stack_ptr = self.builder.build_alloca(stack_ty, &var_name)?;
+                    Symbol::Stack(stack_ptr)
                 };
 
-                let old = self.symbols.insert(var_name.to_string(), v);
+                debug_assert!(!markers.is_mut || matches!(sym, Symbol::Stack(_)));
+                let old = self.symbols.insert(var_name.to_string(), sym);
                 if old.is_some() {
-                    //println!("LOG: '{}' was shadowed in the same scope",
-                    // var_name);
+                    #[cfg(debug_assertions)]
+                    println!("LOG: '{var_name}' was shadowed in the same scope");
                 }
+
+                self.cur_var_name = prev_var_name;
+
                 debug_assert_matches!(expr_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
@@ -730,9 +761,40 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         self.compile_expr(expr.expr, expr.ty)
     }
 
+    fn compile_enum_val(
+        &mut self,
+        variants: VarDeclList,
+        variant_idx: usize,
+        init: Option<Ptr<Expr>>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        let enum_ty = self.type_table[&variants];
+        let enum_ptr = self.builder.build_alloca(enum_ty, "enum")?;
+
+        // set tag
+        let tag_ptr = enum_ptr;
+        let tag_val = self.enum_tag_type(variants).const_int(variant_idx as u64, false);
+        self.builder.build_store(tag_ptr, tag_val)?;
+
+        // set data
+        if let Some(init) = init {
+            let data_ptr = self.builder.build_struct_gep(enum_ty, enum_ptr, 1, "enum_data")?;
+            let v = try_compile_expr_as_val!(self, init, variants[variant_idx].ty);
+            self.builder.build_store(data_ptr, v)?;
+        }
+
+        stack_val(enum_ptr)
+    }
+
     fn compile_fn(&mut self, name: &str, f: &Fn) -> CodegenResult<Symbol<'ctx>> {
+        let prev_bb = self.builder.get_insert_block();
+
         let fn_val = self.compile_prototype(name, f);
         let val = self.compile_fn_body(fn_val, f)?;
+
+        if let Some(prev_bb) = prev_bb {
+            self.builder.position_at_end(prev_bb);
+        }
+
         Ok(Symbol::Function { params: f.params, val })
     }
 
@@ -750,10 +812,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             .collect::<Vec<_>>();
         let fn_type = match f.ret_type {
             Type::Void | Type::Never => self.context.void_type().fn_type(&param_types, false),
-            _ => {
-                let ret_type = self.llvm_type(f.ret_type).basic_ty();
-                ret_type.fn_type(&param_types, false)
-            },
+            _ => self.ret_type(f.ret_type).fn_type(&param_types, false),
         };
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
 
@@ -806,7 +865,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 #[cfg(debug_assertions)]
                 self.module.print_to_stderr();
                 unsafe { func.delete() };
-                unreachable_debug();
+                panic_debug("invalid generated function");
                 Err(CodegenError::InvalidGeneratedFunction)?
             }
         };
@@ -824,7 +883,14 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
                 self.builder.build_return(None)?;
             },
             _ => {
-                let ret = self.sym_as_val(ret_sym, ret_ty)?;
+                let ret = match ret_sym {
+                    Symbol::Stack(ptr) => {
+                        let ty = self.ret_type(ret_ty);
+                        self.builder.build_load(ty, ptr, "")?
+                    },
+                    Symbol::Register(val) => val.basic_val(),
+                    _ => panic_debug("unexpected symbol"),
+                };
                 self.builder.build_return(Some(&ret))?;
             },
         }
@@ -1059,28 +1125,98 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
         }
     }
 
-    fn struct_type(&mut self, fields: VarDeclList, name: Option<&str>) -> StructType<'ctx> {
+    fn struct_type(&mut self, fields: VarDeclList, name: Option<Ptr<str>>) -> StructType<'ctx> {
+        if let Some(t) = self.type_table.get(&fields).copied() {
+            return t;
+        }
+
         let field_types =
             fields.iter().map(|f| self.llvm_type(f.ty).basic_ty()).collect::<Vec<_>>();
-        let ty = match name {
+        let ty = self.struct_type_inner(&field_types, name);
+        let a = self.type_table.insert(fields, ty);
+        assert!(a.is_none());
+        ty
+    }
+
+    fn struct_type_inner<'a>(
+        &mut self,
+        fields: &[BasicTypeEnum<'ctx>],
+        name: Option<Ptr<str>>,
+    ) -> StructType<'ctx> {
+        match name.as_ref().map(Ptr::as_ref) {
             Some(name) => {
                 let ty = self.context.opaque_struct_type(name);
-                if !ty.set_body(&field_types, false) {
+                if !ty.set_body(fields, false) {
                     panic!("invalid struct type")
                 }
                 ty
             },
-            None => self.context.struct_type(&field_types, false),
-        };
+            None => self.context.struct_type(fields, false),
+        }
+    }
+
+    fn union_type(&mut self, fields: VarDeclList, name: Option<Ptr<str>>) -> StructType<'ctx> {
+        if let Some(t) = self.type_table.get(&fields).copied() {
+            return t;
+        }
+
+        let ty = self.union_type_inner(fields, name);
         self.type_table.insert(fields, ty);
         ty
+    }
+
+    fn union_type_inner(
+        &mut self,
+        fields: VarDeclList,
+        name: Option<Ptr<str>>,
+    ) -> StructType<'ctx> {
+        for f in fields.iter() {
+            // if f.ty is a custom type, this will compile the type.
+            let _ = self.llvm_type(f.ty);
+        }
+        let fields = if let Some(biggest_alignment_field) =
+            fields.iter().map(|f| f.ty).max_by(|a, b| a.alignment().cmp(&b.alignment()))
+        {
+            let remaining_size_field = self
+                .context
+                .i8_type()
+                .array_type((Type::Union { fields }.size() - biggest_alignment_field.size()) as u32)
+                .as_basic_type_enum();
+            let biggest_alignment_field = self
+                .context
+                .custom_width_int_type((biggest_alignment_field.size() * 8) as u32)
+                .as_basic_type_enum();
+            &[biggest_alignment_field, remaining_size_field] as &[_]
+        } else {
+            &[]
+        };
+        self.struct_type_inner(fields, name)
+    }
+
+    fn enum_type(&mut self, variants: VarDeclList, name: Option<Ptr<str>>) -> StructType<'ctx> {
+        if let Some(t) = self.type_table.get(&variants).copied() {
+            return t;
+        }
+
+        let tag_ty = self.enum_tag_type(variants).as_basic_type_enum();
+        let val_ty = self.union_type_inner(variants, None).as_basic_type_enum();
+        let ty = self.struct_type_inner(&[tag_ty, val_ty], name);
+        self.type_table.insert(variants, ty);
+        ty
+    }
+
+    #[inline]
+    fn enum_tag_type(&mut self, variants: VarDeclList) -> IntType<'ctx> {
+        let variant_count = util::variant_count_to_tag_size_bits(variants.len());
+        self.context.custom_width_int_type(variant_count)
+        //self.context.i32_type()
     }
 
     fn llvm_type(&mut self, ty: Type) -> CodegenType<'ctx> {
         CodegenType::new(match ty {
             Type::Void => self.context.void_type().as_type_ref(),
             Type::Never => todo!(),
-            Type::Ptr(_) => self.context.ptr_type(AddressSpace::default()).as_type_ref(),
+            Type::Ptr { .. } => self.context.ptr_type(AddressSpace::default()).as_type_ref(),
             Type::Int { bits, .. } => self.int_type(bits).as_type_ref(),
             Type::IntLiteral => panic_debug("int literal type should have been resolved already"),
             Type::Bool => self.context.bool_type().as_type_ref(),
@@ -1092,22 +1228,28 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             Type::Array { len: count, elem_ty: ty } => {
                 self.llvm_type(*ty).basic_ty().array_type(count as u32).as_type_ref()
             },
-            Type::Struct { fields: ptr } | Type::Union { fields: ptr } => {
-                match self.type_table.get(&ptr) {
-                    Some(ty) => *ty,
-                    None => {
-                        let ty = self.struct_type(ptr, None);
-                        self.type_table.insert(ptr, ty);
-                        ty
-                    },
-                }
-                .as_type_ref()
-            },
-            Type::Enum { .. } => todo!(),
+            Type::Struct { fields } => self.struct_type(fields, None).as_type_ref(),
+            Type::Union { fields } => self.union_type(fields, None).as_type_ref(),
+            Type::Enum { variants } => self.enum_type(variants, None).as_type_ref(),
             Type::Type(_) => todo!(),
             Type::Unset | Type::Unevaluated(_) => panic_debug("unvalid type"),
             ty => todo!("{:?}", ty),
         })
+    }
+
+    fn ret_type(&mut self, ty: Type) -> BasicTypeEnum<'ctx> {
+        match ty {
+            Type::Struct { fields } => self.struct_type(fields, None).as_basic_type_enum(),
+            _ => self.llvm_type(ty).basic_ty(),
+        }
+        /*
+        match ty.size() {
+            0 => todo!(),
+            size @ 1..=8 => return_strategy::one_int(self, size),
+            size @ 9..=16 => return_strategy::two_int(self, size),
+            17.. => return_strategy::ret_param(),
+        }
+        */
     }
 
     fn sym_as_val(&mut self, sym: Symbol<'ctx>, ty: Type) -> CodegenResult<CodegenValue<'ctx>> {
@@ -1142,7 +1284,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
 
     fn is_register_passable(ty: Type) -> bool {
         match ty {
-            Type::Ptr(_)
+            Type::Ptr { .. }
             | Type::Int { .. }
             | Type::Bool
             | Type::Float { .. }
@@ -1153,6 +1295,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             | Type::Struct { .. }
             | Type::Union { .. }
             | Type::Enum { .. }
+            | Type::EnumVariant { .. }
             | Type::Type(_) => false,
             Type::IntLiteral | Type::FloatLiteral | Type::Unset | Type::Unevaluated(_) => {
                 panic_debug("invalid type")
@@ -1278,7 +1421,7 @@ impl<'ctx, 'alloc> Codegen<'ctx, 'alloc> {
             .map_err(|err| CodegenError::CannotCompileObjFile(err))
     }
 
-    pub fn jit_run_fn<Ret>(&mut self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
+    pub fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
         match self.module.create_jit_execution_engine(opt) {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>(fn_name)?.call() })
@@ -1307,6 +1450,14 @@ enum Symbol<'ctx> {
     UnionDef {
         fields: VarDeclList,
         ty: StructType<'ctx>,
+    },
+    EnumDef {
+        variants: VarDeclList,
+        ty: StructType<'ctx>,
+    },
+    EnumVariant {
+        variants: VarDeclList,
+        idx: usize,
     },
 }
 
@@ -1435,6 +1586,10 @@ impl<'ctx> CodegenType<'ctx> {
         unsafe { ArrayType::new(self.inner) }
     }
 
+    pub fn struct_ty(&self) -> StructType<'ctx> {
+        unsafe { StructType::new(self.inner) }
+    }
+
     pub fn basic_ty(&self) -> BasicTypeEnum<'ctx> {
         unsafe { BasicTypeEnum::new(self.inner) }
     }
@@ -1464,4 +1619,78 @@ fn stack_val<'ctx>(ptr: PointerValue<'ctx>) -> CodegenResult<Symbol<'ctx>> {
 pub struct Loop<'ctx> {
     continue_bb: BasicBlock<'ctx>,
     end_bb: BasicBlock<'ctx>,
+}
+
+mod return_strategy {
+    use super::Codegen;
+    use inkwell::types::{BasicType, BasicTypeEnum};
+
+    /// x86_64 clang: for 8 byte >= size
+    /// rust 1.81: for 16 byte >= size
+    /// ```llvm
+    /// %struct.S = type { [6 x i8] }
+    ///
+    /// define dso_local i48 @test() {
+    /// entry:
+    ///   %retval = alloca %struct.S, align 1
+    ///   %coerce.dive.coerce = alloca i48, align 8
+    ///   %x = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
+    ///   %arrayidx = getelementptr inbounds [6 x i8], ptr %x, i64 0, i64 5
+    ///   store i8 69, ptr %arrayidx, align 1
+    ///   %coerce.dive = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
+    ///   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %coerce.dive.coerce, ptr align 1 %coerce.dive, i64 6, i1 false)
+    ///   %0 = load i48, ptr %coerce.dive.coerce, align 8
+    ///   ret i48 %0
+    /// }
+    ///
+    /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
+    /// ```
+    pub fn one_int<'ctx>(c: &mut Codegen<'ctx, '_>, bytes: usize) -> BasicTypeEnum<'ctx> {
+        debug_assert!(bytes <= 8);
+        c.context.custom_width_int_type(bytes as u32 * 8).as_basic_type_enum()
+    }
+
+    /// x86_64 clang: for 16 byte >= size > 8 byte
+    /// ```llvm
+    /// %struct.S = type { [14 x i8] }
+    ///
+    /// define dso_local { i64, i48 } @test() {
+    /// entry:
+    ///   %retval = alloca %struct.S, align 1
+    ///   %coerce.dive.coerce = alloca { i64, i48 }, align 8
+    ///   %x = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
+    ///   %arrayidx = getelementptr inbounds [14 x i8], ptr %x, i64 0, i64 5
+    ///   store i8 69, ptr %arrayidx, align 1
+    ///   %coerce.dive = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
+    ///   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %coerce.dive.coerce, ptr align 1 %coerce.dive, i64 14, i1 false)
+    ///   %0 = load { i64, i48 }, ptr %coerce.dive.coerce, align 8
+    ///   ret { i64, i48 } %0
+    /// }
+    ///
+    /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
+    /// ```
+    pub fn two_int<'ctx>(c: &mut Codegen<'ctx, '_>, bytes: usize) -> BasicTypeEnum<'ctx> {
+        debug_assert!(bytes > 8 && bytes <= 16);
+        let ty_i64 = c.context.i64_type().as_basic_type_enum();
+        let remaining_bits = (bytes as u32 - 8) * 8;
+        let ty2 = c.context.custom_width_int_type(remaining_bits).as_basic_type_enum();
+        c.context.struct_type(&[ty_i64, ty2], false).as_basic_type_enum()
+    }
+
+    /// x86_64 clang: for size > 16 byte
+    /// rust 1.81: for size > 8 byte
+    /// ```llvm
+    /// %struct.S = type { [17 x i8] }
+    ///
+    /// define dso_local void @test(ptr dead_on_unwind noalias writable sret(%struct.S) align 1 %agg.result) {
+    /// entry:
+    ///   %x = getelementptr inbounds nuw %struct.S, ptr %agg.result, i32 0, i32 0
+    ///   %arrayidx = getelementptr inbounds [17 x i8], ptr %x, i64 0, i64 5
+    ///   store i8 69, ptr %arrayidx, align 1
+    ///   ret void
+    /// }
+    /// ```
+    pub fn ret_param() -> ! {
+        todo!()
+    }
 }

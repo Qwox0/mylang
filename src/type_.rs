@@ -1,17 +1,19 @@
 use crate::{
     ast::{Expr, Fn, VarDeclList, debug::DebugAst},
     ptr::Ptr,
-    util::panic_debug,
+    util::{panic_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes},
 };
 use core::fmt;
 
 // TODO: benchmark this
 // pub type Type = Ptr<TypeInfo>;
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Void,
     Never,
-    Ptr(Ptr<Type>),
+    Ptr {
+        pointee_ty: Ptr<Type>,
+    },
     Int {
         bits: u32,
         is_signed: bool,
@@ -37,7 +39,18 @@ pub enum Type {
         fields: VarDeclList,
     },
     Enum {
-        variants: (), // TODO
+        variants: VarDeclList, // TODO
+    },
+
+    /// ```
+    /// MyEnum :: enum { A, B(i64) };
+    /// a := MyEnum.A; // variant -> valid val
+    /// b1 := MyEnum.B; // variant -> invalid val
+    /// b2 := MyEnum.B(5); // variant initialization
+    /// ```
+    EnumVariant {
+        enum_ty: Ptr<Type>,
+        idx: usize,
     },
 
     /// `a :: int`
@@ -53,23 +66,35 @@ pub enum Type {
     Unevaluated(Ptr<Expr>),
 }
 
-impl fmt::Debug for Type {
+impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Never => write!(f, "Never"),
-            Type::Ptr(pointee) => write!(f, "*{:?}", &**pointee),
+            Type::Ptr { pointee_ty } => write!(f, "*{:?}", &**pointee_ty),
             Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            Type::Struct { fields } => write!(
+            Type::Struct { fields } | Type::Union { fields } => write!(
                 f,
-                "struct{{{}}}",
+                "{}{{{}}}",
+                if matches!(self, Type::Struct { .. }) { "struct" } else { "union" },
                 fields
                     .iter()
-                    .map(|f| format!("{}:{:?}", &*f.ident.text, f.ty,))
+                    .map(|f| format!("{}:{:?}", &*f.ident.text, f.ty))
                     .intersperse(",".to_string())
                     .collect::<String>()
             ),
-            Type::Union { .. } => write!(f, "union {{ ... }}"),
-            Type::Enum { .. } => write!(f, "enum {{ ... }}"),
+            Type::Enum { variants } => write!(
+                f,
+                "enum {{{}}}",
+                variants
+                    .iter()
+                    .map(|v| format!(
+                        "{}{}",
+                        &*v.ident.text,
+                        if v.ty != Type::Void { format!("({})", v.ty) } else { String::default() }
+                    ))
+                    .intersperse(",".to_string())
+                    .collect::<String>()
+            ),
             Type::Unset => write!(f, "Unset"),
             Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
             ti => write!(f, "{}", ti.to_text()),
@@ -78,21 +103,59 @@ impl fmt::Debug for Type {
 }
 
 impl Type {
-    pub fn stack_size(&self) -> usize {
+    /// size of stack allocation in bytes
+    pub fn size(&self) -> usize {
         match self {
-            Type::Void => 0,
-            Type::Never => 0,
-            Type::Ptr(_) => 8,
+            Type::Void | Type::Never => 0,
+            Type::Ptr { .. } => 8,
             Type::Int { bits, .. } | Type::Float { bits } => (*bits as usize).div_ceil(8),
             Type::Bool => 1,
             Type::Function(_) => todo!(),
-            Type::Array { len, elem_ty } => elem_ty.stack_size() * len,
-            Type::Struct { fields } => fields.iter().map(|f| f.ty.stack_size()).max().unwrap_or(0),
+            Type::Array { len, elem_ty } => elem_ty.size() * len,
             // TODO: struct might contain padding
-            Type::Union { fields } => fields.iter().map(|f| f.ty.stack_size()).sum(),
-            Type::Enum { .. } => todo!(),
+            Type::Struct { fields } => fields.iter().map(|f| f.ty.size()).sum(),
+            Type::Union { fields } => fields.iter().map(|f| f.ty.size()).max().unwrap_or(0),
+            Type::Enum { variants } => {
+                variant_count_to_tag_size_bytes(variants.len()) as usize
+                    + Type::Union { fields: *variants }.size()
+            },
             Type::Type(_) => 0,
-            _ => panic_debug("cannot find stack size"),
+            Type::IntLiteral
+            | Type::FloatLiteral
+            | Type::EnumVariant { .. }
+            | Type::Unset
+            | Type::Unevaluated(_) => panic_debug("cannot find stack size"),
+        }
+    }
+
+    /// alignment of stack allocation in bytes
+    pub fn alignment(&self) -> usize {
+        const ZST_ALIGNMENT: usize = 1;
+        match self {
+            Type::Void | Type::Never => ZST_ALIGNMENT,
+            Type::Ptr { .. } => todo!(),
+            Type::Int { .. } => self.size().min(16),
+            Type::Bool => 1,
+            Type::Float { .. } => self.size().min(16),
+            Type::Function(_) => todo!(),
+            Type::Array { elem_ty, .. } => elem_ty.alignment(),
+            Type::Struct { fields } => {
+                fields.iter().map(|f| f.ty.alignment()).max().unwrap_or(ZST_ALIGNMENT)
+            },
+            Type::Union { fields } => {
+                fields.iter().map(|f| f.ty.alignment()).max().unwrap_or(ZST_ALIGNMENT)
+            },
+            Type::Enum { variants } => {
+                Type::Int { bits: variant_count_to_tag_size_bits(variants.len()), is_signed: false }
+                    .alignment()
+                    .max(Type::Union { fields: *variants }.alignment())
+            },
+            Type::IntLiteral
+            | Type::FloatLiteral
+            | Type::EnumVariant { .. }
+            | Type::Type(..)
+            | Type::Unset
+            | Type::Unevaluated(_) => panic_debug("cannot find stack alignment"),
         }
     }
 
@@ -130,6 +193,16 @@ impl Type {
                 },
                 (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
                 (Type::FloatLiteral, Type::Float { .. }) => Some(Right),
+                (Type::EnumVariant { enum_ty, idx }, e @ Type::Enum { variants })
+                    if *enum_ty == e && variants[idx].ty == Type::Void =>
+                {
+                    Some(Right)
+                },
+                (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
+                    if *enum_ty == e && variants[idx].ty == Type::Void =>
+                {
+                    Some(Left)
+                },
                 _ => None,
             }
         }
@@ -150,6 +223,7 @@ impl Type {
                 *elem_ty = elem_ty.finalize();
                 self
             },
+            Type::EnumVariant { enum_ty, .. } => *enum_ty,
             Type::Unset | Type::Unevaluated(_) => panic_debug("cannot finalize invalid type"),
             t => t,
         }

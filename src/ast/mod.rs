@@ -86,8 +86,8 @@ pub enum ExprKind {
     StructDef(VarDeclList),
     /// `union { a: int, b: String, c: (u8, u32) }`
     UnionDef(VarDeclList),
-    /// `enum { ... }`
-    EnumDef {},
+    /// `enum { A, B(i64) }`
+    EnumDef(VarDeclList),
     /// `?<ty>`
     OptionShort(Type),
     /// `*<ty>`
@@ -107,10 +107,11 @@ pub enum ExprKind {
         fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
     },
 
-    /// `expr . ident`
-    /// `     ^` expr.span
+    /// `expr . ident`, `.ident`
+    /// `     ^` `       ^` expr.span
     Dot {
-        lhs: ExprWithTy,
+        lhs: Option<Ptr<Expr>>,
+        lhs_ty: Type,
         rhs: Ident,
     },
     /// `<lhs> [ <idx> ]`
@@ -266,13 +267,14 @@ impl Expr {
         match self.kind {
             ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
-            ExprKind::EnumDef {} => todo!(),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs, fields } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
             },
-            ExprKind::Dot { lhs, rhs } => lhs.full_span().join(rhs.span),
+            ExprKind::Dot { lhs, lhs_ty: _, rhs } => {
+                lhs.map(|l| l.full_span()).unwrap_or(self.span).join(rhs.span)
+            },
             ExprKind::Index { lhs, idx } => lhs.full_span().join(self.span),
             ExprKind::Call { func, args, pipe_idx } => match pipe_idx {
                 Some(i) => args[i].full_span().join(self.span),

@@ -9,9 +9,6 @@ use core::fmt;
 pub enum ParseErrorKind {
     Unimplemented,
     NoInput,
-    /// Like [`ParseErrorKind::UnexpectedToken`] but this might not be a real
-    /// error is some cases.
-    UnexpectedStart(TokenKind),
     UnexpectedToken(TokenKind),
     MissingToken(TokenKind),
     NotAKeyword,
@@ -62,10 +59,6 @@ impl ParseError {
         Err(ParseError::new(ParseErrorKind::UnexpectedToken(t.kind), t.span))
     }
 
-    pub fn unexpected_start_token<T>(t: Token) -> Result<T, ParseError> {
-        Err(ParseError::new(ParseErrorKind::UnexpectedStart(t.kind), t.span))
-    }
-
     #[cfg(debug_assertions)]
     pub fn add_context(self, context: impl fmt::Display + Send + Sync + 'static) -> Self {
         let context = self.context.context(context);
@@ -85,15 +78,17 @@ pub trait ParseResultExt<T> {
 }
 
 impl<T: core::fmt::Debug> ParseResultExt<T> for ParseResult<T> {
-    /// [`ParseErrorKind::UnexpectedStart`] -> [`None`]
+    /// unexpected start token -> [`None`]
     /// [`ParseErrorKind::NoInput`] -> [`None`]
     fn opt(self) -> ParseResult<Option<T>> {
         match self {
             Ok(t) => Ok(Some(t)),
-            Err(ParseError {
-                kind: ParseErrorKind::UnexpectedStart(_) | ParseErrorKind::NoInput,
-                ..
-            }) => Ok(None),
+            Err(ParseError { kind: ParseErrorKind::NoInput, .. }) => Ok(None),
+            Err(ParseError { kind: ParseErrorKind::UnexpectedToken(t), .. })
+                if t.is_invalid_start() =>
+            {
+                Ok(None)
+            },
             Err(e) => Err(e),
         }
     }

@@ -1,190 +1,57 @@
 use super::{Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind};
-use crate::{ast::VarDecl, ptr::Ptr, type_::Type, util::unreachable_debug};
+use crate::{
+    ast::VarDecl,
+    ptr::Ptr,
+    type_::Type,
+    util::{self, unreachable_debug},
+};
+use std::fmt;
 
 pub trait DebugAst {
-    fn to_text(&self) -> String;
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf);
 
-    fn write_tree(&self, lines: &mut TreeLines);
+    fn to_text(&self) -> String {
+        let mut buf = DebugOneLine::default();
+        self.debug_impl(&mut buf);
+        buf.0
+    }
+
+    fn write_tree(&self) -> DebugTree {
+        let mut lines = DebugTree::default();
+        self.debug_impl(&mut lines);
+        lines
+    }
 
     fn print_tree(&self) {
-        let mut lines = TreeLines::default();
-        self.write_tree(&mut lines);
         println!("| {}", self.to_text());
-        for l in lines.lines {
+        for l in self.write_tree().lines {
             println!("| {}", l.0);
         }
     }
 }
 
 impl<T: DebugAst> DebugAst for Ptr<T> {
-    fn to_text(&self) -> String {
-        self.as_ref().to_text()
+    #[inline]
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
+        self.as_ref().debug_impl(buf);
     }
+}
 
-    fn write_tree(&self, lines: &mut TreeLines) {
-        self.as_ref().write_tree(lines)
+impl DebugAst for Ident {
+    #[inline]
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
+        buf.write(&self.text);
     }
 }
 
 impl DebugAst for Expr {
-    fn to_text(&self) -> String {
+    fn debug_impl(&self, lines: &mut impl DebugAstBuf) {
         #[allow(unused_variables)]
         match &self.kind {
-            ExprKind::Ident(text) => text.to_string(),
-            ExprKind::Literal { kind: _, code } => code.to_string(),
-            ExprKind::BoolLit(b) => b.to_string(),
-            ExprKind::ArrayTy { count, ty } => format!("[{}]{}", count.to_text(), ty.to_text()),
-            ExprKind::ArrayTy2 { ty } => format!("[]{}", ty.to_text()),
-            ExprKind::ArrayLit { elements } => {
-                format!("[{}]", many_expr_to_text(elements, ","))
+            ExprKind::Ident(text) | ExprKind::Literal { kind: _, code: text } => {
+                lines.write(text.as_ref())
             },
-            ExprKind::ArrayLitShort { val, count } => {
-                format!("[{};{}]", val.to_text(), count.to_text())
-            },
-            ExprKind::Tuple { elements } => {
-                format!("({})", many_expr_to_text(elements, ","))
-            },
-            ExprKind::Fn(Fn { params, ret_type, body }) => format!(
-                "({})->{}{}",
-                many_to_text(&*params, |decl, _| var_decl_to_text(decl), ","),
-                ret_type.to_text(),
-                if matches!(body.kind, ExprKind::Block { .. }) {
-                    body.to_text()
-                } else {
-                    format!("{{{}}}", body.to_text())
-                }
-            ),
-            ExprKind::Parenthesis { expr } => format!("({})", expr.to_text()),
-            ExprKind::Block { stmts, has_trailing_semicolon } => {
-                format!(
-                    "{{{}{}}}",
-                    many_to_text(stmts, |a, _| a.to_text(), ";"),
-                    if *has_trailing_semicolon { ";" } else { "" }
-                )
-            },
-            ExprKind::StructDef(fields) | ExprKind::UnionDef(fields) => {
-                let is_struct = matches!(self.kind, ExprKind::StructDef(_));
-                format!(
-                    "{}{{{}}}",
-                    if is_struct { "struct" } else { "union" },
-                    many_to_text(fields, |f, _| var_decl_to_text(f), ",")
-                )
-            },
-            ExprKind::EnumDef {} => panic!(),
-            ExprKind::OptionShort(ty) => {
-                format!("?{}", ty.to_text())
-            },
-            ExprKind::Ptr { is_mut, ty } => {
-                format!("*{}{}", mut_marker(*is_mut), ty.to_text())
-            },
-            ExprKind::Initializer { lhs, fields } => {
-                format!(
-                    "{}.{{{}}}",
-                    opt_expr_to_text(lhs),
-                    many_to_text(
-                        fields,
-                        |(f, val), _| format!(
-                            "{}{}",
-                            f.text.as_ref(),
-                            opt_to_text(val, |v| format!("={}", v.to_text())),
-                        ),
-                        ","
-                    )
-                )
-            },
-            ExprKind::Dot { lhs, rhs } => {
-                format!("{}.{}", lhs.to_text(), rhs.text.as_ref())
-            },
-            ExprKind::Index { lhs, idx } => format!("{}[{}]", lhs.to_text(), idx.to_text()),
-            //ExprKind::CompCall { func, args } => panic!(),
-            ExprKind::Call { func, args, pipe_idx } => {
-                format!(
-                    "{}{}({})",
-                    pipe_idx.map(|idx| args[idx].to_text() + "|").unwrap_or_default(),
-                    func.to_text(),
-                    many_to_text(
-                        args,
-                        |e, idx| {
-                            if pipe_idx.is_some_and(|i| i == idx) {
-                                "^".to_string()
-                            } else {
-                                e.to_text()
-                            }
-                        },
-                        ","
-                    )
-                )
-            },
-            ExprKind::UnaryOp { kind, expr, is_postfix: false } => {
-                let op = match kind {
-                    UnaryOpKind::AddrOf => "&",
-                    UnaryOpKind::AddrMutOf => "&mut ",
-                    UnaryOpKind::Deref => "*",
-                    UnaryOpKind::Not => "!",
-                    UnaryOpKind::Neg => "-",
-                    UnaryOpKind::Try => unreachable_debug(),
-                };
-                format!("{op}{}", expr.to_text())
-            },
-            ExprKind::UnaryOp { kind, expr, is_postfix: true } => {
-                let op = match kind {
-                    UnaryOpKind::AddrOf => ".&",
-                    UnaryOpKind::AddrMutOf => ".&mut",
-                    UnaryOpKind::Deref => ".*",
-                    UnaryOpKind::Try => "?",
-                    UnaryOpKind::Not | UnaryOpKind::Neg => unreachable_debug(),
-                };
-                format!("{}{op}", expr.to_text())
-            },
-            ExprKind::BinOp { lhs, op, rhs, .. } => {
-                format!("{} {} {}", lhs.to_text(), op.to_binop_text(), rhs.to_text())
-            },
-            ExprKind::Assign { lhs, rhs, .. } => {
-                format!("{}={}", lhs.to_text(), rhs.to_text())
-            },
-            ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
-                format!("{}{}{}", lhs.to_text(), op.to_binop_assign_text(), rhs.to_text())
-            },
-            ExprKind::VarDecl(decl) => var_decl_to_text(decl),
-            ExprKind::If { condition, then_body, else_body, was_piped } => {
-                format!(
-                    "if {} {}{}",
-                    condition.to_text(),
-                    then_body.to_text(),
-                    opt_to_text(else_body, |e| format!(" else {}", e.to_text()))
-                )
-            },
-            ExprKind::Match { val, else_body, was_piped } => todo!(),
-            ExprKind::For { source, iter_var, body, was_piped } => {
-                // TODO: normal syntax
-                format!("{}|for {} {}", source.to_text(), &*iter_var.text, body.to_text())
-            },
-            ExprKind::While { condition, body, was_piped } => {
-                if *was_piped {
-                    format!("{}|while {}", condition.to_text(), body.to_text())
-                } else {
-                    format!("while {} {}", condition.to_text(), body.to_text())
-                }
-            },
-            ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Defer(expr) => format!("defer {}", expr.to_text()),
-            ExprKind::Return { expr } => {
-                format!("return{}", opt_to_text(expr, |e| format!(" {}", e.to_text())))
-            },
-            ExprKind::Break { expr } => {
-                format!("break{}", opt_to_text(expr, |e| format!(" {}", e.to_text())))
-            },
-            ExprKind::Continue => format!("continue"),
-            ExprKind::Semicolon(expr) => format!("{};", opt_expr_to_text(expr)),
-        }
-    }
-
-    fn write_tree(&self, lines: &mut TreeLines) {
-        #[allow(unused_variables)]
-        match &self.kind {
-            ExprKind::Ident(_) | ExprKind::Literal { .. } | ExprKind::BoolLit(_) => {
-                lines.write(&self.to_text())
-            },
+            ExprKind::BoolLit(b) => lines.write(if *b { "true" } else { "false" }),
             ExprKind::ArrayTy { count, ty } => {
                 lines.write("[");
                 lines.write_tree(count);
@@ -197,12 +64,7 @@ impl DebugAst for Expr {
             },
             ExprKind::ArrayLit { elements } => {
                 lines.write("[");
-                for (idx, e) in elements.iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-                    lines.write_tree(e);
-                }
+                lines.write_many(&elements, |e, _, l| l.write_tree(e), ",");
                 lines.write("]");
             },
             ExprKind::ArrayLitShort { val, count } => {
@@ -214,26 +76,19 @@ impl DebugAst for Expr {
             },
             ExprKind::Tuple { elements } => {
                 lines.write("(");
-                many_expr_to_text(elements, ",");
+                lines.write_many_expr(elements, ",");
                 lines.write(")");
             },
             ExprKind::Fn(Fn { params, ret_type, body }) => {
                 let body = body;
                 lines.write("(");
-
-                for (idx, decl) in params.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    var_decl_write_tree(decl, lines)
-                }
+                lines.write_many_expr(&params, ",");
                 lines.write(")->");
                 if *ret_type != Type::Unset {
                     lines.write_tree(ret_type);
                 }
                 if matches!(body.kind, ExprKind::Block { .. }) {
-                    body.write_tree(lines);
+                    body.debug_impl(lines);
                 } else {
                     lines.write("{");
                     lines.write_tree(body);
@@ -259,16 +114,25 @@ impl DebugAst for Expr {
             ExprKind::StructDef(fields) | ExprKind::UnionDef(fields) => {
                 let is_struct = matches!(self.kind, ExprKind::StructDef(_));
                 lines.write(if is_struct { "struct{" } else { "union{" });
-                for (idx, field) in fields.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-
-                    var_decl_write_tree(field, lines)
-                }
+                lines.write_many_expr(&fields, ",");
                 lines.write("}");
             },
-            ExprKind::EnumDef {} => todo!(),
+            ExprKind::EnumDef(variants) => {
+                lines.write("enum{");
+                lines.write_many(
+                    &variants,
+                    |v: &VarDecl, _, lines| {
+                        lines.write_tree(&v.ident);
+                        if v.ty != Type::Void {
+                            lines.write("(");
+                            lines.write_tree(&v.ty);
+                            lines.write(")");
+                        }
+                    },
+                    ",",
+                );
+                lines.write("}");
+            },
             ExprKind::OptionShort(ty) => {
                 lines.write("?");
                 lines.write_tree(ty);
@@ -285,24 +149,25 @@ impl DebugAst for Expr {
                     lines.write_tree(lhs);
                 }
                 lines.write(".{");
-                for (idx, (field, val)) in fields.into_iter().enumerate() {
-                    if idx != 0 {
-                        lines.write(",");
-                    }
-                    lines.write_ident(field);
-                    if let Some(val) = val {
-                        lines.write("=");
-                        lines.write_tree(val);
-                    }
-                }
-
+                lines.write_many(
+                    &fields,
+                    |(field, val): &(Ident, _), _, lines| {
+                        lines.write_tree(field);
+                        if let Some(val) = val {
+                            lines.write("=");
+                            lines.write_tree(val);
+                        }
+                    },
+                    ",",
+                );
                 lines.write("}");
             },
-            ExprKind::Dot { lhs, rhs } => {
-                let lhs = lhs;
-                lines.write_tree(lhs);
+            ExprKind::Dot { lhs, lhs_ty: _, rhs } => {
+                if let Some(lhs) = lhs {
+                    lines.write_tree(lhs);
+                }
                 lines.write(".");
-                lines.write_ident(rhs);
+                lines.write_tree(rhs);
             },
             ExprKind::Index { lhs, idx } => {
                 lines.write_tree(lhs);
@@ -317,17 +182,14 @@ impl DebugAst for Expr {
                 }
                 lines.write_tree(func);
                 lines.write("(");
-                let len = args.len();
-                for (idx, arg) in args.into_iter().enumerate() {
+                let inner = |arg, idx, lines| {
                     if pipe_idx.is_some_and(|i| i == idx) {
-                        lines.write("^");
+                        DebugAstBuf::write(lines, "^");
                     } else {
-                        lines.write_tree(arg);
+                        DebugAstBuf::write_tree(lines, arg);
                     }
-                    if idx + 1 != len {
-                        lines.write(",");
-                    }
-                }
+                };
+                lines.write_many(&args, inner, ",");
                 lines.write(")");
             },
             ExprKind::UnaryOp { kind, expr, is_postfix: false } => {
@@ -352,29 +214,21 @@ impl DebugAst for Expr {
                 });
             },
             ExprKind::BinOp { lhs, op, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
                 lines.write_tree(lhs);
-                lines.write(" ");
-                lines.write(op.to_binop_text());
-                lines.write(" ");
+                write!(lines, " {} ", op.to_binop_text()).unwrap();
                 lines.write_tree(rhs);
             },
             ExprKind::Assign { lhs, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
                 lines.write_tree(lhs);
                 lines.write("=");
                 lines.write_tree(rhs);
             },
             ExprKind::BinOpAssign { lhs, op, rhs, .. } => {
-                let lhs = lhs;
-                let rhs = rhs;
                 lines.write_tree(lhs);
                 lines.write(op.to_binop_assign_text());
                 lines.write_tree(rhs);
             },
-            ExprKind::VarDecl(decl) => var_decl_write_tree(decl, lines),
+            ExprKind::VarDecl(decl) => decl.debug_impl(lines),
             ExprKind::If { condition, then_body, else_body, was_piped } => {
                 if *was_piped {
                     lines.write_tree(condition);
@@ -399,7 +253,7 @@ impl DebugAst for Expr {
                 // TODO: normal syntax
                 lines.write_tree(source);
                 lines.write("|for ");
-                lines.write_ident(iter_var);
+                lines.write_tree(iter_var);
                 lines.write(" ");
                 lines.write_tree(body);
             },
@@ -447,45 +301,127 @@ impl DebugAst for Expr {
 }
 
 impl DebugAst for ExprWithTy {
-    fn to_text(&self) -> String {
-        self.expr.to_text()
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
+        self.expr.debug_impl(buf);
     }
+}
 
-    fn write_tree(&self, lines: &mut TreeLines) {
-        self.expr.write_tree(lines);
+impl DebugAst for VarDecl {
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
+        let VarDecl { markers, ident, ty, default, is_const } = self;
+        buf.write(&format!(
+            "{}{}{}",
+            if markers.is_pub { "pub " } else { "" },
+            mut_marker(markers.is_mut),
+            if markers.is_rec { "rec " } else { "" }
+        ));
+
+        buf.write_tree(ident);
+
+        if *ty != Type::Unset {
+            buf.write(":");
+            buf.write_tree(ty);
+        }
+
+        if let Some(default) = default {
+            let default = default;
+            buf.write(&format!(
+                "{}{}",
+                if *ty == Type::Unset { ":" } else { "" },
+                if *is_const { ":" } else { "=" },
+            ));
+            buf.write_tree(default);
+        }
     }
 }
 
 impl DebugAst for Type {
-    fn to_text(&self) -> String {
+    fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
         match self {
-            Type::Void => "void".to_string(),
-            Type::Never => "!".to_string(),
-            Type::Ptr(pointee) => format!("*{}", pointee.to_text()),
-            Type::Int { bits, is_signed } => {
-                format!("{}{}", if *is_signed { "i" } else { "u" }, bits)
+            Type::Void => buf.write("void"),
+            Type::Never => buf.write("!"),
+            Type::Ptr { pointee_ty } => {
+                buf.write("*");
+                pointee_ty.debug_impl(buf);
             },
-            Type::IntLiteral => "int_lit".to_string(),
-            Type::Bool => "bool".to_string(),
-            Type::Float { bits } => format!("f{}", bits),
-            Type::FloatLiteral => "float_lit".to_string(),
-            Type::Function(_) => "fn".to_string(), // TODO: fn type as text
-            Type::Array { len: count, elem_ty: ty } => format!("[{count}]{}", ty.to_text()),
-            Type::Struct { fields } => format!("struct{:?}", fields.0),
-            Type::Union { .. } => todo!(),
-            Type::Enum { .. } => todo!(),
-            Type::Type(_) => "type".to_string(),
-            Type::Unset => String::default(),
-            Type::Unevaluated(expr) => expr.to_text(),
+            Type::Int { bits, is_signed } => {
+                buf.write(if *is_signed { "i" } else { "u" });
+                buf.write(&bits.to_string());
+            },
+            Type::IntLiteral => buf.write("int_lit"),
+            Type::Bool => buf.write("bool"),
+            Type::Float { bits } => {
+                buf.write("f");
+                buf.write(&bits.to_string());
+            },
+            Type::FloatLiteral => buf.write("float_lit"),
+            Type::Function(_) => buf.write("fn"), // TODO: fn type as text
+            Type::Array { len: count, elem_ty: ty } => {
+                write!(buf, "[{count}]").unwrap();
+                ty.debug_impl(buf);
+            },
+            Type::Struct { fields } => write!(buf, "struct{:?}", fields.0).unwrap(),
+            Type::Union { fields } => write!(buf, "union{:?}", fields.0).unwrap(),
+            Type::Enum { variants } => write!(buf, "enum{:?}", variants.0).unwrap(),
+            Type::EnumVariant { enum_ty, idx } => {
+                let Type::Enum { variants } = **enum_ty else { unreachable_debug() };
+                let variant = variants[*idx];
+                buf.write_tree(enum_ty);
+                buf.write(".");
+                buf.write_tree(&variant.ident);
+            },
+            Type::Type(_) => buf.write("type"),
+            Type::Unset => {},
+            Type::Unevaluated(expr) => expr.debug_impl(buf),
+        }
+    }
+}
+
+pub trait DebugAstBuf: fmt::Write {
+    #[inline]
+    fn write(&mut self, text: &str) {
+        fmt::Write::write_str(self, text).unwrap()
+    }
+
+    fn write_tree<T: DebugAst>(&mut self, expr: &T);
+
+    /// SAFETY: don't leak the `&mut Self` param out of the body of
+    /// `single_write_tree`.
+    fn write_many<'x, 'l, T>(
+        &'l mut self,
+        elements: &'x [T],
+        mut single_write_tree: impl FnMut(&'x T, usize, &'l mut Self),
+        sep: &str,
+    ) {
+        for (idx, x) in elements.iter().enumerate() {
+            if idx != 0 {
+                self.write(sep);
+            }
+            let lines = unsafe { util::forget_lifetime_mut(self) };
+            single_write_tree(x, idx, lines);
         }
     }
 
-    fn write_tree(&self, lines: &mut TreeLines) {
-        if let Type::Unevaluated(expr) = self {
-            expr.write_tree(lines);
-        } else {
-            lines.write(&self.to_text())
-        }
+    fn write_many_expr<'x, 'l, T: DebugAst>(&'l mut self, elements: &'x [T], sep: &str)
+    where Self: Sized {
+        self.write_many(elements, |t, _, buf| t.debug_impl(buf), sep);
+    }
+}
+
+#[derive(Default)]
+pub struct DebugOneLine(pub String);
+
+impl fmt::Write for DebugOneLine {
+    #[inline]
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0.write_str(text)
+    }
+}
+
+impl DebugAstBuf for DebugOneLine {
+    #[inline]
+    fn write_tree<T: DebugAst>(&mut self, expr: &T) {
+        expr.debug_impl(self);
     }
 }
 
@@ -505,134 +441,48 @@ impl TreeLine {
 }
 
 #[derive(Default)]
-pub struct TreeLines {
+pub struct DebugTree {
     pub lines: Vec<TreeLine>,
     cur_line: usize,
     cur_offset: usize,
 }
 
-impl TreeLines {
+impl fmt::Write for DebugTree {
+    #[inline]
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let offset = self.cur_offset;
+        self.get_cur_line().overwrite(offset, text);
+        self.cur_offset += text.len();
+        Ok(())
+    }
+}
+
+impl DebugAstBuf for DebugTree {
+    fn write_tree<T: DebugAst>(&mut self, expr: &T) {
+        let state = (self.cur_line, self.cur_offset);
+
+        self.cur_line += 1;
+        expr.debug_impl(self);
+        let len = self.cur_offset - state.1;
+
+        self.cur_line = state.0;
+        self.cur_offset = state.1;
+
+        self.write(&"-".repeat(len))
+    }
+}
+
+impl DebugTree {
     pub fn ensure_lines(&mut self, idx: usize) {
         while self.lines.get(idx).is_none() {
             self.lines.push(TreeLine(String::new()))
         }
     }
 
-    pub fn get_cur(&mut self) -> &mut TreeLine {
+    pub fn get_cur_line(&mut self) -> &mut TreeLine {
         self.ensure_lines(self.cur_line);
         self.lines.get_mut(self.cur_line).unwrap()
     }
-
-    pub fn get_cur_offset(&self) -> usize {
-        self.cur_offset
-    }
-
-    pub fn write(&mut self, text: &str) {
-        let offset = self.cur_offset;
-        self.get_cur().overwrite(offset, text);
-        self.cur_offset += text.len();
-    }
-
-    pub fn write_minus(&mut self, len: usize) {
-        self.write(&"-".repeat(len))
-    }
-
-    pub fn scope_next_line<O>(&mut self, f: impl FnOnce(&mut Self) -> O) -> O {
-        let state = (self.cur_line, self.cur_offset);
-        self.next_line();
-        let out = f(self);
-        self.cur_line = state.0;
-        self.cur_offset = state.1;
-        out
-    }
-
-    pub fn write_tree<T: DebugAst>(&mut self, expr: &T) {
-        self.scope_next_line(|l| expr.write_tree(l));
-        self.write_minus(expr.to_text().len());
-    }
-
-    pub fn write_ident(&mut self, ident: &Ident) {
-        self.scope_next_line(|l| l.write(&ident.text));
-        self.write_minus(ident.text.len());
-    }
-
-    pub fn next_line(&mut self) {
-        self.cur_line += 1;
-    }
-
-    pub fn prev_line(&mut self) {
-        self.cur_line -= 1;
-    }
-
-    pub fn set_offset(&mut self, offset: usize) {
-        self.cur_offset = offset;
-    }
-}
-
-pub fn var_decl_to_text(VarDecl { markers, ident, ty, default, is_const }: &VarDecl) -> String {
-    format!(
-        "{}{}{}{}{}{}{}",
-        if markers.is_pub { "pub " } else { "" },
-        mut_marker(markers.is_mut),
-        if markers.is_rec { "rec " } else { "" },
-        ident.text.as_ref(),
-        if *ty != Type::Unset { ":" } else { "" },
-        ty.to_text(),
-        default
-            .map(|default| format!(
-                "{}{}{}",
-                if *ty == Type::Unset { ":" } else { "" },
-                if *is_const { ":" } else { "=" },
-                default.to_text()
-            ))
-            .unwrap_or_default()
-    )
-}
-
-pub fn var_decl_write_tree(
-    VarDecl { markers, ident, ty, default, is_const }: &VarDecl,
-    lines: &mut TreeLines,
-) {
-    lines.write(&format!(
-        "{}{}{}",
-        if markers.is_pub { "pub " } else { "" },
-        mut_marker(markers.is_mut),
-        if markers.is_rec { "rec " } else { "" }
-    ));
-
-    lines.write_ident(ident);
-
-    if *ty != Type::Unset {
-        lines.write(":");
-        lines.write_tree(ty);
-    }
-
-    if let Some(default) = default {
-        let default = default;
-        lines.write(&format!(
-            "{}{}",
-            if *ty == Type::Unset { ":" } else { "" },
-            if *is_const { ":" } else { "=" },
-        ));
-        lines.write_tree(default);
-    }
-}
-
-pub fn many_to_text<T>(
-    elements: &[T],
-    mut single_to_text: impl FnMut(&T, usize) -> String,
-    sep: &str,
-) -> String {
-    elements
-        .iter()
-        .enumerate()
-        .map(|(idx, t)| single_to_text(t, idx))
-        .intersperse(sep.to_string())
-        .collect()
-}
-
-pub fn many_expr_to_text<T: DebugAst>(elements: &Ptr<[T]>, sep: &str) -> String {
-    many_to_text(elements, |t, _| t.to_text(), sep)
 }
 
 pub fn opt_to_text<T>(opt_expr: &Option<T>, inner: impl FnOnce(&T) -> String) -> String {

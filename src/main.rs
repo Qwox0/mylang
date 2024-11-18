@@ -317,7 +317,7 @@ mymain :: -> {
             let c_file = match f.ret_type {
                 Type::Int { .. } => "../../test-int.c",
                 Type::Float { .. } => "../../test-double.c",
-                _ => todo!(),
+                _ => "../../test-other.c",
             };
             let _ = std::fs::create_dir("target/build_dev");
             let _ = std::fs::remove_file("target/build_dev/test.c");

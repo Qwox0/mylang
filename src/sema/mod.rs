@@ -7,17 +7,21 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
-        VarDecl, VarDeclList,
+        VarDecl,
     },
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::Type,
-    util::{OkOrWithTry, display_span_in_code_with_label, forget_lifetime},
+    util::{
+        OkOrWithTry, UnwrapDebug, display_span_in_code_with_label, forget_lifetime,
+        unreachable_debug,
+    },
 };
 pub use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
+use std::collections::HashSet;
 use symbol::SemaSymbol;
 use value::{EMPTY_PTR, SemaValue};
 
@@ -61,6 +65,7 @@ pub struct Sema<'c, 'alloc, const DEBUG_TYPES: bool = false> {
     code: &'c Code,
 
     pub symbols: SymbolTable<SemaSymbol>,
+    type_stack: Vec<Vec<Ptr<Type>>>,
     function_stack: Vec<Ptr<Fn>>,
     defer_stack: DeferStack,
 
@@ -74,6 +79,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         Sema {
             code,
             symbols: SymbolTable::with_one_scope(),
+            type_stack: vec![vec![]],
             function_stack: vec![],
             defer_stack: DeferStack::default(),
             errors: vec![],
@@ -120,7 +126,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             ExprKind::Ident(text) => {
                 if let Some(internal_ty) = self.try_internal_ty(*text) {
                     let t = self.alloc(internal_ty)?;
-                    return Ok(SemaValue::new_const(Type::Type(t), EMPTY_PTR));
+                    return Ok(SemaValue::type_(t));
                 }
 
                 match self.get_symbol(*text, expr.span)? {
@@ -206,6 +212,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 self.function_stack.push(func.into());
                 self.open_scope();
                 let Fn { mut params, ret_type, body } = func;
+                self.eval_type(ret_type)?;
                 let res = try {
                     for param in params.iter_mut() {
                         assert!(!param.is_const, "todo: const param");
@@ -250,17 +257,28 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 })
             },
             ExprKind::StructDef(fields) => {
+                let mut field_names = HashSet::new();
                 for field in fields.iter_mut() {
+                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateField, field.ident.span);
+                    }
                     if field.is_const {
                         todo!("const struct field")
                     }
                     let f = self.var_decl_to_value(field)?;
                 }
                 let ty = self.alloc(Type::Struct { fields: *fields })?;
-                Ok(SemaValue::new_const(Type::Type(ty), EMPTY_PTR))
+                self.type_stack.last_mut().unwrap_debug().push(ty);
+                Ok(SemaValue::type_(ty))
             },
             ExprKind::UnionDef(fields) => {
+                let mut field_names = HashSet::new();
                 for field in fields.iter_mut() {
+                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateField, field.ident.span);
+                    }
                     if field.is_const {
                         todo!("const struct field")
                     }
@@ -270,9 +288,20 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     let f = self.var_decl_to_value(field)?;
                 }
                 let ty = self.alloc(Type::Union { fields: *fields })?;
-                Ok(SemaValue::new_const(Type::Type(ty), EMPTY_PTR))
+                Ok(SemaValue::type_(ty))
             },
-            ExprKind::EnumDef {} => todo!(),
+            ExprKind::EnumDef(variants) => {
+                let ty = self.alloc(Type::Enum { variants: *variants })?;
+                let mut variant_names = HashSet::new();
+                for variant in variants.iter_mut() {
+                    let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateEnumVariant, variant.ident.span);
+                    }
+                    let _ = self.var_decl_to_value(variant)?;
+                }
+                Ok(SemaValue::type_(ty))
+            },
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::Initializer { lhs: Some(ty_expr), fields: values } => {
@@ -284,7 +313,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         self.analyze_initializer(*t, *values, is_const, span)?;
                         Ok(SemaValue::new(*t))
                     },
-                    Type::Ptr(t) => {
+                    Type::Ptr { pointee_ty: t } => {
                         self.analyze_initializer(*t, *values, is_const, span)?;
                         Ok(lhs_val)
                     },
@@ -293,19 +322,15 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             },
             ExprKind::Initializer { lhs: None, fields: values } => {
                 // TODO: benchmark this
-                let mut struct_ty_iter = self
-                    .symbols
-                    .iter()
-                    .filter_map(|s| match s.get_type().ok() {
-                        Some(Type::Type(struct_ty)) => Some(*struct_ty),
-                        _ => None,
-                    })
-                    .filter(|struct_ty| match struct_ty {
-                        Type::Struct { fields } => values
-                            .iter()
-                            .all(|(i, _)| fields.iter().any(|f| *f.ident.text == *i.text)),
-                        _ => false,
-                    });
+                let mut struct_ty_iter =
+                    self.type_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
+                        |struct_ty| match **struct_ty {
+                            Type::Struct { fields } => values
+                                .iter()
+                                .all(|(i, _)| fields.iter().any(|f| *f.ident.text == *i.text)),
+                            _ => false,
+                        },
+                    );
                 let Some(struct_ty) = struct_ty_iter.next() else {
                     return err(CannotInferInitializerTy, expr.span.start_pos());
                 };
@@ -313,19 +338,35 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     return err(MultiplePossibleInitializerTy, expr.span.start_pos());
                 }
                 drop(struct_ty_iter);
+                let struct_ty = *struct_ty;
                 self.analyze_initializer(struct_ty, *values, is_const, span)?;
                 Ok(SemaValue::new(struct_ty))
             },
-            ExprKind::Dot { lhs, rhs } => {
+            ExprKind::Dot { lhs, lhs_ty, rhs } => {
+                let Some(lhs) = lhs else { todo!("infer dot lhs") };
                 assert!(!is_const, "todo: const dot");
-                let lhs_ty = try_not_never!(self.analyze_typed(lhs, is_const)?).ty;
+                *lhs_ty = try_not_never!(self.analyze(*lhs, is_const)?).ty;
                 debug_assert!(lhs_ty.is_valid());
-                if let Type::Struct { fields } | Type::Union { fields } = lhs_ty
-                    && let Some(f) = fields.iter().find(|f| *f.ident.text == *rhs.text)
-                {
-                    Ok(SemaValue::new(f.ty))
-                } else {
-                    err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)
+                match lhs_ty {
+                    Type::Struct { fields } | Type::Union { fields } => fields
+                        .iter()
+                        .find(|f| *f.ident.text == *rhs.text)
+                        .map(|f| SemaValue::new(f.ty))
+                        .ok_or_else2(|| {
+                            err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span)
+                        }),
+                    Type::Type(p) => match **p {
+                        Type::Enum { variants } => variants
+                            .iter()
+                            .enumerate()
+                            .find(|(_, f)| *f.ident.text == *rhs.text)
+                            .map(|(idx, _)| SemaValue::new(Type::EnumVariant { enum_ty: *p, idx }))
+                            .ok_or_else2(|| {
+                                err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span)
+                            }),
+                        _ => todo!("dot for type {:?}", **p),
+                    },
+                    _ => todo!("err for invalid dot lhs"),
                 }
             },
             ExprKind::Index { lhs, idx } => {
@@ -341,28 +382,19 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             },
             ExprKind::Call { func: f, args, .. } => {
                 assert!(!is_const, "todo: const call");
-                // self.analyze(*fn_expr)?;
-                // debug_assert!(fn_expr.ty.is_valid());
-                let Result::Ok(func) = f.try_to_ident() else {
-                    todo!("non ident function call")
-                };
-                let ty = match self.get_ident_symbol(func)? {
-                    SemaSymbol::Finished(v @ SemaValue { ty, .. }) => {
-                        // currently Type::Function doesn't store additional data in const_val.
-                        // this might change in the future
-                        assert!(v.is_const(), "todo: call of a non-const function");
-                        ty
-                    },
-                    SemaSymbol::NotFinished(Some(ty)) => todo!(),
-                    SemaSymbol::NotFinished(_) => return NotFinished,
-                };
-                match ty {
+                match self.analyze_typed(f, is_const)?.ty {
                     Type::Never => Ok(SemaValue::never()),
                     Type::Function(mut func) => {
                         let Fn { params, ret_type, body } = func.as_mut();
-                        self.validate_call(*params, *args, is_const)?;
+                        self.validate_call(&params, &args, is_const)?;
                         debug_assert!(ret_type.is_valid());
                         Ok(SemaValue::new(*ret_type))
+                    },
+                    Type::EnumVariant { enum_ty, idx } => {
+                        let Type::Enum { variants } = *enum_ty else { unreachable_debug() };
+                        let variant = variants[idx];
+                        self.validate_call(&[variant], &args, is_const)?;
+                        Ok(SemaValue::new(*enum_ty))
                     },
                     _ => err(CallOfANotFunction, span),
                 }
@@ -376,7 +408,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     (_, Type::Never) => Some(ty),
                     (
                         UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf,
-                        Type::Ptr(..)
+                        Type::Ptr { .. }
                         | Type::Int { .. }
                         | Type::IntLiteral
                         | Type::Bool
@@ -386,9 +418,9 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                         | Type::Struct { .. }
                         | Type::Union { .. }
                         | Type::Enum { .. },
-                    ) => Some(Type::Ptr(self.alloc(ty)?)),
+                    ) => Some(Type::Ptr { pointee_ty: self.alloc(ty)? }),
                     (UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf, Type::Function(_)) => todo!(),
-                    (UnaryOpKind::Deref, Type::Ptr(pointee)) => Some(*pointee),
+                    (UnaryOpKind::Deref, Type::Ptr { pointee_ty }) => Some(*pointee_ty),
                     (
                         UnaryOpKind::Deref,
                         Type::Int { .. }
@@ -404,7 +436,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     },
                     (
                         UnaryOpKind::Not,
-                        Type::Ptr(_)
+                        Type::Ptr { .. }
                         | Type::Float { .. }
                         | Type::FloatLiteral
                         | Type::Function(_)
@@ -419,13 +451,14 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     ) => Some(ty),
                     (
                         UnaryOpKind::Neg,
-                        Type::Ptr(_) | Type::Bool | Type::Function(_) | Type::Array { .. },
+                        Type::Ptr { .. } | Type::Bool | Type::Function(_) | Type::Array { .. },
                     ) => None,
                     (
                         _,
                         Type::Struct { .. }
                         | Type::Union { .. }
                         | Type::Enum { .. }
+                        | Type::EnumVariant { .. }
                         | Type::Type(_),
                     ) => todo!("UnaryOp {kind:?} for {ty:?}"),
                     (UnaryOpKind::Try, _) => todo!("try"),
@@ -619,7 +652,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         //     expr.ty = val.ty;
         // }
         if DEBUG_TYPES {
-            display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {res:?}")); // TODO: remove this
+            display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {res:?}"));
         }
         res
     }
@@ -726,8 +759,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             },
         }
 
-        // println!("INFO: '{}' was shadowed in the same scope",
-        // &*decl.ident.text);
+        // println!("INFO: '{}' was shadowed in the same scope", &*decl.ident.text);
     }
 
     /// works for function calls and call initializers
@@ -735,8 +767,8 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
     /// paramN1, ... -> default values
     fn validate_call(
         &mut self,
-        params: VarDeclList,
-        args: Ptr<[Ptr<Expr>]>,
+        params: &[VarDecl],
+        args: &[Ptr<Expr>],
         is_const: bool,
     ) -> SemaResult<()> {
         // TODO: check for duplicate named arguments
@@ -794,19 +826,16 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         }
     }
 
-    #[inline]
-    fn get_ident_symbol(&self, i: Ident) -> SemaResult<&SemaSymbol> {
-        self.get_symbol(i.text, i.span)
-    }
-
     fn open_scope(&mut self) {
         self.symbols.open_scope();
+        self.type_stack.push(vec![]);
         self.defer_stack.open_scope();
     }
 
     fn close_scope(&mut self) -> SemaResult<()> {
         let res = self.analyze_defer_exprs();
         self.symbols.close_scope();
+        self.type_stack.pop();
         self.defer_stack.close_scope();
         res
     }

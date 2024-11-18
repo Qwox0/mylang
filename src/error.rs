@@ -74,3 +74,21 @@ impl SpannedError for SemaError {
         format!("{:?}", self.kind)
     }
 }
+
+impl SpannedError for Error {
+    fn span(&self) -> Span {
+        match self {
+            Error::Parsing(e) => e.span(),
+            Error::Sema(e) => e.span(),
+            Error::Codegen(_) => todo!(),
+        }
+    }
+
+    fn get_text(&self) -> String {
+        match self {
+            Error::Parsing(e) => e.get_text(),
+            Error::Sema(e) => e.get_text(),
+            Error::Codegen(_) => todo!(),
+        }
+    }
+}

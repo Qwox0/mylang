@@ -16,17 +16,31 @@ mod union_;
 mod while_loop;
 
 macro_rules! jit_run_test {
-    ($code:expr => $ret_type:ty) => {
-        $crate::tests::jit_run_test_impl::<$ret_type>($code)
+    (raw $code:expr => $ret_type:ty) => {
+        $crate::tests::jit_run_test_impl::<$ret_type>($code.as_ref())
     };
+    ($code:expr => $ret_type:ty) => {{
+        let code = format!("test :: -> {{ {} }};", $code);
+        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref())
+    }};
 }
 pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
-const DEBUG_AST: bool = true;
+const DEBUG_AST: bool = false;
 const DEBUG_TYPES: bool = true;
+const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
+const PRINT_ERROR: bool = true;
 
-pub fn jit_run_test_impl<RetTy>(code: impl std::fmt::Display) -> Result<RetTy, Error> {
+pub fn jit_run_test_impl<RetTy>(code: &crate::parser::lexer::Code) -> Result<RetTy, Error> {
+    let res = jit_run_test_impl_inner(code);
+    if PRINT_ERROR && let Err(err) = res.as_ref() {
+        display_spanned_error(err, code);
+    }
+    res
+}
+
+pub fn jit_run_test_impl_inner<RetTy>(code: &crate::parser::lexer::Code) -> Result<RetTy, Error> {
     use crate::{
         codegen::llvm,
         compiler::Compiler,
@@ -35,9 +49,6 @@ pub fn jit_run_test_impl<RetTy>(code: impl std::fmt::Display) -> Result<RetTy, E
     };
 
     let alloc = bumpalo::Bump::new();
-
-    let code = format!("test :: -> {{ {code} }};");
-    let code = code.as_ref();
 
     if DEBUG_TOKENS {
         println!("### Tokens:");
@@ -87,7 +98,7 @@ pub fn jit_run_test_impl<RetTy>(code: impl std::fmt::Display) -> Result<RetTy, E
     }
 
     let target_machine = llvm::Codegen::init_target_machine();
-    compiler.optimize(&target_machine, 0)?;
+    compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
 
     println!("{}", compiler.codegen.module.print_to_string().to_string());
 

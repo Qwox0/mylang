@@ -15,3 +15,13 @@ a.a == 123";
 fn anon_struct_on_decl() {
     jit_run_test!("a: struct { a: i64 };" => ()).unwrap();
 }
+
+#[test]
+fn tuple() {
+    let code = "
+MyTuple :: struct { i64, i64 };
+a := MyTuple.(3, 7);
+a.0 == 3 && a.1 == 7";
+    let ok = jit_run_test!(code => bool).unwrap();
+    assert!(ok, "```{code}\n``` -> expected `true`");
+}

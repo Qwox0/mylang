@@ -101,9 +101,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
         let expr = match op {
             FollowingOperator::Dot => {
-                let lhs = ExprWithTy::untyped(lhs);
                 let rhs = self.ws0().ident().context("dot rhs")?;
-                expr!(Dot { lhs, rhs }, span)
+                expr!(Dot { lhs: Some(lhs), lhs_ty: Type::Unset, rhs }, span)
             },
             FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None),
             FollowingOperator::Index => {
@@ -260,7 +259,37 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
                 expr!(UnionDef(fields), span.join(close_b.span))
             },
-            TokenKind::Keyword(Keyword::Enum) => todo!("enum"),
+            TokenKind::Keyword(Keyword::Enum) => {
+                self.advanced().ws0().tok(TokenKind::OpenBrace).context("enum '{'")?;
+                let mut variants = ScratchPool::new();
+                loop {
+                    if self.ws0().peek_tok()?.is_invalid_start() {
+                        break;
+                    }
+                    let variant_ident = self.ident().context("enum variant ident")?;
+                    let ty = if self.ws0().lex.advance_if_kind(TokenKind::OpenParenthesis) {
+                        let ty = ty(self.expr().context("variant type")?);
+                        self.ws0().tok(TokenKind::CloseParenthesis)?;
+                        ty
+                    } else {
+                        Type::Void
+                    };
+                    let decl = VarDecl {
+                        markers: DeclMarkers::default(),
+                        ident: variant_ident,
+                        default: None,
+                        ty,
+                        is_const: false,
+                    };
+                    variants.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
+                    if !self.ws0().lex.advance_if_kind(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let variants = self.clone_slice_from_scratch_pool(variants)?;
+                let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
+                expr!(EnumDef(VarDeclList(variants)), span.join(close_b.span))
+            },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.advanced().expr().context("if condition")?;
@@ -432,7 +461,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             //TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
             //TokenKind::Caret => todo!("TokenKind::Caret"),
             //TokenKind::CaretEq => todo!("TokenKind::CaretEq"),
-            TokenKind::Dot => todo!("TokenKind::Dot"),
+            TokenKind::Dot => {
+                let rhs = self.advanced().ws0().ident().context("dot rhs")?;
+                expr!(Dot { lhs: None, lhs_ty: Type::Unset, rhs }, span)
+            },
             //TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
             //TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
             TokenKind::DotOpenBrace => {
@@ -453,17 +485,6 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
             TokenKind::Backslash => todo!("TokenKind::BackSlash"),
             TokenKind::Backtick => todo!("TokenKind::BackTick"),
-
-            TokenKind::Keyword(Keyword::Else)
-            | TokenKind::CloseParenthesis
-            | TokenKind::CloseBracket
-            | TokenKind::CloseBrace
-            | TokenKind::Comma
-            | TokenKind::Semicolon => {
-                return err(UnexpectedStart(kind), self.lex.pos_span());
-            },
-            // TokenKind::Semicolon => return err(NoInput, self.lex.pos_span()),
-            // TokenKind::Semicolon => expr!(Semicolon(None), span),
             t => return err(UnexpectedToken(t), span).context("expected valid value"),
         };
 
@@ -612,7 +633,6 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     pub fn var_decl(&mut self) -> ParseResult<(VarDecl, Span)> {
         let mut markers = DeclMarkers::default();
         let mut t = self.peek_tok().context("expected variable marker or ident")?;
-        let mut is_first = true;
 
         macro_rules! set_marker {
             ($variant:ident $field:ident) => {
@@ -630,16 +650,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
                 TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
                 TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
-                _ => if is_first {
-                    ParseError::unexpected_start_token(t)
-                } else {
-                    ParseError::unexpected_token(t)
-                }
-                .context("expected decl marker or ident")?,
+                _ => ParseError::unexpected_token(t).context("expected decl marker or ident")?,
             }
             self.advanced().ws1()?;
             t = self.peek_tok().context("expected variable marker or ident")?;
-            is_first = false;
         };
 
         let t = self.ws0().lex.peek();
@@ -975,16 +989,16 @@ impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
     type Item = ParseResult<Ptr<Expr>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.parser.top_level_item() {
-            Err(ParseError { kind: ParseErrorKind::Finished, .. }) => return None,
-            res @ Err(ParseError { kind: ParseErrorKind::UnexpectedStart(_), .. }) => {
-                // HACK: If the next Token results in an UnexpectedStart error, this Iterator
-                // becomes infinite. I'm not sure if this solution is valid in general.
-                self.parser.lex.advance();
-                Some(res)
-            },
-            res => Some(res),
+        if let Some(t) = self.parser.lex.peek()
+            && t.is_invalid_start()
+        {
+            // HACK: If the next Token is an unexpected start, this Iterator becomes
+            // infinite. I'm not sure if this solution is valid in general.
+            self.parser.lex.advance();
+            return Some(err(UnexpectedToken(t.kind), t.span));
         }
+        Some(self.parser.top_level_item())
+            .filter(|res| !matches!(res, Err(ParseError { kind: ParseErrorKind::Finished, .. })))
     }
 }
 

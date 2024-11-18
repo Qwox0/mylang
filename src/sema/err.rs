@@ -39,6 +39,8 @@ pub enum SemaErrorKind {
         ty: Type,
         kind: UnaryOpKind,
     },
+    DuplicateEnumVariant,
+    DuplicateField,
     CannotApplyInitializer {
         ty: Type,
     },
@@ -60,6 +62,7 @@ pub enum SemaErrorKind {
     },
 
     UnknownIdent(Ptr<str>),
+    /// unknown struct or union field or enum variant
     UnknownField {
         ty: Type,
         field: Ptr<str>,

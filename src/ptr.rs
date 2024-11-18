@@ -46,6 +46,14 @@ impl<T: ?Sized> From<&mut T> for Ptr<T> {
     }
 }
 
+impl<T: ?Sized> From<*mut T> for Ptr<T> {
+    #[inline]
+    fn from(value: *mut T) -> Self {
+        // SAFETY: yolo
+        Ptr(unsafe { NonNull::new_unchecked(value) })
+    }
+}
+
 impl<T: ?Sized> Ptr<T> {
     pub const fn new(ptr: NonNull<T>) -> Ptr<T> {
         Self(ptr)
@@ -59,6 +67,11 @@ impl<T: ?Sized> Ptr<T> {
     #[inline]
     pub fn as_mut<'a>(&mut self) -> &'a mut T {
         unsafe { self.0.as_mut() }
+    }
+
+    #[inline]
+    pub fn raw(self) -> *mut T {
+        self.0.as_ptr()
     }
 
     #[inline]

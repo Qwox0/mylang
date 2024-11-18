@@ -20,7 +20,7 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
     } else {
         code.0[..span.start].lines().last().map(str::len).unwrap_or(span.start)
     };
-    let end_offset = code.0[span.end..].lines().next().map(str::len).unwrap_or(span.end);
+    let end_offset = code.0[span.end..].lines().next().map(str::len).unwrap_or(0);
     let line = &code.0[span.start - start_offset..span.end + end_offset];
 
     let linecount_in_span = code[span].lines().count();
@@ -29,6 +29,17 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
     let offset = " ".repeat(start_offset);
     eprintln!("| {offset}{} {label}", "^".repeat(span.len() + linecount_in_span - 1));
     eprintln!("|");
+}
+
+pub fn debug_span_in_code(span: Span, code: &Code) {
+    let line_num = code.0[..=span.start].lines().count();
+    let linecount_in_span = code[span].lines().count();
+    println!("{:?}", &code.0[..span.end]);
+    println!(
+        " {}{} {span:?}",
+        " ".repeat(span.start + line_num.saturating_sub(1)),
+        "^".repeat(span.len() + linecount_in_span.saturating_sub(1))
+    );
 }
 
 pub trait UnwrapDebug {
@@ -106,6 +117,11 @@ pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }
 }
 
+#[inline]
+pub unsafe fn forget_lifetime_mut<'a, T: ?Sized>(r: &mut T) -> &'a mut T {
+    unsafe { &mut *(r as *mut T) }
+}
+
 pub trait OkOrWithTry<T> {
     fn ok_or2<Result>(self, err: Result::Residual) -> Result
     where Result: Try<Output = T>;
@@ -154,4 +170,8 @@ fn test_variant_count_to_tag_size_bits() {
     assert_eq!(variant_count_to_tag_size_bits(9), 4);
     assert_eq!(variant_count_to_tag_size_bits(256), 8);
     assert_eq!(variant_count_to_tag_size_bits(257), 9);
+}
+
+pub fn transmute_unchecked<T, U>(val: &T) -> U {
+    unsafe { std::ptr::read(val as *const T as *const U) }
 }
