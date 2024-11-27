@@ -22,7 +22,7 @@ use crate::{
 pub use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
 use std::collections::HashSet;
-use symbol::SemaSymbol;
+pub use symbol::SemaSymbol;
 use value::{EMPTY_PTR, SemaValue};
 
 mod err;
@@ -61,29 +61,40 @@ macro_rules! try_not_never {
 }
 
 /// Semantic analyzer
-pub struct Sema<'c, 'alloc, const DEBUG_TYPES: bool = false> {
+pub struct Sema<'c, 'alloc> {
     code: &'c Code,
 
     pub symbols: SymbolTable<SemaSymbol>,
-    type_stack: Vec<Vec<Ptr<Type>>>,
+    struct_stack: Vec<Vec<Ptr<Type>>>,
+    enum_stack: Vec<Vec<Ptr<Type>>>,
     function_stack: Vec<Ptr<Fn>>,
     defer_stack: DeferStack,
 
     pub errors: Vec<SemaError>,
 
     alloc: &'alloc bumpalo::Bump,
+
+    #[cfg(debug_assertions)]
+    debug_types: bool,
 }
 
-impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
-    pub fn new(code: &'c Code, alloc: &'alloc bumpalo::Bump) -> Sema<'c, 'alloc, DEBUG_TYPES> {
+impl<'c, 'alloc> Sema<'c, 'alloc> {
+    pub fn new(
+        code: &'c Code,
+        alloc: &'alloc bumpalo::Bump,
+        debug_types: bool,
+    ) -> Sema<'c, 'alloc> {
         Sema {
             code,
             symbols: SymbolTable::with_one_scope(),
-            type_stack: vec![vec![]],
+            struct_stack: vec![vec![]],
+            enum_stack: vec![vec![]],
             function_stack: vec![],
             defer_stack: DeferStack::default(),
             errors: vec![],
             alloc,
+            #[cfg(debug_assertions)]
+            debug_types,
         }
     }
 
@@ -121,7 +132,6 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         //let span = expr.full_span();
         let span = expr.span;
 
-        #[allow(unused_variables)]
         let res = match &mut expr.kind {
             ExprKind::Ident(text) => {
                 if let Some(internal_ty) = self.try_internal_ty(*text) {
@@ -233,8 +243,9 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     let mut val = SemaValue::void();
                     for s in stmts.iter_mut() {
                         match self.analyze(s.expr, is_const) {
-                            Ok(new_val) => {
-                                s.ty = new_val.ty.finalize();
+                            Ok(mut new_val) => {
+                                new_val.ty = new_val.ty.finalize();
+                                s.ty = new_val.ty;
                                 debug_assert!(s.ty.is_valid());
                                 debug_assert!(new_val.check_constness(is_const));
                                 val = new_val
@@ -269,7 +280,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     let f = self.var_decl_to_value(field)?;
                 }
                 let ty = self.alloc(Type::Struct { fields: *fields })?;
-                self.type_stack.last_mut().unwrap_debug().push(ty);
+                self.struct_stack.last_mut().unwrap_debug().push(ty);
                 Ok(SemaValue::type_(ty))
             },
             ExprKind::UnionDef(fields) => {
@@ -291,7 +302,6 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 Ok(SemaValue::type_(ty))
             },
             ExprKind::EnumDef(variants) => {
-                let ty = self.alloc(Type::Enum { variants: *variants })?;
                 let mut variant_names = HashSet::new();
                 for variant in variants.iter_mut() {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
@@ -300,6 +310,8 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                     }
                     let _ = self.var_decl_to_value(variant)?;
                 }
+                let ty = self.alloc(Type::Enum { variants: *variants })?;
+                self.enum_stack.last_mut().unwrap_debug().push(ty);
                 Ok(SemaValue::type_(ty))
             },
             ExprKind::OptionShort(_) => todo!(),
@@ -310,11 +322,11 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 match lhs_val.ty {
                     Type::Never => return Ok(SemaValue::never()),
                     Type::Type(t) => {
-                        self.analyze_initializer(*t, *values, is_const, span)?;
+                        self.validate_initializer(*t, *values, is_const, span)?;
                         Ok(SemaValue::new(*t))
                     },
                     Type::Ptr { pointee_ty: t } => {
-                        self.analyze_initializer(*t, *values, is_const, span)?;
+                        self.validate_initializer(*t, *values, is_const, span)?;
                         Ok(lhs_val)
                     },
                     ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
@@ -323,7 +335,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             ExprKind::Initializer { lhs: None, fields: values } => {
                 // TODO: benchmark this
                 let mut struct_ty_iter =
-                    self.type_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
+                    self.struct_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
                         |struct_ty| match **struct_ty {
                             Type::Struct { fields } => values
                                 .iter()
@@ -339,35 +351,35 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
                 }
                 drop(struct_ty_iter);
                 let struct_ty = *struct_ty;
-                self.analyze_initializer(struct_ty, *values, is_const, span)?;
+                self.validate_initializer(struct_ty, *values, is_const, span)?;
                 Ok(SemaValue::new(struct_ty))
             },
-            ExprKind::Dot { lhs, lhs_ty, rhs } => {
-                let Some(lhs) = lhs else { todo!("infer dot lhs") };
+            ExprKind::Dot { lhs: Some(lhs), lhs_ty, rhs } => {
                 assert!(!is_const, "todo: const dot");
                 *lhs_ty = try_not_never!(self.analyze(*lhs, is_const)?).ty;
                 debug_assert!(lhs_ty.is_valid());
-                match lhs_ty {
-                    Type::Struct { fields } | Type::Union { fields } => fields
-                        .iter()
-                        .find(|f| *f.ident.text == *rhs.text)
-                        .map(|f| SemaValue::new(f.ty))
-                        .ok_or_else2(|| {
-                            err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span)
-                        }),
-                    Type::Type(p) => match **p {
-                        Type::Enum { variants } => variants
-                            .iter()
-                            .enumerate()
-                            .find(|(_, f)| *f.ident.text == *rhs.text)
-                            .map(|(idx, _)| SemaValue::new(Type::EnumVariant { enum_ty: *p, idx }))
-                            .ok_or_else2(|| {
-                                err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span)
-                            }),
-                        _ => todo!("dot for type {:?}", **p),
-                    },
-                    _ => todo!("err for invalid dot lhs"),
+                self.analyze_dot(*lhs_ty, rhs)
+            },
+            ExprKind::Dot { lhs: None, lhs_ty, rhs } => {
+                // `.<ident>` must be an enum
+                let mut enum_ty_iter =
+                    self.enum_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
+                        |enum_ty| match **enum_ty {
+                            Type::Enum { variants } => {
+                                variants.iter().any(|v| *v.ident.text == *rhs.text)
+                            },
+                            _ => false,
+                        },
+                    );
+                let Some(enum_ty) = enum_ty_iter.next() else {
+                    return err(CannotInferInitializerTy, expr.span.start_pos());
+                };
+                if enum_ty_iter.next().is_some() {
+                    return err(MultiplePossibleInitializerTy, expr.span.start_pos());
                 }
+                drop(enum_ty_iter);
+                *lhs_ty = Type::Type(enum_ty);
+                self.analyze_dot(*lhs_ty, rhs)
             },
             ExprKind::Index { lhs, idx } => {
                 assert!(!is_const, "todo: const index");
@@ -648,10 +660,8 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             },
             ExprKind::Semicolon(_) => todo!(),
         };
-        // if let Ok(val) = res {
-        //     expr.ty = val.ty;
-        // }
-        if DEBUG_TYPES {
+        #[cfg(debug_assertions)]
+        if self.debug_types {
             display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {res:?}"));
         }
         res
@@ -669,7 +679,7 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
         res
     }
 
-    pub fn analyze_initializer(
+    pub fn validate_initializer(
         &mut self,
         struct_ty: Type,
         initializer_values: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
@@ -718,6 +728,26 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
             self.errors.push(err_val(MissingFieldInInitializer { field }, initializer_span))
         }
         Ok(())
+    }
+
+    fn analyze_dot(&mut self, lhs_ty: Type, rhs: &Ident) -> SemaResult<SemaValue> {
+        match lhs_ty {
+            Type::Struct { fields } | Type::Union { fields } => fields
+                .iter()
+                .find(|f| *f.ident.text == *rhs.text)
+                .map(|f| SemaValue::new(f.ty))
+                .ok_or_else2(|| err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)),
+            Type::Type(p) => match *p {
+                Type::Enum { variants } => variants
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| *f.ident.text == *rhs.text)
+                    .map(|(idx, _)| SemaValue::new(Type::EnumVariant { enum_ty: p, idx }))
+                    .ok_or_else2(|| err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)),
+                _ => todo!("dot for type {:?}", *p),
+            },
+            _ => todo!("err for invalid dot lhs"),
+        }
     }
 
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
@@ -828,14 +858,16 @@ impl<'c, 'alloc, const DEBUG_TYPES: bool> Sema<'c, 'alloc, DEBUG_TYPES> {
 
     fn open_scope(&mut self) {
         self.symbols.open_scope();
-        self.type_stack.push(vec![]);
+        self.struct_stack.push(vec![]);
+        self.enum_stack.push(vec![]);
         self.defer_stack.open_scope();
     }
 
     fn close_scope(&mut self) -> SemaResult<()> {
         let res = self.analyze_defer_exprs();
         self.symbols.close_scope();
-        self.type_stack.pop();
+        self.struct_stack.pop();
+        self.enum_stack.pop();
         self.defer_stack.close_scope();
         res
     }

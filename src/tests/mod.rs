@@ -1,6 +1,15 @@
-use crate::{error::Error, parser::parser_helper::ParserInterface, util::display_spanned_error};
+use crate::{
+    codegen::llvm,
+    compiler::Compiler,
+    error::Error,
+    parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
+    sema::Sema,
+    util::display_spanned_error,
+};
 
+mod alignment;
 mod binop;
+mod call_conv_c;
 mod enum_;
 mod for_loop;
 mod function;
@@ -16,38 +25,56 @@ mod union_;
 mod while_loop;
 
 macro_rules! jit_run_test {
-    (raw $code:expr => $ret_type:ty) => {
+    (raw $code:expr => $ret_type:ty,llvm_module) => {
         $crate::tests::jit_run_test_impl::<$ret_type>($code.as_ref())
+    };
+    ($code:expr => $ret_type:ty,llvm_module) => {{
+        let code = format!("test :: -> {{ {} }};", $code);
+        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref())
+    }};
+    (raw $code:expr => $ret_type:ty) => {
+        $crate::tests::jit_run_test_impl::<$ret_type>($code.as_ref()).map(|(out, _)| out)
     };
     ($code:expr => $ret_type:ty) => {{
         let code = format!("test :: -> {{ {} }};", $code);
-        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref())
+        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref()).map(|(out, _)| out)
     }};
 }
 pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = false;
-const DEBUG_TYPES: bool = true;
+const DEBUG_TYPES: bool = false;
 const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
 const PRINT_ERROR: bool = true;
+const PRINT_LLVM_MODULE: bool = true;
 
-pub fn jit_run_test_impl<RetTy>(code: &crate::parser::lexer::Code) -> Result<RetTy, Error> {
-    let res = jit_run_test_impl_inner(code);
+pub fn jit_run_test_impl<RetTy>(
+    code: &crate::parser::lexer::Code,
+) -> Result<(RetTy, String), Error>
+where [(); std::mem::size_of::<RetTy>()]: Sized {
+    let context = inkwell::context::Context::create();
+    let res = compile_test(&context, code).and_then(|codegen| {
+        let llvm_module_text = codegen.module.print_to_string().to_string();
+        if PRINT_LLVM_MODULE {
+            println!("{}", llvm_module_text);
+        }
+        let out = codegen.jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)?;
+        Ok((out, llvm_module_text))
+    });
     if PRINT_ERROR && let Err(err) = res.as_ref() {
         display_spanned_error(err, code);
     }
     res
 }
 
-pub fn jit_run_test_impl_inner<RetTy>(code: &crate::parser::lexer::Code) -> Result<RetTy, Error> {
-    use crate::{
-        codegen::llvm,
-        compiler::Compiler,
-        parser::{StmtIter, lexer::Lexer},
-        sema::Sema,
-    };
-
+pub fn compile_test<'ctx, RetTy>(
+    context: &'ctx inkwell::context::Context,
+    code: &crate::parser::lexer::Code,
+) -> Result<llvm::Codegen<'ctx>, Error>
+where
+    [(); std::mem::size_of::<RetTy>()]: Sized,
+{
     let alloc = bumpalo::Bump::new();
 
     if DEBUG_TOKENS {
@@ -78,9 +105,8 @@ pub fn jit_run_test_impl_inner<RetTy>(code: &crate::parser::lexer::Code) -> Resu
         },
     };
 
-    let sema = Sema::<DEBUG_TYPES>::new(code, &alloc);
-    let context = inkwell::context::Context::create();
-    let codegen = llvm::Codegen::new_module(&context, "test", &alloc);
+    let sema = Sema::new(code, &alloc, DEBUG_TYPES);
+    let codegen = llvm::Codegen::new_module(&context, "test");
     let mut compiler = Compiler::new(sema, codegen);
 
     let _ = compiler.compile_stmts(&stmts);
@@ -100,7 +126,5 @@ pub fn jit_run_test_impl_inner<RetTy>(code: &crate::parser::lexer::Code) -> Resu
     let target_machine = llvm::Codegen::init_target_machine();
     compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
 
-    println!("{}", compiler.codegen.module.print_to_string().to_string());
-
-    Ok(compiler.codegen.jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)?)
+    Ok(compiler.codegen)
 }

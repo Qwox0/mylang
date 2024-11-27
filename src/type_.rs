@@ -1,9 +1,19 @@
 use crate::{
     ast::{Expr, Fn, VarDeclList, debug::DebugAst},
     ptr::Ptr,
-    util::{panic_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes},
+    util::{
+        aligned_add, panic_debug, round_up_to_nearest_power_of_two, variant_count_to_tag_size_bits,
+        variant_count_to_tag_size_bytes,
+    },
 };
 use core::fmt;
+use std::cell::OnceCell;
+
+#[allow(unused)]
+fn void(alloc: &bumpalo::Bump) -> Ptr<Type> {
+    thread_local!(static PTR: OnceCell<Ptr<Type>> = OnceCell::new());
+    PTR.with(|cell| *cell.get_or_init(|| Ptr::from(alloc.alloc(Type::Void))))
+}
 
 // TODO: benchmark this
 // pub type Type = Ptr<TypeInfo>;
@@ -18,12 +28,10 @@ pub enum Type {
         bits: u32,
         is_signed: bool,
     },
-    IntLiteral,
     Bool,
     Float {
         bits: u32,
     },
-    FloatLiteral,
 
     Function(Ptr<Fn>),
 
@@ -42,6 +50,17 @@ pub enum Type {
         variants: VarDeclList, // TODO
     },
 
+    /// `a :: int`
+    /// -> type of `a`: [`Type::Type`]
+    /// -> value of `a`: [`Type::Int`]
+    Type(Ptr<Type>),
+
+    // --------------------------------
+    // compiletime only types:
+    //
+    IntLiteral,
+    FloatLiteral,
+
     /// ```
     /// MyEnum :: enum { A, B(i64) };
     /// a := MyEnum.A; // variant -> valid val
@@ -52,11 +71,6 @@ pub enum Type {
         enum_ty: Ptr<Type>,
         idx: usize,
     },
-
-    /// `a :: int`
-    /// -> type of `a`: [`Type::Type`]
-    /// -> value of `a`: [`Type::Int`]
-    Type(Ptr<Type>),
 
     /// The type was not explicitly set in the original source code and must
     /// still be inferred.
@@ -108,17 +122,18 @@ impl Type {
         match self {
             Type::Void | Type::Never => 0,
             Type::Ptr { .. } => 8,
-            Type::Int { bits, .. } | Type::Float { bits } => (*bits as usize).div_ceil(8),
+            Type::Int { bits, .. } | Type::Float { bits } => {
+                round_up_to_nearest_power_of_two(*bits as usize).div_ceil(8)
+            },
             Type::Bool => 1,
             Type::Function(_) => todo!(),
             Type::Array { len, elem_ty } => elem_ty.size() * len,
-            // TODO: struct might contain padding
-            Type::Struct { fields } => fields.iter().map(|f| f.ty.size()).sum(),
+            Type::Struct { fields } => fields.iter().map(|f| &f.ty).fold(0, aligned_add),
             Type::Union { fields } => fields.iter().map(|f| f.ty.size()).max().unwrap_or(0),
-            Type::Enum { variants } => {
-                variant_count_to_tag_size_bytes(variants.len()) as usize
-                    + Type::Union { fields: *variants }.size()
-            },
+            Type::Enum { variants } => aligned_add(
+                variant_count_to_tag_size_bytes(variants.len()) as usize,
+                &Type::Union { fields: *variants },
+            ),
             Type::Type(_) => 0,
             Type::IntLiteral
             | Type::FloatLiteral
@@ -131,7 +146,7 @@ impl Type {
     /// alignment of stack allocation in bytes
     pub fn alignment(&self) -> usize {
         const ZST_ALIGNMENT: usize = 1;
-        match self {
+        let alignment = match self {
             Type::Void | Type::Never => ZST_ALIGNMENT,
             Type::Ptr { .. } => todo!(),
             Type::Int { .. } => self.size().min(16),
@@ -156,7 +171,9 @@ impl Type {
             | Type::Type(..)
             | Type::Unset
             | Type::Unevaluated(_) => panic_debug("cannot find stack alignment"),
-        }
+        };
+        debug_assert!(alignment.is_power_of_two());
+        alignment
     }
 
     /// Checks if the two types equal or can be coerced into a common type.
@@ -228,9 +245,7 @@ impl Type {
             t => t,
         }
     }
-}
 
-impl Type {
     #[inline]
     pub fn is_valid(&self) -> bool {
         match self {
@@ -249,13 +264,22 @@ impl Type {
     }
 }
 
-/*
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaybeType {
-    Valid(TypeInfo),
-
+#[allow(unused)]
+enum SemaType {
+    RuntimeType(Type),
     IntLiteral,
     FloatLiteral,
+    /// ```
+    /// MyEnum :: enum { A, B(i64) };
+    /// a := MyEnum.A; // variant -> valid val
+    /// b1 := MyEnum.B; // variant -> invalid val
+    /// b2 := MyEnum.B(5); // variant initialization
+    /// ```
+    EnumVariant {
+        enum_ty: Ptr<Type>,
+        idx: usize,
+    },
 
     /// The type was not explicitly set in the original source code and must
     /// still be inferred.
@@ -265,133 +289,56 @@ pub enum MaybeType {
     Unevaluated(Ptr<Expr>),
 }
 
-impl MaybeType {
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        matches!(self, MaybeType::Valid(_))
+#[test]
+fn test_sema_type_transmute_to_type() {
+    fn t(sema_type: SemaType) -> Type {
+        unsafe { std::mem::transmute::<SemaType, Type>(sema_type) }
     }
 
-    /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
-    #[inline]
-    pub fn into_valid(self) -> Option<TypeInfo> {
-        match self {
-            MaybeType::Valid(ty) => Some(ty),
-            _ => None,
-        }
-    }
+    let alloc = bumpalo::Bump::new();
+    let void_ty_ptr = Ptr::from(alloc.alloc(Type::Void));
+    let void_ptr = Type::Ptr { pointee_ty: void_ty_ptr };
+    let bool_ty_ptr = Ptr::from(alloc.alloc(Type::Bool));
+    let bool_ptr = Type::Ptr { pointee_ty: bool_ty_ptr };
+    let i64_ty = Type::Int { bits: 64, is_signed: true };
+    let i32_ty = Type::Int { bits: 32, is_signed: true };
+    let u64_ty = Type::Int { bits: 64, is_signed: false };
+    let f64_ty = Type::Float { bits: 64 };
+    let f32_ty = Type::Float { bits: 32 };
 
-    // a: f64 = 1 + 1.0 + 1
-    //          ^           int_lit
-    //              ^^^     float_lit
-    //          ^^^^^^^     float_lit
-    //                    ^ int_lit
-    //          ^^^^^^^^^^^ float_lit
-    //          ^^^^^^^^^^^ f64
+    assert_eq!(t(SemaType::RuntimeType(Type::Void)), Type::Void);
+    assert_eq!(t(SemaType::RuntimeType(Type::Never)), Type::Never);
 
-    /// expects both types to be valid
-    pub fn common_type_valid(self, other: MaybeType) -> Option<MaybeType> {
-        match (self, other) {
-            (MaybeType::Valid(a), MaybeType::Valid(b)) => a.common_type(b).map(MaybeType::Valid),
-            (MaybeType::Valid(t), MaybeType::IntLiteral)
-            | (MaybeType::IntLiteral, MaybeType::Valid(t)) => match t {
-                TypeInfo::Never | TypeInfo::Int { .. } | TypeInfo::Float { .. } => {
-                    Some(MaybeType::Valid(t))
-                },
-                _ => None,
-            },
-            (MaybeType::Valid(t), MaybeType::FloatLiteral)
-            | (MaybeType::FloatLiteral, MaybeType::Valid(t)) => match t {
-                TypeInfo::Never | TypeInfo::Float { .. } => Some(MaybeType::Valid(t)),
-                _ => None,
-            },
-            (MaybeType::IntLiteral, MaybeType::IntLiteral) => Some(MaybeType::IntLiteral),
-            (
-                MaybeType::IntLiteral | MaybeType::FloatLiteral,
-                MaybeType::IntLiteral | MaybeType::FloatLiteral,
-            ) => Some(MaybeType::FloatLiteral),
-            (MaybeType::Unset | MaybeType::Unevaluated(_), _)
-            | (_, MaybeType::Unset | MaybeType::Unevaluated(_)) => {
-                panic_debug("common_type_valid expects valid types")
-            },
-        }
-    }
+    assert_eq!(t(SemaType::RuntimeType(void_ptr)), void_ptr);
+    assert_ne!(t(SemaType::RuntimeType(bool_ptr)), void_ptr);
+    assert_ne!(t(SemaType::RuntimeType(void_ptr)), bool_ptr);
+
+    assert_eq!(t(SemaType::RuntimeType(i64_ty)), i64_ty);
+    assert_ne!(t(SemaType::RuntimeType(i64_ty)), u64_ty);
+    assert_ne!(t(SemaType::RuntimeType(i64_ty)), i32_ty);
+
+    assert_eq!(t(SemaType::RuntimeType(Type::Bool)), Type::Bool);
+
+    assert_eq!(t(SemaType::RuntimeType(f64_ty)), f64_ty);
+    assert_ne!(t(SemaType::RuntimeType(f64_ty)), f32_ty);
 
     /*
-    /// expects both types to be valid
-    pub fn common_type_valid(self, other: MaybeType) -> Option<MaybeType> {
-        match (self, other) {
-            (MaybeType::Valid(a), MaybeType::Valid(b)) => a.common_type(b).map(MaybeType::Valid),
-            (MaybeType::Valid(t), MaybeType::NumLiteral { kind, real_ty })
-            | (MaybeType::NumLiteral { kind, real_ty }, MaybeType::Valid(t)) => {
-                if let Some(real_ty) = *real_ty {
-                    return real_ty.common_type(t).map(MaybeType::Valid);
-                }
-                let matches = match kind {
-                    NumLiteralKind::Int => {
-                        matches!(t, TypeInfo::Int { .. } | TypeInfo::Float { .. })
-                    },
-                    NumLiteralKind::Float => matches!(t, TypeInfo::Float { .. }),
-                };
-                if matches {
-                    *real_ty.as_mut() = Some(t);
-                }
-                Some(t)
-            },
-            (
-                MaybeType::NumLiteral { kind: k1, real_ty: t1 },
-                MaybeType::NumLiteral { kind: k2, real_ty: t2 },
-            ) => match ((k1, *t1), (k2, *t2)) {
-                ((_, Some(t1)), (_, Some(t2))) => t1.common_type(t2).map(MaybeType::Valid),
-                ((_, Some(t)), (k, None)) | ((k, None), (_, Some(t))) => match (t, k) {
-                    (TypeInfo::Void, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Void, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Never, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Never, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Ptr(ptr), NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Ptr(ptr), NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Int { bits, is_signed }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Int { bits, is_signed }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Bool, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Bool, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Float { bits }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Float { bits }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Function(ptr), NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Function(ptr), NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Array { len, elem_ty }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Array { len, elem_ty }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Struct { fields }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Struct { fields }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Union { fields }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Union { fields }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Enum { variants }, NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Enum { variants }, NumLiteralKind::Float) => todo!(),
-                    (TypeInfo::Type(ptr), NumLiteralKind::Int) => todo!(),
-                    (TypeInfo::Type(ptr), NumLiteralKind::Float) => todo!(),
-                },
-                ((k1, None), (k2, None)) => {
-                    let is_float = k1 == NumLiteralKind::Float || k2 == NumLiteralKind::Float;
-                    let kind = if is_float { NumLiteralKind::Float } else { NumLiteralKind::Int };
-                    Some(MaybeType::NumLiteral { kind, real_ty: t1 })
-                },
-            },
-            (MaybeType::Unset | MaybeType::Unevaluated(_), _)
-            | (_, MaybeType::Unset | MaybeType::Unevaluated(_)) => {
-                panic_debug("common_type_valid expects valid types")
-            },
-        }
-    }
+    Function(Ptr<Fn>),
+    Array {
+        len: usize,
+        elem_ty: Ptr<Type>,
+    },
+    Struct {
+        fields: VarDeclList,
+    },
+    Union {
+        fields: VarDeclList,
+    },
+    Enum {
+        variants: VarDeclList, // TODO
+    },
     */
-}
 
-impl UnwrapDebug for MaybeType {
-    type Inner = TypeInfo;
-
-    #[inline]
-    fn unwrap_debug(self) -> Self::Inner {
-        match self {
-            MaybeType::Valid(ty) => ty,
-            _ => panic_debug("called unwrap_debug on an invalid MaybeType variant"),
-        }
-    }
+    assert_eq!(t(SemaType::RuntimeType(Type::Type(void_ty_ptr))), Type::Type(void_ty_ptr));
+    assert_ne!(t(SemaType::RuntimeType(Type::Type(void_ty_ptr))), Type::Type(bool_ty_ptr));
 }
-*/

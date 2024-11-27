@@ -1,9 +1,55 @@
 use crate::{
     error::SpannedError,
     parser::lexer::{Code, Span},
+    type_::Type,
 };
 use core::fmt;
 use std::{hint::unreachable_unchecked, ops::Try};
+
+/// Calculates the padding bytes needed to align `offset` at `alignment`.
+///
+/// <https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding>
+macro_rules! get_padding {
+    ($offset:expr, $alignment:expr) => {
+        $offset.wrapping_neg() & ($alignment - 1)
+    };
+}
+pub(crate) use get_padding;
+
+/// Adds the needed padding bytes to `offset` to align `offset` at `alignment`.
+///
+/// equivalent to `offset + get_padding(offset, alignment)`
+///
+/// <https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding>
+macro_rules! get_aligned_offset {
+    ($offset:expr, $alignment:expr) => {{
+        let alignment = $alignment;
+        ($offset + (alignment - 1)) & alignment.wrapping_neg()
+    }};
+}
+pub(crate) use get_aligned_offset;
+
+#[inline]
+pub fn aligned_add(offset: usize, ty: &Type) -> usize {
+    get_aligned_offset!(offset, ty.alignment()) + ty.size()
+}
+
+/// <https://jameshfisher.com/2018/03/30/round-up-power-2/>
+pub fn round_up_to_nearest_power_of_two(x: usize) -> usize {
+    1usize.wrapping_shl(usize::BITS - x.wrapping_sub(1).leading_zeros())
+}
+
+#[test]
+pub fn test_round_up_to_nearest_power_of_two() {
+    assert_eq!(round_up_to_nearest_power_of_two(0), 1);
+    assert_eq!(round_up_to_nearest_power_of_two(1), 1);
+    assert_eq!(round_up_to_nearest_power_of_two(2), 2);
+    assert_eq!(round_up_to_nearest_power_of_two(3), 4);
+    assert_eq!(round_up_to_nearest_power_of_two(4), 4);
+    assert_eq!(round_up_to_nearest_power_of_two(5), 8);
+    assert_eq!(round_up_to_nearest_power_of_two(8), 8);
+    assert_eq!(round_up_to_nearest_power_of_two(9), 16);
+}
 
 pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
     eprintln!("ERROR: {}", err.get_text());

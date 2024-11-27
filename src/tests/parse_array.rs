@@ -37,7 +37,6 @@ test_helper! { array_lit: "[1, 2, 3, 4, 5]", |arr| {
 
 test_helper! { array_lit_short: "[0; 5]", |arr| {
     let ExprKind::ArrayLitShort { val, count } = arr else {
-        println!("{:#?}", arr );
         panic!("not an array literal")
     };
     assert!(matches!(val.kind, ExprKind::Literal { kind: LitKind::Int, .. }));

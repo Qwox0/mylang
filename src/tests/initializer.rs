@@ -105,4 +105,28 @@ sum";
     assert_eq!(out, 10.5);
 }
 
-// TODO: test errors for invalid cases
+#[test]
+fn nested_initializers() {
+    let code = "
+MyStruct :: struct {
+    a: i64,
+    inner: struct { b: [4]i8, c: f32 = 12.34 },
+};
+
+a := MyStruct.{
+    a = 5,
+    inner = .{ b = [2, 3, 5, 7] },
+};
+
+if a.a != 5 return false;
+if a.inner.b[0] != 2 return false;
+if a.inner.b[1] != 3 return false;
+if a.inner.b[2] != 5 return false;
+if a.inner.b[3] != 7 return false;
+if a.inner.c != 12.34 return false;
+true";
+    let (ok, llvm_module_text) = jit_run_test!(code => bool,llvm_module).unwrap();
+    assert!(ok);
+    let stack_allocations = llvm_module_text.lines().filter(|l| l.contains("alloca")).count();
+    assert_eq!(stack_allocations, 1, "this code should only do one stack allocation");
+}

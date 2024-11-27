@@ -8,7 +8,7 @@ fn test_and() {
             let code = format!("{a} && {b}");
             let out = jit_run_test!(&code => bool).unwrap();
             let expected = a && b;
-            assert!(out == expected, "{code} == {expected}")
+            assert_eq!(out, expected)
         }
     }
 }
@@ -20,8 +20,7 @@ fn test_or() {
             let code = format!("{a} || {b}");
             let out = jit_run_test!(&code => bool).unwrap();
             let expected = a || b;
-            println!("{code} == {expected}");
-            assert!(out == expected, "{code} == {expected}")
+            assert_eq!(out, expected)
         }
     }
 }

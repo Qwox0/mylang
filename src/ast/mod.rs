@@ -247,13 +247,6 @@ pub struct Expr {
     pub span: Span,
 }
 
-impl From<(ExprKind, Span)> for Expr {
-    #[inline]
-    fn from((kind, span): (ExprKind, Span)) -> Self {
-        Expr::new(kind, span)
-    }
-}
-
 impl Expr {
     #[inline]
     pub fn new(kind: ExprKind, span: Span) -> Self {
@@ -595,6 +588,10 @@ impl VarDeclList {
             .into_iter()
             .enumerate()
             .find(|(_, f)| &*f.ident.text == name)
+    }
+
+    pub fn into_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_ {
+        self.iter().map(|decl| decl.ty)
     }
 }
 

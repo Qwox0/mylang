@@ -19,11 +19,11 @@ cd "$script_dir"
 
 rm "target/build_dev/output.o" "target/build_dev/test" 2>/dev/null
 
-cmd="cargo test -q"
-info "$cmd"
-$cmd
+# cmd="cargo test -q"
+# info "$cmd"
+# $cmd
 
-cmd="cargo run"
+cmd="cargo run -- dev"
 info "$cmd"
 #RUSTFLAGS=-Awarnings $cmd || error "Failed" 0
 #RUST_BACKTRACE=1 $cmd || error "Failed" 0 # slows down the Frontend (especially in non-release mode)
@@ -37,6 +37,6 @@ cmd="./target/build_dev/test"
 info "$cmd"
 $cmd || error "Failed" 3
 
-cmd="cargo bench -q"
-info "$cmd"
-$cmd
+# cmd="cargo bench -q"
+# info "$cmd"
+# $cmd

@@ -1,81 +1,46 @@
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use std::path::PathBuf;
 
-#[derive(Debug)]
-pub struct Cli {
-    pub command: Command,
-    pub debug: Option<DebugOptions>,
-}
-
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-#[command(args_conflicts_with_subcommands = true)]
-struct CliImpl {
-    #[command(flatten)]
-    default_args: Option<RunScriptArgs>,
-
+pub struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
-
-    #[arg(long, value_enum)]
-    pub debug: Option<DebugOptions>,
+    pub command: Command,
 }
 
-// all identical:
-// `mylang build.mylang`
-// `mylang run-script build.mylang`
-// `mylang build`
-// `mylang build build.mylang`
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
-    /// Interpret a Script or Build script (default)
-    RunScript(RunScriptArgs),
-    /// Interpret a Build Script to build the current project
-    Build {
-        /// Build script
-        #[arg(default_value = "build.mylang")]
-        build_script: PathBuf,
-    },
-    /// Compile a source file
-    Compile {
-        file: PathBuf,
-    },
-    /// Open a REPL
+    /// Builds the current project
+    Build(BuildArgs),
+    /// Builds and runs the current project
+    Run(BuildArgs),
+    /// Opens a REPL
+    Check(BuildArgs),
+    Clean(BuildArgs),
+
     Repl {},
-    Check {},
-    Clean {},
 
     Dev {},
 }
 
 #[derive(clap::Args, Debug)]
-pub struct RunScriptArgs {
-    /// Script file to Interpret
-    pub script: PathBuf,
-}
+pub struct BuildArgs {
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
 
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DebugOptions {
-    Tokens,
-    Ast,
-    LlvmIrUnoptimized,
-    LlvmIrOptimized,
-    ReplExpr,
-}
+    #[arg(short, default_value = "0")]
+    pub optimization_level: u8,
 
-impl Cli {
-    pub fn parse() -> Self {
-        let parsed = CliImpl::parse();
-
-        let command = parsed
-            .command
-            .or_else(|| parsed.default_args.map(Command::RunScript))
-            .expect("either a command or the default command was parsed");
-
-        Cli { command, debug: parsed.debug }
-    }
-
-    pub fn print_help() -> Result<(), std::io::Error> {
-        CliImpl::command().print_help()
-    }
+    #[arg(long, value_enum)]
+    pub debug_tokens: bool,
+    #[arg(long)]
+    pub debug_ast: bool,
+    #[arg(long)]
+    pub debug_types: bool,
+    #[arg(long)]
+    pub debug_typed_ast: bool,
+    #[arg(long)]
+    pub debug_llvm_ir_unoptimized: bool,
+    #[arg(long)]
+    pub debug_llvm_ir_optimized: bool,
 }

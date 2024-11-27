@@ -8,16 +8,13 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
-pub struct Compiler<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> {
-    pub sema: Sema<'c, 'alloc, DEBUG_TYPES>,
-    pub codegen: llvm::Codegen<'ctx, 'alloc>,
+pub struct Compiler<'c, 'ctx, 'alloc> {
+    pub sema: Sema<'c, 'alloc>,
+    pub codegen: llvm::Codegen<'ctx>,
 }
 
-impl<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> Compiler<'c, 'ctx, 'alloc, DEBUG_TYPES> {
-    pub fn new(
-        sema: Sema<'c, 'alloc, DEBUG_TYPES>,
-        codegen: llvm::Codegen<'ctx, 'alloc>,
-    ) -> Compiler<'c, 'ctx, 'alloc, DEBUG_TYPES> {
+impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
+    pub fn new(sema: Sema<'c, 'alloc>, codegen: llvm::Codegen<'ctx>) -> Compiler<'c, 'ctx, 'alloc> {
         Compiler { sema, codegen }
     }
 
@@ -63,10 +60,11 @@ impl<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> Compiler<'c, 'ctx, 'alloc, DEBUG
         Ok(())
     }
 
-    pub fn compile_stmts_dev<const DEBUG_TYPED_AST: bool>(
+    pub fn compile_stmts_dev(
         &mut self,
         stmts: &[Ptr<Expr>],
         code: &Code,
+        debug_typed_ast: bool,
     ) -> (Duration, Duration) {
         let sema_start = Instant::now();
         for s in stmts.iter().copied() {
@@ -107,7 +105,8 @@ impl<'c, 'ctx, 'alloc, const DEBUG_TYPES: bool> Compiler<'c, 'ctx, 'alloc, DEBUG
 
         let sema_duration = sema_start.elapsed();
 
-        if DEBUG_TYPED_AST {
+        #[cfg(debug_assertions)]
+        if debug_typed_ast {
             println!("\n### Typed AST Nodes:");
             for s in stmts.iter().copied() {
                 println!("stmt @ {:?}", s);

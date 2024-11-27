@@ -1,20 +1,31 @@
 use crate::tests::jit_run_test;
 
 #[test]
-fn todo1() {
+fn better_error_message1() {
     let code = "
 pub test :: (mut x := 1) { // TODO: test this (better error)
     x += 1;
     420;
     1+2*x
 };";
-    todo!("{:?}", code);
+    todo!("better error message for \"{code}\"");
 }
 
 #[test]
-fn todo2() {
-    jit_run_test!("mut a := 1;" => ()).unwrap();
-    panic!("alignment of store instruction is 4");
+fn better_error_message2() {
+    jit_run_test!(raw "
+test :: -> { 1 " => ())
+    .unwrap();
+    /*
+    jit_run_test!(raw "
+test :: -> {
+    MyStruct :: struct { x: i64 };
+    MyStruct.{ x = 5 }
+" => ())
+    .unwrap();
+    */
+    todo!("better error message");
+    panic!("OK")
 }
 
 #[test]
@@ -53,54 +64,4 @@ test :: -> {{
     let out = jit_run_test!(raw &code => Out).unwrap();
     assert_eq!(out.tag, 1);
     assert_eq!(format!("{:x}", out.val.to_bits()), format!("{:x}", big_float_bits));
-}
-
-#[test]
-fn return_local_vs_global_type() {
-    // global
-    // ```
-    // ; ModuleID = 'test'
-    // source_filename = "test"
-    //
-    // %MyStruct = type { i64 }
-    //
-    // define %MyStruct @test() {
-    // entry:
-    //   %struct = alloca %MyStruct, align 8
-    //   %x = getelementptr inbounds %MyStruct, ptr %struct, i32 0, i32 0
-    //   store i64 5, ptr %x, align 4
-    //   %0 = load %MyStruct, ptr %struct, align 4
-    //   ret %MyStruct %0
-    // }
-    // ```
-    let out = jit_run_test!(raw "
-MyStruct :: struct { x: i64 };
-test :: -> MyStruct.{ x = 5 };
-" => i64)
-    .unwrap();
-    assert_eq!(out, 5);
-
-    // local
-    // ```
-    // ; ModuleID = 'test'
-    // source_filename = "test"
-    //
-    // define { i64 } @test() {
-    // entry:
-    //   %struct = alloca { i64 }, align 8
-    //   %x = getelementptr inbounds { i64 }, ptr %struct, i32 0, i32 0
-    //   store i64 5, ptr %x, align 4
-    //   %0 = load { i64 }, ptr %struct, align 4
-    //   ret { i64 } %0
-    // }
-    // ```
-    let out = jit_run_test!(raw "
-test :: -> {
-    MyStruct :: struct { x: i64 };
-    MyStruct.{ x = 5 }
-};" => i64)
-    .unwrap();
-    assert_eq!(out, 5);
-
-    todo!();
 }

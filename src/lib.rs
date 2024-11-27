@@ -8,6 +8,9 @@
 #![feature(try_blocks)]
 #![feature(assert_matches)]
 #![allow(unreachable_code)]
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+#![feature(iter_collect_into)]
 
 pub mod ast;
 pub mod cli;

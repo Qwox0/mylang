@@ -153,9 +153,9 @@ pub defer_test :: -> {
             panic!("Parse ERROR")
         });
 
-        let sema = sema::Sema::<false>::new(code, &alloc);
+        let sema = sema::Sema::new(code, &alloc, false);
         let context = Context::create();
-        let codegen = llvm::Codegen::new_module(&context, "dev", &alloc);
+        let codegen = llvm::Codegen::new_module(&context, "dev");
         let mut compiler = Compiler::new(sema, codegen);
 
         let _ = compiler.compile_stmts(&stmts);
