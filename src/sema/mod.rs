@@ -7,7 +7,7 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
-        VarDecl,
+        VarDecl, VarDeclList,
     },
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
@@ -316,10 +316,33 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             },
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
-            ExprKind::Initializer { lhs: Some(ty_expr), fields: values } => {
+            ExprKind::PositionalInitializer { lhs: Some(ty_expr), lhs_ty, args } => {
                 assert!(!is_const, "todo: const initializer");
                 let lhs_val = self.analyze(*ty_expr, false)?;
-                match lhs_val.ty {
+                *lhs_ty = lhs_val.ty;
+                match *lhs_ty {
+                    Type::Never => return Ok(SemaValue::never()),
+                    Type::Type(t) => {
+                        let Type::Struct { fields } = *t else { todo!("error") };
+                        self.validate_call(&fields.0, args.as_ref(), is_const)?;
+                        Ok(SemaValue::new(*t))
+                    },
+                    Type::Ptr { pointee_ty: t } => {
+                        let Type::Struct { fields } = *t else { todo!("error") };
+                        self.validate_call(&fields.0, args.as_ref(), is_const)?;
+                        Ok(lhs_val)
+                    },
+                    ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
+                }
+            },
+            ExprKind::PositionalInitializer { lhs: None, .. } => {
+                err(CannotInferPositionalInitializerTy, span.start_pos())
+            },
+            ExprKind::NamedInitializer { lhs: Some(ty_expr), lhs_ty, fields: values } => {
+                assert!(!is_const, "todo: const initializer");
+                let lhs_val = self.analyze(*ty_expr, false)?;
+                *lhs_ty = lhs_val.ty;
+                match *lhs_ty {
                     Type::Never => return Ok(SemaValue::never()),
                     Type::Type(t) => {
                         self.validate_initializer(*t, *values, is_const, span)?;
@@ -332,7 +355,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
                 }
             },
-            ExprKind::Initializer { lhs: None, fields: values } => {
+            ExprKind::NamedInitializer { lhs: None, lhs_ty, fields: values } => {
                 // TODO: benchmark this
                 let mut struct_ty_iter =
                     self.struct_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
@@ -344,12 +367,15 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         },
                     );
                 let Some(struct_ty) = struct_ty_iter.next() else {
-                    return err(CannotInferInitializerTy, expr.span.start_pos());
+                    *lhs_ty = Type::Never;
+                    return err(CannotInferNamedInitializerTy, span.start_pos());
                 };
                 if struct_ty_iter.next().is_some() {
-                    return err(MultiplePossibleInitializerTy, expr.span.start_pos());
+                    *lhs_ty = Type::Never;
+                    return err(MultiplePossibleInitializerTy, span.start_pos());
                 }
                 drop(struct_ty_iter);
+                *lhs_ty = Type::Type(struct_ty);
                 let struct_ty = *struct_ty;
                 self.validate_initializer(struct_ty, *values, is_const, span)?;
                 Ok(SemaValue::new(struct_ty))
@@ -372,7 +398,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         },
                     );
                 let Some(enum_ty) = enum_ty_iter.next() else {
-                    return err(CannotInferInitializerTy, expr.span.start_pos());
+                    return err(CannotInferNamedInitializerTy, expr.span.start_pos());
                 };
                 if enum_ty_iter.next().is_some() {
                     return err(MultiplePossibleInitializerTy, expr.span.start_pos());

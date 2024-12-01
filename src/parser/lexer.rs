@@ -134,6 +134,8 @@ pub enum TokenKind {
     DotAsterisk,
     /// `.&`
     DotAmpersand,
+    /// `.(`
+    DotOpenParenthesis,
     /// `.{`
     DotOpenBrace,
     /// `,`
@@ -580,6 +582,7 @@ impl<'c> Lexer<'c> {
                 },
                 '*' => TokenKind::DotAsterisk,
                 '&' => TokenKind::DotAmpersand,
+                '(' => TokenKind::DotOpenParenthesis,
                 '{' => TokenKind::DotOpenBrace,
             },
             ',' => TokenKind::Comma,

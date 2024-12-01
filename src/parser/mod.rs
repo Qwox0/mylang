@@ -61,13 +61,17 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn top_level_item(&mut self) -> ParseResult<Ptr<Expr>> {
-        let res = self.expr().map_err(|err| {
-            if err.kind == ParseErrorKind::NoInput {
-                ParseError { kind: ParseErrorKind::Finished, ..err }
-            } else {
-                err
-            }
-        });
+        let res = match self.expr() {
+            Err(e @ ParseError { kind: ParseErrorKind::NoInput, .. }) => {
+                Err(ParseError { kind: ParseErrorKind::Finished, ..e })
+            },
+            res @ Err(ParseError { kind: ParseErrorKind::UnexpectedToken(_), .. }) => {
+                // skip over the unexpected token to prevent an infinite loop
+                self.lex.advance();
+                res
+            },
+            res => res,
+        };
         self.lex
             .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
         res
@@ -111,9 +115,20 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let close = self.tok(TokenKind::CloseBracket)?;
                 expr!(Index { lhs, idx }, close.span)
             },
-            FollowingOperator::Initializer => {
+            FollowingOperator::PositionalInitializer => {
+                let args = self.parse_call_args(ScratchPool::new())?;
+                let close_p = self.tok(TokenKind::CloseParenthesis)?;
+                expr!(
+                    PositionalInitializer { lhs: Some(lhs), lhs_ty: Type::Unset, args },
+                    span.join(close_p.span)
+                )
+            },
+            FollowingOperator::NamedInitializer => {
                 let (fields, close_b_span) = self.parse_initializer_fields()?;
-                expr!(Initializer { lhs: Some(lhs), fields }, span.join(close_b_span))
+                expr!(
+                    NamedInitializer { lhs: Some(lhs), lhs_ty: Type::Unset, fields },
+                    span.join(close_b_span)
+                )
             },
             FollowingOperator::SingleArgNoParenFn => {
                 let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
@@ -469,7 +484,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             //TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
             TokenKind::DotOpenBrace => {
                 let (fields, close_b_span) = self.advanced().parse_initializer_fields()?;
-                expr!(Initializer { lhs: None, fields }, span.join(close_b_span))
+                expr!(
+                    NamedInitializer { lhs: None, lhs_ty: Type::Unset, fields },
+                    span.join(close_b_span)
+                )
             },
             //TokenKind::Comma => todo!("TokenKind::Comma"),
             TokenKind::Colon => todo!("TokenKind::Colon"),
@@ -553,6 +571,17 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// `... ( ... )`
     /// `     ^` starts here
+    /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
+    pub fn parse_call_args(
+        &mut self,
+        args: ScratchPool<Ptr<Expr>>,
+    ) -> ParseResult<Ptr<[Ptr<Expr>]>> {
+        Ok(self.expr_list(TokenKind::Comma, args).context("call args")?.0)
+    }
+
+    /// `... ( ... )`
+    /// `     ^` starts here
+    /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
     pub fn call(
         &mut self,
         func: Ptr<Expr>,
@@ -560,7 +589,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         pipe_idx: Option<usize>,
     ) -> ParseResult<Ptr<Expr>> {
         let func = ExprWithTy::untyped(func);
-        let (args, _) = self.expr_list(TokenKind::Comma, args).context("call args")?;
+        let args = self.parse_call_args(args)?;
         let closing_paren_span =
             self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
         self.alloc(expr!(Call { func, args, pipe_idx }, closing_paren_span))
@@ -786,6 +815,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         ScratchPool::new_with_first_val(first).map_err(|e| self.wrap_alloc_err(e))
     }
 
+    /// Clones all values from a [`ScratchPool`] to `self.alloc`.
     #[inline]
     fn clone_slice_from_scratch_pool<T: Clone>(
         &self,
@@ -829,9 +859,12 @@ pub enum FollowingOperator {
     /// ` ^`
     Index,
 
+    /// `alloc(MyStruct).(1, "asdf")`
+    /// `               ^^`
+    PositionalInitializer,
     /// `alloc(MyStruct).{ a = 1, b = "asdf" }`
     /// `               ^^`
-    Initializer,
+    NamedInitializer,
 
     /// `arg -> ...`
     /// `    ^^`
@@ -916,7 +949,8 @@ impl FollowingOperator {
             TokenKind::DotDotEq => FollowingOperator::BinOp(BinOpKind::RangeInclusive),
             TokenKind::DotAsterisk => FollowingOperator::PostOp(UnaryOpKind::Deref),
             TokenKind::DotAmpersand => FollowingOperator::PostOp(UnaryOpKind::AddrOf),
-            TokenKind::DotOpenBrace => FollowingOperator::Initializer,
+            TokenKind::DotOpenParenthesis => FollowingOperator::PositionalInitializer,
+            TokenKind::DotOpenBrace => FollowingOperator::NamedInitializer,
             TokenKind::Colon => FollowingOperator::TypedDecl,
             TokenKind::ColonColon => FollowingOperator::ConstDecl,
             TokenKind::ColonEq => FollowingOperator::VarDecl,
@@ -937,7 +971,8 @@ impl FollowingOperator {
             FollowingOperator::Dot
             | FollowingOperator::Call
             | FollowingOperator::Index
-            | FollowingOperator::Initializer
+            | FollowingOperator::PositionalInitializer
+            | FollowingOperator::NamedInitializer
             | FollowingOperator::SingleArgNoParenFn
             | FollowingOperator::PostOp(_) => 21,
             FollowingOperator::BinOp(k) => k.precedence(),
@@ -989,16 +1024,10 @@ impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
     type Item = ParseResult<Ptr<Expr>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(t) = self.parser.lex.peek()
-            && t.is_invalid_start()
-        {
-            // HACK: If the next Token is an unexpected start, this Iterator becomes
-            // infinite. I'm not sure if this solution is valid in general.
-            self.parser.lex.advance();
-            return Some(err(UnexpectedToken(t.kind), t.span));
+        match self.parser.top_level_item() {
+            Err(ParseError { kind: ParseErrorKind::Finished, .. }) => None,
+            res => Some(res),
         }
-        Some(self.parser.top_level_item())
-            .filter(|res| !matches!(res, Err(ParseError { kind: ParseErrorKind::Finished, .. })))
     }
 }
 

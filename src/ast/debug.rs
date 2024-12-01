@@ -144,7 +144,15 @@ impl DebugAst for Expr {
                 }
                 lines.write_tree(ty);
             },
-            ExprKind::Initializer { lhs, fields } => {
+            ExprKind::PositionalInitializer { lhs, args, .. } => {
+                if let Some(lhs) = lhs {
+                    lines.write_tree(lhs);
+                }
+                lines.write(".(");
+                lines.write_many_expr(args, ",");
+                lines.write(")");
+            },
+            ExprKind::NamedInitializer { lhs, fields, .. } => {
                 if let Some(lhs) = lhs {
                     lines.write_tree(lhs);
                 }

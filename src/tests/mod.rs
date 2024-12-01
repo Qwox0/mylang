@@ -123,7 +123,7 @@ where
         },
     }
 
-    let target_machine = llvm::Codegen::init_target_machine();
+    let target_machine = llvm::Codegen::init_target_machine(None);
     compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
 
     Ok(compiler.codegen)

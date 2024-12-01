@@ -44,7 +44,8 @@ pub enum SemaErrorKind {
     CannotApplyInitializer {
         ty: Type,
     },
-    CannotInferInitializerTy,
+    CannotInferPositionalInitializerTy,
+    CannotInferNamedInitializerTy,
     MultiplePossibleInitializerTy,
     DuplicateInInitializer,
     MissingFieldInInitializer {

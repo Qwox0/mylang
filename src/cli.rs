@@ -28,8 +28,11 @@ pub struct BuildArgs {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    #[arg(short, default_value = "0")]
+    #[arg(short = 'O', default_value = "0")]
     pub optimization_level: u8,
+
+    #[arg(long = "target")]
+    pub target_triple: Option<String>,
 
     #[arg(long, value_enum)]
     pub debug_tokens: bool,

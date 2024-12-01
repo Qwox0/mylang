@@ -1,6 +1,6 @@
 #![feature(path_add_extension)]
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use inkwell::context::Context;
 use mylang::{
     ast::debug::DebugAst,
@@ -16,11 +16,7 @@ use mylang::{
     type_::Type,
     util::display_spanned_error,
 };
-use std::{
-    io::Read,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 fn main() {
     let cli = Cli::parse();
@@ -36,20 +32,6 @@ fn main() {
         },
     };
     std::process::exit(err.code().unwrap())
-}
-
-#[allow(unused)]
-fn read_code_file(path: &Path) -> String {
-    fn inner(path: &Path) -> Result<String, std::io::Error> {
-        let mut buf = String::new();
-        std::fs::File::open(path)?.read_to_string(&mut buf)?;
-        Ok(buf)
-    }
-    inner(path).unwrap_or_else(|e| {
-        Cli::command().print_help().unwrap();
-        eprintln!("\nERROR: {}", e);
-        std::process::exit(1);
-    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -153,7 +135,7 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
     }
     println!("\n");
 
-    let target_machine = llvm::Codegen::init_target_machine();
+    let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
 
     if args.debug_llvm_ir_unoptimized {
         println!("### Unoptimized LLVM IR:");
@@ -220,6 +202,8 @@ fn dev() {
     const DEBUG_TYPED_AST: bool = false;
     const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
     const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
+    //const LLVM_TARGET_TRIPLE: Option<&str> = Some("arm-linux-gnueabihf");
+    const LLVM_TARGET_TRIPLE: Option<&str> = None;
     const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
     type MyMainRetTy = i64;
 
@@ -331,7 +315,7 @@ main :: -> {
     }
     println!("\n");
 
-    let target_machine = llvm::Codegen::init_target_machine();
+    let target_machine = llvm::Codegen::init_target_machine(LLVM_TARGET_TRIPLE);
 
     if DEBUG_LLVM_IR_UNOPTIMIZED {
         println!("### Unoptimized LLVM IR:");

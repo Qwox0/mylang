@@ -97,13 +97,24 @@ pub enum ExprKind {
         ty: Type,
     },
 
+    /// `alloc(MyStruct).( a, b, c = <expr>, )`
+    /// `               ^^^^^^^^^^^^^^^^^^^^^^` expr.span
+    ///
+    /// [`Type`] -> value
+    /// `*T` -> `*T`
+    PositionalInitializer {
+        lhs: Option<Ptr<Expr>>,
+        lhs_ty: Type,
+        args: Ptr<[Ptr<Expr>]>,
+    },
     /// `alloc(MyStruct).{ a = <expr>, b, }`
     /// `               ^^^^^^^^^^^^^^^^^^^` expr.span
     ///
     /// [`Type`] -> value
     /// `*T` -> `*T`
-    Initializer {
+    NamedInitializer {
         lhs: Option<Ptr<Expr>>,
+        lhs_ty: Type,
         fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
     },
 
@@ -262,7 +273,8 @@ impl Expr {
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { is_mut, ty } => todo!(),
-            ExprKind::Initializer { lhs, fields } => {
+            ExprKind::PositionalInitializer { lhs, .. }
+            | ExprKind::NamedInitializer { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
             },
             ExprKind::Dot { lhs, lhs_ty: _, rhs } => {

@@ -65,3 +65,19 @@ test :: -> {{
     assert_eq!(out.tag, 1);
     assert_eq!(format!("{:x}", out.val.to_bits()), format!("{:x}", big_float_bits));
 }
+
+#[test]
+fn sret() {
+    #[derive(Debug, PartialEq)]
+    struct MyStruct {
+        a: i64,
+        b: i64,
+        c: i64,
+    }
+    let (out, llvm_module_text) = jit_run_test!(raw "
+        MyStruct :: struct { a: i64, b: i64, c: i64 };
+        test :: -> MyStruct.{ a = 5, b = 10, c = 15 };" => MyStruct,llvm_module)
+    .unwrap();
+    assert_eq!(out, MyStruct { a: 5, b: 10, c: 15 });
+    assert!(!llvm_module_text.contains("memcpy")); // TODO: implement this
+}

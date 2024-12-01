@@ -11,25 +11,13 @@ use crate::{
 };
 pub use inkwell::targets::TargetMachine;
 use inkwell::{
-    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
-    attributes::Attribute,
-    basic_block::BasicBlock,
-    builder::{Builder, BuilderError},
-    context::Context,
-    execution_engine::FunctionLookupError,
-    llvm_sys::{LLVMType, LLVMValue, prelude::LLVMValueRef},
-    module::{Linkage, Module},
-    passes::PassBuilderOptions,
-    support::LLVMString,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target},
-    types::{
+    attributes::Attribute, basic_block::BasicBlock, builder::{Builder, BuilderError}, context::Context, execution_engine::FunctionLookupError, llvm_sys::{prelude::LLVMValueRef, LLVMType, LLVMValue}, module::{Linkage, Module}, passes::PassBuilderOptions, support::LLVMString, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetTriple}, types::{
         AnyTypeEnum, ArrayType, AsTypeRef, BasicMetadataTypeEnum, BasicType, BasicTypeEnum,
         FloatType, IntType, PointerType, StructType,
-    },
-    values::{
+    }, values::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, InstructionValue, IntValue, PointerValue, StructValue,
-    },
+    }, AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel
 };
 use std::{
     assert_matches::debug_assert_matches, collections::HashMap, marker::PhantomData, path::Path,
@@ -287,12 +275,58 @@ impl<'ctx> Codegen<'ctx> {
             },
             ExprKind::OptionShort(_) => todo!(),
             ExprKind::Ptr { .. } => todo!(),
-            ExprKind::Initializer { lhs, fields: values } => {
-                let (fields, struct_ty, struct_ptr) = match (lhs, out_ty) {
+            ExprKind::PositionalInitializer { lhs, lhs_ty, args } => {
+                let (fields, struct_ty, struct_ptr) = match (lhs, *lhs_ty) {
                     (_, Type::Never) => return Ok(Symbol::Never),
-                    (lhs, t @ Type::Struct { fields }) => {
+                    (lhs, Type::Type(t)) => {
+                        let Type::Struct { fields } = *t else { todo!() };
                         if let Some(lhs) = lhs {
-                            self.compile_expr(*lhs, t)?;
+                            self.compile_expr(*lhs, *t)?;
+                        }
+                        let struct_ty = self.type_table[&fields];
+                        let ptr = if let Some(ptr) = write_target.take() {
+                            ptr
+                        } else {
+                            self.build_alloca(struct_ty, "struct", &t)?
+                        };
+
+                        (fields, struct_ty, ptr)
+                    },
+                    (Some(lhs), Type::Ptr { pointee_ty }) => {
+                        let Type::Struct { fields } = *pointee_ty else { unreachable_debug() };
+                        let struct_ty = self.type_table[&fields];
+                        let ptr = try_compile_expr_as_val!(self, *lhs, out_ty).ptr_val();
+                        (fields, struct_ty, ptr)
+                    },
+                    _ => unreachable_debug(),
+                };
+
+                for (f_idx, field_def) in fields.iter().enumerate() {
+                    let init = if let Some(init) = args.get(f_idx) {
+                        *init
+                    } else {
+                        field_def.default.unwrap_debug()
+                    };
+
+                    let field_ptr = self.builder.build_struct_gep(
+                        struct_ty,
+                        struct_ptr,
+                        f_idx as u32,
+                        &field_def.ident.text,
+                    )?;
+                    let _ =
+                        self.compile_expr_with_write_target(init, field_def.ty, Some(field_ptr))?;
+                }
+
+                stack_val(struct_ptr)
+            },
+            ExprKind::NamedInitializer { lhs, lhs_ty, fields: values } => {
+                let (fields, struct_ty, struct_ptr) = match (lhs, *lhs_ty) {
+                    (_, Type::Never) => return Ok(Symbol::Never),
+                    (lhs, Type::Type(t)) => {
+                        let Type::Struct { fields } = *t else { todo!() };
+                        if let Some(lhs) = lhs {
+                            self.compile_expr(*lhs, *t)?;
                         }
                         let struct_ty = self.type_table[&fields];
                         let ptr = if let Some(ptr) = write_target.take() {
@@ -338,7 +372,6 @@ impl<'ctx> Codegen<'ctx> {
                             self.build_store(field_ptr, val, &field_def.ty)?;
                         },
                     };
-                    //self.build_store(field_ptr, init_val, &field_def.ty)?;
                 }
                 for (f_idx, _) in
                     is_initialized_field.into_iter().enumerate().filter(|(_, is_init)| !is_init)
@@ -350,13 +383,11 @@ impl<'ctx> Codegen<'ctx> {
                         f_idx as u32,
                         &field.ident.text,
                     )?;
-                    let init_sym = self.compile_expr_with_write_target(
+                    let _ = self.compile_expr_with_write_target(
                         field.default.unwrap_debug(),
                         field.ty,
                         Some(field_ptr),
                     )?;
-                    //let v = self.sym_as_val(init_sym, field.ty)?;
-                    //self.build_store(field_ptr, v, &field.ty)?;
                 }
                 stack_val(struct_ptr)
             },
@@ -844,19 +875,7 @@ impl<'ctx> Codegen<'ctx> {
         let ptr_type = BasicMetadataTypeEnum::from(self.ptr_type());
         let ret_type = self.ret_type(f.ret_type);
         let use_sret = ret_type == RetType::SRetParam;
-        let mut param_types = if use_sret {
-            let sret = self
-                .context
-                .create_type_attribute(Attribute::get_named_enum_kind_id("sret"), unsafe {
-                    AnyTypeEnum::new(ptr_type.as_type_ref())
-                });
-            let sret_ptr =
-                BasicMetadataTypeEnum::<'ctx>::try_from(sret.get_type_value()).unwrap_debug();
-
-            vec![sret_ptr]
-        } else {
-            Vec::new()
-        };
+        let mut param_types = if use_sret { vec![ptr_type] } else { Vec::new() };
         f.params
             .iter()
             .map(|VarDecl { ty, .. }| {
@@ -872,6 +891,13 @@ impl<'ctx> Codegen<'ctx> {
             None => self.context.void_type().fn_type(&param_types, false),
         };
         let fn_val = self.module.add_function(name, fn_type, Some(Linkage::External));
+        if use_sret {
+            let llvm_ty = self.llvm_type(f.ret_type).any_ty();
+            let sret = self
+                .context
+                .create_type_attribute(Attribute::get_named_enum_kind_id("sret"), llvm_ty);
+            fn_val.add_attribute(inkwell::attributes::AttributeLoc::Param(0), sret);
+        }
 
         (fn_val, use_sret)
     }
@@ -1542,15 +1568,12 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    pub fn init_target_machine() -> TargetMachine {
+    pub fn init_target_machine(target_triple: Option<&str>) -> TargetMachine {
         Target::initialize_all(&InitializationConfig::default());
 
-        let target_triple: Option<&str> = None;
-        let target_triple = if let Some(s) = target_triple {
-            todo!()
-        } else {
-            TargetMachine::get_default_triple()
-        };
+        let target_triple = target_triple
+            .map(TargetTriple::create)
+            .unwrap_or_else(TargetMachine::get_default_triple);
         let target = Target::from_triple(&target_triple).unwrap();
 
         let cpu = "generic";

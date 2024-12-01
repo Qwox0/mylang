@@ -130,3 +130,19 @@ true";
     let stack_allocations = llvm_module_text.lines().filter(|l| l.contains("alloca")).count();
     assert_eq!(stack_allocations, 1, "this code should only do one stack allocation");
 }
+
+#[test]
+fn positional_initializer() {
+    #[derive(Debug, PartialEq)]
+    #[repr(C)]
+    struct Vec3 {
+        x: f32,
+        y: f32,
+        z: f32,
+    }
+    let out = jit_run_test!("
+Vec3 :: struct { x: f32, y: f32, z: f32 };
+Vec3.(1.0, 0.0, 2.5)" => Vec3)
+    .unwrap();
+    assert_eq!(out, Vec3 { x: 1.0, y: 0.0, z: 2.5 });
+}
