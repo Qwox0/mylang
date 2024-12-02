@@ -4,7 +4,7 @@ use clap::Parser;
 use inkwell::context::Context;
 use mylang::{
     ast::debug::DebugAst,
-    cli::{BuildArgs, Cli, Command},
+    cli::{BuildArgs, Cli, Command, OutKind},
     codegen::llvm,
     compiler::Compiler,
     parser::{
@@ -14,7 +14,7 @@ use mylang::{
     },
     sema,
     type_::Type,
-    util::display_spanned_error,
+    util::{self, display_spanned_error},
 };
 use std::time::{Duration, Instant};
 
@@ -42,23 +42,29 @@ enum CompileMode {
 }
 
 fn compile2(mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus {
+    let mut code = String::with_capacity(4096);
+    if !args.no_prelude {
+        let prelude_path = concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang");
+        util::write_file_to_string(prelude_path, &mut code).unwrap();
+    }
+
     if args.path.is_dir() {
-        let code = args
+        for file in args
             .path
             .read_dir()
             .unwrap()
             .map(|f| f.unwrap().path())
             .filter(|p| p.is_file())
             .filter(|p| p.extension().is_some_and(|ext| ext == "mylang"))
-            .map(|f| std::fs::read_to_string(f).unwrap())
-            .collect::<String>();
-        compile(code.as_ref(), mode, args)
+        {
+            util::write_file_to_string(&file, &mut code).unwrap();
+        }
     } else if args.path.is_file() {
-        let code = std::fs::read_to_string(&args.path).unwrap();
-        compile(code.as_ref(), mode, args)
+        util::write_file_to_string(&args.path, &mut code).unwrap();
     } else {
         panic!("{:?} is not a dir nor a file", args.path)
     }
+    compile(code.as_ref(), mode, args)
 }
 
 fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus {
@@ -181,18 +187,19 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
     let obj_file_path = exe_file_path.with_added_extension("o");
     compiler.codegen.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
 
-    std::process::Command::new("gcc")
-        .arg(obj_file_path.as_os_str())
-        .arg("-o")
-        .arg(exe_file_path.as_os_str())
-        .status()
-        .unwrap();
-
-    if mode == CompileMode::Run {
-        std::process::Command::new(exe_file_path).status().unwrap()
-    } else {
-        std::process::ExitStatus::default()
+    if args.out == OutKind::Executable {
+        std::process::Command::new("gcc")
+            .arg(obj_file_path.as_os_str())
+            .arg("-o")
+            .arg(exe_file_path.as_os_str())
+            .status()
+            .unwrap();
+        if mode == CompileMode::Run {
+            return std::process::Command::new(exe_file_path).status().unwrap();
+        }
     }
+
+    std::process::ExitStatus::default()
 }
 
 fn dev() {

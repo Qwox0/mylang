@@ -184,6 +184,10 @@ pub enum ExprKind {
     /// `expr.span` must describe the entire expression if `default.is_none()`,
     /// otherwise only the start is important
     VarDecl(VarDecl),
+    Extern {
+        ident: Ident,
+        ty: Type,
+    },
 
     // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
     // ExternDecl {

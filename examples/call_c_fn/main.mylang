@@ -1,0 +1,5 @@
+extern my_fn : (a: i32, b: i32) -> i32;
+
+main :: -> {
+    return my_fn(60, 9);
+}

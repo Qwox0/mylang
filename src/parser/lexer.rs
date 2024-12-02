@@ -256,7 +256,7 @@ keywords! {
     Union = "union",
     Enum = "enum",
     Unsafe = "unsafe",
-    // Extern = "extern",
+    Extern = "extern",
     If = "if",
     Else = "else",
     Match = "match",

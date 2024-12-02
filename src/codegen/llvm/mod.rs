@@ -11,13 +11,25 @@ use crate::{
 };
 pub use inkwell::targets::TargetMachine;
 use inkwell::{
-    attributes::Attribute, basic_block::BasicBlock, builder::{Builder, BuilderError}, context::Context, execution_engine::FunctionLookupError, llvm_sys::{prelude::LLVMValueRef, LLVMType, LLVMValue}, module::{Linkage, Module}, passes::PassBuilderOptions, support::LLVMString, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetTriple}, types::{
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
+    attributes::Attribute,
+    basic_block::BasicBlock,
+    builder::{Builder, BuilderError},
+    context::Context,
+    execution_engine::FunctionLookupError,
+    llvm_sys::{LLVMType, LLVMValue, prelude::LLVMValueRef},
+    module::{Linkage, Module},
+    passes::PassBuilderOptions,
+    support::LLVMString,
+    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetTriple},
+    types::{
         AnyTypeEnum, ArrayType, AsTypeRef, BasicMetadataTypeEnum, BasicType, BasicTypeEnum,
         FloatType, IntType, PointerType, StructType,
-    }, values::{
+    },
+    values::{
         AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
         FloatValue, FunctionValue, InstructionValue, IntValue, PointerValue, StructValue,
-    }, AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel
+    },
 };
 use std::{
     assert_matches::debug_assert_matches, collections::HashMap, marker::PhantomData, path::Path,
@@ -542,7 +554,7 @@ impl<'ctx> Codegen<'ctx> {
                 let Symbol::Stack(stack_var) = self.compile_typed_expr(lhs)? else {
                     unreachable_debug()
                 };
-                let ExprWithTy { expr: lhs_expr, ty: arg_ty } = lhs;
+                let arg_ty = lhs.ty;
                 let lhs_llvm_ty = self.llvm_type(arg_ty).basic_ty();
                 let lhs_val = self.build_load(lhs_llvm_ty, stack_var, "lhs", &lhs.ty)?;
 
@@ -572,7 +584,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.build_store(stack_var, binop_res, &lhs.ty)?;
                 Ok(Symbol::Void)
             },
-            ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
+            ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, .. }) => {
                 let var_name = &*ident.text;
                 let prev_var_name = self.cur_var_name.replace(Ptr::from(var_name));
 
@@ -607,6 +619,15 @@ impl<'ctx> Codegen<'ctx> {
 
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
+            },
+            ExprKind::Extern { ident, ty } => match ty {
+                Type::Function(f) => {
+                    let val = self.compile_prototype(&ident.text, f).0;
+                    let sym = Symbol::Function { params: f.params, val };
+                    let _ = self.symbols.insert(ident.text, sym);
+                    Ok(Symbol::Void)
+                },
+                _ => todo!(),
             },
             ExprKind::If { condition, then_body, else_body, .. } => {
                 let func = self.cur_fn.unwrap_debug();
@@ -832,14 +853,11 @@ impl<'ctx> Codegen<'ctx> {
         // set data
         if let Some(init) = init {
             let data_ptr = self.builder.build_struct_gep(enum_ty, enum_ptr, 1, "enum_data")?;
-            //let v = try_compile_expr_as_val!(self, init, variants[variant_idx].ty, data_ptr);
-            let v = self.compile_expr_with_write_target(
+            let _ = self.compile_expr_with_write_target(
                 init,
                 variants[variant_idx].ty,
                 Some(data_ptr),
             )?;
-            //panic!("{v:?}")
-            //self.build_store(data_ptr, v)?;
         }
 
         stack_val(enum_ptr)

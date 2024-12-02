@@ -237,6 +237,12 @@ impl DebugAst for Expr {
                 lines.write_tree(rhs);
             },
             ExprKind::VarDecl(decl) => decl.debug_impl(lines),
+            ExprKind::Extern { ident, ty } => {
+                lines.write("extern ");
+                lines.write(&ident.text);
+                lines.write(":");
+                lines.write_tree(ty);
+            },
             ExprKind::If { condition, then_body, else_body, was_piped } => {
                 if *was_piped {
                     lines.write_tree(condition);

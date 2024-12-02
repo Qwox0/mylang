@@ -4,7 +4,12 @@ use crate::{
     type_::Type,
 };
 use core::fmt;
-use std::{hint::unreachable_unchecked, ops::Try};
+use std::{
+    hint::unreachable_unchecked,
+    io::{self, Read},
+    ops::Try,
+    path::Path,
+};
 
 /// Calculates the padding bytes needed to align `offset` at `alignment`.
 ///
@@ -220,4 +225,9 @@ fn test_variant_count_to_tag_size_bits() {
 
 pub fn transmute_unchecked<T, U>(val: &T) -> U {
     unsafe { std::ptr::read(val as *const T as *const U) }
+}
+
+pub fn write_file_to_string(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
+    std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
+    Ok(())
 }

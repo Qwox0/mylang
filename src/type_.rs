@@ -148,7 +148,7 @@ impl Type {
         const ZST_ALIGNMENT: usize = 1;
         let alignment = match self {
             Type::Void | Type::Never => ZST_ALIGNMENT,
-            Type::Ptr { .. } => todo!(),
+            Type::Ptr { .. } => 8,
             Type::Int { .. } => self.size().min(16),
             Type::Bool => 1,
             Type::Float { .. } => self.size().min(16),
@@ -202,6 +202,8 @@ impl Type {
                 {
                     inner(*t1, *t2)
                 },
+                (Type::Ptr { .. }, Type::Ptr { .. }) => Some(Left), // TODO: remove this
+                // (Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
                 (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => {
                     Some(Left)
                 },

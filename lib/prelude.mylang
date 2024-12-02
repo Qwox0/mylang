@@ -1,0 +1,2 @@
+/// writes a character string to stdout
+extern puts : (str: *u8) -> i32;

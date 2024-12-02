@@ -120,3 +120,9 @@ impl<T: ?Sized> std::hash::Hash for Ptr<T> {
         self.0.hash(state);
     }
 }
+
+impl ToString for Ptr<str> {
+    fn to_string(&self) -> String {
+        self.as_ref().to_string()
+    }
+}

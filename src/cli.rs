@@ -34,6 +34,12 @@ pub struct BuildArgs {
     #[arg(long = "target")]
     pub target_triple: Option<String>,
 
+    #[arg(long, default_value = "exe")]
+    pub out: OutKind,
+
+    #[arg(long)]
+    pub no_prelude: bool,
+
     #[arg(long, value_enum)]
     pub debug_tokens: bool,
     #[arg(long)]
@@ -46,4 +52,13 @@ pub struct BuildArgs {
     pub debug_llvm_ir_unoptimized: bool,
     #[arg(long)]
     pub debug_llvm_ir_optimized: bool,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, PartialEq)]
+pub enum OutKind {
+    #[clap(name = "obj")]
+    ObjectFile,
+
+    #[clap(name = "exe")]
+    Executable,
 }

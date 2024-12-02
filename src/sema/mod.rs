@@ -7,7 +7,7 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
-        VarDecl, VarDeclList,
+        VarDecl,
     },
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
@@ -98,16 +98,20 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         }
     }
 
-    pub fn preload_top_level(&mut self, mut s: Ptr<Expr>) {
+    pub fn preload_top_level(&mut self, s: Ptr<Expr>) {
         let res = try {
-            let ExprKind::VarDecl(decl) = &mut s.kind else {
-                err(UnexpectedTopLevelExpr(s), s.span)?
+            let item_ident = match s.kind {
+                ExprKind::VarDecl(decl) => {
+                    debug_assert!(decl.is_const);
+                    debug_assert!(decl.default.is_some());
+                    decl.ident
+                },
+                ExprKind::Extern { ident, .. } => ident,
+                _ => err(UnexpectedTopLevelExpr(s), s.span)?,
             };
-            debug_assert!(decl.is_const);
-            debug_assert!(decl.default.is_some());
 
-            if self.symbols.insert(&*decl.ident.text, SemaSymbol::preload_symbol()).is_some() {
-                err(TopLevelDuplicate, decl.ident.span)?
+            if self.symbols.insert(&*item_ident.text, SemaSymbol::preload_symbol()).is_some() {
+                err(TopLevelDuplicate, item_ident.span)?
             }
         };
         if let Err(e) = res {
@@ -315,7 +319,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 Ok(SemaValue::type_(ty))
             },
             ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Ptr { is_mut, ty } => todo!(),
+            ExprKind::Ptr { is_mut, ty } => {
+                self.eval_type(ty)?;
+                let pointee_ty = self.alloc(*ty)?;
+                let ptr_ty = self.alloc(Type::Ptr { pointee_ty })?;
+                Ok(SemaValue::type_(ptr_ty))
+            },
             ExprKind::PositionalInitializer { lhs: Some(ty_expr), lhs_ty, args } => {
                 assert!(!is_const, "todo: const initializer");
                 let lhs_val = self.analyze(*ty_expr, false)?;
@@ -582,6 +591,17 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     return err(NotAConstExpr, span);
                 }
                 self.analyze_var_decl(decl)?;
+                Ok(SemaValue::void())
+            },
+            ExprKind::Extern { ident, ty } => {
+                self.eval_type(ty)?;
+                if let Type::Function(f) = ty
+                    && let Type::Type(ret_type) = f.ret_type
+                {
+                    f.ret_type = *ret_type;
+                }
+                let _ =
+                    self.symbols.insert(&*ident.text, SemaSymbol::Finished(SemaValue::new(*ty)));
                 Ok(SemaValue::void())
             },
             ExprKind::If { condition, then_body, else_body, .. } => {
@@ -852,6 +872,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         match self.analyze(ty_expr, true)?.ty {
             Type::Never => todo!(),
             Type::Type(t) => Ok(t),
+            t @ Type::Function(_) => Ok(self.alloc(t)?), // TODO: don't alloc here
             _ => err(NotAType, ty_expr.full_span()),
         }
     }
@@ -861,6 +882,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             b'i' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: true }),
             b'u' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: false }),
             b'f' => name[1..].parse().ok().map(|bits| Type::Float { bits }),
+            _ if &*name == "void" => Some(Type::Void),
             _ => None,
         }
     }

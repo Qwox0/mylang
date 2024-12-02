@@ -306,6 +306,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(EnumDef(VarDeclList(variants)), span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
+            TokenKind::Keyword(Keyword::Extern) => {
+                self.advanced().ws1()?;
+                let ident = self.ident()?;
+                self.ws0().tok(TokenKind::Colon)?;
+                let ty_expr = self.expr().context("type of extern decl")?;
+                expr!(Extern { ident, ty: ty(ty_expr) }, span.join(ty_expr.full_span()))
+            },
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.advanced().expr().context("if condition")?;
                 return self.if_after_cond(condition, span, false).context("if");
