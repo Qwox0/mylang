@@ -11,6 +11,7 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 #![feature(iter_collect_into)]
+#![feature(path_add_extension)]
 
 pub mod ast;
 pub mod cli;

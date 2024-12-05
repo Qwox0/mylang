@@ -5,7 +5,7 @@ fn while_loop_sum_array() {
     let array = [1, 2, 3, 4, 10, 123];
     let arr_len = array.len();
     let out = jit_run_test!(format!("
-arr := {array:?};
+arr := .{array:?};
 arr_len := {arr_len};
 mut sum := 0;
 mut idx := 0;

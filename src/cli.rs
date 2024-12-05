@@ -56,6 +56,8 @@ pub struct BuildArgs {
 
 #[derive(clap::ValueEnum, Debug, Clone, PartialEq)]
 pub enum OutKind {
+    None,
+
     #[clap(name = "obj")]
     ObjectFile,
 

@@ -1,2 +1,7 @@
+/// writes a character to stdout
+extern putchar: (ch: i32) -> i32;
+
 /// writes a character string to stdout
-extern puts : (str: *u8) -> i32;
+extern puts: (str: *u8) -> i32;
+
+extern exit: (status: i32) -> never;

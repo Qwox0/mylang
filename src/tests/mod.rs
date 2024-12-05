@@ -19,6 +19,8 @@ mod logic_binop;
 mod parse_array;
 mod parse_function;
 mod ptr;
+mod slice;
+mod string;
 mod struct_;
 mod todo;
 mod union_;

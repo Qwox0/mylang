@@ -24,6 +24,7 @@ use crate::{
     util::{collect_all_result_errors, display_spanned_error},
 };
 use inkwell::context::Context;
+use std::path::PathBuf;
 use test::*;
 
 #[inline]
@@ -167,4 +168,27 @@ pub defer_test :: -> {
             panic!("Semantic analysis ERROR")
         }
     })
+}
+
+#[bench]
+fn compile_libc_example(b: &mut Bencher) {
+    b.iter(|| {
+        let a = crate::compiler::compile2(
+            crate::compiler::CompileMode::Build,
+            &crate::cli::BuildArgs {
+                path: PathBuf::from("./examples/libc/main.mylang"),
+                optimization_level: 0,
+                target_triple: None,
+                out: crate::cli::OutKind::None,
+                no_prelude: true,
+                debug_tokens: false,
+                debug_ast: false,
+                debug_types: false,
+                debug_typed_ast: false,
+                debug_llvm_ir_unoptimized: false,
+                debug_llvm_ir_optimized: false,
+            },
+        );
+        assert!(a.success());
+    });
 }

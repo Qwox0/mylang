@@ -136,6 +136,8 @@ pub enum TokenKind {
     DotAmpersand,
     /// `.(`
     DotOpenParenthesis,
+    /// `.[`
+    DotOpenBracket,
     /// `.{`
     DotOpenBrace,
     /// `,`
@@ -205,12 +207,22 @@ impl TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    // TODO: reduce size (see <https://youtu.be/IroPQ150F6c?t=2100>)
+    //pub span_start: usize,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
         Self { kind, span: Span::from(span) }
     }
+
+    /*
+    fn span(&self, code: &Code) -> Span {
+        let mut lexer = Lexer::new(code.offset(self.span_start));
+        panic!("{}", lexer.pos_span());
+        todo!()
+    }
+    */
 
     /// `true` also means the token ends parsing of the previous expression
     /// independent of precedence.
@@ -354,6 +366,12 @@ impl Code {
         // SAFETY: `Code` is identical to `str`
         unsafe { mem::transmute(code) }
     }
+
+    /*
+    pub fn offset(&self, offset: usize) -> &Self {
+        Code::new(&self.0[offset..])
+    }
+    */
 }
 
 impl AsRef<Code> for String {
@@ -458,9 +476,11 @@ impl<'c> Lexer<'c> {
         self.next_tok.map(|t| t.span).unwrap_or(Span::pos(0))
     }
 
+    /*
     pub fn span_to(&self, other: Lexer<'_>) -> Span {
         self.pos_span().join(other.pos_span())
     }
+    */
 
     pub fn advanced(mut self) -> Self {
         self.advance();
@@ -583,6 +603,7 @@ impl<'c> Lexer<'c> {
                 '*' => TokenKind::DotAsterisk,
                 '&' => TokenKind::DotAmpersand,
                 '(' => TokenKind::DotOpenParenthesis,
+                '[' => TokenKind::DotOpenBracket,
                 '{' => TokenKind::DotOpenBrace,
             },
             ',' => TokenKind::Comma,
@@ -778,3 +799,13 @@ impl<'c> ParserInterface for Cursor<'c> {
         self.get_rem().chars().next()
     }
 }
+
+/*
+#[test]
+fn parse_token_span() {
+    let code = "
+";
+    let lex = Lexer::new(code.as_ref());
+    panic!()
+}
+*/

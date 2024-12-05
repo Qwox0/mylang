@@ -11,7 +11,7 @@ MyStruct :: struct {
 
 a := MyStruct.{
     a = 5,
-    c = [1.0, 2.0, 3.0],
+    c = .[1.0, 2.0, 3.0],
 };
 
 if a.a != 5 return false;
@@ -35,7 +35,7 @@ MyStruct :: struct {
 
 a := .{
     a = 5,
-    c = [1.0, 2.0, 3.0],
+    c = .[1.0, 2.0, 3.0],
 };
 
 if a.a != 5 return false;
@@ -53,7 +53,7 @@ fn initializer_on_anonymous_struct_type() {
     let code = "
 a := struct { a: i64, b := true, c: [3]f64 }.{
     a = 5,
-    c = [1.0, 2.0, 3.0],
+    c = .[1.0, 2.0, 3.0],
 };
 
 if a.a != 5 return false;
@@ -69,7 +69,7 @@ true";
 #[test]
 fn initializer_on_anonymous_struct_type_with_defaults() {
     let code = "
-a := struct { a := 5, b := true, c := [1.0, 2.0, 3.0] }.{};
+a := struct { a := 5, b := true, c := .[1.0, 2.0, 3.0] }.{};
 
 if a.a != 5 return false;
 if !a.b return false;
@@ -94,7 +94,7 @@ a: MyStruct;
 ptr := &a;
 ptr.{
     a = 5,
-    c = [5.2, 2.0, 3.3],
+    c = .[5.2, 2.0, 3.3],
 };
 mut sum := 0.0;
 ptr.*.c | for x {
@@ -115,7 +115,7 @@ MyStruct :: struct {
 
 a := MyStruct.{
     a = 5,
-    inner = .{ b = [2, 3, 5, 7] },
+    inner = .{ b = .[2, 3, 5, 7] },
 };
 
 if a.a != 5 return false;

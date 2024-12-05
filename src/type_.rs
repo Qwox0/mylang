@@ -21,9 +21,6 @@ fn void(alloc: &bumpalo::Bump) -> Ptr<Type> {
 pub enum Type {
     Void,
     Never,
-    Ptr {
-        pointee_ty: Ptr<Type>,
-    },
     Int {
         bits: u32,
         is_signed: bool,
@@ -33,12 +30,18 @@ pub enum Type {
         bits: u32,
     },
 
-    Function(Ptr<Fn>),
-
+    Ptr {
+        pointee_ty: Ptr<Type>,
+    },
+    Slice {
+        elem_ty: Ptr<Type>,
+    },
     Array {
         len: usize,
         elem_ty: Ptr<Type>,
     },
+
+    Function(Ptr<Fn>),
 
     Struct {
         fields: VarDeclList,
@@ -48,6 +51,13 @@ pub enum Type {
     },
     Enum {
         variants: VarDeclList, // TODO
+    },
+
+    Range {
+        elem_ty: Ptr<Type>,
+    },
+    RangeInclusive {
+        elem_ty: Ptr<Type>,
     },
 
     /// `a :: int`
@@ -121,12 +131,13 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void | Type::Never => 0,
-            Type::Ptr { .. } => 8,
             Type::Int { bits, .. } | Type::Float { bits } => {
                 round_up_to_nearest_power_of_two(*bits as usize).div_ceil(8)
             },
             Type::Bool => 1,
             Type::Function(_) => todo!(),
+            Type::Ptr { .. } => 8,
+            Type::Slice { .. } => 16,
             Type::Array { len, elem_ty } => elem_ty.size() * len,
             Type::Struct { fields } => fields.iter().map(|f| &f.ty).fold(0, aligned_add),
             Type::Union { fields } => fields.iter().map(|f| f.ty.size()).max().unwrap_or(0),
@@ -134,6 +145,7 @@ impl Type {
                 variant_count_to_tag_size_bytes(variants.len()) as usize,
                 &Type::Union { fields: *variants },
             ),
+            Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.size() * 2,
             Type::Type(_) => 0,
             Type::IntLiteral
             | Type::FloatLiteral
@@ -148,11 +160,11 @@ impl Type {
         const ZST_ALIGNMENT: usize = 1;
         let alignment = match self {
             Type::Void | Type::Never => ZST_ALIGNMENT,
-            Type::Ptr { .. } => 8,
             Type::Int { .. } => self.size().min(16),
             Type::Bool => 1,
             Type::Float { .. } => self.size().min(16),
             Type::Function(_) => todo!(),
+            Type::Ptr { .. } | Type::Slice { .. } => 8,
             Type::Array { elem_ty, .. } => elem_ty.alignment(),
             Type::Struct { fields } => {
                 fields.iter().map(|f| f.ty.alignment()).max().unwrap_or(ZST_ALIGNMENT)
@@ -165,6 +177,7 @@ impl Type {
                     .alignment()
                     .max(Type::Union { fields: *variants }.alignment())
             },
+            Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.alignment(),
             Type::IntLiteral
             | Type::FloatLiteral
             | Type::EnumVariant { .. }
@@ -197,6 +210,7 @@ impl Type {
                 (t, v) if t == v => Some(Left),
                 (Type::Never, _) => Some(Right),
                 (_, Type::Never) => Some(Left),
+                (Type::Slice { elem_ty: t1 }, Type::Slice { elem_ty: t2 }) => inner(*t1, *t2),
                 (Type::Array { len: l1, elem_ty: t1 }, Type::Array { len: l2, elem_ty: t2 })
                     if l1 == l2 =>
                 {
@@ -238,7 +252,9 @@ impl Type {
         match self {
             Type::IntLiteral => Type::Int { bits: 64, is_signed: true },
             Type::FloatLiteral => Type::Float { bits: 64 },
-            Type::Array { mut elem_ty, .. } => {
+            Type::Array { mut elem_ty, .. }
+            | Type::Range { mut elem_ty }
+            | Type::RangeInclusive { mut elem_ty } => {
                 *elem_ty = elem_ty.finalize();
                 self
             },

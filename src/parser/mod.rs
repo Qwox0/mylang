@@ -401,54 +401,15 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
-                let Some(first_expr) =
-                    self.advanced().ws0().expr().opt().context("first expr in [...]")?
-                else {
-                    // `[]` or `[]ty`
-                    let close_b = self.tok(TokenKind::CloseBracket)?;
-                    let arr = match self.expr_(min_precedence).opt()? {
-                        Some(ty) => expr!(ArrayTy2 { ty }),
-                        None => expr!(
-                            ArrayLit { elements: self.alloc_empty_slice() },
-                            span.join(close_b.span)
-                        ),
-                    };
-                    return self.alloc(arr);
-                };
-
-                let t = self.ws0().next_tok()?;
-                let kind = match t.kind {
-                    // `[count]ty` or `[expr]`
-                    TokenKind::CloseBracket => {
-                        let arr = match self.expr_(min_precedence).opt()? {
-                            Some(ty) => expr!(ArrayTy { count: first_expr, ty }),
-                            None => {
-                                let elements = self.scratch_pool_with_first_val(first_expr)?;
-                                let elements = self.clone_slice_from_scratch_pool(elements)?;
-                                let expr = expr!(ArrayLit { elements }, span.join(t.span));
-                                expr
-                            },
-                        };
-                        return self.alloc(arr);
-                    },
-                    // `[expr; count]`
-                    TokenKind::Semicolon => {
-                        let count = self.expr().context("array literal short count")?;
-                        ExprKind::ArrayLitShort { val: first_expr, count }
-                    },
-                    // `[expr,]` or `[expr, expr, ...]`
-                    TokenKind::Comma => {
-                        let elems = self.scratch_pool_with_first_val(first_expr)?;
-                        let (elements, _) = self.expr_list(TokenKind::Comma, elems)?;
-                        ExprKind::ArrayLit { elements }
-                    },
-                    _ => {
-                        return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
-                    },
-                };
-
-                let close_b = self.tok(TokenKind::CloseBracket)?;
-                Expr::new(kind, span.join(close_b.span))
+                let count = self.advanced().ws0().expr().opt().context("array type count")?;
+                self.tok(TokenKind::CloseBracket)?;
+                let ty_expr = self.expr_(min_precedence)?;
+                let ty_span = ty_expr.full_span();
+                let ty = ty(ty_expr);
+                match count {
+                    Some(count) => expr!(ArrayTy { count, ty }, span.join(ty_span)),
+                    None => expr!(SliceTy { ty }, span.join(ty_span)),
+                }
             },
             TokenKind::OpenBrace => return self.advanced().block(span),
             TokenKind::Bang => {
@@ -469,7 +430,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 self.advanced().ws0();
                 let is_mut = self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let pointee = self.expr().context("pointee type")?;
-                expr!(Ptr { is_mut, ty: ty(pointee) })
+                expr!(PtrTy { is_mut, ty: ty(pointee) }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
                 let is_mut =
@@ -478,17 +439,18 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
                 expr!(UnaryOp { kind, expr, is_postfix: false })
             },
-            //TokenKind::Pipe => todo!("TokenKind::Pipe"),
-            //TokenKind::PipePipe => todo!("TokenKind::PipePipe"),
-            //TokenKind::PipeEq => todo!("TokenKind::PipeEq"),
-            //TokenKind::Caret => todo!("TokenKind::Caret"),
-            //TokenKind::CaretEq => todo!("TokenKind::CaretEq"),
             TokenKind::Dot => {
                 let rhs = self.advanced().ws0().ident().context("dot rhs")?;
                 expr!(Dot { lhs: None, lhs_ty: Type::Unset, rhs }, span)
             },
-            //TokenKind::DotAsterisk => todo!("TokenKind::DotAsterisk"),
-            //TokenKind::DotAmpersand => todo!("TokenKind::DotAmpersand"),
+            TokenKind::DotOpenParenthesis => {
+                let args = self.advanced().ws0().parse_call_args(ScratchPool::new())?;
+                let close_b_span = self.tok(TokenKind::CloseParenthesis)?.span;
+                expr!(
+                    PositionalInitializer { lhs: None, lhs_ty: Type::Unset, args },
+                    span.join(close_b_span)
+                )
+            },
             TokenKind::DotOpenBrace => {
                 let (fields, close_b_span) = self.advanced().parse_initializer_fields()?;
                 expr!(
@@ -496,10 +458,54 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     span.join(close_b_span)
                 )
             },
-            //TokenKind::Comma => todo!("TokenKind::Comma"),
+            TokenKind::DotOpenBracket => {
+                macro_rules! new_arr_init {
+                    ($elements:expr) => {{
+                        let elements = $elements;
+                        ExprKind::ArrayInitializer { lhs: None, lhs_ty: Type::Unset, elements }
+                    }};
+                }
+
+                let Some(first_expr) =
+                    self.advanced().ws0().expr().opt().context("first expr in [...]")?
+                else {
+                    // `.[]`
+                    let kind = new_arr_init!(self.alloc_empty_slice());
+                    let close_b = self.tok(TokenKind::CloseBracket)?;
+                    return self.alloc(Expr::new(kind, span.join(close_b.span)));
+                };
+                let t = self.ws0().peek_tok()?;
+                let kind = match t.kind {
+                    // `.[expr]`
+                    TokenKind::CloseBracket => {
+                        let elements = self.scratch_pool_with_first_val(first_expr)?;
+                        new_arr_init!(self.clone_slice_from_scratch_pool(elements)?)
+                    },
+                    // `.[expr; count]`
+                    TokenKind::Semicolon => {
+                        self.advanced().ws0();
+                        let count = self.expr().context("array literal short count")?;
+                        ExprKind::ArrayInitializerShort {
+                            lhs: None,
+                            lhs_ty: Type::Unset,
+                            val: first_expr,
+                            count,
+                        }
+                    },
+                    // `.[expr,]` or `.[expr, expr, ...]`
+                    TokenKind::Comma => {
+                        self.advanced().ws0();
+                        let elems = self.scratch_pool_with_first_val(first_expr)?;
+                        new_arr_init!(self.expr_list(TokenKind::Comma, elems)?.0)
+                    },
+                    _ => {
+                        return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
+                    },
+                };
+                let close_b = self.tok(TokenKind::CloseBracket)?;
+                Expr::new(kind, span.join(close_b.span))
+            },
             TokenKind::Colon => todo!("TokenKind::Colon"),
-            //TokenKind::ColonColon => todo!("TokenKind::ColonColon"),
-            //TokenKind::ColonEq => todo!("TokenKind::ColonEq"),
             TokenKind::Question => {
                 let type_ = self.advanced().expr().expect("type after ?");
                 expr!(OptionShort(ty(type_)), span.join(type_.span))

@@ -1,6 +1,7 @@
 use crate::{
     ast::{ExprKind, LitKind},
     parser::StmtIter,
+    type_::Type,
 };
 
 macro_rules! test_helper {
@@ -20,13 +21,13 @@ macro_rules! test_helper {
 
 // Literals:
 
-test_helper! { array_lit_empty: "[]", |arr| {
-    let ExprKind::ArrayLit { elements } = arr else { panic!("not an array literal") };
+test_helper! { array_lit_empty: ".[]", |arr| {
+    let ExprKind::ArrayInitializer { elements, .. } = arr else { panic!("not an array literal") };
     assert!(elements.is_empty());
 }}
 
-test_helper! { array_lit: "[1, 2, 3, 4, 5]", |arr| {
-    let ExprKind::ArrayLit { elements } = arr else {
+test_helper! { array_lit: ".[1, 2, 3, 4, 5]", |arr| {
+    let ExprKind::ArrayInitializer { elements, .. } = arr else {
         panic!("not an array literal")
     };
     assert!(elements.len() == 5);
@@ -35,16 +36,16 @@ test_helper! { array_lit: "[1, 2, 3, 4, 5]", |arr| {
     }
 }}
 
-test_helper! { array_lit_short: "[0; 5]", |arr| {
-    let ExprKind::ArrayLitShort { val, count } = arr else {
+test_helper! { array_lit_short: ".[0; 5]", |arr| {
+    let ExprKind::ArrayInitializerShort { val, count, .. } = arr else {
         panic!("not an array literal")
     };
     assert!(matches!(val.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
     assert!(matches!(count.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
 }}
 
-test_helper! { array_lit_with_expr: "[1 + 1, 2 + 2, 3 + 3]", |arr| {
-    let ExprKind::ArrayLit { elements } = arr else {
+test_helper! { array_lit_with_expr: ".[1 + 1, 2 + 2, 3 + 3]", |arr| {
+    let ExprKind::ArrayInitializer { elements, .. } = arr else {
         panic!("not an array literal")
     };
     assert!(elements.len() == 3);
@@ -53,8 +54,8 @@ test_helper! { array_lit_with_expr: "[1 + 1, 2 + 2, 3 + 3]", |arr| {
     }
 }}
 
-test_helper! { array_lit_short_with_expr: "[1 + 1; 2 + 2]", |arr| {
-    let ExprKind::ArrayLitShort { val, count } = arr else {
+test_helper! { array_lit_short_with_expr: ".[1 + 1; 2 + 2]", |arr| {
+    let ExprKind::ArrayInitializerShort { val, count, .. } = arr else {
         panic!("not an array literal")
     };
     assert!(matches!(val.kind, ExprKind::BinOp { .. }));
@@ -68,10 +69,11 @@ test_helper! { array_ty_f64: "[5]f64", |arr| {
         panic!("not an array type")
     };
     assert!(matches!(count.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
-    let ExprKind::Ident(ty) = ty.kind else {
+    if let Type::Unevaluated(expr) = ty && let ExprKind::Ident(ty) = expr.kind {
+        assert!(*ty == *"f64");
+    } else {
         panic!("parsed type incorrectly")
-    };
-    assert!(*ty == *"f64");
+    }
 }}
 
 test_helper! { array_ty_f64_expr_count: "[1 + 1]f64", |arr| {
@@ -79,18 +81,20 @@ test_helper! { array_ty_f64_expr_count: "[1 + 1]f64", |arr| {
         panic!("not an array type")
     };
     assert!(matches!(count.kind, ExprKind::BinOp { .. }));
-    let ExprKind::Ident(ty) = ty.kind else {
+    if let Type::Unevaluated(expr) = ty && let ExprKind::Ident(ty) = expr.kind {
+        assert!(*ty == *"f64");
+    } else {
         panic!("parsed type incorrectly")
-    };
-    assert!(*ty == *"f64");
+    }
 }}
 
-test_helper! { array_ty2_f64: "[]f64", |arr| {
-    let ExprKind::ArrayTy2 { ty } = arr else {
-        panic!("not an array type")
+test_helper! { slice_ty_f64: "[]f64", |arr| {
+    let ExprKind::SliceTy { ty } = arr else {
+        panic!("not a slice type")
     };
-    let ExprKind::Ident(ty) = ty.kind else {
+    if let Type::Unevaluated(expr) = ty && let ExprKind::Ident(ty) = expr.kind {
+        assert!(*ty == *"f64");
+    } else {
         panic!("parsed type incorrectly")
-    };
-    assert!(*ty == *"f64");
+    }
 }}

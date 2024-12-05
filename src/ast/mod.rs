@@ -2,7 +2,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     type_::Type,
-    util::{UnwrapDebug, forget_lifetime},
+    util::{UnwrapDebug, forget_lifetime, unreachable_debug},
 };
 use debug::DebugAst;
 use std::{
@@ -42,36 +42,29 @@ pub enum ExprKind {
     /// `true`, `false`
     BoolLit(bool),
 
+    /// `*<ty>`
+    /// `*mut <ty>`
+    PtrTy {
+        is_mut: bool,
+        ty: Type,
+    },
+    /// `[]T` -> `struct { ptr: *T, len: u64 }`
+    SliceTy {
+        ty: Type,
+    },
     /// `[<count>]ty`
     ArrayTy {
         count: Ptr<Expr>,
-        ty: Ptr<Expr>,
+        ty: Type,
     },
-    /// `[]ty`
-    /// TODO: define meaning
-    ArrayTy2 {
-        ty: Ptr<Expr>,
-    },
-    /// `[<expr>, <expr>, ..., <expr>,]`
-    ArrayLit {
-        elements: Ptr<[Ptr<Expr>]>,
-    },
-    /// `[<val>; <count>]`
-    ArrayLitShort {
-        val: Ptr<Expr>,
-        count: Ptr<Expr>,
-    },
-    /// `(<expr>, <expr>, ..., <expr>,)`
-    /// both for types and literals
-    Tuple {
-        elements: Ptr<[Ptr<Expr>]>,
-    },
+
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
     /// `-> <type> { <body> }`
     /// `-> <body>`
     /// `^ expr.span`
     Fn(Fn),
+
     /// `( <expr> )`
     Parenthesis {
         expr: Ptr<Expr>,
@@ -90,12 +83,6 @@ pub enum ExprKind {
     EnumDef(VarDeclList),
     /// `?<ty>`
     OptionShort(Type),
-    /// `*<ty>`
-    /// `*mut <ty>`
-    Ptr {
-        is_mut: bool,
-        ty: Type,
-    },
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
     /// `               ^^^^^^^^^^^^^^^^^^^^^^` expr.span
@@ -116,6 +103,19 @@ pub enum ExprKind {
         lhs: Option<Ptr<Expr>>,
         lhs_ty: Type,
         fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
+    },
+    /// `alloc(MyArray).[<expr>, <expr>, ..., <expr>,]`
+    ArrayInitializer {
+        lhs: Option<Ptr<Expr>>,
+        lhs_ty: Type,
+        elements: Ptr<[Ptr<Expr>]>,
+    },
+    /// `alloc(MyArray).[<expr>; <count>]`
+    ArrayInitializerShort {
+        lhs: Option<Ptr<Expr>>,
+        lhs_ty: Type,
+        val: Ptr<Expr>,
+        count: Ptr<Expr>,
     },
 
     /// `expr . ident`, `.ident`
@@ -273,10 +273,8 @@ impl Expr {
     pub fn full_span(&self) -> Span {
         #[allow(unused_variables)]
         match self.kind {
-            ExprKind::Tuple { elements } => todo!(),
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
             ExprKind::OptionShort(_) => todo!(),
-            ExprKind::Ptr { is_mut, ty } => todo!(),
             ExprKind::PositionalInitializer { lhs, .. }
             | ExprKind::NamedInitializer { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
@@ -424,14 +422,8 @@ impl BinOpKind {
         }
     }
 
-    pub fn has_independent_out_ty(&self) -> bool {
+    pub fn finalize_arg_type(&self, arg_ty: Type, out_ty: Type) -> Type {
         match self {
-            BinOpKind::Eq
-            | BinOpKind::Ne
-            | BinOpKind::Lt
-            | BinOpKind::Le
-            | BinOpKind::Gt
-            | BinOpKind::Ge => true,
             BinOpKind::Mul
             | BinOpKind::Div
             | BinOpKind::Mod
@@ -443,9 +435,24 @@ impl BinOpKind {
             | BinOpKind::BitXor
             | BinOpKind::BitOr
             | BinOpKind::And
-            | BinOpKind::Or
-            | BinOpKind::Range
-            | BinOpKind::RangeInclusive => false,
+            | BinOpKind::Or => out_ty,
+            BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::Lt
+            | BinOpKind::Le
+            | BinOpKind::Gt
+            | BinOpKind::Ge => {
+                debug_assert_eq!(out_ty, Type::Bool);
+                arg_ty
+            },
+            BinOpKind::Range | BinOpKind::RangeInclusive => {
+                let t = match out_ty {
+                    Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => *elem_ty,
+                    _ => unreachable_debug(),
+                };
+                debug_assert!(arg_ty.matches(t));
+                t
+            },
         }
     }
 }

@@ -52,32 +52,22 @@ impl DebugAst for Expr {
                 lines.write(text.as_ref())
             },
             ExprKind::BoolLit(b) => lines.write(if *b { "true" } else { "false" }),
+            ExprKind::PtrTy { is_mut, ty } => {
+                lines.write("*");
+                if *is_mut {
+                    lines.write("mut ");
+                }
+                lines.write_tree(ty);
+            },
+            ExprKind::SliceTy { ty } => {
+                lines.write("[]");
+                lines.write_tree(ty);
+            },
             ExprKind::ArrayTy { count, ty } => {
                 lines.write("[");
                 lines.write_tree(count);
                 lines.write("]");
                 lines.write_tree(ty);
-            },
-            ExprKind::ArrayTy2 { ty } => {
-                lines.write("[]");
-                lines.write_tree(ty);
-            },
-            ExprKind::ArrayLit { elements } => {
-                lines.write("[");
-                lines.write_many(&elements, |e, _, l| l.write_tree(e), ",");
-                lines.write("]");
-            },
-            ExprKind::ArrayLitShort { val, count } => {
-                lines.write("[");
-                lines.write_tree(val);
-                lines.write(";");
-                lines.write_tree(count);
-                lines.write("]");
-            },
-            ExprKind::Tuple { elements } => {
-                lines.write("(");
-                lines.write_many_expr(elements, ",");
-                lines.write(")");
             },
             ExprKind::Fn(Fn { params, ret_type, body }) => {
                 let body = body;
@@ -137,13 +127,6 @@ impl DebugAst for Expr {
                 lines.write("?");
                 lines.write_tree(ty);
             },
-            ExprKind::Ptr { is_mut, ty } => {
-                lines.write("*");
-                if *is_mut {
-                    lines.write("mut ");
-                }
-                lines.write_tree(ty);
-            },
             ExprKind::PositionalInitializer { lhs, args, .. } => {
                 if let Some(lhs) = lhs {
                     lines.write_tree(lhs);
@@ -169,6 +152,24 @@ impl DebugAst for Expr {
                     ",",
                 );
                 lines.write("}");
+            },
+            ExprKind::ArrayInitializer { lhs, elements, .. } => {
+                if let Some(lhs) = lhs {
+                    lines.write_tree(lhs);
+                }
+                lines.write(".[");
+                lines.write_many(&elements, |e, _, l| l.write_tree(e), ",");
+                lines.write("]");
+            },
+            ExprKind::ArrayInitializerShort { lhs, val, count, .. } => {
+                if let Some(lhs) = lhs {
+                    lines.write_tree(lhs);
+                }
+                lines.write(".[");
+                lines.write_tree(val);
+                lines.write(";");
+                lines.write_tree(count);
+                lines.write("]");
             },
             ExprKind::Dot { lhs, lhs_ty: _, rhs } => {
                 if let Some(lhs) = lhs {
@@ -215,7 +216,7 @@ impl DebugAst for Expr {
                 lines.write_tree(expr);
                 lines.write(match kind {
                     UnaryOpKind::AddrOf => ".&",
-                    UnaryOpKind::AddrMutOf => ".&mut ",
+                    UnaryOpKind::AddrMutOf => ".&mut",
                     UnaryOpKind::Deref => ".*",
                     UnaryOpKind::Try => "?",
                     UnaryOpKind::Not | UnaryOpKind::Neg => unreachable_debug(),
@@ -354,10 +355,6 @@ impl DebugAst for Type {
         match self {
             Type::Void => buf.write("void"),
             Type::Never => buf.write("!"),
-            Type::Ptr { pointee_ty } => {
-                buf.write("*");
-                pointee_ty.debug_impl(buf);
-            },
             Type::Int { bits, is_signed } => {
                 buf.write(if *is_signed { "i" } else { "u" });
                 buf.write(&bits.to_string());
@@ -369,14 +366,26 @@ impl DebugAst for Type {
                 buf.write(&bits.to_string());
             },
             Type::FloatLiteral => buf.write("float_lit"),
-            Type::Function(_) => buf.write("fn"), // TODO: fn type as text
+            Type::Ptr { pointee_ty } => {
+                buf.write("*");
+                pointee_ty.debug_impl(buf);
+            },
+            Type::Slice { elem_ty: val_ty } => {
+                buf.write("[]");
+                val_ty.debug_impl(buf);
+            },
             Type::Array { len: count, elem_ty: ty } => {
                 write!(buf, "[{count}]").unwrap();
                 ty.debug_impl(buf);
             },
+            Type::Function(_) => buf.write("fn"), // TODO: fn type as text
             Type::Struct { fields } => write!(buf, "struct{:?}", fields.0).unwrap(),
             Type::Union { fields } => write!(buf, "union{:?}", fields.0).unwrap(),
             Type::Enum { variants } => write!(buf, "enum{:?}", variants.0).unwrap(),
+            Type::Range { elem_ty } => write!(buf, "Range<{:?}>", elem_ty).unwrap(),
+            Type::RangeInclusive { elem_ty } => {
+                write!(buf, "RangeInclusive<{:?}>", elem_ty).unwrap()
+            },
             Type::EnumVariant { enum_ty, idx } => {
                 let Type::Enum { variants } = **enum_ty else { unreachable_debug() };
                 let variant = variants[*idx];
