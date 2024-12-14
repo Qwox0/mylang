@@ -1,0 +1,4 @@
+main :: -> {
+    text := read_file_as_string_slice("./file.txt");
+    puts(text.ptr);
+}

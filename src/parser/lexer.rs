@@ -282,7 +282,7 @@ keywords! {
 }
 
 /// byte range offset for a [`Code`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -473,7 +473,9 @@ impl<'c> Lexer<'c> {
     }
 
     pub fn pos_span(&self) -> Span {
-        self.next_tok.map(|t| t.span).unwrap_or(Span::pos(0))
+        self.next_tok
+            .map(|t| t.span)
+            .unwrap_or_else(|| Span::pos(self.get_code().len()))
     }
 
     /*
@@ -766,6 +768,10 @@ impl<'c> Cursor<'c> {
     pub fn advance(&mut self) {
         let offset = self.get_rem().char_indices().next().map(|(idx, _)| idx).unwrap_or_default();
         self.pos += offset + 1;
+    }
+
+    pub fn get_pos(&self) -> usize {
+        self.pos
     }
 
     pub unsafe fn set_pos(&mut self, pos: usize) {

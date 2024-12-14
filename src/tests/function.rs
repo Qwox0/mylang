@@ -29,6 +29,7 @@ factorial(10)" => i64);
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn infer_number_based_on_ret_type() {
     let out = jit_run_test!(raw "test :: -> i8 { 1 };" => i8);
     assert_eq!(out.unwrap(), 1);

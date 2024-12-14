@@ -5,10 +5,7 @@ use crate::{
     util::{UnwrapDebug, forget_lifetime, unreachable_debug},
 };
 use debug::DebugAst;
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-};
+use std::{fmt, ops::Deref};
 
 pub mod debug;
 
@@ -57,6 +54,8 @@ pub enum ExprKind {
         count: Ptr<Expr>,
         ty: Type,
     },
+    /// `?<ty>`
+    OptionShort(Type),
 
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
     /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
@@ -81,8 +80,6 @@ pub enum ExprKind {
     UnionDef(VarDeclList),
     /// `enum { A, B(i64) }`
     EnumDef(VarDeclList),
-    /// `?<ty>`
-    OptionShort(Type),
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
     /// `               ^^^^^^^^^^^^^^^^^^^^^^` expr.span
@@ -252,8 +249,38 @@ pub enum ExprKind {
         expr: Option<ExprWithTy>,
     },
     Continue,
+    // Semicolon(Option<Ptr<Expr>>),
+}
 
-    Semicolon(Option<Ptr<Expr>>),
+impl ExprKind {
+    pub(crate) fn block_expects_trailing_semicolon(&self) -> bool {
+        match self {
+            ExprKind::Block { .. } => false,
+            /*
+            | ExprKind::StructDef(..)
+            | ExprKind::UnionDef(..)
+            | ExprKind::EnumDef(..) => false,
+            ExprKind::VarDecl(var_decl) => var_decl
+                .default
+                .map(|e| e.kind.block_expects_trailing_semicolon())
+                .unwrap_or(true),
+            ExprKind::Extern { .. } => todo!(),
+            &ExprKind::If { then_body, else_body, .. } => {
+                else_body.unwrap_or(then_body).kind.block_expects_trailing_semicolon()
+            },
+            ExprKind::Match { .. } => todo!(),
+            ExprKind::Fn(Fn { body, .. })
+            | ExprKind::For { body, .. }
+            | ExprKind::While { body, .. } => body.kind.block_expects_trailing_semicolon(),
+            ExprKind::Catch { .. } => todo!(),
+            ExprKind::Defer(..) => todo!(),
+            ExprKind::Return { .. } => todo!(),
+            ExprKind::Break { .. } => todo!(),
+            ExprKind::Continue => todo!(),
+            */
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +301,6 @@ impl Expr {
         #[allow(unused_variables)]
         match self.kind {
             ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
-            ExprKind::OptionShort(_) => todo!(),
             ExprKind::PositionalInitializer { lhs, .. }
             | ExprKind::NamedInitializer { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
@@ -311,7 +337,7 @@ impl Expr {
                 Some(expr) => self.span.join(expr.full_span()),
                 None => self.span,
             },
-            ExprKind::Semicolon(_) => todo!(),
+            // ExprKind::Semicolon(_) => todo!(),
             _ => self.span,
         }
     }
@@ -499,6 +525,12 @@ pub struct VarDecl {
     pub is_const: bool,
 }
 
+impl VarDecl {
+    pub fn new_basic(ident: Ident, ty: Type) -> Self {
+        VarDecl { markers: DeclMarkers::default(), ident, ty, default: None, is_const: false }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclMarkers {
     pub is_pub: bool,
@@ -548,6 +580,12 @@ pub struct Ident {
 impl Ident {
     pub fn into_expr(self) -> Expr {
         Expr::new(ExprKind::Ident(self.text), self.span)
+    }
+}
+
+impl From<&'static str> for Ident {
+    fn from(value: &'static str) -> Self {
+        Ident { text: Ptr::from(value), span: Span::new(0, 0) }
     }
 }
 
@@ -602,38 +640,23 @@ impl LitKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VarDeclList(pub Ptr<[VarDecl]>);
+pub type VarDeclList = Ptr<[VarDecl]>;
 
-impl VarDeclList {
-    pub fn find_field(self, name: &str) -> Option<(usize, &VarDecl)> {
-        unsafe { forget_lifetime(&*self.0) }
+pub trait VarDeclListTrait {
+    fn find_field(&self, name: &str) -> Option<(usize, &VarDecl)>;
+
+    fn as_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_;
+}
+
+impl VarDeclListTrait for [VarDecl] {
+    fn find_field(&self, name: &str) -> Option<(usize, &VarDecl)> {
+        unsafe { forget_lifetime(&*self) }
             .into_iter()
             .enumerate()
             .find(|(_, f)| &*f.ident.text == name)
     }
 
-    pub fn into_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_ {
+    fn as_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_ {
         self.iter().map(|decl| decl.ty)
-    }
-}
-
-impl From<Ptr<[VarDecl]>> for VarDeclList {
-    fn from(value: Ptr<[VarDecl]>) -> Self {
-        VarDeclList(value)
-    }
-}
-
-impl Deref for VarDeclList {
-    type Target = [VarDecl];
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
-impl DerefMut for VarDeclList {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.0
     }
 }

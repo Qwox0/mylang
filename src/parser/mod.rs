@@ -40,7 +40,7 @@ impl Expr {
     pub fn try_to_ident(&self) -> ParseResult<Ident> {
         match self.kind {
             ExprKind::Ident(text) => Ok(Ident { text, span: self.span }),
-            _ => err(NotAnIdent, self.span),
+            _ => err(NotAnIdent, self.full_span()),
         }
     }
 }
@@ -61,17 +61,15 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn top_level_item(&mut self) -> ParseResult<Ptr<Expr>> {
-        let res = match self.expr() {
-            Err(e @ ParseError { kind: ParseErrorKind::NoInput, .. }) => {
-                Err(ParseError { kind: ParseErrorKind::Finished, ..e })
-            },
-            res @ Err(ParseError { kind: ParseErrorKind::UnexpectedToken(_), .. }) => {
-                // skip over the unexpected token to prevent an infinite loop
-                self.lex.advance();
-                res
-            },
-            res => res,
-        };
+        if self.lex.is_empty() {
+            let span = self.lex.pos_span();
+            return Err(ParseError::new(ParseErrorKind::Finished, span));
+        }
+        let res = self.expr();
+        if let Err(ParseError { kind: ParseErrorKind::UnexpectedToken(_), .. }) = res {
+            // skip over the unexpected token to prevent an infinite loop
+            self.lex.advance();
+        }
         self.lex
             .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
         res
@@ -82,7 +80,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     pub fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
-        let mut lhs = self.ws0().value(min_precedence).context("expr first val")?;
+        let mut lhs = self.ws0().value(/*min_precedence*/).context("expr first val")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) => lhs = node,
@@ -130,15 +128,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     span.join(close_b_span)
                 )
             },
+            FollowingOperator::ArrayInitializer => todo!("ArrayInitializer"),
             FollowingOperator::SingleArgNoParenFn => {
                 let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
-                let param = VarDecl {
-                    markers: DeclMarkers::default(),
-                    ident: lhs,
-                    ty: Type::Unset,
-                    default: None,
-                    is_const: false,
-                };
+                let param = VarDecl::new_basic(lhs, Type::Unset);
                 let params = self.alloc_one_val_slice(param)?.into();
                 return self.function_tail(params, span);
             },
@@ -238,7 +231,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// anything which has higher precedence than any operator
-    pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
+    //pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
+    pub fn value(&mut self) -> ParseResult<Ptr<Expr>> {
         let Token { kind, span } = self.peek_tok().context("expected value")?;
 
         macro_rules! expr {
@@ -289,13 +283,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     } else {
                         Type::Void
                     };
-                    let decl = VarDecl {
-                        markers: DeclMarkers::default(),
-                        ident: variant_ident,
-                        default: None,
-                        ty,
-                        is_const: false,
-                    };
+                    let decl = VarDecl::new_basic(variant_ident, ty);
                     variants.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
                     if !self.ws0().lex.advance_if_kind(TokenKind::Comma) {
                         break;
@@ -303,7 +291,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 }
                 let variants = self.clone_slice_from_scratch_pool(variants)?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
-                expr!(EnumDef(VarDeclList(variants)), span.join(close_b.span))
+                expr!(EnumDef(variants), span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::Extern) => {
@@ -403,7 +391,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBracket => {
                 let count = self.advanced().ws0().expr().opt().context("array type count")?;
                 self.tok(TokenKind::CloseBracket)?;
-                let ty_expr = self.expr_(min_precedence)?;
+                let ty_expr = self.expr_(PREOP_PRECEDENCE)?;
                 let ty_span = ty_expr.full_span();
                 let ty = ty(ty_expr);
                 match count {
@@ -429,7 +417,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 // TODO: deref prefix
                 self.advanced().ws0();
                 let is_mut = self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let pointee = self.expr().context("pointee type")?;
+                let pointee = self.expr_(PREOP_PRECEDENCE).context("pointee type")?;
                 expr!(PtrTy { is_mut, ty: ty(pointee) }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
@@ -467,7 +455,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 }
 
                 let Some(first_expr) =
-                    self.advanced().ws0().expr().opt().context("first expr in [...]")?
+                    self.advanced().ws0().expr().opt().context("first expr in .[...]")?
                 else {
                     // `.[]`
                     let kind = new_arr_init!(self.alloc_empty_slice());
@@ -507,8 +495,8 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::Colon => todo!("TokenKind::Colon"),
             TokenKind::Question => {
-                let type_ = self.advanced().expr().expect("type after ?");
-                expr!(OptionShort(ty(type_)), span.join(type_.span))
+                let type_ = self.advanced().expr_(PREOP_PRECEDENCE).expect("type after ?");
+                expr!(OptionShort(ty(type_)), span.join(type_.full_span()))
             },
             TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -610,8 +598,19 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// parses block context and '}', doesn't parse the '{'
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
-        let (stmts, has_trailing_semicolon) =
-            self.expr_with_ty_list(TokenKind::Semicolon, ScratchPool::new())?;
+        let sep = TokenKind::Semicolon;
+        let mut list_pool = ScratchPool::new();
+        let mut has_trailing_semicolon = false;
+        loop {
+            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
+            list_pool.push(ExprWithTy::untyped(expr)).map_err(|e| self.wrap_alloc_err(e))?;
+            has_trailing_semicolon = self.ws0().lex.advance_if_kind(sep);
+            if !has_trailing_semicolon && expr.kind.block_expects_trailing_semicolon() {
+                break;
+            }
+            self.ws0();
+        }
+        let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
         let closing_brace_span =
             self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?.span;
         let span = open_brace_span.join(closing_brace_span);
@@ -637,24 +636,6 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
     }
 
-    pub fn expr_with_ty_list(
-        &mut self,
-        sep: TokenKind,
-        mut list_pool: ScratchPool<ExprWithTy>,
-    ) -> ParseResult<(Ptr<[ExprWithTy]>, bool)> {
-        let mut has_trailing_sep = false;
-        loop {
-            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
-            list_pool.push(ExprWithTy::untyped(expr)).map_err(|e| self.wrap_alloc_err(e))?;
-            has_trailing_sep = self.ws0().lex.advance_if_kind(sep);
-            if !has_trailing_sep {
-                break;
-            }
-            self.ws0();
-        }
-        Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
-    }
-
     /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
     /// allows a trailing `sep`.
     pub fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<VarDeclList> {
@@ -669,7 +650,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             }
             self.ws0();
         }
-        self.clone_slice_from_scratch_pool(list).map(VarDeclList)
+        self.clone_slice_from_scratch_pool(list)
     }
 
     pub fn var_decl(&mut self) -> ParseResult<(VarDecl, Span)> {
@@ -872,12 +853,16 @@ pub enum FollowingOperator {
     /// ` ^`
     Index,
 
+    /// [`ExprKind::PositionalInitializer`]
     /// `alloc(MyStruct).(1, "asdf")`
     /// `               ^^`
     PositionalInitializer,
     /// `alloc(MyStruct).{ a = 1, b = "asdf" }`
     /// `               ^^`
+    /// [`ExprKind::NamedInitializer`]
     NamedInitializer,
+    /// [`ExprKind::ArrayInitializer`]
+    ArrayInitializer,
 
     /// `arg -> ...`
     /// `    ^^`
@@ -890,6 +875,9 @@ pub enum FollowingOperator {
     /// `a op b`
     /// `  ^^`
     BinOp(BinOpKind),
+
+    /// `a | b`
+    Pipe,
 
     /// `a = b`
     /// `  ^`
@@ -907,8 +895,6 @@ pub enum FollowingOperator {
     /// `a: ty = b` or `a: ty : b`
     /// ` ^`         `   ^`
     TypedDecl,
-
-    Pipe,
 }
 
 impl FollowingOperator {
@@ -984,23 +970,25 @@ impl FollowingOperator {
             FollowingOperator::Dot
             | FollowingOperator::Call
             | FollowingOperator::Index
-            | FollowingOperator::PositionalInitializer
+            | FollowingOperator::PostOp(_)
+            | FollowingOperator::SingleArgNoParenFn => 22,
+            FollowingOperator::PositionalInitializer
             | FollowingOperator::NamedInitializer
-            | FollowingOperator::SingleArgNoParenFn
-            | FollowingOperator::PostOp(_) => 21,
+            | FollowingOperator::ArrayInitializer => 20,
             FollowingOperator::BinOp(k) => k.precedence(),
+            FollowingOperator::Pipe => 4,
             FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 3,
             FollowingOperator::VarDecl
             | FollowingOperator::ConstDecl
             | FollowingOperator::TypedDecl => 2,
-            FollowingOperator::Pipe => 4, // TODO: higher or lower then decl?
         }
     }
 }
 
 const MIN_PRECEDENCE: u8 = 0;
 const IF_PRECEDENCE: u8 = 1;
-const PREOP_PRECEDENCE: u8 = 20;
+/// also for `*ty`, `[]ty`, `?ty`
+const PREOP_PRECEDENCE: u8 = 21;
 /// `a: ty = init`
 /// `   ^^`
 /// must be higher than [`FollowingOperator::Assign`]!

@@ -10,20 +10,24 @@ use std::{
     ops::{FromResidual, Try},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{self:?}")]
 pub enum SemaErrorKind {
     ConstDeclWithoutInit,
     /// TODO: maybe infer the type from the usage
     VarDeclNoType,
 
+    #[error("MismatchedTypes (expected: {expected}, got: {got})")]
     MismatchedTypes {
         expected: Type,
         got: Type,
     },
+    #[error("MismatchedTypesBinOp (lhs: {lhs_ty}, rhs: {rhs_ty})")]
     MismatchedTypesBinOp {
         lhs_ty: Type,
         rhs_ty: Type,
     },
+    #[error("ExpectedNumber (got: {got})")]
     ExpectedNumber {
         got: Type,
     },
@@ -41,6 +45,7 @@ pub enum SemaErrorKind {
     },
     DuplicateEnumVariant,
     DuplicateField,
+    #[error("CannotApplyInitializer to {ty}")]
     CannotApplyInitializer {
         ty: Type,
     },
@@ -75,6 +80,8 @@ pub enum SemaErrorKind {
     UnexpectedTopLevelExpr(Ptr<Expr>),
 
     NotAConstExpr,
+    AssignToConst,
+    AssignToNotMut,
 
     NegativeArrayLen,
     CanOnlyIndexArrays,

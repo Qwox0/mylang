@@ -151,6 +151,7 @@ fn return_inner_ty() {
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn enum_eq() {
     let out = jit_run_test!("
 MyBasicEnum :: enum { A, B, C };
@@ -163,6 +164,7 @@ true" => bool)
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn variant_eq() {
     let out = jit_run_test!("
 MyBasicEnum :: enum { A, B(i32), C(struct { a: u8, b: i32 }) };

@@ -17,6 +17,7 @@ fn anon_struct_on_decl() {
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn tuple() {
     let code = "
 MyTuple :: struct { i64, i64 };

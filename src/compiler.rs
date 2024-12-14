@@ -160,6 +160,7 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus
     }
 
     if args.path.is_dir() {
+        println!("Compiling project at {:?}", args.path);
         for file in args
             .path
             .read_dir()
@@ -171,6 +172,7 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus
             util::write_file_to_string(&file, &mut code).unwrap();
         }
     } else if args.path.is_file() {
+        println!("Compiling file at {:?}", args.path);
         util::write_file_to_string(&args.path, &mut code).unwrap();
     } else {
         panic!("{:?} is not a dir nor a file", args.path)
@@ -198,7 +200,6 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
         println!();
     }
 
-    println!("### Frontend:");
     let frontend_parse_start = Instant::now();
     let stmts = StmtIter::parse_all_or_fail(code, &alloc);
     let frontend_parse_duration = frontend_parse_start.elapsed();
@@ -250,11 +251,13 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
         return std::process::ExitStatus::default();
     }
 
-    print!("functions:");
-    for a in compiler.codegen.module.get_functions() {
-        print!("{:?},", a.get_name());
+    if args.debug_functions {
+        print!("functions:");
+        for a in compiler.codegen.module.get_functions() {
+            print!("{:?},", a.get_name());
+        }
+        println!("\n");
     }
-    println!("\n");
 
     let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
 
@@ -314,6 +317,7 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
             .status()
             .unwrap();
         if mode == CompileMode::Run {
+            println!("### Running `{}`", exe_file_path.display());
             return std::process::Command::new(exe_file_path).status().unwrap();
         }
     }

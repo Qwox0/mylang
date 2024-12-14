@@ -4,6 +4,7 @@
 #![feature(iter_intersperse)]
 #![feature(new_range_api)]
 #![feature(unsigned_is_multiple_of)]
+#![feature(if_let_guard)]
 #![feature(let_chains)]
 #![feature(try_blocks)]
 #![feature(assert_matches)]

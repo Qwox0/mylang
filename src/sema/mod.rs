@@ -7,7 +7,7 @@
 use crate::{
     ast::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind,
-        VarDecl,
+        VarDecl, VarDeclListTrait,
     },
     defer_stack::DeferStack,
     parser::lexer::{Code, Span},
@@ -138,9 +138,14 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
 
         let res = match &mut expr.kind {
             ExprKind::Ident(text) => {
-                if let Some(internal_ty) = self.try_internal_ty(*text) {
+                if let Some(internal_ty) = Type::try_internal_ty(*text) {
                     let t = self.alloc(internal_ty)?;
                     return Ok(SemaValue::type_(t));
+                }
+
+                // TODO: remove this
+                if &**text == "nil" {
+                    return Ok(SemaValue::new(Type::Ptr { pointee_ty: Type::ptr_void() }));
                 }
 
                 match self.get_symbol(*text, expr.span)? {
@@ -155,7 +160,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     LitKind::BChar => todo!(),
                     LitKind::Int => Type::IntLiteral,
                     LitKind::Float => Type::FloatLiteral,
-                    LitKind::Str => todo!(),
+                    LitKind::Str => Type::str_slice(),
                 };
                 if is_const {
                     let val =
@@ -284,7 +289,10 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 self.enum_stack.last_mut().unwrap_debug().push(ty);
                 Ok(SemaValue::type_(ty))
             },
-            ExprKind::OptionShort(_) => todo!(),
+            ExprKind::OptionShort(ty) => {
+                self.eval_type(ty)?;
+                Ok(SemaValue::type_(self.alloc(Type::Option { ty: self.alloc(*ty)? })?))
+            },
             ExprKind::PositionalInitializer { lhs: Some(ty_expr), lhs_ty, args } => {
                 assert!(!is_const, "todo: const initializer");
                 let lhs_val = self.analyze(*ty_expr, false)?;
@@ -293,12 +301,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     Type::Never => return Ok(SemaValue::never()),
                     Type::Type(t) => {
                         let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&fields.0, args.as_ref(), is_const)?;
+                        self.validate_call(&*fields, args.as_ref(), is_const)?;
                         Ok(SemaValue::new(*t))
                     },
                     Type::Ptr { pointee_ty: t } => {
                         let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&fields.0, args.as_ref(), is_const)?;
+                        self.validate_call(&*fields, args.as_ref(), is_const)?;
                         Ok(lhs_val)
                     },
                     ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
@@ -539,11 +547,15 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         },
                     })
                 } else {
+                    println!("MismatchedTypesBinOp {lhs_ty:?} {rhs_ty:?}",);
                     err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span)
                 }
                 .map_ok(SemaValue::new)
             },
             ExprKind::Assign { lhs, rhs, .. } => {
+                if is_const {
+                    return err(AssignToConst, span);
+                }
                 assert!(!is_const, "todo: Assign in const");
                 let lhs_ty = self.analyze_typed(lhs, is_const)?.ty;
                 debug_assert!(lhs_ty.is_valid());
@@ -562,13 +574,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 debug_assert!(lhs_ty.is_valid());
                 let rhs_ty = self.analyze(*rhs, is_const)?.ty;
                 debug_assert!(rhs_ty.is_valid());
-                if let Some(common_ty) = lhs_ty.common_type(rhs_ty) {
-                    lhs.ty = common_ty;
-                    // todo: check if binop can be applied to type
-                    Ok(SemaValue::void())
-                } else {
-                    err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span)
-                }
+                let Some(common_ty) = lhs_ty.common_type(rhs_ty) else {
+                    return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span);
+                };
+                lhs.ty = common_ty;
+                // todo: check if binop can be applied to type
+                Ok(SemaValue::void())
             },
             ExprKind::VarDecl(decl) => {
                 if is_const && !decl.is_const {
@@ -688,7 +699,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 // check if in loop
                 Ok(SemaValue::never())
             },
-            ExprKind::Semicolon(_) => todo!(),
+            // ExprKind::Semicolon(_) => todo!(),
         };
         #[cfg(debug_assertions)]
         if self.debug_types {
@@ -716,7 +727,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         is_const: bool,
         initializer_span: Span,
     ) -> SemaResult<()> {
-        let Type::Struct { fields } = struct_ty else { todo!("error") };
+        let fields = match &struct_ty {
+            Type::Struct { fields } => &**fields,
+            Type::Slice { elem_ty } => &Type::slice_fields(*elem_ty),
+            &ty => return err(CannotApplyInitializer { ty }, initializer_span),
+        };
 
         let mut is_initialized_field = vec![false; fields.len()];
         for (f, init) in initializer_values.iter() {
@@ -776,6 +791,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     .ok_or_else2(|| err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)),
                 _ => todo!("dot for type {:?}", *p),
             },
+            Type::Slice { elem_ty } => Ok(SemaValue::new(match &*rhs.text {
+                "ptr" => Type::Ptr { pointee_ty: elem_ty },
+                "len" => Type::U64,
+                _ => return err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span),
+            })),
             _ => todo!("err for invalid dot lhs"),
         }
     }
@@ -842,21 +862,10 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             let arg_ty = self.analyze(*arg, is_const)?.ty;
             debug_assert!(p.ty.is_valid()); // TODO: infer?
             if !p.ty.matches(arg_ty) {
-                return err(MismatchedTypes { expected: p.ty, got: arg_ty }, arg.span);
+                return err(MismatchedTypes { expected: p.ty, got: arg_ty }, arg.full_span());
             }
         }
         Ok(())
-    }
-
-    fn try_internal_ty(&mut self, name: Ptr<str>) -> Option<Type> {
-        match name.bytes().next()? {
-            b'i' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: true }),
-            b'u' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: false }),
-            b'f' => name[1..].parse().ok().map(|bits| Type::Float { bits }),
-            _ if &*name == "void" => Some(Type::Void),
-            _ if &*name == "never" => Some(Type::Never),
-            _ => None,
-        }
     }
 
     /// [`Type::Unevaluated`] -> a valid [`Type`]

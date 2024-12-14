@@ -71,7 +71,7 @@ impl SpannedError for SemaError {
     }
 
     fn get_text(&self) -> String {
-        format!("{:?}", self.kind)
+        format!("{}", self.kind)
     }
 }
 
@@ -88,7 +88,7 @@ impl SpannedError for Error {
         match self {
             Error::Parsing(e) => e.get_text(),
             Error::Sema(e) => e.get_text(),
-            Error::Codegen(_) => todo!(),
+            Error::Codegen(e) => format!("{e:?}"),
         }
     }
 }

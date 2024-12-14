@@ -1,6 +1,10 @@
-use crate::tests::jit_run_test;
+use crate::{
+    parser::{ParseErrorKind, StmtIter, lexer::Span},
+    tests::jit_run_test,
+};
 
 #[test]
+#[ignore = "unfinished test"]
 fn better_error_message1() {
     let code = "
 pub test :: (mut x := 1) { // TODO: test this (better error)
@@ -12,6 +16,7 @@ pub test :: (mut x := 1) { // TODO: test this (better error)
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn better_error_message2() {
     jit_run_test!(raw "
 test :: -> { 1 " => ())
@@ -67,6 +72,7 @@ test :: -> {{
 }
 
 #[test]
+#[ignore = "unfinished test"]
 fn sret() {
     #[derive(Debug, PartialEq)]
     struct MyStruct {
@@ -80,4 +86,45 @@ fn sret() {
     .unwrap();
     assert_eq!(out, MyStruct { a: 5, b: 10, c: 15 });
     assert!(!llvm_module_text.contains("memcpy")); // TODO: implement this
+}
+
+#[test]
+#[ignore = "unfinished test"]
+fn parse_weird_var_decl() {
+    jit_run_test!("a : i32 : b : 2;" => ()).unwrap();
+    panic!("OK")
+}
+
+#[test]
+fn parse_err_missing_if_body() {
+    let results = StmtIter::parse("if a .A".as_ref(), &bumpalo::Bump::new()).collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    let err = results[0].as_ref().unwrap_err();
+    assert_eq!(err.kind, ParseErrorKind::NoInput);
+    assert_eq!(err.span, Span::new(7, 8));
+}
+
+#[test]
+#[ignore = "unfinished test"]
+fn asdf() {
+    let out = jit_run_test!(raw "
+test :: -> {
+    mut var: i64 = 0;
+    {
+        defer var += 1;
+        {
+            defer var += 1;
+            {
+                defer var += 1;
+                return var;
+            }
+            defer var += 10;
+        }
+        defer var += 10;
+    }
+    defer var += 10;
+    var
+}" => i64)
+    .unwrap();
+    assert_eq!(out, 3);
 }

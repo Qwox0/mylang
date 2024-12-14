@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Expr, Fn, VarDeclList, debug::DebugAst},
+    ast::{Expr, Fn, Ident, VarDecl, VarDeclList, VarDeclListTrait, debug::DebugAst},
     ptr::Ptr,
     util::{
         aligned_add, panic_debug, round_up_to_nearest_power_of_two, variant_count_to_tag_size_bits,
@@ -7,13 +7,6 @@ use crate::{
     },
 };
 use core::fmt;
-use std::cell::OnceCell;
-
-#[allow(unused)]
-fn void(alloc: &bumpalo::Bump) -> Ptr<Type> {
-    thread_local!(static PTR: OnceCell<Ptr<Type>> = OnceCell::new());
-    PTR.with(|cell| *cell.get_or_init(|| Ptr::from(alloc.alloc(Type::Void))))
-}
 
 // TODO: benchmark this
 // pub type Type = Ptr<TypeInfo>;
@@ -60,6 +53,10 @@ pub enum Type {
         elem_ty: Ptr<Type>,
     },
 
+    Option {
+        ty: Ptr<Type>,
+    },
+
     /// `a :: int`
     /// -> type of `a`: [`Type::Type`]
     /// -> value of `a`: [`Type::Int`]
@@ -71,7 +68,7 @@ pub enum Type {
     IntLiteral,
     FloatLiteral,
 
-    /// ```
+    /// ```mylang
     /// MyEnum :: enum { A, B(i64) };
     /// a := MyEnum.A; // variant -> valid val
     /// b1 := MyEnum.B; // variant -> invalid val
@@ -93,32 +90,7 @@ pub enum Type {
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Never => write!(f, "Never"),
-            Type::Ptr { pointee_ty } => write!(f, "*{:?}", &**pointee_ty),
             Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            Type::Struct { fields } | Type::Union { fields } => write!(
-                f,
-                "{}{{{}}}",
-                if matches!(self, Type::Struct { .. }) { "struct" } else { "union" },
-                fields
-                    .iter()
-                    .map(|f| format!("{}:{:?}", &*f.ident.text, f.ty))
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
-            Type::Enum { variants } => write!(
-                f,
-                "enum {{{}}}",
-                variants
-                    .iter()
-                    .map(|v| format!(
-                        "{}{}",
-                        &*v.ident.text,
-                        if v.ty != Type::Void { format!("({})", v.ty) } else { String::default() }
-                    ))
-                    .intersperse(",".to_string())
-                    .collect::<String>()
-            ),
             Type::Unset => write!(f, "Unset"),
             Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
             ti => write!(f, "{}", ti.to_text()),
@@ -127,6 +99,44 @@ impl fmt::Display for Type {
 }
 
 impl Type {
+    pub const F32: Type = Type::Float { bits: 32 };
+    pub const F64: Type = Type::Float { bits: 64 };
+    pub const I64: Type = Type::Int { bits: 64, is_signed: true };
+    pub const U64: Type = Type::Int { bits: 64, is_signed: false };
+
+    pub fn try_internal_ty(name: Ptr<str>) -> Option<Self> {
+        match name.bytes().next()? {
+            b'i' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: true }),
+            b'u' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: false }),
+            b'f' => name[1..].parse().ok().map(|bits| Type::Float { bits }),
+            _ if &*name == "void" => Some(Type::Void),
+            _ if &*name == "never" => Some(Type::Never),
+            _ => None,
+        }
+    }
+
+    pub fn ptr_unset() -> Ptr<Type> {
+        thread_local!(static TYPE: Type = Type::Unset);
+        TYPE.with(|t| Ptr::from(t))
+    }
+
+    /// returns `Ptr(Type::Ptr(Type::Void))`
+    pub fn ptr_void_ptr() -> Ptr<Type> {
+        thread_local!(static TYPE: Type = Type::Ptr { pointee_ty: Type::ptr_void() });
+        TYPE.with(|t| Ptr::from(t))
+    }
+
+    /// returns `Ptr(Type::Void)`
+    pub fn ptr_void() -> Ptr<Type> {
+        thread_local!(static TYPE: Type = Type::Void);
+        TYPE.with(|t| Ptr::from(t))
+    }
+
+    pub fn str_slice() -> Type {
+        thread_local!(static TYPE: Type = Type::Int { bits: 8, is_signed: false });
+        TYPE.with(|t| Type::Slice { elem_ty: Ptr::from(t) })
+    }
+
     /// size of stack allocation in bytes
     pub fn size(&self) -> usize {
         match self {
@@ -146,6 +156,8 @@ impl Type {
                 &Type::Union { fields: *variants },
             ),
             Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.size() * 2,
+            Type::Option { ty } if ty.is_non_null() => ty.size(),
+            Type::Option { ty } => aligned_add(1, ty),
             Type::Type(_) => 0,
             Type::IntLiteral
             | Type::FloatLiteral
@@ -178,6 +190,7 @@ impl Type {
                     .max(Type::Union { fields: *variants }.alignment())
             },
             Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.alignment(),
+            Type::Option { ty } => ty.alignment(),
             Type::IntLiteral
             | Type::FloatLiteral
             | Type::EnumVariant { .. }
@@ -205,39 +218,48 @@ impl Type {
         }
         use Selection::*;
 
-        fn inner(s: Type, other: Type) -> Option<Selection> {
-            match (s, other) {
-                (t, v) if t == v => Some(Left),
-                (Type::Never, _) => Some(Right),
-                (_, Type::Never) => Some(Left),
+        fn inner(l: Type, r: Type) -> Option<Selection> {
+            macro_rules! match_and_select {
+                (match $i:expr => $($body:tt)*) => { match_and_select!(@inner $i; $($body)*) };
+                (@inner $i:expr;) => {};
+                (@inner $i:expr; mirror ($l_pat:pat, $r_pat:pat) $(if $guard:expr)? => Some(Left), $($tail:tt)*) => {
+                    if let ($l_pat, $r_pat) = $i $( && $guard )? {
+                        return Some(Left)
+                    } else if let ($r_pat, $l_pat) = $i $( && $guard )? {
+                        return Some(Right)
+                    }
+                    match_and_select!(@inner $i; $($tail)*)
+                };
+                (@inner $i:expr; $pat:pat $(if $guard:expr)? => $return:expr, $($tail:tt)*) => {
+                    #[allow(irrefutable_let_patterns)]
+                    if let $pat = $i $( && $guard )? {
+                        return $return;
+                    }
+                    match_and_select!(@inner $i; $($tail)*)
+                };
+            }
+
+            match_and_select!(match (l, r) =>
+                (l, r) if l == r => Some(Left),
+                mirror (_, Type::Never) => Some(Left),
                 (Type::Slice { elem_ty: t1 }, Type::Slice { elem_ty: t2 }) => inner(*t1, *t2),
                 (Type::Array { len: l1, elem_ty: t1 }, Type::Array { len: l2, elem_ty: t2 })
-                    if l1 == l2 =>
-                {
-                    inner(*t1, *t2)
-                },
-                (Type::Ptr { .. }, Type::Ptr { .. }) => Some(Left), // TODO: remove this
-                // (Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
-                (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => {
-                    Some(Left)
-                },
-                (Type::IntLiteral, Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral) => {
-                    Some(Right)
-                },
-                (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
-                (Type::FloatLiteral, Type::Float { .. }) => Some(Right),
-                (Type::EnumVariant { enum_ty, idx }, e @ Type::Enum { variants })
-                    if *enum_ty == e && variants[idx].ty == Type::Void =>
-                {
-                    Some(Right)
-                },
-                (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
-                    if *enum_ty == e && variants[idx].ty == Type::Void =>
-                {
-                    Some(Left)
-                },
-                _ => None,
-            }
+                    if l1 == l2 => inner(*t1, *t2),
+
+                //(Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
+                // TODO: remove these rules:
+                mirror (Type::Ptr { .. } | Type::Int { bits: 64, is_signed: false } | Type::IntLiteral, Type::Ptr { .. }) => Some(Left), // allows `*T == *U`, `*T == int`
+                mirror (Type::Ptr { .. } | Type::Int { bits: 64, is_signed: false } | Type::IntLiteral, Type::Option { ty: p }) if matches!(*p, Type::Ptr { .. }) => Some(Left), // allows `?*T == *U`, `?*T == int`
+                //mirror (p1 @ Type::Ptr { .. }, Type::Option { ty: p2 }) if match *p2 { Type::Ptr { .. } => inner(p1, *p2).is_some(), _ => false } => Some(Left), // allows `?*T == *T`
+                mirror (Type::U64, Type::I64) => Some(Left),
+
+                mirror (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => Some(Left),
+                mirror (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
+                mirror (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
+                    if *enum_ty == e && variants[idx].ty == Type::Void => Some(Left),
+                (Type::Option { ty: t1 }, Type::Option { ty: t2 }) => inner(*t1, *t2),
+            );
+            None
         }
 
         inner(self, other).map(|s| match s {
@@ -250,8 +272,8 @@ impl Type {
     /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
     pub fn finalize(self) -> Self {
         match self {
-            Type::IntLiteral => Type::Int { bits: 64, is_signed: true },
-            Type::FloatLiteral => Type::Float { bits: 64 },
+            Type::IntLiteral => Type::I64,
+            Type::FloatLiteral => Type::F64,
             Type::Array { mut elem_ty, .. }
             | Type::Range { mut elem_ty }
             | Type::RangeInclusive { mut elem_ty } => {
@@ -280,6 +302,36 @@ impl Type {
             t => Some(t),
         }
     }
+
+    pub fn is_non_null(&self) -> bool {
+        match self {
+            Type::Void => todo!(),
+            Type::Never => todo!(),
+            Type::Int { .. } | Type::Bool | Type::Float { .. } => false,
+            Type::Ptr { .. } | Type::Slice { .. } => true,
+            Type::Array { .. } => todo!(),
+            Type::Function(..) => todo!(),
+            Type::Struct { fields } => fields.as_type_iter().any(|t| t.is_non_null()),
+            Type::Union { .. } => todo!(),
+            Type::Enum { .. } => todo!(),
+            Type::Range { .. } => todo!(),
+            Type::RangeInclusive { .. } => todo!(),
+            Type::Option { .. } => false,
+            Type::Type(..) => todo!(),
+            Type::IntLiteral => todo!(),
+            Type::FloatLiteral => todo!(),
+            Type::EnumVariant { .. } => todo!(),
+            Type::Unset => todo!(),
+            Type::Unevaluated(..) => todo!(),
+        }
+    }
+
+    pub(crate) fn slice_fields(elem_ty: Ptr<Type>) -> [VarDecl; 2] {
+        [
+            VarDecl::new_basic(Ident::from("ptr"), Type::Ptr { pointee_ty: elem_ty }),
+            VarDecl::new_basic(Ident::from("len"), Type::U64),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,7 +340,7 @@ enum SemaType {
     RuntimeType(Type),
     IntLiteral,
     FloatLiteral,
-    /// ```
+    /// ```mylang
     /// MyEnum :: enum { A, B(i64) };
     /// a := MyEnum.A; // variant -> valid val
     /// b1 := MyEnum.B; // variant -> invalid val

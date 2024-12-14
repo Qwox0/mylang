@@ -305,12 +305,14 @@ impl DebugAst for Expr {
                 }
             },
             ExprKind::Continue => lines.write("continue"),
+            /*
             ExprKind::Semicolon(expr) => {
                 if let Some(expr) = expr {
                     lines.write_tree(expr);
                 }
                 lines.write(";");
             },
+            */
         }
     }
 }
@@ -379,12 +381,46 @@ impl DebugAst for Type {
                 ty.debug_impl(buf);
             },
             Type::Function(_) => buf.write("fn"), // TODO: fn type as text
-            Type::Struct { fields } => write!(buf, "struct{:?}", fields.0).unwrap(),
-            Type::Union { fields } => write!(buf, "union{:?}", fields.0).unwrap(),
-            Type::Enum { variants } => write!(buf, "enum{:?}", variants.0).unwrap(),
-            Type::Range { elem_ty } => write!(buf, "Range<{:?}>", elem_ty).unwrap(),
+            Type::Struct { fields } | Type::Union { fields } => {
+                buf.write(if matches!(self, Type::Struct { .. }) { "struct{" } else { "union{" });
+                buf.write_many(
+                    fields,
+                    |f, _, b| {
+                        b.write_tree(&f.ident);
+                        b.write(":");
+                        b.write_tree(&f.ty);
+                    },
+                    ",",
+                );
+                buf.write("}");
+            },
+            Type::Enum { variants } => {
+                buf.write("enum{");
+                buf.write_many(
+                    variants,
+                    |v, _, b| {
+                        b.write_tree(&v.ident);
+                        if v.ty != Type::Void {
+                            b.write("(");
+                            b.write_tree(&v.ty);
+                            b.write(")");
+                        }
+                    },
+                    ",",
+                );
+                buf.write("}");
+            },
+            Type::Range { elem_ty } => {
+                buf.write("Range<");
+                buf.write_tree(elem_ty);
+                buf.write(">");
+            },
             Type::RangeInclusive { elem_ty } => {
-                write!(buf, "RangeInclusive<{:?}>", elem_ty).unwrap()
+                write!(buf, "RangeInclusive<{}>", **elem_ty).unwrap()
+            },
+            Type::Option { ty } => {
+                buf.write("?");
+                ty.debug_impl(buf);
             },
             Type::EnumVariant { enum_ty, idx } => {
                 let Type::Enum { variants } = **enum_ty else { unreachable_debug() };
@@ -393,7 +429,7 @@ impl DebugAst for Type {
                 buf.write(".");
                 buf.write_tree(&variant.ident);
             },
-            Type::Type(_) => buf.write("type"),
+            Type::Type(p) => write!(buf, "type{p:?}").unwrap(),
             Type::Unset => {},
             Type::Unevaluated(expr) => expr.debug_impl(buf),
         }

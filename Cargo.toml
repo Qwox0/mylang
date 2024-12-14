@@ -11,4 +11,5 @@ const_for = "0.1.4"
 inkwell = { git = "https://github.com/TheDan64/inkwell", features = [
     "llvm18-0",
 ] }
+thiserror = "2.0.6"
 unicode-xid = "0.2.4"

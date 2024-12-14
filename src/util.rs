@@ -71,6 +71,14 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
     } else {
         code.0[..span.start].lines().last().map(str::len).unwrap_or(span.start)
     };
+    if span == Span::pos(code.0.len()) {
+        eprintln!("|");
+        eprintln!("| {}", code.lines().last().unwrap_or(""));
+        let offset = " ".repeat(start_offset);
+        eprintln!("| {offset}{} {label}", "^".repeat(span.len()));
+        eprintln!("|");
+        return;
+    }
     let end_offset = code.0[span.end..].lines().next().map(str::len).unwrap_or(0);
     let line = &code.0[span.start - start_offset..span.end + end_offset];
 

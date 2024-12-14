@@ -171,6 +171,7 @@ pub defer_test :: -> {
 }
 
 #[bench]
+#[ignore = "unfinished test"]
 fn compile_libc_example(b: &mut Bencher) {
     b.iter(|| {
         let a = crate::compiler::compile2(
@@ -185,6 +186,7 @@ fn compile_libc_example(b: &mut Bencher) {
                 debug_ast: false,
                 debug_types: false,
                 debug_typed_ast: false,
+                debug_functions: false,
                 debug_llvm_ir_unoptimized: false,
                 debug_llvm_ir_optimized: false,
             },

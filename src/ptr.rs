@@ -126,3 +126,9 @@ impl ToString for Ptr<str> {
         self.as_ref().to_string()
     }
 }
+
+impl<T> Ptr<[T]> {
+    pub fn as_slice(&self) -> &[T] {
+        &self[..]
+    }
+}
