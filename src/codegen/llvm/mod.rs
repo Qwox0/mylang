@@ -6,7 +6,7 @@ use crate::{
     defer_stack::DeferStack,
     ptr::Ptr,
     symbol_table::SymbolTable,
-    type_::Type,
+    type_::{RangeKind, Type},
     util::{
         self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, panic_debug,
         unreachable_debug,
@@ -30,9 +30,9 @@ use inkwell::{
         FloatType, IntType, PointerType, StructType,
     },
     values::{
-        AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum,
-        FloatValue, FunctionValue, GlobalValue, InstructionValue, IntValue, PointerValue,
-        StructValue,
+        AggregateValue, AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue,
+        BasicValueEnum, FloatValue, FunctionValue, GlobalValue, InstructionValue, IntValue,
+        PhiValue, PointerValue, StructValue,
     },
 };
 use std::{
@@ -41,7 +41,8 @@ use std::{
 
 pub mod jit;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{:?}", self)]
 pub enum CodegenError {
     BuilderError(BuilderError),
     InvalidGeneratedFunction,
@@ -55,7 +56,13 @@ pub enum CodegenError {
     AllocErr(bumpalo::AllocErr),
 }
 
-type CodegenResult<T> = Result<T, CodegenError>;
+unsafe impl Send for CodegenError {}
+unsafe impl Sync for CodegenError {}
+
+#[cfg(not(debug_assertions))]
+pub type CodegenResult<T> = Result<T, CodegenError>;
+#[cfg(debug_assertions)]
+pub type CodegenResult<T> = Result<T, anyhow::Error>;
 
 impl From<BuilderError> for CodegenError {
     fn from(e: BuilderError) -> Self {
@@ -186,7 +193,7 @@ impl<'ctx> Codegen<'ctx> {
                 {
                     Ok(Symbol::Type)
                 } else if &**name == "nil" {
-                    reg(self.context.ptr_type(AddressSpace::default()).const_null())
+                    reg(self.ptr_type().const_null())
                 } else {
                     Ok(self.get_symbol(&**name))
                 }
@@ -202,7 +209,7 @@ impl<'ctx> Codegen<'ctx> {
                 Type::Slice { elem_ty }
                     if matches!(*elem_ty, Type::Int { bits: 8, is_signed: false }) =>
                 {
-                    let value = &code[1..code.len().saturating_sub(1)];
+                    let value = &code[1..code.len().saturating_sub(1)].replace("\\n", "\n");
                     let ptr = self.builder.build_global_string_ptr(value, "")?;
                     let len = self.int_type(64).const_int(value.len() as u64, false);
                     self.build_slice(ptr.as_pointer_value(), len)
@@ -367,11 +374,7 @@ impl<'ctx> Codegen<'ctx> {
                 let arr_ptr = if let Some(target) = write_target.take() {
                     target
                 } else {
-                    self.builder.build_array_alloca(
-                        arr_ty,
-                        self.context.i64_type().const_int(len as u64, false),
-                        "arr",
-                    )?
+                    self.build_alloca(arr_ty, "arr", &out_ty)?
                 };
                 let idx_ty = self.context.i64_type();
                 for (idx, elem) in elements.iter().enumerate() {
@@ -396,25 +399,29 @@ impl<'ctx> Codegen<'ctx> {
                 let arr_ptr = if let Some(target) = write_target.take() {
                     target
                 } else {
-                    self.builder.build_array_alloca(
-                        arr_ty,
-                        self.context.i64_type().const_int(len as u64, false),
-                        "arr",
-                    )?
+                    self.build_alloca(arr_ty, "arr", &out_ty)?
                 };
                 let elem_val = try_compile_expr_as_val!(self, *val, *elem_ty);
                 let idx_ty = self.context.i64_type();
-                for idx in 0..len {
-                    let elem_ptr = unsafe {
-                        self.builder.build_in_bounds_gep(
-                            arr_ty,
-                            arr_ptr,
-                            &[idx_ty.const_zero(), idx_ty.const_int(idx as u64, false)],
-                            "",
-                        )
-                    }?;
-                    self.build_store(elem_ptr, elem_val, elem_ty.as_ref())?;
-                }
+                let for_info = self.build_for(
+                    idx_ty,
+                    idx_ty.const_zero(),
+                    idx_ty.const_int(len as u64, false),
+                    false,
+                )?;
+
+                let elem_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        arr_ty,
+                        arr_ptr,
+                        &[idx_ty.const_zero(), for_info.idx_int],
+                        "",
+                    )
+                }?;
+                self.build_store(elem_ptr, elem_val, elem_ty.as_ref())?;
+
+                self.build_for_end(for_info, Symbol::Void)?;
+
                 stack_val(arr_ptr)
             },
             &ExprKind::Dot { lhs, lhs_ty, rhs } => match lhs_ty {
@@ -467,20 +474,19 @@ impl<'ctx> Codegen<'ctx> {
                 _ => unreachable_debug(),
             },
             &ExprKind::Index { lhs, idx } => {
+                let lhs_sym = self.compile_typed_expr(lhs)?;
                 let idx_val = try_compile_expr_as_val!(self, idx.expr, idx.ty);
 
-                let lhs_sym = self.compile_typed_expr(lhs)?;
-                let (ptr, elem_ty) = match lhs.ty {
+                let (ptr, len, elem_ty) = match lhs.ty {
                     Type::Never => return Ok(Symbol::Never),
                     Type::Slice { elem_ty } => {
-                        let slice = self.sym_as_val(lhs_sym, lhs.ty)?.struct_val();
-                        let ptr =
-                            self.builder.build_extract_value(slice, 0, "")?.into_pointer_value();
-                        (ptr, elem_ty)
+                        let (ptr, len) = self.build_slice_field_access(lhs_sym)?;
+                        (ptr, len, elem_ty)
                     },
-                    Type::Array { elem_ty, .. } => {
+                    Type::Array { elem_ty, len } => {
                         let Symbol::Stack(arr_ptr) = lhs_sym else { unreachable_debug() };
-                        (arr_ptr, elem_ty)
+                        let len = self.context.i64_type().const_int(len as u64, false);
+                        (arr_ptr, len, elem_ty)
                     },
                     _ => unreachable_debug(),
                 };
@@ -490,17 +496,56 @@ impl<'ctx> Codegen<'ctx> {
                     Type::Int { .. } => {
                         stack_val(self.build_gep(llvm_elem_ty, ptr, &[idx_val.int_val()])?)
                     },
-                    Type::Range { .. } => {
+                    Type::Range { elem_ty, kind } => {
+                        let Type::Int { is_signed, .. } = *elem_ty else { unreachable_debug() };
                         let range_val = idx_val.struct_val();
-                        let start =
-                            self.builder.build_extract_value(range_val, 0, "")?.into_int_value();
-                        let end =
-                            self.builder.build_extract_value(range_val, 1, "")?.into_int_value();
 
-                        let ptr = unsafe {
-                            self.builder.build_in_bounds_gep(llvm_elem_ty, ptr, &[start], "")?
+                        let (ptr, len) = match kind {
+                            RangeKind::Full => (ptr, len),
+                            RangeKind::From => {
+                                let start = self
+                                    .builder
+                                    .build_extract_value(range_val, 0, "start")?
+                                    .into_int_value();
+                                let ptr = self.build_gep(llvm_elem_ty, ptr, &[start])?;
+                                let len = self.builder.build_int_sub(len, start, "")?;
+                                (ptr, len)
+                            },
+                            RangeKind::To | RangeKind::ToInclusive => {
+                                let mut end = self
+                                    .builder
+                                    .build_extract_value(range_val, 0, "end")?
+                                    .into_int_value();
+                                if kind.is_inclusive() {
+                                    end = self.builder.build_int_add(
+                                        end,
+                                        end.get_type().const_int(1, is_signed),
+                                        "",
+                                    )?;
+                                }
+                                (ptr, end)
+                            },
+                            RangeKind::Both | RangeKind::BothInclusive => {
+                                let start = self
+                                    .builder
+                                    .build_extract_value(range_val, 0, "start")?
+                                    .into_int_value();
+                                let mut end = self
+                                    .builder
+                                    .build_extract_value(range_val, 1, "end")?
+                                    .into_int_value();
+                                if kind.is_inclusive() {
+                                    end = self.builder.build_int_add(
+                                        end,
+                                        end.get_type().const_int(1, is_signed),
+                                        "",
+                                    )?;
+                                }
+                                let ptr = self.build_gep(llvm_elem_ty, ptr, &[start])?;
+                                let len = self.builder.build_int_sub(end, start, "")?;
+                                (ptr, len)
+                            },
                         };
-                        let len = self.builder.build_int_sub(end, start, "")?;
                         self.build_slice(ptr, len)
                     },
                     _ => unreachable!(),
@@ -514,21 +559,14 @@ impl<'ctx> Codegen<'ctx> {
                         .enumerate()
                         .map(|(idx, param)| {
                             let arg = args.get(idx).copied().or(param.default).unwrap_debug();
-                            Ok(match self.compile_expr(arg, param.ty)? {
-                                Symbol::Stack(ptr) => BasicMetadataValueEnum::from(ptr),
-                                Symbol::Register(val) => val.basic_metadata_val(),
-                                Symbol::Global { val } => {
-                                    let llvm_ty = self.llvm_type(param.ty);
-                                    let val = self.build_load(
-                                        llvm_ty.basic_ty(),
-                                        val.as_pointer_value(),
-                                        &param.ident.text,
-                                        &param.ty,
-                                    )?;
-                                    BasicMetadataValueEnum::from(val)
-                                },
-                                _ => unreachable_debug(),
-                            })
+                            let sym = self.compile_expr(arg, param.ty)?;
+                            if param.ty.pass_arg_as_ptr()
+                                && let Symbol::Stack(ptr) = sym
+                            {
+                                Ok(BasicMetadataValueEnum::from(ptr))
+                            } else {
+                                Ok(self.sym_as_val(sym, param.ty)?.basic_metadata_val())
+                            }
                         })
                         .collect::<CodegenResult<Vec<_>>>()?;
                     let ret = self.builder.build_call(func, &args, "call")?;
@@ -544,21 +582,26 @@ impl<'ctx> Codegen<'ctx> {
                 _ => unreachable_debug(),
             },
             ExprKind::UnaryOp { kind, expr, .. } => {
-                //let v = try_compile_expr_as_val!(self, *expr, expr_ty);
-                let v = try_not_never!(self.compile_expr(*expr, out_ty)?);
+                let sym = try_not_never!(self.compile_expr(*expr, out_ty)?);
                 match kind {
-                    UnaryOpKind::AddrOf => {
-                        return reg(match v {
+                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                        return reg(match sym {
                             Symbol::Stack(ptr_value) => ptr_value,
-                            Symbol::Register(val) => self.build_stack_alloc_as_ptr(val, &out_ty)?,
+                            Symbol::Register(val) => {
+                                #[cfg(debug_assertions)]
+                                println!("WARN: doing stack allocation for AddrOf register");
+                                self.build_stack_alloc_as_ptr(val, &out_ty)?
+                            },
+                            Symbol::Function { val, .. } => {
+                                val.as_global_value().as_pointer_value()
+                            },
                             _ => todo!(),
                         });
                     },
-                    UnaryOpKind::AddrMutOf => todo!(),
                     _ => {},
                 }
 
-                let v = self.sym_as_val(v, out_ty)?;
+                let v = self.sym_as_val(sym, out_ty)?;
                 match kind {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => unreachable_debug(),
                     /*
@@ -592,28 +635,42 @@ impl<'ctx> Codegen<'ctx> {
                     return self.build_bool_short_circuit_binop(lhs_val.bool_val(), rhs, op);
                 }
                 let rhs_val = try_compile_expr_as_val!(self, rhs, ty);
-                if let Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } = out_ty {
-                    self.build_range(lhs_val, rhs_val, *elem_ty)
-                } else {
-                    match ty {
-                        Type::Int { is_signed, .. } => self
-                            .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, op)
-                            .map(reg_sym),
-                        Type::Ptr { .. } => self
-                            .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), false, op)
-                            .map(reg_sym),
-                        Type::Option { ty } if matches!(*ty, Type::Ptr { .. }) => self
-                            .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), false, op)
-                            .map(reg_sym),
-                        Type::Float { .. } => self
-                            .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
-                            .map(reg_sym),
-                        Type::Bool => {
-                            self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), op)
-                        },
-                        t => todo!("{:?}", t),
-                    }
+
+                match ty {
+                    Type::Int { is_signed, .. } => self
+                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), is_signed, op)
+                        .map(reg_sym),
+                    Type::Ptr { .. } => self
+                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), false, op)
+                        .map(reg_sym),
+                    Type::Option { ty } if matches!(*ty, Type::Ptr { .. }) => self
+                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), false, op)
+                        .map(reg_sym),
+                    Type::Float { .. } => self
+                        .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
+                        .map(reg_sym),
+                    Type::Bool => self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), op),
+                    t => todo!("{:?}", t),
                 }
+            },
+            ExprKind::Range { start, end, .. } => {
+                let Type::Range { elem_ty, kind } = out_ty else { unreachable_debug() };
+                let mut range =
+                    self.range_type(*elem_ty, kind).get_undef().as_aggregate_value_enum();
+                if let Some(start) = start {
+                    let val = try_compile_expr_as_val!(self, *start, *elem_ty);
+                    range = self.builder.build_insert_value(range, val, 0, "")?;
+                }
+                if let Some(end) = end {
+                    let val = try_compile_expr_as_val!(self, *end, *elem_ty);
+                    range = self.builder.build_insert_value(
+                        range,
+                        val,
+                        kind.get_field_count() as u32 - 1,
+                        "",
+                    )?;
+                }
+                reg(range)
             },
             &ExprKind::Assign { lhs, rhs } => {
                 let Symbol::Stack(stack_var) = self.compile_typed_expr(lhs)? else {
@@ -765,66 +822,59 @@ impl<'ctx> Codegen<'ctx> {
             },
             ExprKind::Match { .. } => todo!(),
             ExprKind::For { source, iter_var, body, .. } => {
-                let Type::Array { len, elem_ty: _ } = source.ty else {
-                    panic!("for loop over other types")
+                let source_ty = self.llvm_type(source.ty);
+                let source_sym = try_not_never!(self.compile_typed_expr(*source)?);
+                const IDX_TY: Type = Type::Int { bits: 64, is_signed: false };
+                let idx_ty = self.llvm_type(IDX_TY).int_ty();
+
+                match source.ty {
+                    Type::Array { len, .. } => {
+                        let len = idx_ty.const_int(len as u64, false);
+                        let for_info = self.build_for(idx_ty, idx_ty.const_zero(), len, false)?;
+
+                        let Symbol::Stack(arr_ptr) = source_sym else { panic!() };
+                        let iter_var_sym =
+                            Symbol::Stack(self.build_gep(source_ty.arr_ty(), arr_ptr, &[
+                                idx_ty.const_zero(),
+                                for_info.idx_int,
+                            ])?);
+                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        let out = self.compile_expr(*body, Type::Void)?;
+                        self.build_for_end(for_info, out)?
+                    },
+                    Type::Slice { elem_ty } => {
+                        let (ptr, len) = self.build_slice_field_access(source_sym)?;
+
+                        let for_info = self.build_for(idx_ty, idx_ty.const_zero(), len, false)?;
+                        let elem_ty = self.llvm_type(*elem_ty).basic_ty();
+                        let iter_var_sym =
+                            Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
+                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        let out = self.compile_expr(*body, Type::Void)?;
+                        self.build_for_end(for_info, out)?
+                    },
+                    Type::Range { kind, .. } if kind.has_start() => {
+                        let range_ty = source_ty.struct_ty();
+                        let start = self.build_struct_access(range_ty, source_sym, 0, "start")?;
+                        let start = self.sym_as_val(start, IDX_TY)?.int_val();
+
+                        let end = if kind.has_end() {
+                            let idx = kind.get_field_count() as u32 - 1;
+                            let end = self.build_struct_access(range_ty, source_sym, idx, "end")?;
+                            self.sym_as_val(end, IDX_TY)?.int_val()
+                        } else {
+                            idx_ty.const_all_ones()
+                        };
+
+                        let for_info = self.build_for(idx_ty, start, end, kind.is_inclusive())?;
+                        let iter_var_sym = reg_sym(for_info.idx);
+                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        let out = self.compile_expr(*body, Type::Void)?;
+                        self.build_for_end(for_info, out)?
+                    },
+                    _ => panic_debug("for loop over other types"),
                 };
-                let arr_ty = self.llvm_type(source.ty).arr_ty();
-                let Symbol::Stack(arr_ptr) = try_not_never!(self.compile_typed_expr(*source)?)
-                else {
-                    panic!()
-                };
 
-                let func = self.cur_fn.unwrap_debug();
-                let entry_bb = self.builder.get_insert_block().unwrap_debug();
-                let cond_bb = self.context.append_basic_block(func, "for.cond");
-                let body_bb = self.context.append_basic_block(func, "for.body");
-                let inc_bb = self.context.append_basic_block(func, "for.inc");
-                let end_bb = self.context.append_basic_block(func, "for.end");
-
-                // entry
-                self.builder.build_unconditional_branch(cond_bb)?;
-
-                // cond
-                self.builder.position_at_end(cond_bb);
-                let idx_ty = self.context.i64_type();
-                let idx = self.builder.build_phi(idx_ty, "for.idx")?;
-                idx.add_incoming(&[(&idx_ty.const_zero(), entry_bb)]);
-                let idx_int = idx.as_basic_value().into_int_value();
-                //self.symbols.insert("idx", reg_sym(idx_int));
-
-                let len = idx_ty.const_int(len as u64, false);
-                let idx_cmp = self.builder.build_int_compare(
-                    IntPredicate::ULT,
-                    idx_int,
-                    len,
-                    "for.idx_cmp",
-                )?;
-
-                self.builder.build_conditional_branch(idx_cmp, body_bb, end_bb)?;
-
-                // body
-                self.builder.position_at_end(body_bb);
-
-                let val =
-                    stack_val(self.build_gep(arr_ty, arr_ptr, &[idx_ty.const_zero(), idx_int])?)?;
-                self.symbols.insert(&*iter_var.text, val);
-
-                let outer_loop = self.cur_loop.replace(Loop { continue_bb: inc_bb, end_bb });
-                let out = self.compile_expr(*body, Type::Void)?;
-                self.cur_loop = outer_loop;
-                if !matches!(out, Symbol::Never) {
-                    self.builder.build_unconditional_branch(inc_bb)?;
-                }
-
-                // inc
-                self.builder.position_at_end(inc_bb);
-                let next_idx =
-                    self.builder.build_int_add(idx_int, idx_ty.const_int(1, false), "next_idx")?;
-                idx.add_incoming(&[(&next_idx, inc_bb)]);
-                self.builder.build_unconditional_branch(cond_bb)?;
-
-                // end
-                self.builder.position_at_end(end_bb);
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
@@ -855,7 +905,6 @@ impl<'ctx> Codegen<'ctx> {
                 // end
                 self.builder.position_at_end(end_bb);
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
-                println!("while body: {:?}", out_ty);
                 Ok(Symbol::Void)
             },
             ExprKind::Catch { .. } => todo!(),
@@ -981,10 +1030,10 @@ impl<'ctx> Codegen<'ctx> {
         f.params
             .iter()
             .map(|VarDecl { ty, .. }| {
-                if Self::is_register_passable(*ty) {
-                    self.llvm_type(*ty).basic_metadata_ty()
-                } else {
+                if ty.pass_arg_as_ptr() {
                     ptr_type
+                } else {
+                    self.llvm_type(*ty).basic_metadata_ty()
                 }
             })
             .collect_into(&mut param_types);
@@ -1021,15 +1070,15 @@ impl<'ctx> Codegen<'ctx> {
             for (param, param_def) in func.get_param_iter().zip(f.params.iter()) {
                 let pname = &param_def.ident.text;
                 let param = CodegenValue::new(param.as_value_ref());
-                let s = if Self::is_register_passable(param_def.ty) {
+                let s = if param_def.ty.pass_arg_as_ptr() {
+                    Symbol::Stack(param.ptr_val())
+                } else {
                     if param_def.markers.is_mut {
                         self.position_builder_at_start(func.get_first_basic_block().unwrap_debug());
                         Symbol::Stack(self.build_stack_alloc_as_ptr(param, &param_def.ty)?)
                     } else {
                         Symbol::Register(param)
                     }
-                } else {
-                    Symbol::Stack(param.ptr_val())
                 };
                 self.symbols.insert(pname.to_string(), s);
             }
@@ -1223,6 +1272,18 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn build_slice_field_access(
+        &mut self,
+        slice_sym: Symbol<'ctx>,
+    ) -> CodegenResult<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        let slice_ty = self.slice_ty();
+        let ptr = self.build_struct_access(slice_ty, slice_sym, 0, "")?;
+        let ptr = self.sym_as_val(ptr, Type::Ptr { pointee_ty: Type::ptr_unset() })?.ptr_val();
+        let len = self.build_struct_access(slice_ty, slice_sym, 1, "")?;
+        let len = self.sym_as_val(len, Type::U64)?.int_val();
+        Ok((ptr, len))
+    }
+
     pub fn build_int_binop(
         &mut self,
         lhs: IntValue<'ctx>,
@@ -1271,9 +1332,6 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::Ge => cmp!(UGE, "ge"),
 
             BinOpKind::And | BinOpKind::Or => unreachable!(),
-
-            BinOpKind::Range => todo!(),
-            BinOpKind::RangeInclusive => todo!(),
         }
     }
 
@@ -1305,8 +1363,6 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::Le => cmp!(OLE, "le"),
             BinOpKind::Gt => cmp!(OGT, "gt"),
             BinOpKind::Ge => cmp!(OGE, "ge"),
-            BinOpKind::Range => todo!(),
-            BinOpKind::RangeInclusive => todo!(),
             _ => unreachable!(),
         }
     }
@@ -1346,8 +1402,6 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::BitAnd => ret(self.builder.build_and(lhs, rhs, "and")?),
             BinOpKind::BitOr => ret(self.builder.build_or(lhs, rhs, "or")?),
             BinOpKind::BitXor => ret(self.builder.build_xor(lhs, rhs, "xor")?),
-            BinOpKind::Range => todo!(),
-            BinOpKind::RangeInclusive => todo!(),
             _ => unreachable!(),
         }
     }
@@ -1405,17 +1459,6 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    fn build_range(
-        &mut self,
-        lhs_val: CodegenValue<'ctx>,
-        rhs_val: CodegenValue<'ctx>,
-        elem_ty: Type,
-    ) -> CodegenResult<Symbol<'ctx>> {
-        let range = self.range_type(elem_ty).get_undef();
-        let range = self.builder.build_insert_value(range, lhs_val, 0, "")?;
-        reg(self.builder.build_insert_value(range, rhs_val, 1, "range")?)
-    }
-
     fn build_slice(
         &mut self,
         ptr: PointerValue<'ctx>,
@@ -1424,6 +1467,74 @@ impl<'ctx> Codegen<'ctx> {
         let slice = self.slice_ty().get_undef();
         let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
         reg(self.builder.build_insert_value(slice, len, 1, "slice")?)
+    }
+
+    /// # Usage
+    /// ```rust,ignore
+    /// let for_info = self.build_for(/* ... */)?;
+    /// // build for body
+    /// self.build_for(for_info);
+    /// ```
+    #[must_use]
+    fn build_for(
+        &mut self,
+        idx_ty: IntType<'ctx>,
+        start_idx: IntValue<'ctx>,
+        end_idx: IntValue<'ctx>,
+        is_end_inclusive: bool,
+    ) -> CodegenResult<ForInfo<'ctx>> {
+        let func = self.cur_fn.unwrap_debug();
+        let entry_bb = self.builder.get_insert_block().unwrap_debug();
+        let cond_bb = self.context.append_basic_block(func, "for.cond");
+        let body_bb = self.context.append_basic_block(func, "for.body");
+        let inc_bb = self.context.append_basic_block(func, "for.inc");
+        let end_bb = self.context.append_basic_block(func, "for.end");
+
+        // entry
+        self.builder.build_unconditional_branch(cond_bb)?;
+
+        // cond
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_phi(idx_ty, "for.idx")?;
+        idx.add_incoming(&[(&start_idx, entry_bb)]);
+        let idx_int = idx.as_basic_value().into_int_value();
+        //self.symbols.insert("idx", reg_sym(idx_int));
+
+        let cond = self.builder.build_int_compare(
+            if is_end_inclusive { IntPredicate::ULE } else { IntPredicate::ULT },
+            idx_int,
+            end_idx,
+            "for.idx_cmp",
+        )?;
+        self.builder.build_conditional_branch(cond, body_bb, end_bb)?;
+
+        // body
+        self.builder.position_at_end(body_bb);
+        let outer_loop = self.cur_loop.replace(Loop { continue_bb: inc_bb, end_bb });
+        Ok(ForInfo { cond_bb, inc_bb, end_bb, idx, idx_ty, idx_int, outer_loop })
+    }
+
+    fn build_for_end(
+        &mut self,
+        for_info: ForInfo<'ctx>,
+        body_out_sym: Symbol<'ctx>,
+    ) -> CodegenResult<()> {
+        let ForInfo { cond_bb, inc_bb, end_bb, idx, idx_ty, idx_int, outer_loop } = for_info;
+        self.cur_loop = outer_loop;
+        if !matches!(body_out_sym, Symbol::Never) {
+            self.builder.build_unconditional_branch(inc_bb)?;
+        }
+
+        // inc
+        self.builder.position_at_end(inc_bb);
+        let next_idx =
+            self.builder.build_int_add(idx_int, idx_ty.const_int(1, false), "next_idx")?;
+        idx.add_incoming(&[(&next_idx, inc_bb)]);
+        self.builder.build_unconditional_branch(cond_bb)?;
+
+        // end
+        self.builder.position_at_end(end_bb);
+        Ok(())
     }
 
     /// LLVM does not make a distinction between signed and unsigned integer
@@ -1546,9 +1657,10 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     #[inline]
-    fn range_type(&mut self, elem_ty: Type) -> StructType<'ctx> {
+    fn range_type(&mut self, elem_ty: Type, kind: RangeKind) -> StructType<'ctx> {
         let e = self.llvm_type(elem_ty).basic_ty();
-        self.struct_type_inner(&[e; 2], None, false)
+        let fields = &[e; 2][..kind.get_field_count()];
+        self.struct_type_inner(fields, None, false)
     }
 
     #[inline]
@@ -1576,9 +1688,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Struct { fields } => self.struct_type(fields, None).as_type_ref(),
             Type::Union { fields } => self.union_type(fields, None).as_type_ref(),
             Type::Enum { variants } => self.enum_type(variants, None).as_type_ref(),
-            Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => {
-                self.range_type(*elem_ty).as_type_ref()
-            },
+            Type::Range { elem_ty, kind } => self.range_type(*elem_ty, kind).as_type_ref(),
             Type::Option { ty } if ty.is_non_null() => return self.llvm_type(*ty),
             Type::Option { .. } => {
                 thread_local! {
@@ -1782,31 +1892,6 @@ impl<'ctx> Codegen<'ctx> {
         *self.symbols.get(name).unwrap_debug()
     }
 
-    fn is_register_passable(ty: Type) -> bool {
-        match ty {
-            Type::Int { .. }
-            | Type::Bool
-            | Type::Float { .. }
-            | Type::Ptr { .. }
-            | Type::Slice { .. }
-            | Type::Array { .. } => true,
-            Type::Void
-            | Type::Never
-            | Type::Function(_)
-            | Type::Struct { .. }
-            | Type::Union { .. }
-            | Type::Enum { .. }
-            | Type::EnumVariant { .. }
-            | Type::Type(_) => false,
-            Type::Range { elem_ty: ty }
-            | Type::RangeInclusive { elem_ty: ty }
-            | Type::Option { ty } => Self::is_register_passable(*ty),
-            Type::IntLiteral | Type::FloatLiteral | Type::Unset | Type::Unevaluated(_) => {
-                panic_debug("invalid type")
-            },
-        }
-    }
-
     pub fn init_target_machine(target_triple: Option<&str>) -> TargetMachine {
         Target::initialize_all(&InitializationConfig::default());
 
@@ -1877,11 +1962,7 @@ impl<'ctx> Codegen<'ctx> {
 
 // optimizations
 impl<'ctx> Codegen<'ctx> {
-    pub fn optimize_module(
-        &self,
-        target_machine: &TargetMachine,
-        level: u8,
-    ) -> Result<(), CodegenError> {
+    pub fn optimize_module(&self, target_machine: &TargetMachine, level: u8) -> CodegenResult<()> {
         assert!((0..=3).contains(&level));
         let passes = format!("default<O{}>", level);
 
@@ -1891,9 +1972,10 @@ impl<'ctx> Codegen<'ctx> {
         //   ["instcombine", "reassociate", "gvn", "simplifycfg",
         //"mem2reg",].join(","), );
 
-        self.module
+        Ok(self
+            .module
             .run_passes(&passes, target_machine, PassBuilderOptions::create())
-            .map_err(|err| CodegenError::CannotOptimizeModule(err))
+            .map_err(|err| CodegenError::CannotOptimizeModule(err))?)
     }
 
     pub fn compile_to_obj_file(
@@ -1912,7 +1994,7 @@ impl<'ctx> Codegen<'ctx> {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>(fn_name)?.call() })
             },
-            Err(err) => Err(CodegenError::CannotCreateJit(err)),
+            Err(err) => Err(CodegenError::CannotCreateJit(err))?,
         }
     }
 }
@@ -1999,7 +2081,13 @@ impl<'ctx> CodegenValue<'ctx> {
 
     pub fn basic_metadata_val(&self) -> BasicMetadataValueEnum<'ctx> {
         // TODO: // debug_assert?
-        BasicMetadataValueEnum::try_from(self.any_val()).unwrap_debug()
+        // For some reason `function_value.as_global_value().as_pointer_value().as_any_value_enum().is_pointer_value()` is `false`
+        match self.any_val() {
+            AnyValueEnum::FunctionValue(function_value) => BasicMetadataValueEnum::PointerValue(
+                function_value.as_global_value().as_pointer_value(),
+            ),
+            v => BasicMetadataValueEnum::try_from(v).unwrap_debug(),
+        }
     }
 
     pub fn any_val(&self) -> AnyValueEnum<'ctx> {
@@ -2192,4 +2280,14 @@ impl<'ctx> RetType<'ctx> {
             RetType::Zst | RetType::SRetParam => None,
         }
     }
+}
+
+struct ForInfo<'ctx> {
+    cond_bb: BasicBlock<'ctx>,
+    inc_bb: BasicBlock<'ctx>,
+    end_bb: BasicBlock<'ctx>,
+    idx: PhiValue<'ctx>,
+    idx_ty: IntType<'ctx>,
+    idx_int: IntValue<'ctx>,
+    outer_loop: Option<Loop<'ctx>>,
 }

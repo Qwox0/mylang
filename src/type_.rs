@@ -48,9 +48,7 @@ pub enum Type {
 
     Range {
         elem_ty: Ptr<Type>,
-    },
-    RangeInclusive {
-        elem_ty: Ptr<Type>,
+        kind: RangeKind,
     },
 
     Option {
@@ -132,6 +130,11 @@ impl Type {
         TYPE.with(|t| Ptr::from(t))
     }
 
+    pub fn ptr_u0() -> Ptr<Type> {
+        thread_local!(static TYPE: Type = Type::Int { bits: 0, is_signed: false });
+        TYPE.with(|t| Ptr::from(t))
+    }
+
     pub fn str_slice() -> Type {
         thread_local!(static TYPE: Type = Type::Int { bits: 8, is_signed: false });
         TYPE.with(|t| Type::Slice { elem_ty: Ptr::from(t) })
@@ -155,7 +158,7 @@ impl Type {
                 variant_count_to_tag_size_bytes(variants.len()) as usize,
                 &Type::Union { fields: *variants },
             ),
-            Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.size() * 2,
+            Type::Range { elem_ty, kind } => elem_ty.size() * kind.get_field_count(),
             Type::Option { ty } if ty.is_non_null() => ty.size(),
             Type::Option { ty } => aligned_add(1, ty),
             Type::Type(_) => 0,
@@ -189,7 +192,8 @@ impl Type {
                     .alignment()
                     .max(Type::Union { fields: *variants }.alignment())
             },
-            Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => elem_ty.alignment(),
+            Type::Range { kind: RangeKind::Full, .. } => ZST_ALIGNMENT,
+            Type::Range { elem_ty, .. } => elem_ty.alignment(),
             Type::Option { ty } => ty.alignment(),
             Type::IntLiteral
             | Type::FloatLiteral
@@ -274,15 +278,21 @@ impl Type {
         match self {
             Type::IntLiteral => Type::I64,
             Type::FloatLiteral => Type::F64,
-            Type::Array { mut elem_ty, .. }
-            | Type::Range { mut elem_ty }
-            | Type::RangeInclusive { mut elem_ty } => {
+            // Type::Range { kind: RangeKind::Full, .. } => self,
+            Type::Array { mut elem_ty, .. } | Type::Range { mut elem_ty, .. } => {
                 *elem_ty = elem_ty.finalize();
                 self
             },
             Type::EnumVariant { enum_ty, .. } => *enum_ty,
             Type::Unset | Type::Unevaluated(_) => panic_debug("cannot finalize invalid type"),
             t => t,
+        }
+    }
+
+    pub fn matches_int(&self) -> bool {
+        match self {
+            Type::Never | Type::Int { .. } => true,
+            _ => false,
         }
     }
 
@@ -315,7 +325,6 @@ impl Type {
             Type::Union { .. } => todo!(),
             Type::Enum { .. } => todo!(),
             Type::Range { .. } => todo!(),
-            Type::RangeInclusive { .. } => todo!(),
             Type::Option { .. } => false,
             Type::Type(..) => todo!(),
             Type::IntLiteral => todo!(),
@@ -326,11 +335,92 @@ impl Type {
         }
     }
 
+    pub fn pass_arg_as_ptr(&self) -> bool {
+        match self {
+            Type::Void
+            | Type::Never
+            | Type::Int { .. }
+            | Type::Bool
+            | Type::Float { .. }
+            | Type::Ptr { .. } => false,
+            Type::Slice { .. } => false,
+            Type::Array { .. } => todo!(),
+            Type::Function(_) => todo!(),
+            Type::Struct { .. } | Type::Union { .. } | Type::Enum { .. } => true,
+            Type::Range { .. } | Type::Option { .. } | Type::Type(_) => todo!(),
+            Type::IntLiteral
+            | Type::FloatLiteral
+            | Type::EnumVariant { .. }
+            | Type::Unset
+            | Type::Unevaluated(_) => panic_debug("invalid type"),
+        }
+    }
+
     pub(crate) fn slice_fields(elem_ty: Ptr<Type>) -> [VarDecl; 2] {
         [
             VarDecl::new_basic(Ident::from("ptr"), Type::Ptr { pointee_ty: elem_ty }),
             VarDecl::new_basic(Ident::from("len"), Type::U64),
         ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeKind {
+    /// `..`
+    Full,
+    /// `start..`
+    From,
+    /// `..end`
+    To,
+    /// `..=end`
+    ToInclusive,
+    /// `start..end`
+    Both,
+    /// `start..=end`
+    BothInclusive,
+}
+
+impl RangeKind {
+    pub fn get_field_count(self) -> usize {
+        match self {
+            RangeKind::Full => 0,
+            RangeKind::From | RangeKind::To | RangeKind::ToInclusive => 1,
+            RangeKind::Both | RangeKind::BothInclusive => 2,
+        }
+    }
+
+    pub fn has_start(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::To | RangeKind::ToInclusive => false,
+            RangeKind::From | RangeKind::Both | RangeKind::BothInclusive => true,
+        }
+    }
+
+    pub fn has_end(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::From => false,
+            RangeKind::To | RangeKind::ToInclusive | RangeKind::Both | RangeKind::BothInclusive => {
+                true
+            },
+        }
+    }
+
+    pub fn is_inclusive(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::From | RangeKind::To | RangeKind::Both => false,
+            RangeKind::ToInclusive | RangeKind::BothInclusive => true,
+        }
+    }
+
+    pub fn type_name(self) -> &'static str {
+        match self {
+            RangeKind::Full => "RangeFull",
+            RangeKind::From => "RangeFrom",
+            RangeKind::To => "RangeTo",
+            RangeKind::ToInclusive => "RangeToInclusive",
+            RangeKind::Both => "Range",
+            RangeKind::BothInclusive => "RangeInclusive",
+        }
     }
 }
 

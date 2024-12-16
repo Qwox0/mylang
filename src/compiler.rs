@@ -1,7 +1,7 @@
 use crate::{
     ast::{Expr, debug::DebugAst},
     cli::{BuildArgs, OutKind},
-    codegen::llvm::{self, CodegenError},
+    codegen::llvm::{self, CodegenResult},
     parser::{
         StmtIter,
         lexer::{Code, Lexer},
@@ -136,11 +136,7 @@ impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
         &self.sema.errors
     }
 
-    pub fn optimize(
-        &self,
-        target_machine: &llvm::TargetMachine,
-        level: u8,
-    ) -> Result<(), CodegenError> {
+    pub fn optimize(&self, target_machine: &llvm::TargetMachine, level: u8) -> CodegenResult<()> {
         self.codegen.optimize_module(target_machine, level)
     }
 }
@@ -310,12 +306,15 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
     compiler.codegen.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
 
     if args.out == OutKind::Executable {
-        std::process::Command::new("gcc")
+        let err = std::process::Command::new("gcc")
             .arg(obj_file_path.as_os_str())
             .arg("-o")
             .arg(exe_file_path.as_os_str())
             .status()
             .unwrap();
+        if !err.success() {
+            return err;
+        }
         if mode == CompileMode::Run {
             println!("### Running `{}`", exe_file_path.display());
             return std::process::Command::new(exe_file_path).status().unwrap();

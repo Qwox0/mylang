@@ -142,46 +142,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let rhs = self.expr_(op.precedence())?;
                 expr!(BinOp { lhs, op, rhs, arg_ty: Type::Unset }, span)
             },
-            FollowingOperator::Assign => {
-                let lhs = ExprWithTy::untyped(lhs);
-                let rhs = self.expr()?;
-                expr!(Assign { lhs, rhs }, span)
-            },
-            FollowingOperator::BinOpAssign(op) => {
-                let lhs = ExprWithTy::untyped(lhs);
-                let rhs = self.expr()?;
-                expr!(BinOpAssign { lhs, op, rhs }, span)
-            },
-            FollowingOperator::VarDecl => {
-                let markers = DeclMarkers::default();
-                let ident = lhs.try_to_ident().context("var decl ident")?;
-                let init = self.expr().context(":= init")?;
-                let decl = VarDecl {
-                    markers,
-                    ident,
-                    ty: Type::Unset,
-                    default: Some(init),
-                    is_const: false,
-                };
-                expr!(VarDecl(decl), ident.span)
-            },
-            FollowingOperator::ConstDecl => {
-                let markers = DeclMarkers::default();
-                let ident = lhs.try_to_ident().context("const decl ident")?;
-                let init = self.expr().context(":: init")?;
-                let decl = VarDecl {
-                    markers,
-                    ident,
-                    ty: Type::Unset,
-                    default: Some(init),
-                    is_const: true,
-                };
-                expr!(VarDecl(decl), ident.span)
-            },
-            FollowingOperator::TypedDecl => {
-                let ident = lhs.try_to_ident().context("const decl ident")?;
-                let (decl, span) = self.typed_decl(DeclMarkers::default(), ident)?;
-                expr!(VarDecl(decl), ident.span.join(span))
+            FollowingOperator::Range { is_inclusive } => {
+                let end = self.expr_(op.precedence()).opt().context("range end")?;
+                expr!(Range { start: Some(lhs), end, is_inclusive }, span)
             },
             FollowingOperator::Pipe => {
                 let t = self.ws0().next_tok()?;
@@ -225,6 +188,47 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     _ => ParseError::unexpected_token(t)
                         .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
                 };
+            },
+            FollowingOperator::Assign => {
+                let lhs = ExprWithTy::untyped(lhs);
+                let rhs = self.expr()?;
+                expr!(Assign { lhs, rhs }, span)
+            },
+            FollowingOperator::BinOpAssign(op) => {
+                let lhs = ExprWithTy::untyped(lhs);
+                let rhs = self.expr()?;
+                expr!(BinOpAssign { lhs, op, rhs }, span)
+            },
+            FollowingOperator::VarDecl => {
+                let markers = DeclMarkers::default();
+                let ident = lhs.try_to_ident().context("var decl ident")?;
+                let init = self.expr().context(":= init")?;
+                let decl = VarDecl {
+                    markers,
+                    ident,
+                    ty: Type::Unset,
+                    default: Some(init),
+                    is_const: false,
+                };
+                expr!(VarDecl(decl), ident.span)
+            },
+            FollowingOperator::ConstDecl => {
+                let markers = DeclMarkers::default();
+                let ident = lhs.try_to_ident().context("const decl ident")?;
+                let init = self.expr().context(":: init")?;
+                let decl = VarDecl {
+                    markers,
+                    ident,
+                    ty: Type::Unset,
+                    default: Some(init),
+                    is_const: true,
+                };
+                expr!(VarDecl(decl), ident.span)
+            },
+            FollowingOperator::TypedDecl => {
+                let ident = lhs.try_to_ident().context("const decl ident")?;
+                let (decl, span) = self.typed_decl(DeclMarkers::default(), ident)?;
+                expr!(VarDecl(decl), ident.span.join(span))
             },
         };
         self.alloc(expr)
@@ -431,6 +435,19 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let rhs = self.advanced().ws0().ident().context("dot rhs")?;
                 expr!(Dot { lhs: None, lhs_ty: Type::Unset, rhs }, span)
             },
+            TokenKind::DotDot => {
+                let end =
+                    self.advanced().ws0().expr_(RANGE_PRECEDENCE).opt().context("range end")?;
+                expr!(Range { start: None, end, is_inclusive: false })
+            },
+            TokenKind::DotDotEq => {
+                let end =
+                    self.advanced().ws0().expr_(RANGE_PRECEDENCE).opt().context("range end")?;
+                if end.is_none() {
+                    return err(ParseErrorKind::RangeInclusiveWithoutEnd, span);
+                }
+                expr!(Range { start: None, end, is_inclusive: true })
+            },
             TokenKind::DotOpenParenthesis => {
                 let args = self.advanced().ws0().parse_call_args(ScratchPool::new())?;
                 let close_b_span = self.tok(TokenKind::CloseParenthesis)?.span;
@@ -611,9 +628,12 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             self.ws0();
         }
         let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
-        let closing_brace_span =
-            self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?.span;
-        let span = open_brace_span.join(closing_brace_span);
+        let closing_brace = self.tok(TokenKind::CloseBrace).context("expected ';' or '}'");
+        if closing_brace.is_err() {
+            self.lex.advance_while(|t| t.kind != TokenKind::CloseBrace);
+            self.lex.advance();
+        }
+        let span = open_brace_span.join(closing_brace?.span);
         self.alloc(expr!(Block { stmts, has_trailing_semicolon }, span))
     }
 
@@ -876,6 +896,10 @@ pub enum FollowingOperator {
     /// `  ^^`
     BinOp(BinOpKind),
 
+    Range {
+        is_inclusive: bool,
+    },
+
     /// `a | b`
     Pipe,
 
@@ -944,8 +968,8 @@ impl FollowingOperator {
             TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),
             TokenKind::CaretEq => FollowingOperator::BinOpAssign(BinOpKind::BitXor),
             TokenKind::Dot => FollowingOperator::Dot,
-            TokenKind::DotDot => FollowingOperator::BinOp(BinOpKind::Range),
-            TokenKind::DotDotEq => FollowingOperator::BinOp(BinOpKind::RangeInclusive),
+            TokenKind::DotDot => FollowingOperator::Range { is_inclusive: false },
+            TokenKind::DotDotEq => FollowingOperator::Range { is_inclusive: true },
             TokenKind::DotAsterisk => FollowingOperator::PostOp(UnaryOpKind::Deref),
             TokenKind::DotAmpersand => FollowingOperator::PostOp(UnaryOpKind::AddrOf),
             TokenKind::DotOpenParenthesis => FollowingOperator::PositionalInitializer,
@@ -976,6 +1000,7 @@ impl FollowingOperator {
             | FollowingOperator::NamedInitializer
             | FollowingOperator::ArrayInitializer => 20,
             FollowingOperator::BinOp(k) => k.precedence(),
+            FollowingOperator::Range { .. } => RANGE_PRECEDENCE,
             FollowingOperator::Pipe => 4,
             FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 3,
             FollowingOperator::VarDecl
@@ -989,6 +1014,7 @@ const MIN_PRECEDENCE: u8 = 0;
 const IF_PRECEDENCE: u8 = 1;
 /// also for `*ty`, `[]ty`, `?ty`
 const PREOP_PRECEDENCE: u8 = 21;
+const RANGE_PRECEDENCE: u8 = 10;
 /// `a: ty = init`
 /// `   ^^`
 /// must be higher than [`FollowingOperator::Assign`]!
@@ -1011,7 +1037,6 @@ impl BinOpKind {
             | BinOpKind::Ge => 13,
             BinOpKind::And => 12,
             BinOpKind::Or => 11,
-            BinOpKind::Range | BinOpKind::RangeInclusive => 10,
         }
     }
 }

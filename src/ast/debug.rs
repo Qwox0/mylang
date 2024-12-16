@@ -128,17 +128,13 @@ impl DebugAst for Expr {
                 lines.write_tree(ty);
             },
             ExprKind::PositionalInitializer { lhs, args, .. } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
+                lines.write_opt_expr(lhs.as_ref());
                 lines.write(".(");
                 lines.write_many_expr(args, ",");
                 lines.write(")");
             },
             ExprKind::NamedInitializer { lhs, fields, .. } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
+                lines.write_opt_expr(lhs.as_ref());
                 lines.write(".{");
                 lines.write_many(
                     &fields,
@@ -154,17 +150,13 @@ impl DebugAst for Expr {
                 lines.write("}");
             },
             ExprKind::ArrayInitializer { lhs, elements, .. } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
+                lines.write_opt_expr(lhs.as_ref());
                 lines.write(".[");
                 lines.write_many(&elements, |e, _, l| l.write_tree(e), ",");
                 lines.write("]");
             },
             ExprKind::ArrayInitializerShort { lhs, val, count, .. } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
+                lines.write_opt_expr(lhs.as_ref());
                 lines.write(".[");
                 lines.write_tree(val);
                 lines.write(";");
@@ -172,9 +164,7 @@ impl DebugAst for Expr {
                 lines.write("]");
             },
             ExprKind::Dot { lhs, lhs_ty: _, rhs } => {
-                if let Some(lhs) = lhs {
-                    lines.write_tree(lhs);
-                }
+                lines.write_opt_expr(lhs.as_ref());
                 lines.write(".");
                 lines.write_tree(rhs);
             },
@@ -227,6 +217,11 @@ impl DebugAst for Expr {
                 write!(lines, " {} ", op.to_binop_text()).unwrap();
                 lines.write_tree(rhs);
             },
+            ExprKind::Range { start, end, is_inclusive } => {
+                lines.write_opt_expr(start.as_ref());
+                lines.write(if *is_inclusive { "..=" } else { ".." });
+                lines.write_opt_expr(end.as_ref());
+            },
             ExprKind::Assign { lhs, rhs, .. } => {
                 lines.write_tree(lhs);
                 lines.write("=");
@@ -255,7 +250,6 @@ impl DebugAst for Expr {
                 lines.write(" ");
                 lines.write_tree(then_body);
                 if let Some(else_body) = else_body {
-                    let else_body = else_body;
                     lines.write(" else ");
                     lines.write_tree(else_body);
                 }
@@ -410,13 +404,11 @@ impl DebugAst for Type {
                 );
                 buf.write("}");
             },
-            Type::Range { elem_ty } => {
-                buf.write("Range<");
+            Type::Range { elem_ty, kind } => {
+                buf.write(kind.type_name());
+                buf.write("<");
                 buf.write_tree(elem_ty);
                 buf.write(">");
-            },
-            Type::RangeInclusive { elem_ty } => {
-                write!(buf, "RangeInclusive<{}>", **elem_ty).unwrap()
             },
             Type::Option { ty } => {
                 buf.write("?");
@@ -464,6 +456,12 @@ pub trait DebugAstBuf: fmt::Write {
     fn write_many_expr<'x, 'l, T: DebugAst>(&'l mut self, elements: &'x [T], sep: &str)
     where Self: Sized {
         self.write_many(elements, |t, _, buf| t.debug_impl(buf), sep);
+    }
+
+    fn write_opt_expr<'x, 'l, T: DebugAst>(&mut self, opt_expr: Option<&T>) {
+        if let Some(t) = opt_expr {
+            self.write_tree(t);
+        }
     }
 }
 
@@ -542,14 +540,6 @@ impl DebugTree {
         self.ensure_lines(self.cur_line);
         self.lines.get_mut(self.cur_line).unwrap()
     }
-}
-
-pub fn opt_to_text<T>(opt_expr: &Option<T>, inner: impl FnOnce(&T) -> String) -> String {
-    opt_expr.as_ref().map(inner).unwrap_or_default()
-}
-
-pub fn opt_expr_to_text<T: DebugAst>(opt_expr: &Option<T>) -> String {
-    opt_to_text(opt_expr, |t| t.to_text())
 }
 
 #[inline]

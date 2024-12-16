@@ -46,6 +46,14 @@ extern fread: (data: *void, size: c_size_t, count: c_size_t, stream: *FILE) -> c
 
 extern exit: (status: c_int) -> never;
 
+extern strtol: (string: *c_char, tailptr: **c_char, base: c_int) -> c_long;
+
+/// currently only works for one int (use %l in `fmt`)
+extern printf: (fmt: *c_char, x: c_long) -> c_int;
+
+/// <https://www.gnu.org/software/libc/manual/html_node/Array-Sort-Function.html>
+extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *void, r: *void) -> c_int) -> void;
+
 // ----- my own stuff -----
 
 open_file :: (pathname: []u8, mode: []u8) -> ?*FILE {

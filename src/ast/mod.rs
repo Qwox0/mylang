@@ -2,7 +2,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     type_::Type,
-    util::{UnwrapDebug, forget_lifetime, unreachable_debug},
+    util::{UnwrapDebug, forget_lifetime},
 };
 use debug::DebugAst;
 use std::{fmt, ops::Deref};
@@ -160,6 +160,13 @@ pub enum ExprKind {
         rhs: Ptr<Expr>,
         arg_ty: Type,
     },
+
+    Range {
+        start: Option<Ptr<Expr>>,
+        end: Option<Ptr<Expr>>,
+        is_inclusive: bool,
+    },
+
     /// `<lhs> = <lhs>`
     Assign {
         lhs: ExprWithTy,
@@ -265,19 +272,16 @@ impl ExprKind {
                 .map(|e| e.kind.block_expects_trailing_semicolon())
                 .unwrap_or(true),
             ExprKind::Extern { .. } => todo!(),
+            */
             &ExprKind::If { then_body, else_body, .. } => {
                 else_body.unwrap_or(then_body).kind.block_expects_trailing_semicolon()
             },
             ExprKind::Match { .. } => todo!(),
-            ExprKind::Fn(Fn { body, .. })
-            | ExprKind::For { body, .. }
-            | ExprKind::While { body, .. } => body.kind.block_expects_trailing_semicolon(),
-            ExprKind::Catch { .. } => todo!(),
-            ExprKind::Defer(..) => todo!(),
-            ExprKind::Return { .. } => todo!(),
-            ExprKind::Break { .. } => todo!(),
-            ExprKind::Continue => todo!(),
-            */
+            // ExprKind::Fn(Fn { body, .. })
+            ExprKind::For { body, .. } | ExprKind::While { body, .. } => {
+                body.kind.block_expects_trailing_semicolon()
+            },
+            // ExprKind::Catch { .. } => todo!(),
             _ => true,
         }
     }
@@ -397,11 +401,6 @@ pub enum BinOpKind {
 
     /// `||`, `||=`
     Or,
-
-    /// `..`
-    Range,
-    /// `..=`
-    RangeInclusive,
 }
 
 impl BinOpKind {
@@ -425,8 +424,6 @@ impl BinOpKind {
             BinOpKind::Ge => ">=",
             BinOpKind::And => "&&",
             BinOpKind::Or => "||",
-            BinOpKind::Range => "..",
-            BinOpKind::RangeInclusive => "..=",
         }
     }
 
@@ -470,14 +467,6 @@ impl BinOpKind {
             | BinOpKind::Ge => {
                 debug_assert_eq!(out_ty, Type::Bool);
                 arg_ty
-            },
-            BinOpKind::Range | BinOpKind::RangeInclusive => {
-                let t = match out_ty {
-                    Type::Range { elem_ty } | Type::RangeInclusive { elem_ty } => *elem_ty,
-                    _ => unreachable_debug(),
-                };
-                debug_assert!(arg_ty.matches(t));
-                t
             },
         }
     }
