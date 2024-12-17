@@ -32,10 +32,6 @@ impl SemaValue {
         SemaValue::new_const(Type::Type(ty), EMPTY_PTR)
     }
 
-    pub fn const_bool(p: Ptr<bool>) -> SemaValue {
-        SemaValue::new_const(Type::Bool, p.cast())
-    }
-
     pub fn is_const(&self) -> bool {
         self.const_val.is_some()
     }

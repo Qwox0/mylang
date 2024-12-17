@@ -121,6 +121,13 @@ impl<T, E> SemaResult<T, E> {
         self
     }
 
+    pub fn is_ok(&self) -> bool {
+        match self {
+            Ok(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn ok(self) -> Option<T> {
         match self {
             Ok(t) => Some(t),

@@ -1,8 +1,4 @@
-use crate::{
-    ast::{ExprKind, LitKind},
-    parser::StmtIter,
-    type_::Type,
-};
+use crate::{ast::ExprKind, parser::StmtIter, type_::Type};
 
 macro_rules! test_helper {
     ($test_name:ident : $code:expr, $test_closure:expr) => {
@@ -32,7 +28,7 @@ test_helper! { array_lit: ".[1, 2, 3, 4, 5]", |arr| {
     };
     assert!(elements.len() == 5);
     for x in elements.iter() {
-        assert!(matches!(x.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
+        assert!(matches!(x.kind, ExprKind::IntLit(_)));
     }
 }}
 
@@ -40,8 +36,8 @@ test_helper! { array_lit_short: ".[0; 5]", |arr| {
     let ExprKind::ArrayInitializerShort { val, count, .. } = arr else {
         panic!("not an array literal")
     };
-    assert!(matches!(val.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
-    assert!(matches!(count.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
+    assert!(matches!(val.kind, ExprKind::IntLit(_)));
+    assert!(matches!(count.kind, ExprKind::IntLit(_)));
 }}
 
 test_helper! { array_lit_with_expr: ".[1 + 1, 2 + 2, 3 + 3]", |arr| {
@@ -68,7 +64,7 @@ test_helper! { array_ty_f64: "[5]f64", |arr| {
     let ExprKind::ArrayTy { count, ty } = arr else {
         panic!("not an array type")
     };
-    assert!(matches!(count.kind, ExprKind::Literal { kind: LitKind::Int, .. }));
+    assert!(matches!(count.kind, ExprKind::IntLit(_)));
     if let Type::Unevaluated(expr) = ty && let ExprKind::Ident(ty) = expr.kind {
         assert!(*ty == *"f64");
     } else {

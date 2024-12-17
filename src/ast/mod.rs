@@ -1,9 +1,4 @@
-use crate::{
-    parser::lexer::Span,
-    ptr::Ptr,
-    type_::Type,
-    util::{UnwrapDebug, forget_lifetime},
-};
+use crate::{parser::lexer::Span, ptr::Ptr, type_::Type, util::forget_lifetime};
 use debug::DebugAst;
 use std::{fmt, ops::Deref};
 
@@ -32,12 +27,17 @@ impl Deref for ExprWithTy {
 #[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
     Ident(Ptr<str>),
-    Literal {
-        kind: LitKind,
-        code: Ptr<str>,
-    },
+
+    IntLit(Ptr<str>),
+    FloatLit(Ptr<str>),
     /// `true`, `false`
     BoolLit(bool),
+    /// `'a'`
+    CharLit(char),
+    /// `b'a'`
+    BCharLit(u8),
+    /// `"hello world"`
+    StrLit(Ptr<str>),
 
     /// `*<ty>`
     /// `*mut <ty>`
@@ -589,51 +589,6 @@ impl From<&'static str> for Ident {
 pub struct Pattern {
     kind: ExprKind, // TODO: own kind enum
     span: Span,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LitKind {
-    /// `'a'`
-    Char,
-    /// `b'a'`
-    BChar,
-    /// `1`, `-10`, `10_000`
-    /// allowed but not recommended: `1_0_0_0`
-    Int,
-    /// `1.5`
-    Float,
-    /// `"literal"`
-    Str,
-}
-
-impl LitKind {
-    pub fn parse(
-        self,
-        code: Ptr<str>,
-        alloc: &bumpalo::Bump,
-    ) -> Result<Ptr<()>, bumpalo::AllocErr> {
-        macro_rules! alloc {
-            ($val:expr) => {
-                alloc.try_alloc($val).map(Ptr::from).map(Ptr::cast)
-            };
-        }
-
-        match self {
-            LitKind::Char => {
-                let mut chars = code.chars();
-                let c = chars.next().unwrap_debug();
-                debug_assert!(c == '\'');
-                let val = chars.next().unwrap_debug();
-                let c = chars.next().unwrap_debug();
-                debug_assert!(c == '\'');
-                alloc!(val)
-            },
-            LitKind::BChar => todo!(),
-            LitKind::Int => alloc!(code.parse::<i128>().unwrap_debug()),
-            LitKind::Float => alloc!(code.parse::<f64>().unwrap_debug()),
-            LitKind::Str => todo!(),
-        }
-    }
 }
 
 pub type VarDeclList = Ptr<[VarDecl]>;

@@ -29,7 +29,6 @@ factorial(10)" => i64);
 }
 
 #[test]
-#[ignore = "unfinished test"]
 fn infer_number_based_on_ret_type() {
     let out = jit_run_test!(raw "
 test :: -> i8 {
@@ -37,5 +36,24 @@ test :: -> i8 {
     2
 };" => i8);
     assert_eq!(out.unwrap(), 1);
-    todo!()
+}
+
+#[test]
+fn infer_struct_pos_initalizer_based_on_ret_type() {
+    let out = jit_run_test!(raw "
+test :: -> struct { ok: bool } {
+    if false return .(false);
+    .(true)
+};" => bool);
+    assert_eq!(out.unwrap(), true);
+}
+
+#[test]
+fn infer_struct_named_initalizer_based_on_ret_type() {
+    let out = jit_run_test!(raw "
+test :: -> struct { ok: bool } {
+    if false return .{ ok = false };
+    .{ ok = true }
+};" => bool);
+    assert_eq!(out.unwrap(), true);
 }

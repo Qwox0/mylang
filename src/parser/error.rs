@@ -13,6 +13,8 @@ pub enum ParseErrorKind {
     MissingToken(TokenKind),
     NotAKeyword,
     NotAnIdent,
+    InvalidCharLit,
+    InvalidBCharLit,
     RangeInclusiveWithoutEnd,
     DuplicateDeclMarker(DeclMarkerKind),
     AllocErr(bumpalo::AllocErr),

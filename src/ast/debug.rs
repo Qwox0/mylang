@@ -48,10 +48,13 @@ impl DebugAst for Expr {
     fn debug_impl(&self, lines: &mut impl DebugAstBuf) {
         #[allow(unused_variables)]
         match &self.kind {
-            ExprKind::Ident(text) | ExprKind::Literal { kind: _, code: text } => {
-                lines.write(text.as_ref())
-            },
+            ExprKind::Ident(text)
+            | ExprKind::IntLit(text)
+            | ExprKind::FloatLit(text)
+            | ExprKind::StrLit(text) => lines.write(text.as_ref()),
             ExprKind::BoolLit(b) => lines.write(if *b { "true" } else { "false" }),
+            ExprKind::CharLit(char) => lines.write(&format!("'{}'", *char)),
+            ExprKind::BCharLit(_) => todo!(),
             ExprKind::PtrTy { is_mut, ty } => {
                 lines.write("*");
                 if *is_mut {

@@ -106,7 +106,7 @@ fn parse_err_missing_if_body() {
 
 #[test]
 #[ignore = "unfinished test"]
-fn asdf() {
+fn defer_multiple_blocks() {
     let out = jit_run_test!(raw "
 test :: -> {
     mut var: i64 = 0;

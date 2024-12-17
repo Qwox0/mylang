@@ -1,15 +1,15 @@
 use crate::{
     ast::{
-        BinOpKind, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind, VarDecl,
-        VarDeclList, VarDeclListTrait,
+        BinOpKind, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind, VarDecl, VarDeclList,
+        VarDeclListTrait,
     },
     defer_stack::DeferStack,
     ptr::Ptr,
     symbol_table::SymbolTable,
     type_::{RangeKind, Type},
     util::{
-        self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, panic_debug,
-        unreachable_debug,
+        self, UnwrapDebug, replace_escape_chars, forget_lifetime, get_aligned_offset, get_padding,
+        panic_debug, unreachable_debug,
     },
 };
 pub use inkwell::targets::TargetMachine;
@@ -198,38 +198,30 @@ impl<'ctx> Codegen<'ctx> {
                     Ok(self.get_symbol(&**name))
                 }
             },
-            ExprKind::Literal { kind, code } => match kind {
-                LitKind::Char => {
-                    debug_assert_eq!(out_ty, Type::U8);
-                    let val = code[1..code.len().saturating_sub(1)]
-                        .replace("\\n", "\n")
-                        .chars()
-                        .next()
-                        .unwrap_debug();
-                    reg(self.int_type(8).const_int(val as u8 as u64, false))
+            ExprKind::IntLit(code) | ExprKind::FloatLit(code) => match out_ty {
+                Type::Int { bits, is_signed } => {
+                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
                 },
-                LitKind::BChar => todo!(),
-                LitKind::Int | LitKind::Float => match out_ty {
-                    Type::Int { bits, is_signed } => {
-                        reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
-                    },
-                    Type::Float { bits } => {
-                        reg(unsafe { self.float_type(bits).const_float_from_string(code) })
-                    },
-                    _ => unreachable_debug(),
+                Type::Float { bits } => {
+                    reg(unsafe { self.float_type(bits).const_float_from_string(code) })
                 },
-                LitKind::Str => {
-                    debug_assert_matches!(out_ty, Type::Slice { elem_ty } if matches!(*elem_ty, Type::U8));
-                    let value = &code[1..code.len().saturating_sub(1)].replace("\\n", "\n");
-                    let ptr = self.builder.build_global_string_ptr(value, "")?;
-                    let len = self.int_type(64).const_int(value.len() as u64, false);
-                    self.build_slice(ptr.as_pointer_value(), len)
-                },
+                _ => unreachable_debug(),
             },
             ExprKind::BoolLit(bool) => {
                 debug_assert_matches!(out_ty, Type::Bool | Type::Unset);
                 let b_ty = self.context.bool_type();
                 reg(if *bool { b_ty.const_all_ones() } else { b_ty.const_zero() })
+            },
+            ExprKind::CharLit(char) => {
+                reg(self.int_type(8).const_int(*char as u8 as u64, false)) // TODO: real char type
+            },
+            ExprKind::BCharLit(byte) => reg(self.int_type(8).const_int(*byte as u64, false)),
+            ExprKind::StrLit(code) => {
+                debug_assert_matches!(out_ty, Type::Slice { elem_ty } if matches!(*elem_ty, Type::U8));
+                let value = replace_escape_chars(&code[1..code.len().saturating_sub(1)]);
+                let ptr = self.builder.build_global_string_ptr(&value, "")?;
+                let len = self.int_type(64).const_int(value.len() as u64, false);
+                self.build_slice(ptr.as_pointer_value(), len)
             },
             ExprKind::PtrTy { .. } => Ok(Symbol::Type),
             ExprKind::SliceTy { .. } => Ok(Symbol::Type),
@@ -280,8 +272,8 @@ impl<'ctx> Codegen<'ctx> {
                 match (lhs, *lhs_ty) {
                     (_, Type::Never) => return Ok(Symbol::Never),
                     (None | Some(Symbol::Type), Type::Type(t)) => match t.as_ref() {
-                        Type::Struct { fields } => {
-                            let struct_ty = self.type_table[fields];
+                        ty @ Type::Struct { fields } => {
+                            let struct_ty = self.llvm_type(*ty).struct_ty();
                             let ptr = if let Some(ptr) = write_target.take() {
                                 ptr
                             } else {
@@ -333,8 +325,8 @@ impl<'ctx> Codegen<'ctx> {
                 match (lhs, *lhs_ty) {
                     (_, Type::Never) => return Ok(Symbol::Never),
                     (None | Some(Symbol::Type), Type::Type(t)) => match t.as_ref() {
-                        Type::Struct { fields } => {
-                            let struct_ty = self.type_table[fields];
+                        ty @ Type::Struct { fields } => {
+                            let struct_ty = self.llvm_type(*ty).struct_ty();
                             let ptr = if let Some(ptr) = write_target.take() {
                                 ptr
                             } else {
@@ -816,6 +808,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 self.builder.position_at_end(then_bb);
                 let then_sym = self.compile_expr(*then_body, out_ty)?;
+                let then_val = self.sym_as_val_checked(then_sym, out_ty)?;
                 if then_sym != Symbol::Never {
                     self.builder.build_unconditional_branch(merge_bb)?;
                 }
@@ -827,6 +820,7 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     Symbol::Void
                 };
+                let else_val = self.sym_as_val_checked(else_sym, out_ty)?;
                 if else_sym != Symbol::Never {
                     self.builder.build_unconditional_branch(merge_bb)?;
                 }
@@ -845,10 +839,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 let branch_ty = self.llvm_type(out_ty).basic_ty();
                 let phi = self.builder.build_phi(branch_ty, "ifexpr")?;
-                match (
-                    self.sym_as_val_checked(then_sym, out_ty)?,
-                    self.sym_as_val_checked(else_sym, out_ty)?,
-                ) {
+                match (then_val, else_val) {
                     (Some(then_val), Some(else_val)) => {
                         phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)])
                     },

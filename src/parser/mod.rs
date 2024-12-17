@@ -11,7 +11,7 @@ use crate::{
     ptr::Ptr,
     scratch_pool::ScratchPool,
     type_::Type,
-    util::{collect_all_result_errors, display_spanned_error},
+    util::{collect_all_result_errors, display_spanned_error, replace_escape_chars},
 };
 use error::ParseErrorKind::*;
 pub use error::*;
@@ -359,13 +359,49 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let expr = self.advanced().expr().context("defer expr")?;
                 expr!(Defer(expr), span)
             },
-            TokenKind::Literal(kind) => {
-                expr!(Literal { kind, code: self.advanced().get_text_from_span(span) })
-            },
-            TokenKind::BoolLit(b) => {
+            TokenKind::IntLit => expr!(IntLit(self.advanced().get_text_from_span(span))),
+            TokenKind::FloatLit => expr!(FloatLit(self.advanced().get_text_from_span(span))),
+            TokenKind::BoolLitTrue => {
                 self.lex.advance();
-                expr!(BoolLit(b))
+                expr!(BoolLit(true))
             },
+            TokenKind::BoolLitFalse => {
+                self.lex.advance();
+                expr!(BoolLit(false))
+            },
+            TokenKind::CharLit => {
+                let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
+                let mut chars = code.chars();
+
+                let start = chars.next();
+                debug_assert_eq!(start, Some('\''));
+                let end = chars.next_back();
+                debug_assert_eq!(end, Some('\''));
+
+                let Some(c) = chars.next() else { return err(InvalidCharLit, span) };
+                if chars.next().is_some() {
+                    return err(InvalidCharLit, span);
+                }
+                expr!(CharLit(c))
+            },
+            TokenKind::BCharLit => {
+                let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
+                let mut bytes = code.bytes();
+
+                let prefix = bytes.next();
+                debug_assert_eq!(prefix, Some(b'b'));
+                let start = bytes.next();
+                debug_assert_eq!(start, Some(b'\''));
+                let end = bytes.next_back();
+                debug_assert_eq!(end, Some(b'\''));
+
+                let Some(byte) = bytes.next() else { return err(InvalidBCharLit, span) };
+                if bytes.next().is_some() {
+                    return err(InvalidCharLit, span);
+                }
+                expr!(BCharLit(byte))
+            },
+            TokenKind::StrLit => expr!(StrLit(self.advanced().get_text_from_span(span))),
             TokenKind::OpenParenthesis => {
                 self.advanced().ws0();
                 // TODO: currently no tuples allowed!

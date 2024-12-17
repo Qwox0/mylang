@@ -239,3 +239,13 @@ pub fn write_file_to_string(path: impl AsRef<Path>, buf: &mut String) -> io::Res
     std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
     Ok(())
 }
+
+pub fn replace_escape_chars(s: &str) -> String {
+    s.replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace("\\\\", "\\")
+        .replace("\\0", "\0")
+        .replace("\\'", "\'")
+        .replace("\\\"", "\"")
+}

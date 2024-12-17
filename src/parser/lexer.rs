@@ -1,44 +1,44 @@
 use super::ParseErrorKind;
-use crate::{ast::LitKind, parser::parser_helper::ParserInterface};
+use crate::parser::parser_helper::ParserInterface;
 use core::{fmt, range::Range};
 use std::{
+    assert_matches::debug_assert_matches,
     mem,
     ops::{Deref, Index},
     str::FromStr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommentType {
-    /// `// ...` and `/* ... */`
-    Comment,
-    /// `//!` and `/*! ... */`
-    DocInner,
-    /// `///` and `/** ... */`
-    DocOuter,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Whitespace {
+pub enum TokenKind {
+    /// see [`is_whitespace`]
     Whitespace,
 
     /// `// ...`
-    LineComment(CommentType),
-    /// `/* ... */`
-    BlockComment(CommentType),
-}
+    LineComment,
+    /// `//!`
+    LineDocInner,
+    /// `///`
+    LineDocOuter,
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    /// see [`is_whitespace`]
-    Whitespace(Whitespace),
+    /// `/* ... */`
+    BlockComment,
+    /// `/*! ... */`
+    BlockDocInner,
+    /// `/** ... */`
+    BlockDocOuter,
 
     /// `let`, `my_var`, `MyStruct`, `_`
     Ident,
 
     Keyword(Keyword),
 
-    Literal(LitKind),
-    BoolLit(bool),
+    IntLit,
+    FloatLit,
+    BoolLitTrue,
+    BoolLitFalse,
+    CharLit,
+    BCharLit,
+    StrLit,
 
     /// `(`
     OpenParenthesis,
@@ -171,7 +171,16 @@ pub enum TokenKind {
 
 impl TokenKind {
     pub fn is_whitespace(&self) -> bool {
-        matches!(self, TokenKind::Whitespace(_))
+        matches!(
+            self,
+            TokenKind::Whitespace
+                | TokenKind::LineComment
+                | TokenKind::LineDocInner
+                | TokenKind::LineDocOuter
+                | TokenKind::BlockComment
+                | TokenKind::BlockDocInner
+                | TokenKind::BlockDocOuter
+        )
     }
 
     /// `true` also means the token ends parsing of the previous expression
@@ -512,7 +521,7 @@ impl<'c> Lexer<'c> {
         let kind = match self.code.next()? {
             w if is_whitespace(w) => {
                 self.code.advance_while(is_whitespace);
-                TokenKind::Whitespace(Whitespace::Whitespace)
+                TokenKind::Whitespace
             },
             '"' => self.string_literal(),
             '\'' => self.char_literal(),
@@ -634,21 +643,42 @@ impl<'c> Lexer<'c> {
     }
 
     fn string_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('"' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::Str)
+        while let Some(c) = self.code.next() {
+            match c {
+                '\"' | '\n' => break,
+                '\\' => {
+                    let escape_char = self.code.next();
+                    debug_assert_matches!(
+                        escape_char,
+                        Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"')
+                    )
+                },
+                _ => {},
+            }
+        }
+        TokenKind::StrLit
     }
 
     fn bchar_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('\'' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::BChar)
+        self.char_literal();
+        TokenKind::BCharLit
     }
 
     fn char_literal(&mut self) -> TokenKind {
-        while !matches!(self.code.next(), Some('\'' | '\n')) {}
-        // TODO: check for invalid literal
-        TokenKind::Literal(LitKind::Char)
+        while let Some(c) = self.code.next() {
+            match c {
+                '\'' | '\n' => break,
+                '\\' => {
+                    let escape_char = self.code.next();
+                    debug_assert_matches!(
+                        escape_char,
+                        Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"')
+                    )
+                },
+                _ => {},
+            }
+        }
+        TokenKind::CharLit
     }
 
     fn num_literal(&mut self) -> TokenKind {
@@ -658,28 +688,28 @@ impl<'c> Lexer<'c> {
             Some(('.', c)) if c != '.' && !is_id_start(c) => {
                 self.code.advance();
                 self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-                TokenKind::Literal(LitKind::Float)
+                TokenKind::FloatLit
             },
-            _ => TokenKind::Literal(LitKind::Int),
+            _ => TokenKind::IntLit,
         }
     }
 
     fn line_comment(&mut self) -> TokenKind {
-        let comment_type = match self.code.peek() {
-            Some('!') => CommentType::DocInner,
-            Some('/') => CommentType::DocOuter,
-            _ => CommentType::Comment,
+        let t = match self.code.peek() {
+            Some('!') => TokenKind::LineDocInner,
+            Some('/') => TokenKind::LineDocOuter,
+            _ => TokenKind::LineComment,
         };
         while !matches!(self.code.next(), None | Some('\n')) {}
-        TokenKind::Whitespace(Whitespace::LineComment(comment_type))
+        t
     }
 
     fn block_comment(&mut self) -> TokenKind {
-        let comment_type = match self.code.peek() {
-            Some('!') => CommentType::DocInner,
+        let t = match self.code.peek() {
+            Some('!') => TokenKind::BlockDocInner,
             // `/**/` => CommentType::Comment
-            Some('*') if self.code.peek2() != Some('/') => CommentType::DocOuter,
-            _ => CommentType::Comment,
+            Some('*') if self.code.peek2() != Some('/') => TokenKind::BlockDocOuter,
+            _ => TokenKind::BlockComment,
         };
 
         let mut depth: usize = 1;
@@ -696,14 +726,14 @@ impl<'c> Lexer<'c> {
             }
         }
 
-        TokenKind::Whitespace(Whitespace::BlockComment(comment_type))
+        t
     }
 
     fn ident_like(&mut self, start: usize) -> TokenKind {
         self.code.advance_while(is_id_continue);
         match &self.get_code().0[start..self.code.pos] {
-            "true" => TokenKind::BoolLit(true),
-            "false" => TokenKind::BoolLit(false),
+            "true" => TokenKind::BoolLitTrue,
+            "false" => TokenKind::BoolLitFalse,
             s => s.parse::<Keyword>().map(TokenKind::Keyword).unwrap_or(TokenKind::Ident),
         }
     }
