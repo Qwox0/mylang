@@ -131,7 +131,6 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     /// This modifies the [`Expr`] behind `expr` to ensure that codegen is
     /// possible.
     pub fn analyze(&mut self, mut expr: Ptr<Expr>, is_const: bool) -> SemaResult<SemaValue> {
-        //let span = expr.full_span();
         let span = expr.span;
 
         let res = match &mut expr.kind {
@@ -154,7 +153,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             },
             &mut ExprKind::Literal { kind, code } => {
                 let ty = match kind {
-                    LitKind::Char => todo!(),
+                    LitKind::Char => Type::U8, // TODO: change this to a real char type
                     LitKind::BChar => todo!(),
                     LitKind::Int => Type::IntLiteral,
                     LitKind::Float => Type::FloatLiteral,
@@ -450,6 +449,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     t => todo!("other idx ({t:#?})"),
                 }))
             },
+            ExprKind::Cast { lhs, target_ty } => {
+                let _v = self.analyze_typed(lhs, false)?;
+                self.eval_type(target_ty)?;
+                // TODO: check if cast is possible
+                Ok(SemaValue::new(*target_ty))
+            },
             ExprKind::Call { func: f, args, .. } => {
                 assert!(!is_const, "todo: const call");
                 match self.analyze_typed(f, is_const)?.ty {
@@ -655,7 +660,9 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 let source = try_not_never!(self.analyze_typed(source, is_const)?);
                 let elem_ty = match source.ty.finalize() {
                     Type::Array { elem_ty, .. } | Type::Slice { elem_ty } => elem_ty,
-                    Type::Range { elem_ty, kind } if kind.has_start() => elem_ty,
+                    Type::Range { elem_ty, kind } if elem_ty.matches_int() && kind.has_start() => {
+                        elem_ty
+                    },
                     _ => todo!("for over non-array"),
                 };
 

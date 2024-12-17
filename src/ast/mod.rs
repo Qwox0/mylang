@@ -129,6 +129,13 @@ pub enum ExprKind {
         idx: ExprWithTy,
     },
 
+    /// `expr.as(ty)`
+    /// TODO: remove this [`ExprKind`] when implementing method calls.
+    Cast {
+        lhs: ExprWithTy,
+        target_ty: Type,
+    },
+
     /*
     /// `<func> < <params> >`
     CompCall {

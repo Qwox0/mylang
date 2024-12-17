@@ -13,6 +13,7 @@
 #![feature(generic_const_exprs)]
 #![feature(iter_collect_into)]
 #![feature(path_add_extension)]
+#![feature(exit_status_error)]
 
 pub mod ast;
 pub mod cli;

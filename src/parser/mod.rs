@@ -104,7 +104,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         let expr = match op {
             FollowingOperator::Dot => {
                 let rhs = self.ws0().ident().context("dot rhs")?;
-                expr!(Dot { lhs: Some(lhs), lhs_ty: Type::Unset, rhs }, span)
+                if &*rhs.text == "as" {
+                    self.ws0().tok(TokenKind::OpenParenthesis).context("expected '('")?;
+                    let target_ty = self.ws0().expr().context("cast target type")?;
+                    self.ws0().tok(TokenKind::CloseParenthesis).context("expected ')'")?;
+                    expr!(Cast { lhs: ExprWithTy::untyped(lhs), target_ty: ty(target_ty) }, span)
+                } else {
+                    expr!(Dot { lhs: Some(lhs), lhs_ty: Type::Unset, rhs }, span)
+                }
             },
             FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None),
             FollowingOperator::Index => {

@@ -8,7 +8,8 @@ c_size_t :: u64;
 c_off64_t :: i64;
 
 /// writes a character to stdout
-extern putchar: (ch: c_int) -> c_int;
+//extern putchar: (ch: c_int) -> c_int;
+extern putchar: (ch: u8) -> c_int;
 
 /// writes a character string to stdout
 extern puts: (str: *u8) -> c_int;
@@ -67,7 +68,7 @@ read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     defer fclose(file);
 
     fseek(file, 0, SEEK_END);
-    length := ftell(file);
+    length := ftell(file).as(u64);
     if length < 0 return "";
     fseek(file, 0, SEEK_SET);
 
@@ -79,4 +80,15 @@ read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     mut slice := []u8.{ ptr = buffer, len = length + 1 };
     slice[length] = 0;
     slice
+}
+
+print_str :: (str: []u8) -> void {
+    0..str.len | for idx {
+        putchar(str[idx]); // handle output == EOF?
+    }
+}
+
+println_str :: (str: []u8) -> void {
+    print_str(str);
+    putchar('\n'); // handle output == EOF?
 }

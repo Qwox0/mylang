@@ -174,23 +174,19 @@ pub defer_test :: -> {
 #[ignore = "unfinished test"]
 fn compile_libc_example(b: &mut Bencher) {
     b.iter(|| {
-        let a = crate::compiler::compile2(
-            crate::compiler::CompileMode::Build,
-            &crate::cli::BuildArgs {
-                path: PathBuf::from("./examples/libc/main.mylang"),
-                optimization_level: 0,
-                target_triple: None,
-                out: crate::cli::OutKind::None,
-                no_prelude: true,
-                debug_tokens: false,
-                debug_ast: false,
-                debug_types: false,
-                debug_typed_ast: false,
-                debug_functions: false,
-                debug_llvm_ir_unoptimized: false,
-                debug_llvm_ir_optimized: false,
-            },
-        );
-        assert!(a.success());
+        crate::compiler::compile2(crate::compiler::CompileMode::Build, &crate::cli::BuildArgs {
+            path: PathBuf::from("./examples/libc/main.mylang"),
+            optimization_level: 0,
+            target_triple: None,
+            out: crate::cli::OutKind::None,
+            no_prelude: true,
+            debug_tokens: false,
+            debug_ast: false,
+            debug_types: false,
+            debug_typed_ast: false,
+            debug_functions: false,
+            debug_llvm_ir_unoptimized: false,
+            debug_llvm_ir_optimized: false,
+        });
     });
 }

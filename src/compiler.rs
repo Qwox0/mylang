@@ -148,7 +148,7 @@ pub enum CompileMode {
     Run,
 }
 
-pub fn compile2(mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus {
+pub fn compile2(mode: CompileMode, args: &BuildArgs) {
     let mut code = String::with_capacity(4096);
     if !args.no_prelude {
         let prelude_path = concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang");
@@ -176,7 +176,7 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus
     compile(code.as_ref(), mode, args)
 }
 
-fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::ExitStatus {
+fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
     let alloc = bumpalo::Bump::new();
 
     if args.debug_tokens {
@@ -244,7 +244,7 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
         };
 
     if mode == CompileMode::Check {
-        return std::process::ExitStatus::default();
+        return;
     }
 
     if args.debug_functions {
@@ -297,7 +297,7 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
     }
 
     if args.out == OutKind::None {
-        return std::process::ExitStatus::default();
+        return;
     }
 
     let mut exe_file_path = args.path.with_file_name("out");
@@ -313,15 +313,16 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> std::process::Ex
             .status()
             .unwrap();
         if !err.success() {
-            return err;
+            println!("linking with gcc failed: {:?}", err);
         }
         if mode == CompileMode::Run {
             println!("### Running `{}`", exe_file_path.display());
-            return std::process::Command::new(exe_file_path).status().unwrap();
+            if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
+                println!("{e}");
+                std::process::exit(e.code().unwrap_or(1));
+            }
         }
     }
-
-    std::process::ExitStatus::default()
 }
 
 pub fn dev() {

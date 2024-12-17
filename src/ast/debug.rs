@@ -174,6 +174,12 @@ impl DebugAst for Expr {
                 lines.write_tree(idx);
                 lines.write("]");
             },
+            ExprKind::Cast { lhs, target_ty } => {
+                lines.write_tree(lhs);
+                lines.write(".as(");
+                lines.write_tree(target_ty);
+                lines.write(")");
+            },
             ExprKind::Call { func, args, pipe_idx } => {
                 if let Some(idx) = *pipe_idx {
                     lines.write_tree(&args[idx]);

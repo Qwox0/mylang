@@ -101,11 +101,13 @@ impl Type {
     pub const F64: Type = Type::Float { bits: 64 };
     pub const I64: Type = Type::Int { bits: 64, is_signed: true };
     pub const U64: Type = Type::Int { bits: 64, is_signed: false };
+    pub const U8: Type = Type::Int { bits: 8, is_signed: false };
 
     pub fn try_internal_ty(name: Ptr<str>) -> Option<Self> {
         match name.bytes().next()? {
             b'i' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: true }),
             b'u' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: false }),
+            _ if &*name == "bool" => Some(Type::Bool),
             b'f' => name[1..].parse().ok().map(|bits| Type::Float { bits }),
             _ if &*name == "void" => Some(Type::Void),
             _ if &*name == "never" => Some(Type::Never),
@@ -250,12 +252,9 @@ impl Type {
                 (Type::Array { len: l1, elem_ty: t1 }, Type::Array { len: l2, elem_ty: t2 })
                     if l1 == l2 => inner(*t1, *t2),
 
-                //(Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
+                (Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
                 // TODO: remove these rules:
-                mirror (Type::Ptr { .. } | Type::Int { bits: 64, is_signed: false } | Type::IntLiteral, Type::Ptr { .. }) => Some(Left), // allows `*T == *U`, `*T == int`
-                mirror (Type::Ptr { .. } | Type::Int { bits: 64, is_signed: false } | Type::IntLiteral, Type::Option { ty: p }) if matches!(*p, Type::Ptr { .. }) => Some(Left), // allows `?*T == *U`, `?*T == int`
-                //mirror (p1 @ Type::Ptr { .. }, Type::Option { ty: p2 }) if match *p2 { Type::Ptr { .. } => inner(p1, *p2).is_some(), _ => false } => Some(Left), // allows `?*T == *T`
-                mirror (Type::U64, Type::I64) => Some(Left),
+                mirror (Type::Ptr { .. }, Type::Option { ty: p }) if matches!(*p, Type::Ptr { .. }) => Some(Left), // allows `?*T == *U`
 
                 mirror (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => Some(Left),
                 mirror (Type::Float { .. }, Type::FloatLiteral) => Some(Left),

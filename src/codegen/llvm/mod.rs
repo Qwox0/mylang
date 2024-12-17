@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        BinOpKind, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind, VarDecl, VarDeclList,
-        VarDeclListTrait,
+        BinOpKind, Expr, ExprKind, ExprWithTy, Fn, Ident, LitKind, UnaryOpKind, VarDecl,
+        VarDeclList, VarDeclListTrait,
     },
     defer_stack::DeferStack,
     ptr::Ptr,
@@ -198,23 +198,33 @@ impl<'ctx> Codegen<'ctx> {
                     Ok(self.get_symbol(&**name))
                 }
             },
-            ExprKind::Literal { code, .. } => match out_ty {
-                Type::Never => Ok(Symbol::Never),
-                Type::Int { bits, is_signed } => {
-                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
+            ExprKind::Literal { kind, code } => match kind {
+                LitKind::Char => {
+                    debug_assert_eq!(out_ty, Type::U8);
+                    let val = code[1..code.len().saturating_sub(1)]
+                        .replace("\\n", "\n")
+                        .chars()
+                        .next()
+                        .unwrap_debug();
+                    reg(self.int_type(8).const_int(val as u8 as u64, false))
                 },
-                Type::Float { bits } => {
-                    reg(unsafe { self.float_type(bits).const_float_from_string(code) })
+                LitKind::BChar => todo!(),
+                LitKind::Int | LitKind::Float => match out_ty {
+                    Type::Int { bits, is_signed } => {
+                        reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
+                    },
+                    Type::Float { bits } => {
+                        reg(unsafe { self.float_type(bits).const_float_from_string(code) })
+                    },
+                    _ => unreachable_debug(),
                 },
-                Type::Slice { elem_ty }
-                    if matches!(*elem_ty, Type::Int { bits: 8, is_signed: false }) =>
-                {
+                LitKind::Str => {
+                    debug_assert_matches!(out_ty, Type::Slice { elem_ty } if matches!(*elem_ty, Type::U8));
                     let value = &code[1..code.len().saturating_sub(1)].replace("\\n", "\n");
                     let ptr = self.builder.build_global_string_ptr(value, "")?;
                     let len = self.int_type(64).const_int(value.len() as u64, false);
                     self.build_slice(ptr.as_pointer_value(), len)
                 },
-                t => todo!("{expr:#?} {t:?}"),
             },
             ExprKind::BoolLit(bool) => {
                 debug_assert_matches!(out_ty, Type::Bool | Type::Unset);
@@ -405,6 +415,7 @@ impl<'ctx> Codegen<'ctx> {
                 let idx_ty = self.context.i64_type();
                 let for_info = self.build_for(
                     idx_ty,
+                    false,
                     idx_ty.const_zero(),
                     idx_ty.const_int(len as u64, false),
                     false,
@@ -551,6 +562,35 @@ impl<'ctx> Codegen<'ctx> {
                     _ => unreachable!(),
                 }
             },
+            ExprKind::Cast { lhs, target_ty } => {
+                let lhs_sym = self.compile_typed_expr(*lhs)?;
+                match (lhs.ty, target_ty) {
+                    (l, t) if l.matches(*t) => Ok(lhs_sym),
+                    (Type::Ptr { .. }, Type::Ptr { .. }) => Ok(lhs_sym),
+                    (Type::Bool, i @ Type::Int { is_signed, .. }) => {
+                        let lhs = self.sym_as_val(lhs_sym, Type::Bool)?.bool_val();
+                        let int_ty = self.llvm_type(*i).int_ty();
+                        reg(if *is_signed {
+                            //self.builder.build_int_s_extend_or_bit_cast(int_value, int_type, "")
+                            self.builder.build_int_s_extend(lhs, int_ty, "")?
+                        } else {
+                            //self.builder.build_int_z_extend_or_bit_cast(int_value, int_type, "")
+                            self.builder.build_int_z_extend(lhs, int_ty, "")?
+                        })
+                    },
+                    (p @ Type::Ptr { .. }, i @ Type::Int { .. }) => {
+                        let ptr = self.sym_as_val(lhs_sym, p)?.ptr_val();
+                        let int_ty = self.llvm_type(*i).int_ty();
+                        reg(self.builder.build_ptr_to_int(ptr, int_ty, "")?)
+                    },
+                    (l @ Type::Int { .. }, r @ Type::Int { is_signed, .. }) => {
+                        let lhs = self.sym_as_val(lhs_sym, l)?.int_val();
+                        let rhs_ty = self.llvm_type(*r).int_ty();
+                        reg(self.builder.build_int_cast_sign_flag(lhs, rhs_ty, *is_signed, "")?)
+                    },
+                    (l, t) => panic_debug(&format!("cannot cast {l} to {t}")),
+                }
+            },
             ExprKind::Call { func, args, .. } => match self.compile_typed_expr(*func)? {
                 Symbol::Function { params, val: func } => {
                     let args = params
@@ -598,32 +638,28 @@ impl<'ctx> Codegen<'ctx> {
                             _ => todo!(),
                         });
                     },
-                    _ => {},
-                }
-
-                let v = self.sym_as_val(sym, out_ty)?;
-                match kind {
-                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => unreachable_debug(),
-                    /*
-                    UnaryOpKind::Deref => reg(self.build_load(
-                        self.llvm_type(expr_ty).basic_ty(),
-                        v.ptr_val(),
-                        "deref",
-                    )?),
-                    */
-                    UnaryOpKind::Deref => stack_val(v.ptr_val()),
-                    UnaryOpKind::Not => match out_ty {
-                        Type::Bool => reg(self.builder.build_not(v.bool_val(), "not")?),
-                        _ => todo!(),
+                    UnaryOpKind::Deref => {
+                        let ptr_ty = Type::Ptr { pointee_ty: Type::ptr_unset() };
+                        stack_val(self.sym_as_val(sym, ptr_ty)?.ptr_val())
                     },
-                    UnaryOpKind::Neg => match out_ty {
-                        Type::Int { is_signed: true, .. } => {
-                            reg(self.builder.build_int_neg(v.int_val(), "neg")?)
-                        },
-                        Type::Float { .. } => {
-                            reg(self.builder.build_float_neg(v.float_val(), "neg")?)
-                        },
-                        _ => todo!(),
+                    UnaryOpKind::Not => {
+                        let v = self.sym_as_val(sym, out_ty)?;
+                        match out_ty {
+                            Type::Bool => reg(self.builder.build_not(v.bool_val(), "not")?),
+                            _ => todo!(),
+                        }
+                    },
+                    UnaryOpKind::Neg => {
+                        let v = self.sym_as_val(sym, out_ty)?;
+                        match out_ty {
+                            Type::Int { is_signed: true, .. } => {
+                                reg(self.builder.build_int_neg(v.int_val(), "neg")?)
+                            },
+                            Type::Float { .. } => {
+                                reg(self.builder.build_float_neg(v.float_val(), "neg")?)
+                            },
+                            _ => todo!(),
+                        }
                     },
                     UnaryOpKind::Try => todo!(),
                 }
@@ -715,15 +751,17 @@ impl<'ctx> Codegen<'ctx> {
                 self.build_store(stack_var, binop_res, &lhs.ty)?;
                 Ok(Symbol::Void)
             },
-            ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, .. }) => {
+            ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
                 let var_name = &*ident.text;
                 let prev_var_name = self.cur_var_name.replace(Ptr::from(var_name));
+
+                const DISABLE_MUT_CHECK: bool = true;
 
                 let sym = if let Some(ExprKind::Fn(f)) = init.map(|p| &p.as_ref().kind) {
                     self.compile_fn(var_name, f)?
                 } else if let Some(init) = init {
                     let init = try_not_never!(self.compile_expr(*init, *ty)?);
-                    if markers.is_mut
+                    if (markers.is_mut || (DISABLE_MUT_CHECK && !is_const))
                         && let Symbol::Register(init_val) = init
                     {
                         let stack_ty = self.llvm_type(*ty).basic_ty();
@@ -824,13 +862,13 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::For { source, iter_var, body, .. } => {
                 let source_ty = self.llvm_type(source.ty);
                 let source_sym = try_not_never!(self.compile_typed_expr(*source)?);
-                const IDX_TY: Type = Type::Int { bits: 64, is_signed: false };
-                let idx_ty = self.llvm_type(IDX_TY).int_ty();
 
                 match source.ty {
                     Type::Array { len, .. } => {
+                        let idx_ty = self.context.i64_type();
                         let len = idx_ty.const_int(len as u64, false);
-                        let for_info = self.build_for(idx_ty, idx_ty.const_zero(), len, false)?;
+                        let for_info =
+                            self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
 
                         let Symbol::Stack(arr_ptr) = source_sym else { panic!() };
                         let iter_var_sym =
@@ -843,9 +881,11 @@ impl<'ctx> Codegen<'ctx> {
                         self.build_for_end(for_info, out)?
                     },
                     Type::Slice { elem_ty } => {
+                        let idx_ty = self.context.i64_type();
                         let (ptr, len) = self.build_slice_field_access(source_sym)?;
 
-                        let for_info = self.build_for(idx_ty, idx_ty.const_zero(), len, false)?;
+                        let for_info =
+                            self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
                         let elem_ty = self.llvm_type(*elem_ty).basic_ty();
                         let iter_var_sym =
                             Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
@@ -853,20 +893,28 @@ impl<'ctx> Codegen<'ctx> {
                         let out = self.compile_expr(*body, Type::Void)?;
                         self.build_for_end(for_info, out)?
                     },
-                    Type::Range { kind, .. } if kind.has_start() => {
+                    Type::Range { elem_ty, kind } if kind.has_start() => {
+                        let Type::Int { is_signed, .. } = *elem_ty else { unreachable_debug() };
+                        let elem_llvm_ty = self.llvm_type(*elem_ty).int_ty();
                         let range_ty = source_ty.struct_ty();
                         let start = self.build_struct_access(range_ty, source_sym, 0, "start")?;
-                        let start = self.sym_as_val(start, IDX_TY)?.int_val();
+                        let start = self.sym_as_val(start, *elem_ty)?.int_val();
 
                         let end = if kind.has_end() {
                             let idx = kind.get_field_count() as u32 - 1;
                             let end = self.build_struct_access(range_ty, source_sym, idx, "end")?;
-                            self.sym_as_val(end, IDX_TY)?.int_val()
+                            self.sym_as_val(end, *elem_ty)?.int_val()
                         } else {
-                            idx_ty.const_all_ones()
+                            self.max_int(elem_llvm_ty, is_signed)?
                         };
 
-                        let for_info = self.build_for(idx_ty, start, end, kind.is_inclusive())?;
+                        let for_info = self.build_for(
+                            elem_llvm_ty,
+                            is_signed,
+                            start,
+                            end,
+                            kind.is_inclusive(),
+                        )?;
                         let iter_var_sym = reg_sym(for_info.idx);
                         self.symbols.insert(iter_var.text, iter_var_sym);
                         let out = self.compile_expr(*body, Type::Void)?;
@@ -1479,6 +1527,7 @@ impl<'ctx> Codegen<'ctx> {
     fn build_for(
         &mut self,
         idx_ty: IntType<'ctx>,
+        idx_is_signed: bool,
         start_idx: IntValue<'ctx>,
         end_idx: IntValue<'ctx>,
         is_end_inclusive: bool,
@@ -1500,12 +1549,13 @@ impl<'ctx> Codegen<'ctx> {
         let idx_int = idx.as_basic_value().into_int_value();
         //self.symbols.insert("idx", reg_sym(idx_int));
 
-        let cond = self.builder.build_int_compare(
-            if is_end_inclusive { IntPredicate::ULE } else { IntPredicate::ULT },
-            idx_int,
-            end_idx,
-            "for.idx_cmp",
-        )?;
+        let cmp_op = match (is_end_inclusive, idx_is_signed) {
+            (true, true) => IntPredicate::SLE,
+            (true, false) => IntPredicate::ULE,
+            (false, true) => IntPredicate::SLT,
+            (false, false) => IntPredicate::ULT,
+        };
+        let cond = self.builder.build_int_compare(cmp_op, idx_int, end_idx, "for.idx_cmp")?;
         self.builder.build_conditional_branch(cond, body_bb, end_bb)?;
 
         // body
@@ -1535,6 +1585,16 @@ impl<'ctx> Codegen<'ctx> {
         // end
         self.builder.position_at_end(end_bb);
         Ok(())
+    }
+
+    fn max_int(&self, int_ty: IntType<'ctx>, is_signed: bool) -> CodegenResult<IntValue<'ctx>> {
+        let all_ones = int_ty.const_all_ones();
+        Ok(if is_signed {
+            self.builder
+                .build_right_shift(all_ones, int_ty.const_int(1, false), false, "")?
+        } else {
+            all_ones
+        })
     }
 
     /// LLVM does not make a distinction between signed and unsigned integer
