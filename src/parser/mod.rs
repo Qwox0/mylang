@@ -11,7 +11,7 @@ use crate::{
     ptr::Ptr,
     scratch_pool::ScratchPool,
     type_::Type,
-    util::{collect_all_result_errors, display_spanned_error, replace_escape_chars},
+    util::{UnwrapDebug, collect_all_result_errors, display_spanned_error, replace_escape_chars},
 };
 use error::ParseErrorKind::*;
 pub use error::*;
@@ -45,7 +45,11 @@ impl Expr {
     }
 }
 
-pub fn ty(ty_expr: Ptr<Expr>) -> Type {
+pub fn ty(mut ty_expr: Ptr<Expr>) -> Type {
+    if let ExprKind::Fn(f) = &mut ty_expr.kind {
+        debug_assert_eq!(f.ret_type, Type::Unset);
+        f.ret_type = Type::Unevaluated(f.body.take().unwrap_debug());
+    }
     Type::Unevaluated(ty_expr)
 }
 
@@ -409,29 +413,34 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     self.ws0().tok(TokenKind::Arrow).context("'->'")?;
                     return self.function_tail(self.alloc_empty_slice().into(), span);
                 }
-                let start_state = self.lex.get_state();
                 let first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
                 let t = self.ws0().next_tok().context("missing ')'")?;
                 self.ws0();
-                match t.kind {
+                let params = match t.kind {
                     // (expr)
-                    TokenKind::CloseParenthesis
-                        if !self.lex.peek().is_some_and(|t| t.kind == TokenKind::Arrow) =>
-                    {
+                    TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
                         return self
                             .alloc(expr!(Parenthesis { expr: first_expr }, span.join(t.span)));
                     },
                     // (expr) -> ...
-                    // (params...) -> ...
-                    TokenKind::CloseParenthesis | TokenKind::Comma => {
-                        self.lex.set_state(start_state) // TODO: maybe no resetting in the future
+                    TokenKind::CloseParenthesis => {
+                        let Some(decl) = first_expr.as_var_decl() else { todo!("better error") };
+                        self.alloc(decl)?.as_slice1()
                     },
-                    _ => ParseError::unexpected_token(t).context("expected ',' or ')'")?,
+                    // (params...) -> ...
+                    TokenKind::Comma => {
+                        let Some(decl) = first_expr.as_var_decl() else { todo!("better error") };
+                        let params = ScratchPool::new_with_first_val(decl)
+                            .map_err(|e| self.wrap_alloc_err(e))?;
+                        let params = self
+                            .var_decl_list_with_start_list(TokenKind::Comma, params)
+                            .context("function parameter list")?;
+                        self.ws0().tok(TokenKind::CloseParenthesis).context("')'")?;
+                        self.ws0().tok(TokenKind::Arrow).context("'->'")?;
+                        params
+                    },
+                    _ => return ParseError::unexpected_token(t).context("expected ',' or ')'"),
                 };
-                let params =
-                    self.var_decl_list(TokenKind::Comma).context("function parameter list")?;
-                self.ws0().tok(TokenKind::CloseParenthesis).context("')'")?;
-                self.ws0().tok(TokenKind::Arrow).context("'->'")?;
                 return self.function_tail(params, span);
             },
             TokenKind::OpenBracket => {
@@ -608,7 +617,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             Some(brace) => (ty(expr), self.block(brace.span).context("fn body")?),
             None => (Type::Unset, expr),
         };
-        self.alloc(expr!(Fn(Fn { params, ret_type, body }), start_span))
+        self.alloc(expr!(Fn(Fn { params, ret_type, body: Some(body) }), start_span))
     }
 
     pub fn if_after_cond(
@@ -737,7 +746,14 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
     /// allows a trailing `sep`.
     pub fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<VarDeclList> {
-        let mut list = ScratchPool::new();
+        self.var_decl_list_with_start_list(sep, ScratchPool::new())
+    }
+
+    pub fn var_decl_list_with_start_list(
+        &mut self,
+        sep: TokenKind,
+        mut list: ScratchPool<VarDecl>,
+    ) -> ParseResult<VarDeclList> {
         loop {
             let Some((decl, _end_span)) = self.var_decl().opt().context("var_decl")? else {
                 break;

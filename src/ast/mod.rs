@@ -294,7 +294,7 @@ impl ExprKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -311,7 +311,13 @@ impl Expr {
     pub fn full_span(&self) -> Span {
         #[allow(unused_variables)]
         match self.kind {
-            ExprKind::Fn(Fn { params, ret_type, body }) => self.span.join(body.full_span()),
+            ExprKind::Fn(Fn { params, ret_type, body: Some(body) }) => {
+                self.span.join(body.full_span())
+            },
+            ExprKind::Fn(Fn { params, ret_type: Type::Unevaluated(t), body: None }) => {
+                self.span.join(t.full_span())
+            },
+            ExprKind::Fn(Fn { params, ret_type, body: None }) => self.span,
             ExprKind::PositionalInitializer { lhs, .. }
             | ExprKind::NamedInitializer { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
@@ -350,6 +356,15 @@ impl Expr {
             },
             // ExprKind::Semicolon(_) => todo!(),
             _ => self.span,
+        }
+    }
+
+    pub fn as_var_decl(self) -> Option<VarDecl> {
+        let Expr { kind, span } = self;
+        match kind {
+            ExprKind::VarDecl(decl) => Some(decl),
+            ExprKind::Ident(text) => Some(VarDecl::new_basic(Ident { text, span }, Type::Unset)),
+            _ => None,
         }
     }
 }
@@ -507,7 +522,8 @@ pub enum UnaryOpKind {
 pub struct Fn {
     pub params: VarDeclList,
     pub ret_type: Type,
-    pub body: Ptr<Expr>,
+    /// if `body == None` this is a function type
+    pub body: Option<Ptr<Expr>>,
 }
 
 #[derive(Debug, Clone, Copy)]

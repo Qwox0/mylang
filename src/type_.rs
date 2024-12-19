@@ -274,6 +274,16 @@ impl Type {
                 mirror (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
                     if *enum_ty == e && variants[idx].ty == Type::Void => Some(Left),
                 (Type::Option { ty: t1 }, Type::Option { ty: t2 }) => inner(*t1, *t2),
+
+                (Type::Function(f1), Type::Function(f2)) => {
+                    let functions_match = f1.ret_type.matches(f2.ret_type)
+                        && f1.params.len() == f2.params.len()
+                        && f1.params.iter().zip(f2.params.iter()).all(|(a, b)| {
+                            a.ty.matches(b.ty)
+                                || matches!((a.ty, b.ty), (Type::Ptr { .. }, Type::Ptr { .. })) // TODO: remove this
+                        });
+                    Some(Left).filter(|_| functions_match)
+                },
             );
             None
         }

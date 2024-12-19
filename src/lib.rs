@@ -14,6 +14,7 @@
 #![feature(iter_collect_into)]
 #![feature(path_add_extension)]
 #![feature(exit_status_error)]
+#![feature(non_null_from_ref)]
 
 pub mod ast;
 pub mod cli;

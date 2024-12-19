@@ -80,12 +80,16 @@ impl DebugAst for Expr {
                 if *ret_type != Type::Unset {
                     lines.write_tree(ret_type);
                 }
-                if matches!(body.kind, ExprKind::Block { .. }) {
-                    body.debug_impl(lines);
-                } else {
-                    lines.write("{");
-                    lines.write_tree(body);
-                    lines.write("}");
+                match body {
+                    Some(body) if matches!(body.kind, ExprKind::Block { .. }) => {
+                        body.debug_impl(lines);
+                    },
+                    Some(body) => {
+                        lines.write("{");
+                        lines.write_tree(body);
+                        lines.write("}");
+                    },
+                    None => {},
                 }
             },
             ExprKind::Parenthesis { expr } => {

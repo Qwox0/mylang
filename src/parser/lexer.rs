@@ -470,17 +470,6 @@ impl<'c> Lexer<'c> {
         self.code.code
     }
 
-    #[inline]
-    pub fn get_state(&self) -> (usize, Option<Token>) {
-        (self.code.pos, self.next_tok)
-    }
-
-    #[inline]
-    pub fn set_state(&mut self, pos: (usize, Option<Token>)) {
-        self.next_tok = pos.1;
-        unsafe { self.code.set_pos(pos.0) }
-    }
-
     pub fn pos_span(&self) -> Span {
         self.next_tok
             .map(|t| t.span)

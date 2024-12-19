@@ -1136,7 +1136,8 @@ impl<'ctx> Codegen<'ctx> {
                 self.symbols.insert(pname.to_string(), s);
             }
 
-            let body = self.compile_expr_with_write_target(f.body, f.ret_type, None)?;
+            let body =
+                self.compile_expr_with_write_target(f.body.unwrap_debug(), f.ret_type, None)?;
             self.build_return(body, f.ret_type)?;
 
             if func.verify(true) {

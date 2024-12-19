@@ -161,13 +161,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     return Ok(SemaValue::new(Type::Ptr { pointee_ty: Type::ptr_never() }));
                 }
 
-                let sym = self.get_symbol(*text, span)?;
-                if let SemaSymbol::Finished(v) = sym
-                    && !v.check_constness(is_const)
-                {
-                    return err(SemaErrorKind::NotAConstExpr, span);
+                match self.get_symbol(*text, expr.span)? {
+                    SemaSymbol::Finished(v) if v.check_constness(is_const) => Ok(*v),
+                    SemaSymbol::Finished(_) => err(SemaErrorKind::NotAConstExpr, span),
+                    SemaSymbol::NotFinished(Some(ty)) if !is_const => Ok(SemaValue::new(*ty)),
+                    SemaSymbol::NotFinished(_) => NotFinished,
                 }
-                sym.get_type().map_ok(SemaValue::new)
             },
             ExprKind::IntLit(code) => {
                 let ty = if ty_hint == Type::Unset {
@@ -225,18 +224,24 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             },
             ExprKind::Fn(func) => {
                 assert!(is_const, "todo: non-const function");
-                self.function_stack.push(func.into());
-                self.open_scope();
+                let fn_ptr = Ptr::from(&*func);
                 let Fn { mut params, ret_type, body } = func;
                 self.eval_type(ret_type)?;
+                self.function_stack.push(fn_ptr);
+                self.open_scope();
                 let res: SemaResult<SemaValue> = try {
                     for param in params.iter_mut() {
                         assert!(!param.is_const, "todo: const param");
                         self.analyze_var_decl(param)?;
                     }
-                    let body_ty = self.analyze(*body, *ret_type, false)?.ty;
-                    check_or_set_type!(ret_type, body_ty, body.span)?; // TODO: better span if `body` is a block
-                    SemaValue::new_const(Type::Function(func.into()), EMPTY_PTR)
+                    match body {
+                        Some(body) => {
+                            let body_ty = self.analyze(*body, *ret_type, false)?.ty;
+                            check_or_set_type!(ret_type, body_ty, body.span)?; // TODO: better span if `body` is a block
+                            SemaValue::new_const(Type::Function(func.into()), EMPTY_PTR)
+                        },
+                        None => SemaValue::new(Type::Type(self.alloc(Type::Function(fn_ptr))?)),
+                    }
                 };
                 debug_assert!(!res.is_ok() || func.ret_type.is_valid());
                 self.close_scope()?;
@@ -975,7 +980,6 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             *ty = *match self.analyze(ty_expr, Type::Unset, true)?.ty {
                 Type::Never => todo!(),
                 Type::Type(t) => t,
-                t @ Type::Function(_) => self.alloc(t)?, // TODO: don't alloc here
                 _ => return Err(err_val(NotAType, ty_expr.full_span())),
             };
             debug_assert!(ty.is_valid());

@@ -70,13 +70,22 @@ impl<T: ?Sized> Ptr<T> {
     }
 
     #[inline]
-    pub fn raw(self) -> *mut T {
+    pub const fn raw(self) -> *mut T {
         self.0.as_ptr()
     }
 
     #[inline]
     pub const fn cast<U>(self) -> Ptr<U> {
         Ptr(self.0.cast::<U>())
+    }
+}
+
+impl<T> Ptr<T> {
+    /// Casts the pointer into a pointer to a slice of length 1.
+    #[inline]
+    pub const fn as_slice1(self) -> Ptr<[T]> {
+        let slice = unsafe { std::slice::from_raw_parts(self.raw(), 1) };
+        Ptr::new(NonNull::from_ref(slice))
     }
 }
 

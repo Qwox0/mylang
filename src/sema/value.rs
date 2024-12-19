@@ -1,5 +1,5 @@
-use super::err::{SemaErrorKind, SemaResult};
-use crate::{parser::lexer::Span, ptr::Ptr, type_::Type};
+use super::err::SemaErrorKind;
+use crate::{ptr::Ptr, type_::Type};
 use std::ptr::NonNull;
 
 #[derive(Debug, Clone, Copy)]
