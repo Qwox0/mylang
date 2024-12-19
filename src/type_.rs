@@ -66,6 +66,11 @@ pub enum Type {
     IntLiteral,
     FloatLiteral,
 
+    /// `lhs.method`
+    MethodStub {
+        function: Ptr<Fn>,
+        first_expr: Ptr<Expr>,
+    },
     /// ```mylang
     /// MyEnum :: enum { A, B(i64) };
     /// a := MyEnum.A; // variant -> valid val
@@ -132,6 +137,12 @@ impl Type {
         TYPE.with(|t| Ptr::from(t))
     }
 
+    /// returns `Ptr(Type::Void)`
+    pub fn ptr_never() -> Ptr<Type> {
+        thread_local!(static TYPE: Type = Type::Never);
+        TYPE.with(|t| Ptr::from(t))
+    }
+
     pub fn ptr_u0() -> Ptr<Type> {
         thread_local!(static TYPE: Type = Type::Int { bits: 0, is_signed: false });
         TYPE.with(|t| Ptr::from(t))
@@ -166,6 +177,7 @@ impl Type {
             Type::Type(_) => 0,
             Type::IntLiteral
             | Type::FloatLiteral
+            | Type::MethodStub { .. }
             | Type::EnumVariant { .. }
             | Type::Unset
             | Type::Unevaluated(_) => panic_debug("cannot find stack size"),
@@ -199,6 +211,7 @@ impl Type {
             Type::Option { ty } => ty.alignment(),
             Type::IntLiteral
             | Type::FloatLiteral
+            | Type::MethodStub { .. }
             | Type::EnumVariant { .. }
             | Type::Type(..)
             | Type::Unset
@@ -326,11 +339,12 @@ impl Type {
             Type::Range { .. } => todo!(),
             Type::Option { .. } => false,
             Type::Type(..) => todo!(),
-            Type::IntLiteral => todo!(),
-            Type::FloatLiteral => todo!(),
-            Type::EnumVariant { .. } => todo!(),
-            Type::Unset => todo!(),
-            Type::Unevaluated(..) => todo!(),
+            Type::IntLiteral
+            | Type::FloatLiteral
+            | Type::MethodStub { .. }
+            | Type::EnumVariant { .. }
+            | Type::Unset
+            | Type::Unevaluated(_) => todo!(),
         }
     }
 
@@ -349,6 +363,7 @@ impl Type {
             Type::Range { .. } | Type::Option { .. } | Type::Type(_) => todo!(),
             Type::IntLiteral
             | Type::FloatLiteral
+            | Type::MethodStub { .. }
             | Type::EnumVariant { .. }
             | Type::Unset
             | Type::Unevaluated(_) => panic_debug("invalid type"),

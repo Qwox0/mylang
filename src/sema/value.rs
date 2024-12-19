@@ -40,14 +40,6 @@ impl SemaValue {
         !has_to_be_const || self.is_const()
     }
 
-    pub fn into_const_checked(&self, has_to_be_const: bool, span: Span) -> SemaResult<SemaValue> {
-        if self.check_constness(has_to_be_const) {
-            SemaResult::Ok(*self)
-        } else {
-            super::err(SemaErrorKind::NotAConstExpr, span)
-        }
-    }
-
     pub fn is_int(self) -> bool {
         matches!(self.ty, Type::Int { .. } | Type::IntLiteral)
     }

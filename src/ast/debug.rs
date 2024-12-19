@@ -423,6 +423,11 @@ impl DebugAst for Type {
                 buf.write("?");
                 ty.debug_impl(buf);
             },
+            Type::MethodStub { function: _, first_expr } => {
+                buf.write_tree(first_expr);
+                buf.write(".");
+                buf.write("method"); // TODO get real function name
+            },
             Type::EnumVariant { enum_ty, idx } => {
                 let Type::Enum { variants } = **enum_ty else { unreachable_debug() };
                 let variant = variants[*idx];

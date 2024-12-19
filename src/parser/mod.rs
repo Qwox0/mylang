@@ -121,11 +121,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(Index { lhs, idx }, close.span)
             },
             FollowingOperator::PositionalInitializer => {
-                let args = self.parse_call_args(ScratchPool::new())?;
-                let close_p = self.tok(TokenKind::CloseParenthesis)?;
+                let (args, close_p_span) = self.parse_call(ScratchPool::new())?;
                 expr!(
                     PositionalInitializer { lhs: Some(lhs), lhs_ty: Type::Unset, args },
-                    span.join(close_p.span)
+                    span.join(close_p_span)
                 )
             },
             FollowingOperator::NamedInitializer => {
@@ -437,7 +436,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::OpenBracket => {
                 let count = self.advanced().ws0().expr().opt().context("array type count")?;
-                self.tok(TokenKind::CloseBracket)?;
+                self.tok(TokenKind::CloseBracket).context("array ty ']'")?;
                 let ty_expr = self.expr_(PREOP_PRECEDENCE)?;
                 let ty_span = ty_expr.full_span();
                 let ty = ty(ty_expr);
@@ -446,7 +445,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     None => expr!(SliceTy { ty }, span.join(ty_span)),
                 }
             },
-            TokenKind::OpenBrace => return self.advanced().block(span),
+            TokenKind::OpenBrace => return self.advanced().block(span).context("block"),
             TokenKind::Bang => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
                 expr!(UnaryOp { kind: UnaryOpKind::Not, expr, is_postfix: false }, span)
@@ -492,11 +491,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(Range { start: None, end, is_inclusive: true })
             },
             TokenKind::DotOpenParenthesis => {
-                let args = self.advanced().ws0().parse_call_args(ScratchPool::new())?;
-                let close_b_span = self.tok(TokenKind::CloseParenthesis)?.span;
+                let (args, close_p_span) = self.advanced().ws0().parse_call(ScratchPool::new())?;
                 expr!(
                     PositionalInitializer { lhs: None, lhs_ty: Type::Unset, args },
-                    span.join(close_b_span)
+                    span.join(close_p_span)
                 )
             },
             TokenKind::DotOpenBrace => {
@@ -633,16 +631,33 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// `... ( ... )`
     /// `     ^` starts here
     /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
-    pub fn parse_call_args(
+    pub fn parse_call(
         &mut self,
         args: ScratchPool<Ptr<Expr>>,
-    ) -> ParseResult<Ptr<[Ptr<Expr>]>> {
-        Ok(self.expr_list(TokenKind::Comma, args).context("call args")?.0)
+    ) -> ParseResult<(Ptr<[Ptr<Expr>]>, Span)> {
+        let res: ParseResult<_> = try {
+            //let args = self.parse_call_args(args)?;
+            let args = self.expr_list(TokenKind::Comma, args).context("call args")?.0;
+            let closing_paren_span =
+                self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
+            (args, closing_paren_span)
+        };
+        if res.is_err() {
+            let mut depth: usize = 0;
+            self.lex.advance_while(|t| {
+                match t.kind {
+                    TokenKind::OpenParenthesis => depth += 1,
+                    TokenKind::CloseParenthesis if depth == 0 => return false,
+                    TokenKind::CloseParenthesis => depth -= 1,
+                    _ => {},
+                };
+                true
+            });
+            self.lex.advance();
+        }
+        res
     }
 
-    /// `... ( ... )`
-    /// `     ^` starts here
-    /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
     pub fn call(
         &mut self,
         func: Ptr<Expr>,
@@ -650,33 +665,53 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         pipe_idx: Option<usize>,
     ) -> ParseResult<Ptr<Expr>> {
         let func = ExprWithTy::untyped(func);
-        let args = self.parse_call_args(args)?;
-        let closing_paren_span =
-            self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
+        let (args, closing_paren_span) = self.parse_call(args)?;
         self.alloc(expr!(Call { func, args, pipe_idx }, closing_paren_span))
     }
 
     /// parses block context and '}', doesn't parse the '{'
     pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
-        let sep = TokenKind::Semicolon;
+        let res = self._block_inner(open_brace_span);
+        if res.is_err() {
+            // skip the remaining block
+            let mut depth: usize = 0;
+            self.lex.advance_while(|t| {
+                match t.kind {
+                    TokenKind::OpenBrace => depth += 1,
+                    TokenKind::CloseBrace if depth == 0 => return false,
+                    TokenKind::CloseBrace => depth -= 1,
+                    _ => {},
+                };
+                true
+            });
+            self.lex.advance();
+        }
+        res
+    }
+
+    #[inline]
+    fn _block_inner(&mut self, open_brace_span: Span) -> ParseResult<Ptr<Expr>> {
         let mut list_pool = ScratchPool::new();
         let mut has_trailing_semicolon = false;
         loop {
-            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
+            let expr = match self.expr() {
+                Ok(expr) => expr,
+                Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken(TokenKind::CloseBrace),
+                    ..
+                }) => break,
+                err => return err.context("expr in block"),
+            };
             list_pool.push(ExprWithTy::untyped(expr)).map_err(|e| self.wrap_alloc_err(e))?;
-            has_trailing_semicolon = self.ws0().lex.advance_if_kind(sep);
+            has_trailing_semicolon = self.ws0().lex.advance_if_kind(TokenKind::Semicolon);
             if !has_trailing_semicolon && expr.kind.block_expects_trailing_semicolon() {
                 break;
             }
             self.ws0();
         }
         let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
-        let closing_brace = self.tok(TokenKind::CloseBrace).context("expected ';' or '}'");
-        if closing_brace.is_err() {
-            self.lex.advance_while(|t| t.kind != TokenKind::CloseBrace);
-            self.lex.advance();
-        }
-        let span = open_brace_span.join(closing_brace?.span);
+        let closing_brace = self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?;
+        let span = open_brace_span.join(closing_brace.span);
         self.alloc(expr!(Block { stmts, has_trailing_semicolon }, span))
     }
 

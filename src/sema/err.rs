@@ -56,7 +56,7 @@ pub enum SemaErrorKind {
     MissingFieldInInitializer {
         field: Ptr<str>,
     },
-    CallOfANotFunction,
+    CallOfANonFunction,
     ReturnNotInAFunction,
     NotAType,
 
@@ -124,6 +124,13 @@ impl<T, E> SemaResult<T, E> {
     pub fn is_ok(&self) -> bool {
         match self {
             Ok(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_ok_and(&self, cond: impl FnOnce(&T) -> bool) -> bool {
+        match self {
+            Ok(t) => cond(t),
             _ => false,
         }
     }

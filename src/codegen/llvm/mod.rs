@@ -8,8 +8,8 @@ use crate::{
     symbol_table::SymbolTable,
     type_::{RangeKind, Type},
     util::{
-        self, UnwrapDebug, replace_escape_chars, forget_lifetime, get_aligned_offset, get_padding,
-        panic_debug, unreachable_debug,
+        self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, panic_debug,
+        replace_escape_chars, unreachable_debug,
     },
 };
 pub use inkwell::targets::TargetMachine;
@@ -429,25 +429,13 @@ impl<'ctx> Codegen<'ctx> {
             },
             &ExprKind::Dot { lhs, lhs_ty, rhs } => match lhs_ty {
                 Type::Never => return Ok(Symbol::Never),
-                Type::Int { .. } => todo!(),
-                Type::Bool => todo!(),
-                Type::Float { .. } => todo!(),
-                Type::Ptr { .. } => todo!(),
-                Type::Slice { .. } => {
-                    let lhs = lhs.unwrap_debug();
-                    let slice_sym = try_not_never!(self.compile_expr(lhs, lhs_ty)?);
-
-                    let field_idx = match &*rhs.text {
-                        "ptr" => 0,
-                        "len" => 1,
-                        _ => unreachable_debug(),
+                _ if let Type::MethodStub { first_expr, .. } = out_ty => {
+                    debug_assert_eq!(lhs.unwrap_debug(), first_expr);
+                    let Symbol::Function { val } = self.get_symbol(&rhs.text) else {
+                        unreachable_debug()
                     };
-
-                    let slice_ty = self.slice_ty();
-
-                    self.build_struct_access(slice_ty, slice_sym, field_idx, &rhs.text)
+                    Ok(Symbol::MethodStub { fn_val: val })
                 },
-                Type::Array { .. } => todo!(),
                 Type::Struct { fields } => {
                     let lhs = lhs.unwrap_debug();
                     let struct_ty = self.type_table[&fields];
@@ -461,7 +449,6 @@ impl<'ctx> Codegen<'ctx> {
                     let union_sym = try_not_never!(self.compile_expr(lhs, lhs_ty)?);
                     self.build_struct_access(union_ty, union_sym, 0, &rhs.text)
                 },
-                Type::Enum { .. } => todo!(),
                 Type::Type(ty) => match out_ty {
                     Type::Enum { variants } => {
                         let (tag, _) = variants.find_field(&rhs.text).unwrap_debug();
@@ -473,6 +460,20 @@ impl<'ctx> Codegen<'ctx> {
                         Ok(Symbol::EnumVariant { variants, idx })
                     },
                     _ => unreachable_debug(),
+                },
+                Type::Slice { .. } => {
+                    let lhs = lhs.unwrap_debug();
+                    let slice_sym = try_not_never!(self.compile_expr(lhs, lhs_ty)?);
+
+                    let field_idx = match &*rhs.text {
+                        "ptr" => 0,
+                        "len" => 1,
+                        _ => unreachable_debug(),
+                    };
+
+                    let slice_ty = self.slice_ty();
+
+                    self.build_struct_access(slice_ty, slice_sym, field_idx, &rhs.text)
                 },
                 _ => unreachable_debug(),
             },
@@ -584,28 +585,19 @@ impl<'ctx> Codegen<'ctx> {
                 }
             },
             ExprKind::Call { func, args, .. } => match self.compile_typed_expr(*func)? {
-                Symbol::Function { params, val: func } => {
-                    let args = params
-                        .as_ref()
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, param)| {
-                            let arg = args.get(idx).copied().or(param.default).unwrap_debug();
-                            let sym = self.compile_expr(arg, param.ty)?;
-                            if param.ty.pass_arg_as_ptr()
-                                && let Symbol::Stack(ptr) = sym
-                            {
-                                Ok(BasicMetadataValueEnum::from(ptr))
-                            } else {
-                                Ok(self.sym_as_val(sym, param.ty)?.basic_metadata_val())
-                            }
-                        })
-                        .collect::<CodegenResult<Vec<_>>>()?;
-                    let ret = self.builder.build_call(func, &args, "call")?;
-                    match out_ty {
-                        // Type::Never => Ok(Symbol::Never),
-                        _ => reg(ret),
-                    }
+                Symbol::Function { val } => {
+                    let Type::Function(f) = func.ty else { unreachable_debug() };
+                    self.compile_call(f, val, args.iter().copied())
+                },
+                Symbol::MethodStub { fn_val } => {
+                    let Type::MethodStub { function, first_expr } = func.ty else {
+                        unreachable_debug()
+                    };
+                    self.compile_call(
+                        function,
+                        fn_val,
+                        std::iter::once(first_expr).chain(args.iter().copied()),
+                    )
                 },
                 Symbol::EnumVariant { variants, idx } => {
                     debug_assert!(args.len() <= 1);
@@ -616,20 +608,16 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::UnaryOp { kind, expr, .. } => {
                 let sym = try_not_never!(self.compile_expr(*expr, out_ty)?);
                 match kind {
-                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
-                        return reg(match sym {
-                            Symbol::Stack(ptr_value) => ptr_value,
-                            Symbol::Register(val) => {
-                                #[cfg(debug_assertions)]
-                                println!("WARN: doing stack allocation for AddrOf register");
-                                self.build_stack_alloc_as_ptr(val, &out_ty)?
-                            },
-                            Symbol::Function { val, .. } => {
-                                val.as_global_value().as_pointer_value()
-                            },
-                            _ => todo!(),
-                        });
-                    },
+                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => reg(match sym {
+                        Symbol::Stack(ptr_value) => ptr_value,
+                        Symbol::Register(val) => {
+                            #[cfg(debug_assertions)]
+                            println!("WARN: doing stack allocation for AddrOf register");
+                            self.build_stack_alloc_as_ptr(val, &out_ty)?
+                        },
+                        Symbol::Function { val, .. } => val.as_global_value().as_pointer_value(),
+                        _ => todo!(),
+                    }),
                     UnaryOpKind::Deref => {
                         let ptr_ty = Type::Ptr { pointee_ty: Type::ptr_unset() };
                         stack_val(self.sym_as_val(sym, ptr_ty)?.ptr_val())
@@ -784,8 +772,7 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Extern { ident, ty } => {
                 let sym = match ty {
                     Type::Function(f) => {
-                        let val = self.compile_prototype(&ident.text, f).0;
-                        Symbol::Function { params: f.params, val }
+                        Symbol::Function { val: self.compile_prototype(&ident.text, f).0 }
                     },
                     ty => {
                         let ty = self.llvm_type(*ty).basic_ty();
@@ -1003,6 +990,33 @@ impl<'ctx> Codegen<'ctx> {
         self.compile_expr(expr.expr, expr.ty)
     }
 
+    fn compile_call(
+        &mut self,
+        f: Ptr<Fn>,
+        fn_val: FunctionValue<'ctx>,
+        args: impl IntoIterator<Item = Ptr<Expr>>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        let mut args = args.into_iter();
+        let args = f
+            .params
+            .as_ref()
+            .iter()
+            .map(|param| {
+                let arg = args.next().or(param.default).unwrap_debug();
+                let sym = self.compile_expr(arg, param.ty)?;
+                if param.ty.pass_arg_as_ptr()
+                    && let Symbol::Stack(ptr) = sym
+                {
+                    Ok(BasicMetadataValueEnum::from(ptr))
+                } else {
+                    Ok(self.sym_as_val(sym, param.ty)?.basic_metadata_val())
+                }
+            })
+            .collect::<CodegenResult<Vec<_>>>()?;
+        let ret = self.builder.build_call(fn_val, &args, "call")?;
+        reg(ret)
+    }
+
     fn compile_enum_val(
         &mut self,
         variants: VarDeclList,
@@ -1058,7 +1072,7 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(prev_bb);
         }
 
-        Ok(Symbol::Function { params: f.params, val })
+        Ok(Symbol::Function { val })
     }
 
     fn compile_prototype(&mut self, name: &str, f: &Fn) -> (FunctionValue<'ctx>, bool) {
@@ -1755,6 +1769,7 @@ impl<'ctx> Codegen<'ctx> {
 
             Type::IntLiteral
             | Type::FloatLiteral
+            | Type::MethodStub { .. }
             | Type::EnumVariant { .. }
             | Type::Unset
             | Type::Unevaluated(_) => panic_debug("unfinished type"),
@@ -2061,11 +2076,13 @@ enum Symbol<'ctx> {
         val: GlobalValue<'ctx>,
     },
     Function {
-        /// TODO: think of a better way to store the fn definition
-        params: VarDeclList,
         val: FunctionValue<'ctx>,
     },
     Type,
+    /// The function parameter definitions and the first expression can be taken from the ast.
+    MethodStub {
+        fn_val: FunctionValue<'ctx>,
+    },
     EnumVariant {
         variants: VarDeclList,
         idx: usize,

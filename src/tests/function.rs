@@ -57,3 +57,11 @@ test :: -> struct { ok: bool } {
 };" => bool);
     assert_eq!(out.unwrap(), true);
 }
+
+#[test]
+fn call_like_method() {
+    let out = jit_run_test!(raw "
+add :: (l: i64, r: i64) -> l + r;
+test :: -> 123.add(456);" => i64);
+    assert_eq!(out.unwrap(), 123 + 456);
+}

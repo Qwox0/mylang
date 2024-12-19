@@ -158,14 +158,16 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
 
                 // TODO: remove this
                 if &**text == "nil" {
-                    return Ok(SemaValue::new(Type::Ptr { pointee_ty: Type::ptr_void() }));
+                    return Ok(SemaValue::new(Type::Ptr { pointee_ty: Type::ptr_never() }));
                 }
 
-                match self.get_symbol(*text, expr.span)? {
-                    SemaSymbol::Finished(v) => v.into_const_checked(is_const, span),
-                    SemaSymbol::NotFinished(Some(ty)) if !is_const => Ok(SemaValue::new(*ty)),
-                    SemaSymbol::NotFinished(_) => NotFinished,
+                let sym = self.get_symbol(*text, span)?;
+                if let SemaSymbol::Finished(v) = sym
+                    && !v.check_constness(is_const)
+                {
+                    return err(SemaErrorKind::NotAConstExpr, span);
                 }
+                sym.get_type().map_ok(SemaValue::new)
             },
             ExprKind::IntLit(code) => {
                 let ty = if ty_hint == Type::Unset {
@@ -333,12 +335,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     Type::Never => return Ok(SemaValue::never()),
                     Type::Type(t) => {
                         let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&*fields, args.as_ref(), is_const)?;
+                        self.validate_call(&*fields, args.iter().copied(), is_const)?;
                         Ok(SemaValue::new(*t))
                     },
                     Type::Ptr { pointee_ty: t } => {
                         let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&*fields, args.as_ref(), is_const)?;
+                        self.validate_call(&*fields, args.iter().copied(), is_const)?;
                         Ok(lhs_val)
                     },
                     ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
@@ -347,7 +349,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             ExprKind::PositionalInitializer { lhs: None, lhs_ty, args } => match ty_hint {
                 t @ Type::Struct { fields } => {
                     *lhs_ty = Type::Type(self.alloc(t)?);
-                    self.validate_call(&*fields, args.as_ref(), is_const)?;
+                    self.validate_call(&*fields, args.iter().copied(), is_const)?;
                     Ok(SemaValue::new(t))
                 },
                 _ => err(CannotInferPositionalInitializerTy, span.start_pos()),
@@ -452,20 +454,52 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 assert!(!is_const, "todo: const dot");
                 *lhs_ty = try_not_never!(self.analyze(*lhs, Type::Unset, is_const)?).ty;
                 debug_assert!(lhs_ty.is_valid());
-                self.analyze_dot(*lhs_ty, rhs)
+                // field access or enum variant
+                match *lhs_ty {
+                    Type::Struct { fields } | Type::Union { fields } => {
+                        if let Some(field) = fields.iter().find(|f| *f.ident.text == *rhs.text) {
+                            return Ok(SemaValue::new(field.ty));
+                        }
+                    },
+                    Type::Type(t) if let Type::Enum { variants } = *t => {
+                        if let Some((variant_idx, _)) =
+                            variants.iter().enumerate().find(|(_, f)| *f.ident.text == *rhs.text)
+                        {
+                            return Ok(SemaValue::new(Type::EnumVariant {
+                                enum_ty: t,
+                                idx: variant_idx,
+                            }));
+                        }
+                    },
+                    Type::Slice { elem_ty } => match &*rhs.text {
+                        "ptr" => return Ok(SemaValue::new(Type::Ptr { pointee_ty: elem_ty })),
+                        "len" => return Ok(SemaValue::new(Type::U64)),
+                        _ => {},
+                    },
+                    _ => {},
+                }
+
+                let Type::Function(function) = self.get_symbol(rhs.text, rhs.span)?.get_type()?
+                else {
+                    return err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span);
+                };
+
+                Ok(SemaValue::new(Type::MethodStub { function, first_expr: *lhs }))
             },
             ExprKind::Dot { lhs: None, lhs_ty, rhs } => {
                 // `.<ident>` must be an enum
                 let mut enum_ty_iter =
-                    self.enum_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
-                        |enum_ty| match **enum_ty {
+                    self.enum_stack.iter().flat_map(|scope| scope.iter()).copied().filter_map(
+                        |enum_ty| match *enum_ty {
                             Type::Enum { variants } => {
-                                variants.iter().any(|v| *v.ident.text == *rhs.text)
+                                let idx =
+                                    variants.iter().position(|v| *v.ident.text == *rhs.text)?;
+                                Some((enum_ty, idx))
                             },
-                            _ => false,
+                            _ => None,
                         },
                     );
-                let Some(enum_ty) = enum_ty_iter.next() else {
+                let Some((enum_ty, idx)) = enum_ty_iter.next() else {
                     return err(CannotInferNamedInitializerTy, expr.span.start_pos());
                 };
                 if enum_ty_iter.next().is_some() {
@@ -473,7 +507,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }
                 drop(enum_ty_iter);
                 *lhs_ty = Type::Type(enum_ty);
-                self.analyze_dot(*lhs_ty, rhs)
+                Ok(SemaValue::new(Type::EnumVariant { enum_ty, idx }))
             },
             ExprKind::Index { lhs, idx } => {
                 assert!(!is_const, "todo: const index");
@@ -506,7 +540,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     Type::Never => Ok(SemaValue::never()),
                     Type::Function(mut func) => {
                         let Fn { params, ret_type, .. } = func.as_mut();
-                        self.validate_call(&params, &args, is_const)?;
+                        self.validate_call(&params, args.iter().copied(), is_const)?;
                         debug_assert!(ret_type.is_valid());
                         /*
                         if *ret_type == Type::Never {
@@ -515,13 +549,20 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                         */
                         Ok(SemaValue::new(*ret_type))
                     },
+                    Type::MethodStub { mut function, first_expr } => {
+                        let Fn { params, ret_type, .. } = function.as_mut();
+                        let args = std::iter::once(first_expr).chain(args.iter().copied());
+                        self.validate_call(&params, args, is_const)?;
+                        debug_assert!(ret_type.is_valid());
+                        Ok(SemaValue::new(*ret_type))
+                    },
                     Type::EnumVariant { enum_ty, idx } => {
                         let Type::Enum { variants } = *enum_ty else { unreachable_debug() };
                         let variant = variants[idx];
-                        self.validate_call(&[variant], &args, is_const)?;
+                        self.validate_call(&[variant], args.iter().copied(), is_const)?;
                         Ok(SemaValue::new(*enum_ty))
                     },
-                    _ => err(CallOfANotFunction, span),
+                    _ => err(CallOfANonFunction, span),
                 }
             },
             &mut ExprKind::UnaryOp { kind, expr, .. } => {
@@ -859,31 +900,6 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         Ok(())
     }
 
-    fn analyze_dot(&mut self, lhs_ty: Type, rhs: &Ident) -> SemaResult<SemaValue> {
-        match lhs_ty {
-            Type::Struct { fields } | Type::Union { fields } => fields
-                .iter()
-                .find(|f| *f.ident.text == *rhs.text)
-                .map(|f| SemaValue::new(f.ty))
-                .ok_or_else2(|| err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)),
-            Type::Type(p) => match *p {
-                Type::Enum { variants } => variants
-                    .iter()
-                    .enumerate()
-                    .find(|(_, f)| *f.ident.text == *rhs.text)
-                    .map(|(idx, _)| SemaValue::new(Type::EnumVariant { enum_ty: p, idx }))
-                    .ok_or_else2(|| err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span)),
-                _ => todo!("dot for type {:?}", *p),
-            },
-            Type::Slice { elem_ty } => Ok(SemaValue::new(match &*rhs.text {
-                "ptr" => Type::Ptr { pointee_ty: elem_ty },
-                "len" => Type::U64,
-                _ => return err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span),
-            })),
-            _ => todo!("err for invalid dot lhs"),
-        }
-    }
-
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
     /// declaration. This also doesn't insert into `self.symbols`.
     fn var_decl_to_value(&mut self, decl: &mut VarDecl) -> SemaResult<SemaValue> {
@@ -932,18 +948,19 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     fn validate_call(
         &mut self,
         params: &[VarDecl],
-        args: &[Ptr<Expr>],
+        args: impl IntoIterator<Item = Ptr<Expr>>,
         is_const: bool,
     ) -> SemaResult<()> {
+        let mut args = args.into_iter();
         // TODO: check for duplicate named arguments
-        for (idx, p) in params.iter().enumerate() {
-            let Some(arg) = args.get(idx) else {
+        for p in params.iter() {
+            let Some(arg) = args.next() else {
                 if p.default.is_some() {
                     continue;
                 }
                 return err(MissingArg, todo!());
             };
-            let arg_ty = self.analyze(*arg, p.ty, is_const)?.ty;
+            let arg_ty = self.analyze(arg, p.ty, is_const)?.ty;
             debug_assert!(p.ty.is_valid()); // TODO: infer?
             if !p.ty.matches(arg_ty) {
                 return err(MismatchedTypes { expected: p.ty, got: arg_ty }, arg.full_span());
