@@ -50,7 +50,7 @@ pub struct BuildArgs {
     pub debug_typed_ast: bool,
     #[arg(long)]
     pub debug_functions: bool,
-    #[arg(long)]
+    #[arg(long, alias = "debug-llvm-ir")]
     pub debug_llvm_ir_unoptimized: bool,
     #[arg(long)]
     pub debug_llvm_ir_optimized: bool,

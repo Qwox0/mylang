@@ -243,6 +243,12 @@ pub enum ExprKind {
         // TODO
     },
 
+    /// `xx input`
+    /// source: Jai
+    Autocast {
+        expr: ExprWithTy,
+    },
+
     /*
     /// `lhs | rhs`
     /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
@@ -375,7 +381,7 @@ impl fmt::Display for Expr {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOpKind {
     /// `*`, `*=`
     Mul,

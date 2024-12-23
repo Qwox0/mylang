@@ -358,6 +358,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 self.lex.advance();
                 expr!(Continue, span)
             },
+            TokenKind::Keyword(Keyword::Autocast) => {
+                let expr =
+                    self.advanced().expr().context("autocast expr").map(ExprWithTy::untyped)?;
+                expr!(Autocast { expr }, span)
+            },
             TokenKind::Keyword(Keyword::Defer) => {
                 let expr = self.advanced().expr().context("defer expr")?;
                 expr!(Defer(expr), span)

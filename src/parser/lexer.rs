@@ -287,6 +287,7 @@ keywords! {
     Return = "return",
     Break = "break",
     Continue = "continue",
+    Autocast = "xx",
     Defer = "defer",
 }
 
@@ -310,6 +311,10 @@ impl Span {
 
     pub fn pos(pos: usize) -> Span {
         Self::new(pos, pos + 1)
+    }
+
+    pub fn end(&self) -> Span {
+        Span::pos(self.end - 1)
     }
 
     pub fn zero_width(pos: usize) -> Span {

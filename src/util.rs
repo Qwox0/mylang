@@ -1,6 +1,8 @@
 use crate::{
+    ast::VarDecl,
     error::SpannedError,
     parser::lexer::{Code, Span},
+    ptr::Ptr,
     type_::Type,
 };
 use core::fmt;
@@ -248,4 +250,8 @@ pub fn replace_escape_chars(s: &str) -> String {
         .replace("\\0", "\0")
         .replace("\\'", "\'")
         .replace("\\\"", "\"")
+}
+
+pub fn is_simple_enum(variants: Ptr<[VarDecl]>) -> bool {
+    variants.iter().all(|v| v.ty == Type::Void)
 }

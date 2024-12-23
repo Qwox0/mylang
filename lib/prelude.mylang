@@ -17,6 +17,9 @@ extern puts: (str: *u8) -> c_int;
 extern malloc: (size: c_size_t) -> ?*void;
 extern free: (ptr: *void) -> void;
 
+extern memcpy: (dest: *void, src: *void, len: c_size_t) -> *void;
+extern memset: (ptr: *void, byte: u8, len: c_size_t) -> *void;
+
 FILE :: struct { /* ? */ };
 
 /*
@@ -48,6 +51,8 @@ extern fread: (data: *void, size: c_size_t, count: c_size_t, stream: *FILE) -> c
 extern exit: (status: c_int) -> never;
 
 extern strtol: (string: *c_char, tailptr: **c_char, base: c_int) -> c_long;
+extern atoi: (string: *c_char) -> c_int;
+extern atol: (string: *c_char) -> c_long;
 
 /// currently only works for one int (use %l in `fmt`)
 extern printf: (fmt: *c_char, x: c_long) -> c_int;
@@ -57,23 +62,30 @@ extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *voi
 
 // ----- my own stuff -----
 
-open_file :: (pathname: []u8, mode: []u8) -> ?*FILE {
+panic :: (msg: []u8) -> never {
+    print_str("PANIC: ");
+    println_str(msg);
+    exit(1)
+}
+
+open_file :: (pathname: []u8, mode: []u8) -> *FILE {
     // currently all string slices are 0 terminated, so this should be fine.
-    fopen(pathname.ptr, mode.ptr)
+    file := fopen(pathname.ptr, mode.ptr);
+    if file == nil do panic("No such file or directory");
+    file
 }
 
 read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     file := open_file(pathname, "rb");
-    if file == nil return "";
     defer fclose(file);
 
     fseek(file, 0, SEEK_END);
     length := ftell(file).as(u64);
-    if length < 0 return "";
+    if length < 0 do panic("Cannot get file size");
     fseek(file, 0, SEEK_SET);
 
     buffer := malloc(length + 1);
-    if buffer == nil return "";
+    if buffer == nil do panic("malloc failed");
 
     fread(buffer, 1, length, file);
 

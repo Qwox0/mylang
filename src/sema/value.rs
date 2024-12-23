@@ -1,5 +1,5 @@
 use super::err::SemaErrorKind;
-use crate::{ptr::Ptr, type_::Type};
+use crate::{ptr::Ptr, type_::Type, util::UnwrapDebug};
 use std::ptr::NonNull;
 
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +30,16 @@ impl SemaValue {
 
     pub fn type_(ty: Ptr<Type>) -> SemaValue {
         SemaValue::new_const(Type::Type(ty), EMPTY_PTR)
+    }
+
+    pub fn enum_variant(enum_ty: Ptr<Type>, idx: usize) -> SemaValue {
+        if let Type::Enum { variants } = *enum_ty
+            && variants.get(idx).unwrap_debug().ty == Type::Void
+        {
+            SemaValue::new(Type::Enum { variants })
+        } else {
+            SemaValue::new(Type::EnumVariant { enum_ty, idx })
+        }
     }
 
     pub fn is_const(&self) -> bool {

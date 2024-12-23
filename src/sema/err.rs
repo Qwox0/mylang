@@ -51,6 +51,7 @@ pub enum SemaErrorKind {
     },
     CannotInferPositionalInitializerTy,
     CannotInferNamedInitializerTy,
+    CannotInferAutocastTy,
     MultiplePossibleInitializerTy,
     DuplicateInInitializer,
     MissingFieldInInitializer {
@@ -67,8 +68,10 @@ pub enum SemaErrorKind {
         got: Type,
     },
 
+    #[error("unknown ident `{}`", &**_0)]
     UnknownIdent(Ptr<str>),
     /// unknown struct or union field or enum variant
+    #[error("no field `{}` on type `{ty}`", &**field)]
     UnknownField {
         ty: Type,
         field: Ptr<str>,
@@ -109,6 +112,14 @@ impl<T, E> SemaResult<T, E> {
     pub fn map_ok<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U, E> {
         match self {
             Ok(t) => Ok(f(t)),
+            NotFinished => NotFinished,
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn and_then<U>(self, f: impl FnOnce(T) -> SemaResult<U, E>) -> SemaResult<U, E> {
+        match self {
+            Ok(t) => f(t),
             NotFinished => NotFinished,
             Err(err) => Err(err),
         }

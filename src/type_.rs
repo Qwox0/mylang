@@ -271,6 +271,7 @@ impl Type {
 
                 mirror (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => Some(Left),
                 mirror (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
+
                 mirror (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
                     if *enum_ty == e && variants[idx].ty == Type::Void => Some(Left),
                 (Type::Option { ty: t1 }, Type::Option { ty: t2 }) => inner(*t1, *t2),
@@ -278,10 +279,7 @@ impl Type {
                 (Type::Function(f1), Type::Function(f2)) => {
                     let functions_match = f1.ret_type.matches(f2.ret_type)
                         && f1.params.len() == f2.params.len()
-                        && f1.params.iter().zip(f2.params.iter()).all(|(a, b)| {
-                            a.ty.matches(b.ty)
-                                || matches!((a.ty, b.ty), (Type::Ptr { .. }, Type::Ptr { .. })) // TODO: remove this
-                        });
+                        && f1.params.iter().zip(f2.params.iter()).all(|(a, b)| a.ty.matches(b.ty));
                     Some(Left).filter(|_| functions_match)
                 },
             );
@@ -385,6 +383,35 @@ impl Type {
             VarDecl::new_basic(Ident::from("ptr"), Type::Ptr { pointee_ty: elem_ty }),
             VarDecl::new_basic(Ident::from("len"), Type::U64),
         ]
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        match self {
+            Type::Void
+            | Type::Never
+            | Type::Int { .. }
+            | Type::Bool
+            | Type::Float { .. }
+            | Type::Ptr { .. } => false,
+            Type::Option { ty } if ty.is_non_null() => ty.is_aggregate(),
+            Type::Function(_) => todo!(),
+            Type::Slice { .. }
+            | Type::Array { .. }
+            | Type::Struct { .. }
+            | Type::Union { .. }
+            | Type::Enum { .. }
+            | Type::Range { .. }
+            | Type::Option { .. } => true,
+
+            Type::Type(_) => todo!(),
+
+            Type::IntLiteral
+            | Type::FloatLiteral
+            | Type::MethodStub { .. }
+            | Type::EnumVariant { .. }
+            | Type::Unset
+            | Type::Unevaluated(_) => panic_debug("invalid type"),
+        }
     }
 }
 

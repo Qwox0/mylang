@@ -291,6 +291,10 @@ impl DebugAst for Expr {
                 lines.write_tree(body);
             },
             ExprKind::Catch { lhs } => todo!(),
+            ExprKind::Autocast { expr } => {
+                lines.write("xx ");
+                lines.write_tree(expr);
+            },
             ExprKind::Defer(expr) => {
                 lines.write("defer ");
                 lines.write_tree(expr);
