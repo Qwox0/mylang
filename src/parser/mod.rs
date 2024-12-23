@@ -13,6 +13,7 @@ use crate::{
     type_::Type,
     util::{UnwrapDebug, collect_all_result_errors, display_spanned_error, replace_escape_chars},
 };
+use core::str;
 use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
@@ -406,7 +407,21 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 }
                 expr!(BCharLit(byte))
             },
-            TokenKind::StrLit => expr!(StrLit(self.advanced().get_text_from_span(span))),
+            TokenKind::StrLit => {
+                let lit = self.advanced().get_text_from_span(span);
+                expr!(StrLit(Ptr::from(&lit[1..lit.len().saturating_sub(1)])))
+            },
+            TokenKind::MultilineStrLitLine => {
+                // Note: bumpalo::Bump allocates in the wrong direction
+                let mut scratch = Vec::with_capacity(1024);
+                while let Some(t) = self.ws0().lex.next_if_kind(TokenKind::MultilineStrLitLine) {
+                    scratch.extend_from_slice(self.get_text_from_span(t.span)[2..].as_bytes());
+                }
+                let bytes = self.alloc_slice(&scratch)?;
+                let text = unsafe { std::str::from_utf8_unchecked(&bytes) };
+                debug_assert!(text.ends_with('\n'));
+                expr!(StrLit(Ptr::from(&text[0..text.len().saturating_sub(1)])))
+            },
             TokenKind::OpenParenthesis => {
                 self.advanced().ws0();
                 // TODO: currently no tuples allowed!

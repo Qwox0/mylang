@@ -39,6 +39,7 @@ pub enum TokenKind {
     CharLit,
     BCharLit,
     StrLit,
+    MultilineStrLitLine,
 
     /// `(`
     OpenParenthesis,
@@ -163,7 +164,6 @@ pub enum TokenKind {
     /// `~`
     Tilde,
     /// `\`
-    /// maybe: <https://ziglang.org/documentation/0.11.0/#Multiline-String-Literals>
     Backslash,
     /// `
     Backtick,
@@ -205,7 +205,6 @@ impl TokenKind {
             //K::Dollar => todo!(),
             //K::At => todo!(),
             //K::Tilde => todo!(),
-            //K::Backslash => todo!(),
             //K::Backtick => todo!(),
             _ => false,
         }
@@ -521,6 +520,7 @@ impl<'c> Lexer<'c> {
             },
             '"' => self.string_literal(),
             '\'' => self.char_literal(),
+            '0' => self.num_literal_with_prefix(),
             '0'..='9' => self.num_literal(),
 
             '(' => TokenKind::OpenParenthesis,
@@ -626,7 +626,10 @@ impl<'c> Lexer<'c> {
             '$' => TokenKind::Dollar,
             '@' => TokenKind::At,
             '~' => TokenKind::Tilde,
-            '\\' => todo!("BackSlash"),
+            '\\' => maybe_followed_by! {
+                default: TokenKind::Backslash,
+                '\\' => self.multiline_string_literal_line(),
+            },
 
             'b' => maybe_followed_by! {
                 default: self.ident_like(start),
@@ -642,7 +645,7 @@ impl<'c> Lexer<'c> {
     fn string_literal(&mut self) -> TokenKind {
         while let Some(c) = self.code.next() {
             match c {
-                '\"' | '\n' => break,
+                '\"' => break,
                 '\\' => {
                     let escape_char = self.code.next();
                     debug_assert_matches!(
@@ -654,6 +657,11 @@ impl<'c> Lexer<'c> {
             }
         }
         TokenKind::StrLit
+    }
+
+    fn multiline_string_literal_line(&mut self) -> TokenKind {
+        while self.code.next().is_some_and(|c| c != '\n') {}
+        TokenKind::MultilineStrLitLine
     }
 
     fn bchar_literal(&mut self) -> TokenKind {
@@ -688,6 +696,15 @@ impl<'c> Lexer<'c> {
                 TokenKind::FloatLit
             },
             _ => TokenKind::IntLit,
+        }
+    }
+
+    fn num_literal_with_prefix(&mut self) -> TokenKind {
+        if self.code.advance_if(|c| matches!(c, 'b' | 'o' | 'x')) {
+            self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
+            TokenKind::IntLit
+        } else {
+            self.num_literal()
         }
     }
 

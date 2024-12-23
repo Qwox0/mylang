@@ -225,7 +225,13 @@ impl<'ctx> Codegen<'ctx> {
             },
             ExprKind::IntLit(code) | ExprKind::FloatLit(code) => match out_ty {
                 Type::Int { bits, is_signed } => {
-                    reg(self.int_type(bits).const_int(code.parse().unwrap_debug(), is_signed))
+                    let res = match code.get(..2) {
+                        Some("0b") => u64::from_str_radix(&code[2..], 2),
+                        Some("0o") => u64::from_str_radix(&code[2..], 8),
+                        Some("0x") => u64::from_str_radix(&code[2..], 16),
+                        _ => u64::from_str_radix(code, 10),
+                    };
+                    reg(self.int_type(bits).const_int(res.unwrap_debug(), is_signed))
                 },
                 Type::Float { bits } => {
                     reg(unsafe { self.float_type(bits).const_float_from_string(code) })
@@ -243,7 +249,7 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::BCharLit(byte) => reg(self.int_type(8).const_int(*byte as u64, false)),
             ExprKind::StrLit(code) => {
                 debug_assert_matches!(out_ty, Type::Slice { elem_ty } if matches!(*elem_ty, Type::U8));
-                let value = replace_escape_chars(&code[1..code.len().saturating_sub(1)]);
+                let value = replace_escape_chars(&code);
                 let ptr = self.builder.build_global_string_ptr(&value, "")?;
                 let len = self.int_type(64).const_int(value.len() as u64, false);
                 self.build_slice(ptr.as_pointer_value(), len)
