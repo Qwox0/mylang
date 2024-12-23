@@ -95,7 +95,7 @@ read_file_as_string_slice :: (pathname: []u8) -> []u8 {
 }
 
 print_str :: (str: []u8) -> void {
-    0..str.len | for idx {
+    for idx in 0..str.len {
         putchar(str[idx]); // handle output == EOF?
     }
 }

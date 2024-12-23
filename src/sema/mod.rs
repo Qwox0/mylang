@@ -631,12 +631,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     | BinOpKind::Div
                     | BinOpKind::Mod
                     | BinOpKind::Add
-                    | BinOpKind::Sub => common_ty,
-                    BinOpKind::ShiftL => todo!(),
-                    BinOpKind::ShiftR => todo!(),
-                    BinOpKind::BitAnd => todo!(),
-                    BinOpKind::BitXor => todo!(),
-                    BinOpKind::BitOr => todo!(),
+                    | BinOpKind::Sub
+                    | BinOpKind::ShiftL
+                    | BinOpKind::ShiftR
+                    | BinOpKind::BitAnd
+                    | BinOpKind::BitXor
+                    | BinOpKind::BitOr => common_ty,
                     BinOpKind::Eq
                     | BinOpKind::Ne
                     | BinOpKind::Lt

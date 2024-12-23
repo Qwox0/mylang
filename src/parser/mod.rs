@@ -167,19 +167,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     },
                     TokenKind::Keyword(Keyword::For) => {
                         let source = ExprWithTy::untyped(lhs);
-                        let iter_var = self.ws0().ident().context("for iteration variable");
-                        // TODO: better compiler errors
-                        // println!("{:?}", iter_var);
-                        // println!("{:?}", self.lex.peek());
-                        // println!("{:?}", self.lex.pos_span());
-                        // display_span_in_code_with_label(
-                        //     self.lex.pos_span(),
-                        //     self.lex.get_code(),
-                        //     "pos",
-                        // );
-                        // todo!();
-                        let iter_var = iter_var?;
-
+                        let iter_var = self.ws0().ident().context("for iteration variable")?;
                         self.ws0().opt_do();
                         let body = self.ws0().expr().context("for body")?;
                         self.alloc(expr!(For { source, iter_var, body, was_piped: true }, t.span))
@@ -334,9 +322,18 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(Match { val, else_body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::For) => {
-                todo!("for");
-                // let (source, iter_var, body) = todo!();
-                // expr!(For { source, iter_var, body }, span)
+                let iter_var = self.advanced().ws0().ident()?;
+                // "in" is not a global keyword
+                match self.ws0().tok(TokenKind::Ident) {
+                    Ok(i) if &*self.get_text_from_span(i.span) == "in" => Ok(()),
+                    Ok(t) => ParseError::unexpected_token(t),
+                    Err(e) => Err(e),
+                }
+                .context("expected `in`")?;
+                let source = ExprWithTy::untyped(self.ws0().expr().context("for .. in source")?);
+                self.ws0().opt_do();
+                let body = self.expr().context("for .. in body")?;
+                expr!(For { source, iter_var, body, was_piped: false })
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr().context("while condition")?;
@@ -837,7 +834,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// this doesn't check if the text at span is valid
     pub fn ident_from_span(&self, span: Span) -> Ident {
-        Ident { text: self.lex.get_code()[span].into(), span }
+        Ident { text: self.get_text_from_span(span), span }
     }
 
     /// Parses the `do` keyword 0 or 1 times.
@@ -997,7 +994,7 @@ pub enum FollowingOperator {
         is_inclusive: bool,
     },
 
-    /// `a | b`
+    /// `a |> b`
     Pipe,
 
     /// `a = b`
@@ -1054,14 +1051,11 @@ impl FollowingOperator {
             TokenKind::AmpersandAmpersand => FollowingOperator::BinOp(BinOpKind::And),
             TokenKind::AmpersandAmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::And),
             TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
-            TokenKind::Pipe => {
-                // TODO: find a solution for pipe vs bitor (currently bitand, bitxor and bitor
-                // are ignored)
-                FollowingOperator::Pipe
-            },
+            TokenKind::Pipe => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
             TokenKind::PipePipe => FollowingOperator::BinOp(BinOpKind::Or),
             TokenKind::PipePipeEq => FollowingOperator::BinOpAssign(BinOpKind::Or),
             TokenKind::PipeEq => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
+            TokenKind::PipeGt => FollowingOperator::Pipe,
             TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),
             TokenKind::CaretEq => FollowingOperator::BinOpAssign(BinOpKind::BitXor),
             TokenKind::Dot => FollowingOperator::Dot,

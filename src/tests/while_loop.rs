@@ -21,7 +21,7 @@ sum") => i64);
 fn while_pipe_condition() {
     let out = jit_run_test!(format!("
 mut idx := 0;
-idx < 3 | while idx += 1;
+idx < 3 |> while idx += 1;
 idx") => i64);
     assert_eq!(out.unwrap(), 3);
 }
@@ -30,7 +30,7 @@ idx") => i64);
 fn while_break_in_if() {
     let out = jit_run_test!("
 mut idx := 0;
-true | while {
+true |> while {
     if idx == 3 break;
     idx += 1;
 };
@@ -42,7 +42,7 @@ idx" => i64);
 fn while_continue_at_end() {
     let out = jit_run_test!("
 mut idx := 0;
-idx < 5 | while {
+idx < 5 |> while {
     idx += 1;
     continue;
 };
@@ -54,7 +54,7 @@ idx" => i64);
 fn while_continue_and_break() {
     let out = jit_run_test!("
 mut idx := 0;
-true | while {
+while true {
     idx += 1;
     if idx < 10 continue;
     break;

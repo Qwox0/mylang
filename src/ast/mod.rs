@@ -222,7 +222,7 @@ pub enum ExprKind {
         was_piped: bool,
     },
 
-    /// TODO: normal syntax
+    /// `for <iter_var> in <source> <body>`
     /// `<source> | for <iter_var> <body>`
     For {
         source: ExprWithTy,
@@ -406,8 +406,6 @@ pub enum BinOpKind {
     /// `^`, `^=`
     BitXor,
 
-    /// TODO: find a solution for pipe vs bitor (currently bitand, bitxor and
-    /// bitor are ignored)
     /// `|`, `|=`
     BitOr,
 

@@ -76,7 +76,7 @@ fn bench_parse3(b: &mut Bencher) {
     let code = "
 pub test :: x -> 1+2*x;
 pub sub :: (a, b) -> -b + a;
-main :: -> false | if test(1) else (10 | sub(3));
+main :: -> false |> if test(1) else (10 |> sub(3));
 ";
     b.iter(|| bench_parse(code));
 }
@@ -112,7 +112,7 @@ pub sub2 :: (values: Sub) -> values.a - values.b;
 mymain :: -> {
     mut a := test(1);
     mut a := 10.0;
-    a = a == 0 | if test(1) else (10 | sub(1)) | sub(3);
+    a = a == 0 |> if test(1) else (10.sub(1)) |> sub(3);
     b := test();
 
     if defer_test() return 10000.0;

@@ -97,7 +97,7 @@ ptr.{
     c = .[5.2, 2.0, 3.3],
 };
 mut sum := 0.0;
-ptr.*.c | for x {
+ptr.*.c |> for x {
     sum += x;
 };
 sum";

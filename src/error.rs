@@ -1,3 +1,5 @@
+#[cfg(not(debug_assertions))]
+use crate::codegen::llvm::CodegenError;
 use crate::{
     parser::{ParseError, lexer::Span},
     sema::SemaError,

@@ -119,6 +119,8 @@ pub enum TokenKind {
     PipePipeEq,
     /// `|=`
     PipeEq,
+    /// `|>`
+    PipeGt,
     /// `^`
     Caret,
     /// `^=`
@@ -593,6 +595,7 @@ impl<'c> Lexer<'c> {
                     '=' => TokenKind::PipePipeEq,
                 },
                 '=' => TokenKind::PipeEq,
+                '>' => TokenKind::PipeGt,
             },
             '^' => maybe_followed_by! {
                 default: TokenKind::Caret,
