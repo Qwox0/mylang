@@ -798,21 +798,19 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             t = self.peek_tok().context("expected variable marker or ident")?;
         };
 
-        let t = self.ws0().lex.peek();
-        let init = match t.map(|t| t.kind) {
-            Some(TokenKind::Colon) => {
-                self.lex.advance();
-                return self.typed_decl(markers, ident);
+        match self.ws0().lex.peek() {
+            Some(Token { kind: TokenKind::Colon, .. }) => {
+                self.advanced().typed_decl(markers, ident)
             },
-            Some(TokenKind::ColonEq | TokenKind::ColonColon) => {
-                self.lex.advance();
-                Some(self.expr().context("variable initialization")?)
+            Some(t @ Token { kind: TokenKind::ColonEq | TokenKind::ColonColon, .. }) => {
+                let init = Some(self.advanced().expr().context("variable initialization")?);
+                let is_const = t.kind == TokenKind::ColonColon;
+                let span = ident.span;
+                Ok((VarDecl { markers, ident, ty: Type::Unset, default: init, is_const }, span))
             },
-            _ => None,
-        };
-        let is_const = t.is_some_and(|t| t.kind == TokenKind::ColonColon);
-        let span = ident.span;
-        Ok((VarDecl { markers, ident, ty: Type::Unset, default: init, is_const }, span))
+            Some(t) => ParseError::unexpected_token(t).context("expected ':', ':=' or '::'"),
+            None => err(NoInput, self.lex.pos_span()),
+        }
     }
 
     /// starts parsing after the colon:
