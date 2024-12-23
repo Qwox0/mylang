@@ -310,6 +310,7 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
             .arg(obj_file_path.as_os_str())
             .arg("-o")
             .arg(exe_file_path.as_os_str())
+            .arg("-lm")
             .status()
             .unwrap();
         if !err.success() {

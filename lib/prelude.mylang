@@ -6,6 +6,7 @@ c_int :: i32;
 c_long :: i64;
 c_size_t :: u64;
 c_off64_t :: i64;
+c_double :: f64;
 
 /// writes a character to stdout
 //extern putchar: (ch: c_int) -> c_int;
@@ -59,6 +60,8 @@ extern printf: (fmt: *c_char, x: c_long) -> c_int;
 
 /// <https://www.gnu.org/software/libc/manual/html_node/Array-Sort-Function.html>
 extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *void, r: *void) -> c_int) -> void;
+
+extern log10: (x: c_double) -> c_double;
 
 // ----- my own stuff -----
 

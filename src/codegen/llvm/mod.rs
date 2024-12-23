@@ -1335,6 +1335,25 @@ impl<'ctx> Codegen<'ctx> {
                 reg(self.builder.build_int_cast_sign_flag(lhs, rhs_ty, is_signed, "")?)
             },
 
+            (i @ Type::Int { is_signed, .. }, f @ Type::Float { .. }) => {
+                let int = self.sym_as_val(sym, i)?.int_val();
+                let float_ty = self.llvm_type(f).float_ty();
+                reg(if is_signed {
+                    self.builder.build_signed_int_to_float(int, float_ty, "")?
+                } else {
+                    self.builder.build_unsigned_int_to_float(int, float_ty, "")?
+                })
+            },
+            (f @ Type::Float { .. }, i @ Type::Int { is_signed, .. }) => {
+                let float = self.sym_as_val(sym, f)?.float_val();
+                let int_ty = self.llvm_type(i).int_ty();
+                reg(if is_signed {
+                    self.builder.build_float_to_signed_int(float, int_ty, "")?
+                } else {
+                    self.builder.build_float_to_unsigned_int(float, int_ty, "")?
+                })
+            },
+
             (e @ Type::Enum { variants }, i @ Type::Int { .. }) if is_simple_enum(variants) => {
                 let lhs = self.sym_as_val(sym, e)?.struct_val();
                 let tag = self.builder.build_extract_value(lhs, 0, "")?.into_int_value();
