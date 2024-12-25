@@ -55,15 +55,18 @@ impl DebugAst for Expr {
             ExprKind::BoolLit(b) => lines.write(if *b { "true" } else { "false" }),
             ExprKind::CharLit(char) => lines.write(&format!("'{}'", *char)),
             ExprKind::BCharLit(_) => todo!(),
-            ExprKind::PtrTy { is_mut, ty } => {
+            ExprKind::PtrTy { ty, is_mut } => {
                 lines.write("*");
                 if *is_mut {
                     lines.write("mut ");
                 }
                 lines.write_tree(ty);
             },
-            ExprKind::SliceTy { ty } => {
+            ExprKind::SliceTy { ty, is_mut } => {
                 lines.write("[]");
+                if *is_mut {
+                    lines.write("mut ");
+                }
                 lines.write_tree(ty);
             },
             ExprKind::ArrayTy { count, ty } => {
@@ -269,13 +272,16 @@ impl DebugAst for Expr {
             },
             ExprKind::Match { val, else_body, was_piped } => todo!(),
             ExprKind::For { source, iter_var, body, was_piped } => {
-                if !was_piped {
-                    todo!()
+                if *was_piped {
+                    lines.write_tree(source);
+                    lines.write("|for ");
+                    lines.write_tree(iter_var);
+                } else {
+                    lines.write("for ");
+                    lines.write_tree(iter_var);
+                    lines.write(" in ");
+                    lines.write_tree(source);
                 }
-                // TODO: normal syntax
-                lines.write_tree(source);
-                lines.write("|for ");
-                lines.write_tree(iter_var);
                 lines.write(" ");
                 lines.write_tree(body);
             },

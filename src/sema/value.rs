@@ -13,7 +13,10 @@ pub struct SemaValue {
 
 impl SemaValue {
     pub fn new(ty: Type) -> SemaValue {
-        SemaValue { ty, const_val: None }
+        match ty {
+            Type::Void | Type::Never | Type::Type(_) => SemaValue::new_const(ty, EMPTY_PTR),
+            _ => SemaValue { ty, const_val: None },
+        }
     }
 
     pub fn new_const(ty: Type, val: Ptr<()>) -> SemaValue {

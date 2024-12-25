@@ -195,7 +195,7 @@ impl TokenKind {
             K::Keyword(Keyword::Else) | K::CloseParenthesis | K::CloseBracket | K::CloseBrace |
             //K::FatArrow => todo!(),
             //K::Arrow => todo!(),
-            K::Pipe |
+            K::PipeGt |
             K::Comma |
             //K::Colon => todo!(),
             //K::ColonColon => todo!(),

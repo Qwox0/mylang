@@ -63,6 +63,7 @@ pub enum SemaErrorKind {
 
     MissingArg,
     MissingElseBranch,
+    #[error("IncompatibleBranches (expected: {expected}, got: {got})")]
     IncompatibleBranches {
         expected: Type,
         got: Type,

@@ -147,6 +147,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 return self.function_tail(params, span);
             },
             FollowingOperator::PostOp(kind) => {
+                let kind = if kind == UnaryOpKind::AddrOf
+                    && self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut))
+                {
+                    UnaryOpKind::AddrMutOf
+                } else {
+                    kind
+                };
                 expr!(UnaryOp { kind, expr: lhs, is_postfix: true }, span)
             },
             FollowingOperator::BinOp(op) => {
@@ -463,12 +470,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             TokenKind::OpenBracket => {
                 let count = self.advanced().ws0().expr().opt().context("array type count")?;
                 self.tok(TokenKind::CloseBracket).context("array ty ']'")?;
-                let ty_expr = self.expr_(PREOP_PRECEDENCE)?;
+                let is_mut = self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let ty_expr = self.ws0().expr_(PREOP_PRECEDENCE)?;
                 let ty_span = ty_expr.full_span();
                 let ty = ty(ty_expr);
                 match count {
                     Some(count) => expr!(ArrayTy { count, ty }, span.join(ty_span)),
-                    None => expr!(SliceTy { ty }, span.join(ty_span)),
+                    None => expr!(SliceTy { ty, is_mut }, span.join(ty_span)),
                 }
             },
             TokenKind::OpenBrace => return self.advanced().block(span).context("block"),
@@ -487,10 +495,10 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
-                self.advanced().ws0();
-                let is_mut = self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let pointee = self.expr_(PREOP_PRECEDENCE).context("pointee type")?;
-                expr!(PtrTy { is_mut, ty: ty(pointee) }, span.join(pointee.full_span()))
+                let is_mut =
+                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let pointee = self.ws0().expr_(PREOP_PRECEDENCE).context("pointee type")?;
+                expr!(PtrTy { ty: ty(pointee), is_mut }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
                 let is_mut =
@@ -720,20 +728,18 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         let mut list_pool = ScratchPool::new();
         let mut has_trailing_semicolon = false;
         loop {
-            let expr = match self.expr() {
-                Ok(expr) => expr,
-                Err(ParseError {
-                    kind: ParseErrorKind::UnexpectedToken(TokenKind::CloseBrace),
-                    ..
-                }) => break,
-                err => return err.context("expr in block"),
-            };
+            if matches!(
+                self.ws0().lex.peek(),
+                None | Some(Token { kind: TokenKind::CloseBrace, .. })
+            ) {
+                break;
+            }
+            let expr = self.expr().context("expr in block")?;
             list_pool.push(ExprWithTy::untyped(expr)).map_err(|e| self.wrap_alloc_err(e))?;
             has_trailing_semicolon = self.ws0().lex.advance_if_kind(TokenKind::Semicolon);
             if !has_trailing_semicolon && expr.kind.block_expects_trailing_semicolon() {
                 break;
             }
-            self.ws0();
         }
         let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
         let closing_brace = self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?;

@@ -206,13 +206,14 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 ()
             }),
             #[allow(unused_variables)]
-            ExprKind::PtrTy { is_mut, ty } => {
+            ExprKind::PtrTy { ty, is_mut } => {
                 self.eval_type(ty)?;
                 debug_assert!(ty.is_valid());
                 let pointee_ty = self.alloc(*ty)?;
                 self.alloc(Type::Ptr { pointee_ty }).map_ok(SemaValue::type_)
             },
-            ExprKind::SliceTy { ty } => {
+            #[allow(unused_variables)]
+            ExprKind::SliceTy { ty, is_mut } => {
                 self.eval_type(ty)?;
                 debug_assert!(ty.is_valid());
                 let elem_ty = self.alloc(*ty)?;
@@ -489,11 +490,12 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     _ => {},
                 }
 
-                let Ok(Type::Function(function)) =
-                    self.get_symbol(rhs.text, rhs.span).and_then(SemaSymbol::get_type)
-                else {
-                    return err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span);
-                };
+                let function =
+                    match self.get_symbol(rhs.text, rhs.span).and_then(SemaSymbol::get_type) {
+                        Ok(Type::Function(function)) => function,
+                        NotFinished => return NotFinished,
+                        _ => return err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span),
+                    };
 
                 Ok(SemaValue::new(Type::MethodStub { function, first_expr: *lhs }))
             },
@@ -1000,7 +1002,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     fn eval_type(&mut self, ty: &mut Type) -> SemaResult<()> {
         if let Type::Unevaluated(ty_expr) = *ty {
             *ty = *match self.analyze(ty_expr, Type::Unset, true)?.ty {
-                Type::Never => todo!(),
+                Type::Never => Type::ptr_never(),
                 Type::Type(t) => t,
                 _ => return Err(err_val(NotAType, ty_expr.full_span())),
             };

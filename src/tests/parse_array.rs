@@ -85,7 +85,7 @@ test_helper! { array_ty_f64_expr_count: "[1 + 1]f64", |arr| {
 }}
 
 test_helper! { slice_ty_f64: "[]f64", |arr| {
-    let ExprKind::SliceTy { ty } = arr else {
+    let ExprKind::SliceTy { ty, is_mut: false } = arr else {
         panic!("not a slice type")
     };
     if let Type::Unevaluated(expr) = ty && let ExprKind::Ident(ty) = expr.kind {

@@ -42,12 +42,14 @@ pub enum ExprKind {
     /// `*<ty>`
     /// `*mut <ty>`
     PtrTy {
-        is_mut: bool,
         ty: Type,
+        is_mut: bool,
     },
     /// `[]T` -> `struct { ptr: *T, len: u64 }`
+    /// `[]mut T`
     SliceTy {
         ty: Type,
+        is_mut: bool,
     },
     /// `[<count>]ty`
     ArrayTy {
@@ -498,7 +500,7 @@ impl BinOpKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOpKind {
     /// `& <expr>`, `<expr>.&`
     AddrOf,

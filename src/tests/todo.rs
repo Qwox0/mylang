@@ -140,3 +140,24 @@ a" => i64)
     .unwrap();
     assert_eq!(out, 3);
 }
+
+#[test]
+fn fix_precedence_range() {
+    let a = 1..{
+        let x = 1;
+        x
+    };
+    for _ in {
+        let x = 1;
+        0..x
+    } {}
+    for _ in 1.. {
+        let x = 1;
+        //x // -> Error
+        break;
+    }
+
+    //jit_run_test!("for x in 0.. do break;" => ()).unwrap();
+    //jit_run_test!("if 1 == 0.. do {};" => ()).unwrap();
+    jit_run_test!("if true do 0.. else 1..;" => ()).unwrap();
+}
