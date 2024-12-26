@@ -10,6 +10,7 @@ use crate::{
 mod alignment;
 mod binop;
 mod call_conv_c;
+mod defer;
 mod enum_;
 mod for_loop;
 mod function;

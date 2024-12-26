@@ -3,8 +3,8 @@ use crate::{
         BinOpKind, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind, VarDecl, VarDeclList,
         VarDeclListTrait,
     },
-    defer_stack::DeferStack,
     ptr::Ptr,
+    scoped_stack::ScopedStack,
     symbol_table::SymbolTable,
     type_::{RangeKind, Type},
     util::{
@@ -121,12 +121,15 @@ pub struct Codegen<'ctx> {
 
     symbols: SymbolTable<Symbol<'ctx>>,
     type_table: HashMap<VarDeclList, StructType<'ctx>>,
-    defer_stack: DeferStack,
+    defer_stack: ScopedStack<Ptr<Expr>>,
 
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_loop: Option<Loop<'ctx>>,
     cur_var_name: Option<Ptr<str>>,
     sret_ptr: Option<PointerValue<'ctx>>,
+
+    return_depth: usize,
+    continue_break_depth: usize,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -141,11 +144,13 @@ impl<'ctx> Codegen<'ctx> {
             module,
             symbols: SymbolTable::with_one_scope(),
             type_table: HashMap::new(),
-            defer_stack: DeferStack::default(),
+            defer_stack: ScopedStack::default(),
             cur_fn: None,
             cur_loop: None,
             cur_var_name: None,
             sret_ptr: None,
+            return_depth: 0,
+            continue_break_depth: 0,
         }
     }
 
@@ -787,6 +792,13 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::If { condition, then_body, else_body, .. } => {
                 let func = self.cur_fn.unwrap_debug();
                 let condition = try_compile_expr_as_val!(self, *condition, Type::Bool).bool_val();
+                let condition = if condition.get_type().get_bit_width() > 1 {
+                    let i1 = self.context.custom_width_int_type(1);
+                    // TODO: truncate the bool on load
+                    self.builder.build_int_truncate(condition, i1, "")?
+                } else {
+                    condition
+                };
 
                 let mut then_bb = self.context.append_basic_block(func, "then");
                 let mut else_bb = self.context.append_basic_block(func, "else");
@@ -840,6 +852,9 @@ impl<'ctx> Codegen<'ctx> {
             },
             ExprKind::Match { .. } => todo!(),
             ExprKind::For { source, iter_var, body, .. } => {
+                let outer_continue_break_depth = self.continue_break_depth;
+                self.continue_break_depth = 0;
+
                 let source_ty = self.llvm_type(source.ty);
                 let source_sym = try_not_never!(self.compile_typed_expr(*source)?);
 
@@ -903,6 +918,7 @@ impl<'ctx> Codegen<'ctx> {
                     _ => panic_debug("for loop over other types"),
                 };
 
+                self.continue_break_depth = outer_continue_break_depth;
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
@@ -911,6 +927,9 @@ impl<'ctx> Codegen<'ctx> {
                 let cond_bb = self.context.append_basic_block(func, "while.cond");
                 let body_bb = self.context.append_basic_block(func, "while.body");
                 let end_bb = self.context.append_basic_block(func, "while.end");
+
+                let outer_continue_break_depth = self.continue_break_depth;
+                self.continue_break_depth = 0;
 
                 // entry
                 self.builder.build_unconditional_branch(cond_bb)?;
@@ -931,6 +950,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 // end
                 self.builder.position_at_end(end_bb);
+                self.continue_break_depth = outer_continue_break_depth;
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
@@ -944,11 +964,11 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Return { expr: val } => {
                 if let Some(val) = val {
                     let sym = self.compile_typed_expr(*val)?;
-                    if self.compile_defer_exprs()? {
+                    if self.compile_multiple_defer_scopes(self.return_depth)? {
                         self.build_return(sym, val.ty)?;
                     }
                 } else {
-                    if self.compile_defer_exprs()? {
+                    if self.compile_multiple_defer_scopes(self.return_depth)? {
                         self.builder.build_return(None)?;
                     }
                 }
@@ -958,11 +978,13 @@ impl<'ctx> Codegen<'ctx> {
                 if expr.is_some() {
                     todo!("break with expr")
                 }
+                let _ = self.compile_multiple_defer_scopes(self.continue_break_depth)?;
                 let bb = self.cur_loop.unwrap_debug().end_bb;
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
             },
             ExprKind::Continue => {
+                let _ = self.compile_multiple_defer_scopes(self.continue_break_depth)?;
                 let bb = self.cur_loop.unwrap_debug().continue_bb;
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
@@ -1179,6 +1201,8 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
 
         let outer_fn = self.cur_fn.replace(func);
+        let outer_return_depth = self.return_depth;
+        self.return_depth = 0;
 
         self.open_scope();
         let res = try {
@@ -1218,6 +1242,7 @@ impl<'ctx> Codegen<'ctx> {
             }
         };
         self.close_scope(true)?; // TODO: is `true` correct?
+        self.return_depth = outer_return_depth;
         self.cur_fn = outer_fn;
         self.builder.clear_insertion_position();
         res
@@ -2148,6 +2173,8 @@ impl<'ctx> Codegen<'ctx> {
     fn open_scope(&mut self) {
         self.symbols.open_scope();
         self.defer_stack.open_scope();
+        self.return_depth += 1;
+        self.continue_break_depth += 1;
     }
 
     fn close_scope(&mut self, do_compile_defer: bool) -> CodegenResult<()> {
@@ -2156,6 +2183,8 @@ impl<'ctx> Codegen<'ctx> {
         }
         self.symbols.close_scope();
         self.defer_stack.close_scope();
+        self.return_depth -= 1;
+        self.continue_break_depth -= 1;
         Ok(())
     }
 
@@ -2167,6 +2196,19 @@ impl<'ctx> Codegen<'ctx> {
             let s = self.compile_expr(*expr, Type::Void)?;
             if s == Symbol::Never {
                 return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn compile_multiple_defer_scopes(&mut self, depth: usize) -> CodegenResult<bool> {
+        let defer_stack = unsafe { forget_lifetime(&self.defer_stack) };
+        for scope in defer_stack.iter_scopes().take(depth) {
+            for expr in scope.iter().rev() {
+                let s = self.compile_expr(*expr, Type::Void)?;
+                if s == Symbol::Never {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)

@@ -20,7 +20,7 @@ pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
-pub mod defer_stack;
+pub mod scoped_stack;
 pub mod error;
 pub mod parser;
 pub mod ptr;

@@ -7,9 +7,9 @@ use crate::{
         BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind, VarDecl,
         VarDeclListTrait,
     },
-    defer_stack::DeferStack,
     parser::lexer::{Code, Span},
     ptr::Ptr,
+    scoped_stack::ScopedStack,
     symbol_table::SymbolTable,
     type_::{RangeKind, Type},
     util::{
@@ -67,7 +67,7 @@ pub struct Sema<'c, 'alloc> {
     struct_stack: Vec<Vec<Ptr<Type>>>,
     enum_stack: Vec<Vec<Ptr<Type>>>,
     function_stack: Vec<Ptr<Fn>>,
-    defer_stack: DeferStack,
+    defer_stack: ScopedStack<Ptr<Expr>>,
 
     pub errors: Vec<SemaError>,
 
@@ -89,7 +89,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             struct_stack: vec![vec![]],
             enum_stack: vec![vec![]],
             function_stack: vec![],
-            defer_stack: DeferStack::default(),
+            defer_stack: ScopedStack::default(),
             errors: vec![],
             alloc,
             #[cfg(debug_assertions)]
@@ -170,30 +170,20 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }
             },
             ExprKind::IntLit(code) => {
-                let ty = if ty_hint == Type::Unset {
-                    Type::IntLiteral
-                } else {
-                    debug_assert_matches!(
-                        ty_hint,
-                        Type::Int { .. }
-                            | Type::Float { .. }
-                            | Type::IntLiteral
-                            | Type::FloatLiteral
-                            | Type::Never
-                    );
-                    ty_hint
+                let ty = match ty_hint {
+                    Type::Never
+                    | Type::Int { .. }
+                    | Type::Float { .. }
+                    | Type::IntLiteral
+                    | Type::FloatLiteral => ty_hint,
+                    _ => Type::IntLiteral,
                 };
                 lit_to_val!(ty, code.parse::<i128>().unwrap_debug())
             },
             ExprKind::FloatLit(code) => {
-                let ty = if ty_hint == Type::Unset {
-                    Type::FloatLiteral
-                } else {
-                    debug_assert_matches!(
-                        ty_hint,
-                        Type::Float { .. } | Type::FloatLiteral | Type::Never
-                    );
-                    ty_hint
+                let ty = match ty_hint {
+                    Type::Never | Type::Float { .. } | Type::FloatLiteral => ty_hint,
+                    _ => Type::FloatLiteral,
                 };
                 lit_to_val!(ty, code.parse::<f64>().unwrap_debug())
             },

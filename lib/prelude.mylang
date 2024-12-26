@@ -71,6 +71,12 @@ panic :: (msg: []u8) -> never {
     exit(1)
 }
 
+malloc0 :: (size: c_size_t) -> {
+    ptr := malloc(size);
+    memset(ptr, 0, size);
+    ptr
+}
+
 open_file :: (pathname: []u8, mode: []u8) -> *FILE {
     // currently all string slices are 0 terminated, so this should be fine.
     file := fopen(pathname.ptr, mode.ptr);

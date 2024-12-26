@@ -106,31 +106,6 @@ fn parse_err_missing_if_body() {
 
 #[test]
 #[ignore = "unfinished test"]
-fn defer_multiple_blocks() {
-    let out = jit_run_test!(raw "
-test :: -> {
-    mut var: i64 = 0;
-    {
-        defer var += 1;
-        {
-            defer var += 1;
-            {
-                defer var += 1;
-                return var;
-            }
-            defer var += 10;
-        }
-        defer var += 10;
-    }
-    defer var += 10;
-    var
-}" => i64)
-    .unwrap();
-    assert_eq!(out, 3);
-}
-
-#[test]
-#[ignore = "unfinished test"]
 fn fix_shadowing_for_defer() {
     let out = jit_run_test!("
 mut a := 10;
