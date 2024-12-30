@@ -1,143 +1,66 @@
 use crate::{
     ast::{Expr, debug::DebugAst},
     cli::{BuildArgs, OutKind},
-    codegen::llvm::{self, CodegenResult},
+    codegen::llvm,
     parser::{
         StmtIter,
         lexer::{Code, Lexer},
         parser_helper::ParserInterface,
     },
     ptr::Ptr,
-    sema::{self, Sema, SemaError, SemaResult},
-    type_::Type,
+    sema::{self, Sema, SemaResult},
     util::{self, display_spanned_error},
 };
 use inkwell::context::Context;
-use std::time::{Duration, Instant};
+use std::{
+    assert_matches::debug_assert_matches,
+    time::{Duration, Instant},
+};
 
-pub struct Compiler<'c, 'ctx, 'alloc> {
-    pub sema: Sema<'c, 'alloc>,
-    pub codegen: llvm::Codegen<'ctx>,
+impl<'c, 'alloc> Sema<'c, 'alloc> {
+    /// This doesn't panic if an error is found.
+    /// the caller has to check if `sema.errors` contains an error
+    pub fn analyze_all<'ctx>(&mut self, stmts: &[Ptr<Expr>]) -> Vec<usize> {
+        for s in stmts.iter().copied() {
+            self.preload_top_level(s);
+        }
+
+        let mut finished = vec![false; stmts.len()];
+        let mut remaining_count = stmts.len();
+        let mut order = Vec::with_capacity(stmts.len());
+        while finished.iter().any(std::ops::Not::not) {
+            let old_remaining_count = remaining_count;
+            debug_assert!(stmts.len() == finished.len());
+            remaining_count = 0;
+            for (idx, (&s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
+                if *finished {
+                    continue;
+                }
+                let res = self.analyze_top_level(s);
+                *finished = res != SemaResult::NotFinished;
+                match res {
+                    SemaResult::Ok(_) => order.push(idx),
+                    SemaResult::NotFinished => remaining_count += 1,
+                    SemaResult::Err(_) => {},
+                }
+            }
+            // println!("finished statements: {:?}", finished);
+            if remaining_count == old_remaining_count {
+                panic!("cycle detected") // TODO: find location of cycle
+            }
+        }
+
+        order
+    }
 }
 
-impl<'c, 'ctx, 'alloc> Compiler<'c, 'ctx, 'alloc> {
-    pub fn new(sema: Sema<'c, 'alloc>, codegen: llvm::Codegen<'ctx>) -> Compiler<'c, 'ctx, 'alloc> {
-        Compiler { sema, codegen }
-    }
-
-    pub fn compile_stmts(&mut self, stmts: &[Ptr<Expr>]) -> Result<(), ()> {
-        for s in stmts.iter().copied() {
-            self.sema.preload_top_level(s);
-        }
-
-        let mut finished = vec![false; stmts.len()];
-        let mut remaining_count = stmts.len();
-        let mut order = Vec::with_capacity(stmts.len());
-        while finished.iter().any(std::ops::Not::not) {
-            let old_remaining_count = remaining_count;
-            debug_assert!(stmts.len() == finished.len());
-            remaining_count = 0;
-            for (idx, (&s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
-                if *finished {
-                    continue;
-                }
-                let res = self.sema.analyze_top_level(s);
-                *finished = res != SemaResult::NotFinished;
-                match res {
-                    SemaResult::Ok(_) => order.push(idx),
-                    SemaResult::NotFinished => remaining_count += 1,
-                    SemaResult::Err(_) => {},
-                }
-            }
-            // println!("finished statements: {:?}", finished);
-            if remaining_count == old_remaining_count {
-                panic!("cycle detected") // TODO: find location of cycle
-            }
-        }
-
-        if !self.sema.errors.is_empty() {
-            return Err(());
-        }
-
+impl<'ctx> llvm::Codegen<'ctx> {
+    pub fn compile_all(&mut self, stmts: &[Ptr<Expr>], order: &[usize]) {
+        debug_assert_eq!(stmts.len(), order.len());
         for idx in order {
-            let s = stmts[idx];
-            self.codegen.compile_top_level(s);
+            let s = stmts[*idx];
+            self.compile_top_level(s);
         }
-
-        Ok(())
-    }
-
-    pub fn compile_stmts_dev(
-        &mut self,
-        stmts: &[Ptr<Expr>],
-        code: &Code,
-        debug_typed_ast: bool,
-    ) -> (Duration, Duration) {
-        let sema_start = Instant::now();
-        for s in stmts.iter().copied() {
-            self.sema.preload_top_level(s);
-        }
-
-        let mut finished = vec![false; stmts.len()];
-        let mut remaining_count = stmts.len();
-        let mut order = Vec::with_capacity(stmts.len());
-        while finished.iter().any(std::ops::Not::not) {
-            let old_remaining_count = remaining_count;
-            debug_assert!(stmts.len() == finished.len());
-            remaining_count = 0;
-            for (idx, (&s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
-                if *finished {
-                    continue;
-                }
-                let res = self.sema.analyze_top_level(s);
-                *finished = res != SemaResult::NotFinished;
-                match res {
-                    SemaResult::Ok(_) => order.push(idx),
-                    SemaResult::NotFinished => remaining_count += 1,
-                    SemaResult::Err(_) => {},
-                }
-            }
-            // println!("finished statements: {:?}", finished);
-            if remaining_count == old_remaining_count {
-                panic!("cycle detected") // TODO: find location of cycle
-            }
-        }
-
-        if !self.sema.errors.is_empty() {
-            for e in self.sema.errors.iter() {
-                display_spanned_error(e, code);
-            }
-            std::process::exit(1);
-        }
-
-        let sema_duration = sema_start.elapsed();
-
-        #[cfg(debug_assertions)]
-        if debug_typed_ast {
-            println!("\n### Typed AST Nodes:");
-            for s in stmts.iter().copied() {
-                println!("stmt @ {:?}", s);
-                s.print_tree();
-            }
-            println!();
-        }
-
-        let codegen_start = Instant::now();
-
-        for idx in order {
-            let s = stmts[idx];
-            self.codegen.compile_top_level(s);
-        }
-
-        (sema_duration, codegen_start.elapsed())
-    }
-
-    pub fn get_sema_errors(&self) -> &[SemaError] {
-        &self.sema.errors
-    }
-
-    pub fn optimize(&self, target_machine: &llvm::TargetMachine, level: u8) -> CodegenResult<()> {
-        self.codegen.optimize_module(target_machine, level)
     }
 }
 
@@ -146,6 +69,10 @@ pub enum CompileMode {
     Check,
     Build,
     Run,
+
+    // for benchmarks:
+    Parse,
+    Codegen,
 }
 
 pub fn compile2(mode: CompileMode, args: &BuildArgs) {
@@ -176,7 +103,13 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) {
     compile(code.as_ref(), mode, args)
 }
 
-fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
+#[inline]
+pub fn parse(code: &Code, alloc: &bumpalo::Bump) -> Vec<Ptr<Expr>> {
+    StmtIter::parse_all_or_fail(code, alloc)
+}
+
+pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
+    let mut compile_time = CompileDurations::default();
     let alloc = bumpalo::Bump::new();
 
     if args.debug_tokens {
@@ -197,100 +130,84 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
     }
 
     let frontend_parse_start = Instant::now();
-    let stmts = StmtIter::parse_all_or_fail(code, &alloc);
-    let frontend_parse_duration = frontend_parse_start.elapsed();
+    let stmts = parse(code, &alloc);
+    compile_time.parser = frontend_parse_start.elapsed();
 
-    let sema = sema::Sema::new(code, &alloc, args.debug_types);
-    let context = Context::create();
-    let codegen = llvm::Codegen::new_module(&context, "dev");
-    let mut compiler = Compiler::new(sema, codegen);
-
-    enum FrontendDurations {
-        Detailed { sema: Duration, codegen: Duration },
-        Combined(Duration),
+    if mode == CompileMode::Parse {
+        return;
     }
 
-    let frontend2_duration = if cfg!(debug_assertions) {
-        let (sema, codegen) = compiler.compile_stmts_dev(&stmts, code, args.debug_typed_ast);
-        FrontendDurations::Detailed { sema, codegen }
-    } else {
-        let frontend2_start = Instant::now();
-        let _ = compiler.compile_stmts(&stmts);
+    // ##### Sema #####
 
-        if !compiler.sema.errors.is_empty() {
-            for e in compiler.sema.errors {
-                display_spanned_error(&e, code);
-            }
-            std::process::exit(1);
+    let sema_start = Instant::now();
+    let mut sema = sema::Sema::new(code, &alloc, args.debug_types);
+    let order = sema.analyze_all(&stmts);
+    compile_time.sema = sema_start.elapsed();
+
+    if !sema.errors.is_empty() {
+        eprintln!("Sema Error in {:?}", compile_time.sema);
+        for e in sema.errors.iter() {
+            display_spanned_error(e, sema.code);
         }
+        std::process::exit(1);
+    }
 
-        let frontend2_duration = frontend2_start.elapsed();
-
-        if args.debug_typed_ast {
-            println!("\n### Typed AST Nodes:");
-            for s in stmts.iter().copied() {
-                println!("stmt @ {:?}", s);
-                s.print_tree();
-            }
-            println!();
+    if args.debug_typed_ast {
+        println!("\n### Typed AST Nodes:");
+        for s in stmts.iter().copied() {
+            println!("stmt @ {:?}", s);
+            s.print_tree();
         }
-
-        FrontendDurations::Combined(frontend2_duration)
-    };
-    let total_frontend_duration = frontend_parse_duration
-        + match frontend2_duration {
-            FrontendDurations::Detailed { sema, codegen } => sema + codegen,
-            FrontendDurations::Combined(d) => d,
-        };
+        println!();
+    }
 
     if mode == CompileMode::Check {
         return;
     }
 
+    // ##### Codegen #####
+
+    let codegen_start = Instant::now();
+    let context = Context::create();
+    let mut codegen = llvm::Codegen::new_module(&context, "dev");
+    codegen.compile_all(&stmts, &order);
+    compile_time.codegen = codegen_start.elapsed();
+
     if args.debug_functions {
         print!("functions:");
-        for a in compiler.codegen.module.get_functions() {
+        for a in codegen.module.get_functions() {
             print!("{:?},", a.get_name());
         }
         println!("\n");
     }
 
+    if mode == CompileMode::Codegen {
+        return;
+    }
+
+    // ##### Backend #####
+
+    debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run);
+
+    let backend_setup_start = Instant::now();
     let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
+    compile_time.backend_setup = backend_setup_start.elapsed();
 
     if args.debug_llvm_ir_unoptimized {
         println!("### Unoptimized LLVM IR:");
-        compiler.codegen.module.print_to_stderr();
+        codegen.module.print_to_stderr();
         println!();
     }
 
     let backend_start = Instant::now();
-    compiler.optimize(&target_machine, args.optimization_level).unwrap();
-    let backend_duration = backend_start.elapsed();
-    let total_duration = total_frontend_duration + backend_duration;
+    codegen.optimize_module(&target_machine, args.optimization_level).unwrap();
+    compile_time.optimization = backend_start.elapsed();
 
     if args.debug_llvm_ir_optimized {
         println!("### Optimized LLVM IR:");
-        compiler.codegen.module.print_to_stderr();
+        codegen.module.print_to_stderr();
         println!();
     }
-
-    println!("### Compilation time:");
-    println!("  Frontend:                             {:?}", total_frontend_duration);
-    println!("    Lexer, Parser:                      {:?}", frontend_parse_duration);
-
-    match frontend2_duration {
-        FrontendDurations::Detailed { sema, codegen } => {
-            println!("    Semantic Analysis:                  {:?}", sema);
-            println!("    LLVM IR Codegen:                    {:?}", codegen);
-        },
-        FrontendDurations::Combined(d) => {
-            println!("    Semantic Analysis, LLVM IR Codegen: {:?}", d);
-        },
-    }
-
-    println!("  LLVM Backend (LLVM pass pipeline):    {:?}", backend_duration);
-    println!("  Total:                                {:?}", total_duration);
-    println!();
 
     if args.path.is_dir() {
         todo!()
@@ -303,9 +220,12 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
     let mut exe_file_path = args.path.with_file_name("out");
     exe_file_path.push(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
-    compiler.codegen.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
+    let write_obj_file_start = Instant::now();
+    codegen.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
+    compile_time.writing_obj = Some(write_obj_file_start.elapsed());
 
     if args.out == OutKind::Executable {
+        let linking_start = std::time::Instant::now();
         let err = std::process::Command::new("gcc")
             .arg(obj_file_path.as_os_str())
             .arg("-o")
@@ -316,209 +236,58 @@ fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
         if !err.success() {
             println!("linking with gcc failed: {:?}", err);
         }
-        if mode == CompileMode::Run {
-            println!("### Running `{}`", exe_file_path.display());
-            if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
-                println!("{e}");
-                std::process::exit(e.code().unwrap_or(1));
-            }
+
+        compile_time.linking = Some(linking_start.elapsed());
+    }
+
+    compile_time.print();
+
+    if args.out == OutKind::Executable && mode == CompileMode::Run {
+        println!("\nRunning `{}`", exe_file_path.display());
+        if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
+            println!("{e}");
+            std::process::exit(e.code().unwrap_or(1));
         }
     }
 }
 
-pub fn dev() {
-    const DEBUG_TOKENS: bool = false;
-    const DEBUG_AST: bool = true;
-    const DEBUG_TYPES: bool = false;
-    const DEBUG_TYPED_AST: bool = false;
-    const DEBUG_LLVM_IR_UNOPTIMIZED: bool = false;
-    const DEBUG_LLVM_IR_OPTIMIZED: bool = true;
-    //const LLVM_TARGET_TRIPLE: Option<&str> = Some("arm-linux-gnueabihf");
-    const LLVM_TARGET_TRIPLE: Option<&str> = None;
-    const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
-    type MyMainRetTy = i64;
+#[derive(Default)]
+pub struct CompileDurations {
+    // frontend:
+    parser: Duration,
+    sema: Duration,
+    codegen: Duration,
 
-    let alloc = bumpalo::Bump::new();
+    // backend:
+    backend_setup: Duration,
+    optimization: Duration,
+    writing_obj: Option<Duration>,
 
-    let code = "
-A :: struct {
-    a: i64,
-    b := 2,
+    linking: Option<Duration>,
 }
 
-add :: (a: i64, b: i64) -> a + b;
+impl CompileDurations {
+    pub fn print(&self) {
+        let frontend_total = self.parser + self.sema + self.codegen;
+        println!("  Frontend:              {:?}", frontend_total);
+        println!("    Lexer, Parser:         {:?}", self.parser);
+        println!("    Semantic Analysis:     {:?}", self.sema);
+        println!("    LLVM IR Codegen:       {:?}", self.codegen);
 
-main :: -> {
-    three := 3;
-    myarr: [5]f32 = [2.0; 5];
-    myarr := [3, 30, three, 5, 5];
-
-    b := true || false;
-
-    a := A.{ a = 1 };
-
-    mut sum := a.a;
-    myarr | for x {
-        sum += add(x, 1);
-    };
-    sum
-};
-
-// rec factorial :: (x: f64) -> x == 0 | if 1 else x * factorial(x-1);
-// mymain :: -> factorial(10) == 3628800;
-
-// TODO: This causes too many loops
-// a :: -> b();
-// b :: -> c();
-// c :: -> d();
-// d :: -> 10;
-";
-    let code = code.as_ref();
-
-    if DEBUG_TOKENS {
-        println!("### Tokens:");
-        let mut lex = Lexer::new(code);
-        while let Some(t) = lex.next() {
-            println!("{:?}", t)
-        }
-        println!();
-    }
-
-    if DEBUG_AST {
-        println!("### AST Nodes:");
-        if let Err(()) = StmtIter::parse_and_debug(code) {
-            std::process::exit(1)
-        }
-        println!();
-    }
-
-    println!("### Frontend:");
-    let frontend_parse_start = Instant::now();
-    let stmts = StmtIter::parse_all_or_fail(code, &alloc);
-    let frontend_parse_duration = frontend_parse_start.elapsed();
-
-    let sema = sema::Sema::new(code, &alloc, DEBUG_TYPES);
-    let context = Context::create();
-    let codegen = llvm::Codegen::new_module(&context, "dev");
-    let mut compiler = Compiler::new(sema, codegen);
-
-    enum FrontendDurations {
-        Detailed { sema: Duration, codegen: Duration },
-        Combined(Duration),
-    }
-
-    let frontend2_duration = if cfg!(debug_assertions) {
-        let (sema, codegen) = compiler.compile_stmts_dev(&stmts, code, DEBUG_TYPED_AST);
-        FrontendDurations::Detailed { sema, codegen }
-    } else {
-        let frontend2_start = Instant::now();
-        let _ = compiler.compile_stmts(&stmts);
-
-        if !compiler.sema.errors.is_empty() {
-            for e in compiler.sema.errors {
-                display_spanned_error(&e, code);
-            }
-            std::process::exit(1);
+        let backend_total =
+            self.backend_setup + self.optimization + self.writing_obj.unwrap_or_default();
+        println!("  Backend:               {:?}", backend_total);
+        println!("    LLVM Setup:            {:?}", self.backend_setup);
+        println!("    LLVM pass pipeline:    {:?}", self.optimization);
+        if let Some(d) = self.writing_obj {
+            println!("    writing obj file:      {:?}", d);
         }
 
-        let frontend2_duration = frontend2_start.elapsed();
-
-        if DEBUG_TYPED_AST {
-            println!("\n### Typed AST Nodes:");
-            for s in stmts.iter().copied() {
-                println!("stmt @ {:?}", s);
-                s.print_tree();
-            }
-            println!();
+        if let Some(d) = self.linking {
+            println!("  Linking with gcc:      {:?}", d);
         }
 
-        FrontendDurations::Combined(frontend2_duration)
-    };
-    let total_frontend_duration = frontend_parse_duration
-        + match frontend2_duration {
-            FrontendDurations::Detailed { sema, codegen } => sema + codegen,
-            FrontendDurations::Combined(d) => d,
-        };
-
-    print!("functions:");
-    for a in compiler.codegen.module.get_functions() {
-        print!("{:?},", a.get_name());
+        let total = frontend_total + backend_total + self.linking.unwrap_or_default();
+        println!("  Total:                 {:?}", total);
     }
-    println!("\n");
-
-    let target_machine = llvm::Codegen::init_target_machine(LLVM_TARGET_TRIPLE);
-
-    if DEBUG_LLVM_IR_UNOPTIMIZED {
-        println!("### Unoptimized LLVM IR:");
-        compiler.codegen.module.print_to_stderr();
-        println!();
-    }
-
-    let backend_start = Instant::now();
-    compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL).unwrap();
-    let backend_duration = backend_start.elapsed();
-    let total_duration = total_frontend_duration + backend_duration;
-
-    if DEBUG_LLVM_IR_OPTIMIZED {
-        println!("### Optimized LLVM IR:");
-        compiler.codegen.module.print_to_stderr();
-        println!();
-    }
-
-    #[allow(unused)]
-    enum ExecutionVariant {
-        ObjectCode,
-        Jit,
-    }
-
-    const EXE_VAR: ExecutionVariant = ExecutionVariant::ObjectCode;
-    //const EXE_VAR: ExecutionVariant = ExecutionVariant::Jit;
-    match EXE_VAR {
-        ExecutionVariant::ObjectCode => {
-            let Type::Function(f) =
-                compiler.sema.symbols.get("mymain").unwrap().get_type().ok().unwrap()
-            else {
-                panic!()
-            };
-            let c_file = match f.ret_type {
-                Type::Int { .. } => "../../test-int.c",
-                Type::Float { .. } => "../../test-double.c",
-                _ => "../../test-other.c",
-            };
-            println!("{:?}", c_file);
-            let _ = std::fs::create_dir("target/build_dev");
-            let _ = std::fs::remove_file("target/build_dev/test.c");
-            std::os::unix::fs::symlink(c_file, "target/build_dev/test.c").unwrap();
-            let filename = "target/build_dev/output.o";
-            compiler
-                .codegen
-                .compile_to_obj_file(&target_machine, filename.as_ref())
-                .unwrap();
-        },
-        ExecutionVariant::Jit => {
-            let fn_name = "mymain";
-            let out = compiler
-                .codegen
-                .jit_run_fn::<MyMainRetTy>(fn_name, inkwell::OptimizationLevel::None)
-                .unwrap();
-            println!("{fn_name} returned {}", out);
-        },
-    }
-
-    println!("### Compilation time:");
-    println!("  Frontend:                             {:?}", total_frontend_duration);
-    println!("    Lexer, Parser:                      {:?}", frontend_parse_duration);
-
-    match frontend2_duration {
-        FrontendDurations::Detailed { sema, codegen } => {
-            println!("    Semantic Analysis:                  {:?}", sema);
-            println!("    LLVM IR Codegen:                    {:?}", codegen);
-        },
-        FrontendDurations::Combined(d) => {
-            println!("    Semantic Analysis, LLVM IR Codegen: {:?}", d);
-        },
-    }
-
-    println!("  LLVM Backend (LLVM pass pipeline):    {:?}", backend_duration);
-    println!("  Total:                                {:?}", total_duration);
 }

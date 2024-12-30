@@ -12,10 +12,7 @@ use crate::{
     scoped_stack::ScopedStack,
     symbol_table::SymbolTable,
     type_::{RangeKind, Type},
-    util::{
-        OkOrWithTry, UnwrapDebug, display_span_in_code_with_label, forget_lifetime,
-        unreachable_debug,
-    },
+    util::{OkOrWithTry, UnwrapDebug, forget_lifetime, unreachable_debug},
 };
 pub use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
@@ -61,7 +58,7 @@ macro_rules! try_not_never {
 
 /// Semantic analyzer
 pub struct Sema<'c, 'alloc> {
-    code: &'c Code,
+    pub code: &'c Code,
 
     pub symbols: SymbolTable<SemaSymbol>,
     struct_stack: Vec<Vec<Ptr<Type>>>,
@@ -81,11 +78,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     pub fn new(
         code: &'c Code,
         alloc: &'alloc bumpalo::Bump,
-        debug_types: bool,
+        #[allow(unused)] debug_types: bool,
     ) -> Sema<'c, 'alloc> {
         Sema {
             code,
-            symbols: SymbolTable::with_one_scope(),
+            symbols: SymbolTable::default(),
             struct_stack: vec![vec![]],
             enum_stack: vec![vec![]],
             function_stack: vec![],
@@ -109,7 +106,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 _ => err(UnexpectedTopLevelExpr(s), s.span)?,
             };
 
-            if self.symbols.insert(&*item_ident.text, SemaSymbol::preload_symbol()).is_some() {
+            if self
+                .symbols
+                .insert_no_duplicate(item_ident.text, SemaSymbol::preload_symbol())
+                .is_err()
+            {
                 err(TopLevelDuplicate, item_ident.span)?
             }
         };
@@ -719,8 +720,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 {
                     f.ret_type = *ret_type;
                 }
-                let _ =
-                    self.symbols.insert(&*ident.text, SemaSymbol::Finished(SemaValue::new(*ty)));
+                let _ = self.symbols.insert(ident.text, SemaSymbol::Finished(SemaValue::new(*ty)));
                 Ok(SemaValue::void())
             },
             ExprKind::If { condition, then_body, else_body, .. } => {
@@ -804,7 +804,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }
             },
             ExprKind::Defer(expr) => {
-                self.defer_stack.push_expr(*expr);
+                self.defer_stack.push(*expr);
                 Ok(SemaValue::void())
             },
             ExprKind::Return { expr: val } => {
@@ -841,6 +841,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         };
         #[cfg(debug_assertions)]
         if self.debug_types {
+            use crate::util::display_span_in_code_with_label;
             let text = match &res {
                 Ok(v) => format!("{}", v.ty),
                 res => format!("{:?}", res),
@@ -939,7 +940,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
 
     fn analyze_var_decl(&mut self, decl: &mut VarDecl) -> SemaResult<()> {
         let res = self.var_decl_to_value(decl);
-        let name = &*decl.ident.text;
+        let name = decl.ident.text;
         match res {
             Ok(val) => {
                 let _ = self.symbols.insert(name, SemaSymbol::Finished(val));

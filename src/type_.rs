@@ -276,6 +276,9 @@ impl Type {
                     if *enum_ty == e && variants[idx].ty == Type::Void => Some(Left),
                 (Type::Option { ty: t1 }, Type::Option { ty: t2 }) => inner(*t1, *t2),
 
+                (Type::Range { elem_ty: e1, kind: k1 }, Type::Range { elem_ty: e2, kind: k2 })
+                    if k1 == k2 => inner(*e1, *e2),
+
                 (Type::Function(f1), Type::Function(f2)) => {
                     let functions_match = f1.ret_type.matches(f2.ret_type)
                         && f1.params.len() == f2.params.len()

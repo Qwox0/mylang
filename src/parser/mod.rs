@@ -112,7 +112,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 if &*rhs.text == "as" {
                     self.ws0().tok(TokenKind::OpenParenthesis).context("expected '('")?;
                     let target_ty = self.ws0().expr().context("cast target type")?;
-                    self.ws0().tok(TokenKind::CloseParenthesis).context("expected ')'")?;
+                    let close_p =
+                        self.ws0().tok(TokenKind::CloseParenthesis).context("expected ')'")?;
+                    let span = span.join(close_p.span);
                     expr!(Cast { lhs: ExprWithTy::untyped(lhs), target_ty: ty(target_ty) }, span)
                 } else {
                     expr!(Dot { lhs: Some(lhs), lhs_ty: Type::Unset, rhs }, span)

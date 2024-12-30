@@ -1,6 +1,7 @@
-use crate::{ast::Expr, ptr::Ptr, util::UnwrapDebug};
+use crate::util::UnwrapDebug;
 use core::fmt;
 use std::{
+    iter::FusedIterator,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
     ops::Range,
@@ -14,7 +15,8 @@ pub struct ScopedStack<T> {
 
 impl<T> Default for ScopedStack<T> {
     fn default() -> Self {
-        Self { values: vec![], cur_len: 0 }
+        // this starting value is required for `ScopedStackScopeIter`.
+        Self { values: vec![ScopedStackValue { prev_len: 0 }], cur_len: 0 }
     }
 }
 
@@ -29,19 +31,29 @@ impl<T> ScopedStack<T> {
         self.cur_len = unsafe { self.values.pop().unwrap_debug().prev_len }; // unwrap: closed when no scope was open
     }
 
-    pub fn push_expr(&mut self, val: T) {
+    pub fn push(&mut self, val: T) {
         self.values.push(ScopedStackValue { val: ManuallyDrop::new(val) });
         self.cur_len += 1;
     }
 
-    pub fn get_cur_scope(&self) -> &[Ptr<Expr>] {
-        unsafe { mem::transmute(&self.values[self.values.len() - self.cur_len..]) }
+    pub fn get_cur_scope(&self) -> &[T] {
+        unsafe {
+            mem::transmute::<&[ScopedStackValue<T>], &[T]>(
+                &self.values[self.values.len() - self.cur_len..],
+            )
+        }
     }
 
     /// Iterates over the scopes of the stack in pop order.
+    #[inline]
     pub fn iter_scopes(&self) -> ScopedStackScopeIter<T> {
         let Range { start, end } = self.values.as_ptr_range();
         ScopedStackScopeIter { start, end, cur_len: self.cur_len, _lifetime: PhantomData }
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.values.reserve(additional);
     }
 }
 
@@ -76,6 +88,7 @@ impl<'a, T> Iterator for ScopedStackScopeIter<'a, T> {
             let scope = std::slice::from_raw_parts(scope_start, self.cur_len);
 
             self.end = self.end.sub(self.cur_len + 1);
+            debug_assert!(self.end >= self.start);
             self.cur_len = (*self.end).prev_len;
 
             Some(mem::transmute::<&[ScopedStackValue<T>], &[T]>(scope))
@@ -83,10 +96,13 @@ impl<'a, T> Iterator for ScopedStackScopeIter<'a, T> {
     }
 }
 
+impl<T> FusedIterator for ScopedStackScopeIter<'_, T> {}
+
 #[cfg(test)]
 mod benches {
     extern crate test;
     use super::*;
+    use crate::ptr::Ptr;
     use test::*;
 
     /// `DeferStack` using `Vec<Vec<Ptr<Expr>>>`:
@@ -111,12 +127,12 @@ mod benches {
             for _ in 0..10 {
                 defer_stack.open_scope();
                 for _ in 0..10 {
-                    defer_stack.push_expr(p);
+                    defer_stack.push(p);
                 }
             }
             for _ in 0..10 {
                 for _ in 0..10 {
-                    defer_stack.push_expr(p);
+                    defer_stack.push(p);
                 }
                 defer_stack.close_scope();
             }

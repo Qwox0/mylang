@@ -142,7 +142,7 @@ impl<'ctx> Codegen<'ctx> {
             context,
             builder,
             module,
-            symbols: SymbolTable::with_one_scope(),
+            symbols: SymbolTable::default(),
             type_table: HashMap::new(),
             defer_stack: ScopedStack::default(),
             cur_fn: None,
@@ -726,14 +726,13 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(Symbol::Void)
             },
             ExprKind::VarDecl(VarDecl { markers, ident, ty, default: init, is_const }) => {
-                let var_name = &*ident.text;
-                let prev_var_name = self.cur_var_name.replace(Ptr::from(var_name));
+                let prev_var_name = self.cur_var_name.replace(ident.text);
 
                 const DISABLE_MUT_CHECK: bool = true;
 
                 let sym = if *is_const {
                     match ty {
-                        Type::Function(f) => self.compile_fn(var_name, f)?,
+                        Type::Function(f) => self.compile_fn(&ident.text, f)?,
                         Type::Type(ty) => {
                             self.compile_type_def(ident.text, ty)?;
                             self.cur_var_name = prev_var_name;
@@ -752,7 +751,7 @@ impl<'ctx> Codegen<'ctx> {
                     try_not_never!(self.compile_expr(*init, *ty)?)
                 } else {
                     let stack_ty = self.llvm_type(*ty).basic_ty();
-                    let stack_ptr = self.build_alloca(stack_ty, &var_name, ty)?;
+                    let stack_ptr = self.build_alloca(stack_ty, &ident.text, ty)?;
                     if let Some(init) = init {
                         let _init = try_not_never!(self.compile_expr_with_write_target(
                             *init,
@@ -764,12 +763,7 @@ impl<'ctx> Codegen<'ctx> {
                 };
 
                 debug_assert!(!markers.is_mut || matches!(sym, Symbol::Stack(_)));
-                let old = self.symbols.insert(var_name.to_string(), sym);
-                if old.is_some() {
-                    #[cfg(debug_assertions)]
-                    println!("LOG: '{var_name}' was shadowed in the same scope");
-                }
-
+                self.symbols.insert(ident.text, sym);
                 self.cur_var_name = prev_var_name;
 
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
@@ -957,7 +951,7 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Catch { .. } => todo!(),
             ExprKind::Autocast { expr } => self.compile_cast(expr, out_ty),
             ExprKind::Defer(inner) => {
-                self.defer_stack.push_expr(*inner);
+                self.defer_stack.push(*inner);
                 debug_assert_matches!(out_ty, Type::Void | Type::Unset);
                 Ok(Symbol::Void)
             },
@@ -1089,7 +1083,7 @@ impl<'ctx> Codegen<'ctx> {
 
             stack_val(enum_ptr)
         } else {
-            let val = enum_ty.get_undef();
+            let val = enum_ty.get_poison();
             let tag_val = self.enum_tag_llvm_type(variants).const_int(variant_idx as u64, false);
             reg(self.builder.build_insert_value(val, tag_val, 0, "")?)
         }
@@ -1211,7 +1205,6 @@ impl<'ctx> Codegen<'ctx> {
             for (param, param_def) in
                 func.get_param_iter().skip(use_sret as usize).zip(f.params.iter())
             {
-                let pname = &param_def.ident.text;
                 let param = CodegenValue::new(param.as_value_ref());
                 let s = if param_def.ty.pass_arg_as_ptr() {
                     Symbol::Stack(param.ptr_val())
@@ -1225,7 +1218,7 @@ impl<'ctx> Codegen<'ctx> {
                         Symbol::Register(param)
                     }
                 };
-                self.symbols.insert(pname.to_string(), s);
+                self.symbols.insert(param_def.ident.text, s);
             }
 
             let body = self.compile_expr(f.body.unwrap_debug(), f.ret_type)?;
@@ -1386,7 +1379,7 @@ impl<'ctx> Codegen<'ctx> {
                 reg(self.builder.build_int_cast_sign_flag(tag, rhs_ty, false, "")?)
             },
 
-            (l, t) => panic_debug(&format!("cannot cast {l} to {t}")),
+            (l, t) => panic!("cannot cast {l} to {t}"),
         }
     }
 

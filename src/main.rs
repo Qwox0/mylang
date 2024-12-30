@@ -1,7 +1,7 @@
 use clap::Parser;
 use mylang::{
     cli::{Cli, Command},
-    compiler::{CompileMode, compile2, dev},
+    compiler::{CompileMode, compile2},
 };
 
 fn main() {
@@ -12,6 +12,5 @@ fn main() {
         Command::Build(args) => compile2(CompileMode::Build, args),
         Command::Run(args) => compile2(CompileMode::Run, args),
         Command::Check(args) => compile2(CompileMode::Check, args),
-        Command::Dev {} => dev(),
     };
 }

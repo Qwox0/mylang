@@ -1,6 +1,5 @@
 use crate::{
     codegen::llvm,
-    compiler::Compiler,
     error::Error,
     parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
     sema::Sema,
@@ -46,8 +45,8 @@ macro_rules! jit_run_test {
 pub(crate) use jit_run_test;
 
 const DEBUG_TOKENS: bool = false;
-const DEBUG_AST: bool = false;
-const DEBUG_TYPES: bool = false;
+const DEBUG_AST: bool = true;
+const DEBUG_TYPES: bool = true;
 const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
 const PRINT_ERROR: bool = true;
 const PRINT_LLVM_MODULE: bool = true;
@@ -108,26 +107,26 @@ where
         },
     };
 
-    let sema = Sema::new(code, &alloc, DEBUG_TYPES);
-    let codegen = llvm::Codegen::new_module(&context, "test");
-    let mut compiler = Compiler::new(sema, codegen);
+    let mut sema = Sema::new(code, &alloc, DEBUG_TYPES);
+    let order = sema.analyze_all(&stmts);
 
-    let _ = compiler.compile_stmts(&stmts);
-
-    match compiler.sema.errors.len() {
+    match sema.errors.len() {
         0 => {},
-        1 => return Err(Error::Sema(compiler.sema.errors.into_iter().next().unwrap())),
+        1 => return Err(Error::Sema(sema.errors.into_iter().next().unwrap())),
         _ => {
             eprintln!("### Sema Errors:");
-            for e in compiler.sema.errors {
+            for e in sema.errors {
                 display_spanned_error(&e, code);
             }
             panic!("multiple sema errors")
         },
     }
 
-    let target_machine = llvm::Codegen::init_target_machine(None);
-    compiler.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
+    let mut codegen = llvm::Codegen::new_module(&context, "dev");
+    codegen.compile_all(&stmts, &order);
 
-    Ok(compiler.codegen)
+    let target_machine = llvm::Codegen::init_target_machine(None);
+    codegen.optimize_module(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
+
+    Ok(codegen)
 }

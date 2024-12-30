@@ -19,8 +19,6 @@ pub enum Command {
     Clean(BuildArgs),
 
     Repl {},
-
-    Dev {},
 }
 
 #[derive(clap::Args, Debug)]
@@ -39,6 +37,10 @@ pub struct BuildArgs {
 
     #[arg(long)]
     pub no_prelude: bool,
+
+    /// Disabled in benchmarks
+    #[clap(skip = true)]
+    pub print_compile_time: bool,
 
     #[arg(long, value_enum)]
     pub debug_tokens: bool,
@@ -65,4 +67,25 @@ pub enum OutKind {
 
     #[clap(name = "exe")]
     Executable,
+}
+
+impl BuildArgs {
+    /// for benchmarks
+    pub fn bench_args() -> Self {
+        BuildArgs {
+            path: PathBuf::new(),
+            optimization_level: 0,
+            target_triple: None,
+            out: OutKind::None,
+            no_prelude: true,
+            print_compile_time: false,
+            debug_tokens: false,
+            debug_ast: false,
+            debug_types: false,
+            debug_typed_ast: false,
+            debug_functions: false,
+            debug_llvm_ir_unoptimized: false,
+            debug_llvm_ir_optimized: false,
+        }
+    }
 }

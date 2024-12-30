@@ -10,7 +10,7 @@ pub struct Ptr<T: ?Sized>(NonNull<T>);
 impl<T: ?Sized> Clone for Ptr<T> {
     #[inline]
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        *self
     }
 }
 
