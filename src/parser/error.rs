@@ -18,8 +18,6 @@ pub enum ParseErrorKind {
     RangeInclusiveWithoutEnd,
     DuplicateDeclMarker(DeclMarkerKind),
     AllocErr(bumpalo::AllocErr),
-
-    Finished,
 }
 
 pub struct ParseError {

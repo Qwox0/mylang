@@ -65,10 +65,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         Self { lex, alloc }
     }
 
-    pub fn top_level_item(&mut self) -> ParseResult<Ptr<Expr>> {
+    pub fn top_level_item(&mut self) -> ParseResult<Option<Ptr<Expr>>> {
         if self.lex.is_empty() {
-            let span = self.lex.pos_span();
-            return Err(ParseError::new(ParseErrorKind::Finished, span));
+            return Ok(None);
         }
         let res = self.expr();
         if let Err(ParseError { kind: ParseErrorKind::UnexpectedToken(_), .. }) = res {
@@ -77,7 +76,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
         self.lex
             .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
-        res
+        res.map(Some)
     }
 
     pub fn expr(&mut self) -> ParseResult<Ptr<Expr>> {
@@ -88,21 +87,23 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         let mut lhs = self.ws0().value(/*min_precedence*/).context("expr first val")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
-                Ok(node) => lhs = node,
-                Err(ParseError { kind: ParseErrorKind::Finished, .. }) => return Ok(lhs),
-                err => return err.context("expr op chain element"),
+                Ok(Some(node)) => lhs = node,
+                Ok(None) => return Ok(lhs),
+                Err(err) => return Err(err).context("expr op chain element"),
             };
         }
     }
 
-    pub fn op_chain(&mut self, lhs: Ptr<Expr>, min_precedence: u8) -> ParseResult<Ptr<Expr>> {
-        let Some(Token { kind, span }) = self.ws0().lex.peek() else {
-            return err(Finished, self.lex.pos_span());
-        };
+    pub fn op_chain(
+        &mut self,
+        lhs: Ptr<Expr>,
+        min_precedence: u8,
+    ) -> ParseResult<Option<Ptr<Expr>>> {
+        let Some(Token { kind, span }) = self.ws0().lex.peek() else { return Ok(None) };
 
         let op = match FollowingOperator::new(kind) {
             Some(op) if op.precedence() > min_precedence => op,
-            _ => return err(Finished, span),
+            _ => return Ok(None),
         };
         self.lex.advance();
 
@@ -120,7 +121,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                     expr!(Dot { lhs: Some(lhs), lhs_ty: Type::Unset, rhs }, span)
                 }
             },
-            FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None),
+            FollowingOperator::Call => return self.call(lhs, ScratchPool::new(), None).map(Some),
             FollowingOperator::Index => {
                 let lhs = ExprWithTy::untyped(lhs);
                 let idx = ExprWithTy::untyped(self.expr()?);
@@ -146,7 +147,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
                 let param = VarDecl::new_basic(lhs, Type::Unset);
                 let params = self.alloc_one_val_slice(param)?.into();
-                return self.function_tail(params, span);
+                return self.function_tail(params, span).map(Some);
             },
             FollowingOperator::PostOp(kind) => {
                 let kind = if kind == UnaryOpKind::AddrOf
@@ -168,9 +169,9 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             FollowingOperator::Pipe => {
                 let t = self.ws0().next_tok()?;
-                return match t.kind {
+                match t.kind {
                     TokenKind::Keyword(Keyword::If) => {
-                        self.if_after_cond(lhs, span, true).context("if")
+                        return self.if_after_cond(lhs, span, true).context("| if").map(Some);
                     },
                     TokenKind::Keyword(Keyword::Match) => {
                         todo!("| match")
@@ -180,22 +181,22 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                         let iter_var = self.ws0().ident().context("for iteration variable")?;
                         self.ws0().opt_do();
                         let body = self.ws0().expr().context("for body")?;
-                        self.alloc(expr!(For { source, iter_var, body, was_piped: true }, t.span))
+                        expr!(For { source, iter_var, body, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         self.ws0().opt_do();
                         let body = self.expr().context("while body")?;
-                        self.alloc(expr!(While { condition: lhs, body, was_piped: true }, t.span))
+                        expr!(While { condition: lhs, body, was_piped: true }, t.span)
                     },
                     TokenKind::Ident => {
                         let func = self.alloc(self.ident_from_span(t.span).into_expr())?;
                         self.tok(TokenKind::OpenParenthesis).context("pipe call: expect '('")?;
                         let args = self.scratch_pool_with_first_val(lhs)?;
-                        self.call(func, args, Some(0))
+                        return self.call(func, args, Some(0)).map(Some);
                     },
                     _ => ParseError::unexpected_token(t)
                         .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
-                };
+                }
             },
             FollowingOperator::Assign => {
                 let lhs = ExprWithTy::untyped(lhs);
@@ -239,7 +240,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
                 expr!(VarDecl(decl), ident.span.join(span))
             },
         };
-        self.alloc(expr)
+        self.alloc(expr).map(Some)
     }
 
     /// anything which has higher precedence than any operator
@@ -493,7 +494,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
             },
             TokenKind::Arrow => {
                 self.lex.advance();
-                return self.function_tail(self.alloc_empty_slice().into(), span);
+                return self.function_tail(self.alloc_empty_slice(), span);
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
@@ -1164,10 +1165,7 @@ impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
     type Item = ParseResult<Ptr<Expr>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.parser.top_level_item() {
-            Err(ParseError { kind: ParseErrorKind::Finished, .. }) => None,
-            res => Some(res),
-        }
+        self.parser.top_level_item().transpose()
     }
 }
 
