@@ -14,3 +14,5 @@ While collecting ideas for this language, I thought about and developed concepts
 * Jai (Jonathan Blow's language)
 * [Zig](https://github.com/ziglang/zig)
 * [Odin](https://github.com/odin-lang/Odin)
+
+For more details see <./Inspirations.md>

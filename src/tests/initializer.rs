@@ -33,7 +33,7 @@ MyStruct :: struct {
     c: [3]f64,
 };
 
-a := .{
+a: MyStruct = .{
     a = 5,
     c = .[1.0, 2.0, 3.0],
 };

@@ -28,7 +28,7 @@ impl<T> ScopedStack<T> {
 
     pub fn close_scope(&mut self) {
         unsafe { self.values.set_len(self.values.len() - self.cur_len) };
-        self.cur_len = unsafe { self.values.pop().unwrap_debug().prev_len }; // unwrap: closed when no scope was open
+        self.cur_len = unsafe { self.values.pop().u().prev_len }; // unwrap: closed when no scope was open
     }
 
     pub fn push(&mut self, val: T) {
@@ -37,11 +37,13 @@ impl<T> ScopedStack<T> {
     }
 
     pub fn get_cur_scope(&self) -> &[T] {
-        unsafe {
-            mem::transmute::<&[ScopedStackValue<T>], &[T]>(
-                &self.values[self.values.len() - self.cur_len..],
-            )
-        }
+        let start = self.values.len() - self.cur_len;
+        unsafe { mem::transmute::<&[ScopedStackValue<T>], &[T]>(&self.values[start..]) }
+    }
+
+    pub fn get_cur_scope_mut(&mut self) -> &mut [T] {
+        let start = self.values.len() - self.cur_len;
+        unsafe { mem::transmute::<&mut [ScopedStackValue<T>], &mut [T]>(&mut self.values[start..]) }
     }
 
     /// Iterates over the scopes of the stack in pop order.
@@ -98,6 +100,7 @@ impl<'a, T> Iterator for ScopedStackScopeIter<'a, T> {
 
 impl<T> FusedIterator for ScopedStackScopeIter<'_, T> {}
 
+/*
 #[cfg(test)]
 mod benches {
     extern crate test;
@@ -117,7 +120,7 @@ mod benches {
     #[bench]
     fn bench_defer_stack(b: &mut Bencher) {
         let n = "".into();
-        let e = crate::ast::Expr::new(
+        let e = crate::ast::Ast::new(
             crate::ast::ExprKind::Ident(n),
             crate::parser::lexer::Span::new(0, 0),
         );
@@ -139,3 +142,4 @@ mod benches {
         })
     }
 }
+*/

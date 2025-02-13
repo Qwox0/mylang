@@ -49,7 +49,8 @@ impl<T: ?Sized> From<&mut T> for Ptr<T> {
 impl<T: ?Sized> From<*mut T> for Ptr<T> {
     #[inline]
     fn from(value: *mut T) -> Self {
-        // SAFETY: yolo
+        debug_assert!((value as *const () as u64) > 0x500);
+        debug_assert!(!value.is_null());
         Ptr(unsafe { NonNull::new_unchecked(value) })
     }
 }
@@ -65,8 +66,8 @@ impl<T: ?Sized> Ptr<T> {
     }
 
     #[inline]
-    pub fn as_mut<'a>(&mut self) -> &'a mut T {
-        unsafe { self.0.as_mut() }
+    pub fn as_mut<'a>(&self) -> &'a mut T {
+        unsafe { self.0.as_ptr().as_mut_unchecked() }
     }
 
     #[inline]
@@ -77,6 +78,22 @@ impl<T: ?Sized> Ptr<T> {
     #[inline]
     pub const fn cast<U>(self) -> Ptr<U> {
         Ptr(self.0.cast::<U>())
+    }
+
+    /*
+    pub const fn from_ref(r: &T) -> Ptr<T> {
+        Ptr(NonNull::from_ref(r))
+    }
+    */
+
+    pub fn from_ref(r: &T) -> Ptr<T> {
+        let p = Ptr(NonNull::from_ref(r));
+        debug_assert!((p.raw() as *const () as usize) > 0x500);
+        p
+    }
+
+    pub fn drop_in_place(self) {
+        unsafe { self.0.drop_in_place() }
     }
 }
 
@@ -89,38 +106,45 @@ impl<T> Ptr<T> {
     }
 }
 
-impl<T: ?Sized> PartialEq for Ptr<T> {
+impl<T, U> PartialEq<Ptr<U>> for Ptr<T> {
     #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.0.as_ptr(), other.0.as_ptr())
+    fn eq(&self, other: &Ptr<U>) -> bool {
+        std::ptr::eq(self.raw(), other.raw() as *const T)
     }
 }
 
-impl<T: ?Sized> Eq for Ptr<T> {}
+impl<T> Eq for Ptr<T> {}
 
-impl<T: ?Sized> PartialOrd for Ptr<T> {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.as_ptr().cast::<()>().partial_cmp(&other.0.as_ptr().cast::<()>())
+impl<T: ?Sized + std::fmt::Display> std::fmt::Display for Ptr<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.as_ref(), f)
     }
 }
 
-impl<T: ?Sized> Ord for Ptr<T> {
-    #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.as_ptr().cast::<()>().cmp(&other.0.as_ptr().cast::<()>())
-    }
-}
+const DEFAULT_PTR_DEBUG_DEPTH: usize = 7;
 
 impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for Ptr<T> {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if f.alternate() {
-            write!(f, "Ptr->")?;
-            self.as_ref().fmt(f)
-        } else {
+        let mut opt = f.options();
+        let width = opt.get_width().unwrap_or(DEFAULT_PTR_DEBUG_DEPTH);
+        if width == 0 {
+            write!(f, "{:x?} ...", self.0)
+        } else if opt.get_debug_as_hex().is_some() {
             self.0.fmt(f)
+        } else {
+            if f.alternate() {
+                write!(f, "Ptr->")?;
+            }
+            self.as_ref()
+                .fmt(&mut f.with_options(*opt.width(Some(width.saturating_sub(1)))))
         }
+    }
+}
+
+impl<T: ?Sized> std::fmt::Pointer for Ptr<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Pointer::fmt(&self.0, f)
     }
 }
 
@@ -130,14 +154,41 @@ impl<T: ?Sized> std::hash::Hash for Ptr<T> {
     }
 }
 
-impl ToString for Ptr<str> {
-    fn to_string(&self) -> String {
-        self.as_ref().to_string()
-    }
-}
-
 impl<T> Ptr<[T]> {
     pub fn as_slice(&self) -> &[T] {
         &self[..]
+    }
+}
+
+pub type OPtr<T> = Option<Ptr<T>>;
+
+pub trait OPtrExt<T: ?Sized> {
+    fn raw(self) -> *mut T
+    where T: Sized;
+}
+
+impl<T: ?Sized> OPtrExt<T> for OPtr<T> {
+    fn raw(self) -> *mut T
+    where T: Sized {
+        match self {
+            Some(p) => p.raw(),
+            None => std::ptr::null_mut(),
+        }
+    }
+}
+
+impl<T, U> PartialEq<Ptr<U>> for OPtr<T> {
+    #[inline]
+    fn eq(&self, other: &Ptr<U>) -> bool {
+        match *self {
+            Some(p) => p == *other,
+            None => false,
+        }
+    }
+}
+
+impl<T, U> PartialEq<OPtr<U>> for Ptr<T> {
+    fn eq(&self, other: &OPtr<U>) -> bool {
+        other == self
     }
 }

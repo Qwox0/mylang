@@ -1,58 +1,45 @@
 //! # Semantic analysis module
 //!
-//! Semantic analysis validates (and changes) all stored [`Type`]s in [`Expr`].
+//! Semantic analysis validates (and changes) all stored [`ast::Type`]s in [`Expr`].
 
 use crate::{
+    arena_allocator::Arena,
     ast::{
-        BinOpKind, DeclMarkers, Expr, ExprKind, ExprWithTy, Fn, Ident, UnaryOpKind, VarDecl,
-        VarDeclListTrait,
+        self, Ast, AstEnum, AstKind, BinOpKind, Decl, DeclListExt, OptionAstExt, OptionTypeExt,
+        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, type_new,
     },
     parser::lexer::{Code, Span},
-    ptr::Ptr,
+    ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
-    symbol_table::SymbolTable,
-    type_::{RangeKind, Type},
-    util::{OkOrWithTry, UnwrapDebug, forget_lifetime, unreachable_debug},
+    symbol_table::SymbolTable2,
+    type_::{RangeKind, common_type, ty_match},
+    util::{UnwrapDebug, forget_lifetime_mut, panic_debug, then, unreachable_debug},
 };
 pub use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
-use std::{assert_matches::debug_assert_matches, collections::HashSet};
-pub use symbol::SemaSymbol;
-use value::{EMPTY_PTR, SemaValue};
+use primitives::Primitives;
+use std::collections::HashSet;
 
 mod err;
-mod symbol;
-mod value;
+pub mod primitives;
 
-/// This is a macro because `err_span` should only be evaluated when an error
-/// happens.
+/// This is a macro because `err_span` should only be evaluated when an error happens.
 /// ```ignore
-/// fn check_or_set_type(target: &mut Type, new_ty: Type, err_span: Span) -> SemaResult<()>
+/// fn check_or_set_type(ty: Ptr<ast::Type>, target_ty: &mut OPtr<ast::Type>, err_span: Span) -> SemaResult<()>
 /// ```
-macro_rules! check_or_set_type {
-    ($target:expr, $new_ty:expr, $err_span:expr $(,)?) => {{
-        let target: &mut Type = $target;
-        let new_ty: Type = $new_ty;
-        debug_assert!(new_ty.is_valid());
-        if *target == Type::Unset {
-            *target = new_ty.finalize();
-            Ok(())
-        } else if let Some(common_ty) = target.common_type(new_ty) {
-            *target = common_ty;
-            Ok(())
+macro_rules! check_and_set_target {
+    ($ty:expr, $target_ty:expr, $err_span:expr $(,)?) => {{
+        let ty: Ptr<ast::Type> = $ty;
+        let target_ty: &mut OPtr<ast::Type> = $target_ty;
+        let common_ty = if let Some(target_ty) = target_ty {
+            match common_type(ty, *target_ty) {
+                Some(t) => t,
+                None => return err(MismatchedTypes { expected: *target_ty, got: ty }, $err_span),
+            }
         } else {
-            err(MismatchedTypes { expected: *target, got: new_ty }, $err_span)
-        }
-    }};
-}
-
-macro_rules! try_not_never {
-    ($val:expr) => {{
-        let v: SemaValue = $val;
-        match v.ty {
-            Type::Never => return Ok(v),
-            _ => v,
-        }
+            ty
+        };
+        *target_ty = Some(common_ty);
     }};
 }
 
@@ -60,15 +47,18 @@ macro_rules! try_not_never {
 pub struct Sema<'c, 'alloc> {
     pub code: &'c Code,
 
-    pub symbols: SymbolTable<SemaSymbol>,
-    struct_stack: Vec<Vec<Ptr<Type>>>,
-    enum_stack: Vec<Vec<Ptr<Type>>>,
-    function_stack: Vec<Ptr<Fn>>,
-    defer_stack: ScopedStack<Ptr<Expr>>,
+    //pub symbols: SymbolTable<SemaSymbol>,
+    pub symbols: SymbolTable2,
+    // struct_stack: Vec<Vec<Ptr<ast::Type>>>,
+    // enum_stack: Vec<Vec<Ptr<ast::Type>>>,
+    function_stack: Vec<Ptr<ast::Fn>>,
+    defer_stack: ScopedStack<Ptr<Ast>>,
 
     pub errors: Vec<SemaError>,
 
-    alloc: &'alloc bumpalo::Bump,
+    alloc: &'alloc Arena,
+
+    pub primitives: Primitives,
 
     #[cfg(debug_assertions)]
     debug_types: bool,
@@ -77,41 +67,37 @@ pub struct Sema<'c, 'alloc> {
 impl<'c, 'alloc> Sema<'c, 'alloc> {
     pub fn new(
         code: &'c Code,
-        alloc: &'alloc bumpalo::Bump,
+        alloc: &'alloc Arena,
         #[allow(unused)] debug_types: bool,
     ) -> Sema<'c, 'alloc> {
+        let mut symbols = SymbolTable2::default();
+        symbols.open_scope();
+        let primitives = Primitives::setup(&mut symbols, alloc);
+
         Sema {
             code,
-            symbols: SymbolTable::default(),
-            struct_stack: vec![vec![]],
-            enum_stack: vec![vec![]],
+            symbols,
+            // struct_stack: vec![vec![]],
+            // enum_stack: vec![vec![]],
             function_stack: vec![],
             defer_stack: ScopedStack::default(),
             errors: vec![],
             alloc,
+            primitives,
             #[cfg(debug_assertions)]
             debug_types,
         }
     }
 
-    pub fn preload_top_level(&mut self, s: Ptr<Expr>) {
+    pub fn preload_top_level(&mut self, s: Ptr<Ast>) {
         let res = try {
-            let item_ident = match s.kind {
-                ExprKind::VarDecl(decl) => {
-                    debug_assert!(decl.is_const);
-                    debug_assert!(decl.default.is_some());
-                    decl.ident
-                },
-                ExprKind::Extern { ident, .. } => ident,
-                _ => err(UnexpectedTopLevelExpr(s), s.span)?,
+            let Some(decl) = s.try_downcast::<ast::Decl>() else {
+                err(UnexpectedTopLevelExpr(s), s.full_span())?
             };
-
-            if self
-                .symbols
-                .insert_no_duplicate(item_ident.text, SemaSymbol::preload_symbol())
-                .is_err()
-            {
-                err(TopLevelDuplicate, item_ident.span)?
+            debug_assert!((decl.is_const && decl.init.is_some()) || decl.is_extern);
+            debug_assert!(decl.ty.is_none());
+            if self.symbols.insert_no_duplicate(decl).is_err() {
+                err(TopLevelDuplicate, decl.ident.span)?
             }
         };
         if let Err(e) = res {
@@ -119,8 +105,8 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         }
     }
 
-    pub fn analyze_top_level(&mut self, s: Ptr<Expr>) -> SemaResult<(), ()> {
-        match self.analyze(s, Type::Void, true) {
+    pub fn analyze_top_level(&mut self, s: Ptr<Ast>) -> SemaResult<(), ()> {
+        match self.analyze(s, &Some(self.primitives.void_ty), true) {
             Ok(_) => Ok(()),
             NotFinished => NotFinished,
             Err(e) => {
@@ -130,496 +116,444 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
         }
     }
 
-    /// This modifies the [`Expr`] behind `expr` to ensure that codegen is
-    /// possible.
     pub fn analyze(
         &mut self,
-        mut expr: Ptr<Expr>,
-        ty_hint: Type,
+        expr: Ptr<Ast>,
+        ty_hint: &OPtr<ast::Type>,
         is_const: bool,
-    ) -> SemaResult<SemaValue> {
+    ) -> SemaResult<()> {
+        let res = self._analyze_inner(expr, ty_hint, is_const);
+        #[cfg(debug_assertions)]
+        if self.debug_types {
+            let label = match &res {
+                Ok(()) => format!("type: {}", expr.ty.u()),
+                NotFinished => "not finished".to_string(),
+                Err(e) => format!("err: {}", e.kind),
+            };
+            crate::util::display_span_in_code_with_label(expr.full_span(), self.code, label);
+        }
+        #[cfg(debug_assertions)]
+        if res.is_ok() {
+            debug_assert!(expr.ty.is_some());
+        }
+        res
+    }
+
+    /// This modifies the [`Ast`] behind `expr` to ensure that codegen is possible.
+    #[inline]
+    fn _analyze_inner(
+        &mut self,
+        mut expr: Ptr<Ast>,
+        ty_hint: &OPtr<ast::Type>, // reference to handle changing pointers
+        is_const: bool,
+    ) -> SemaResult<()> {
+        // println!("analyze {:x?}: {:?} {}", expr, expr.kind, expr.to_text());
         let span = expr.span;
 
-        macro_rules! lit_to_val {
-            ($ty:expr, $const_val:expr) => {
-                if is_const {
-                    let val = self.alloc($const_val)?.cast::<()>();
-                    Ok(SemaValue::new_const($ty, val))
-                } else {
-                    Ok(SemaValue::new($ty))
-                }
-            };
+        if expr.replacement.is_some() {
+            // Does this work in general? Is this needed if NotFinished is removed?
+            return Ok(());
         }
 
-        let res = match &mut expr.kind {
-            ExprKind::Ident(text) => {
-                if let Some(internal_ty) = Type::try_internal_ty(*text) {
-                    let t = self.alloc(internal_ty)?;
-                    return Ok(SemaValue::type_(t));
+        /// Like [`Sema::analyze`] but returns on error and never
+        macro_rules! analyze {
+            ($expr:expr, $ty_hint:expr) => {
+                analyze!($expr, $ty_hint, is_const)
+            };
+            ($expr:expr, $ty_hint:expr, $is_const:expr) => {{
+                let e: Ptr<Ast> = $expr;
+                self.analyze(e, &$ty_hint, $is_const)?;
+                if e.ty == self.primitives.never {
+                    expr.as_mut().ty = Some(self.primitives.never);
+                    return Ok(());
                 }
+                e.as_mut().ty.as_mut().u()
+            }};
+        }
 
-                // TODO: remove this
-                if &**text == "nil" {
-                    return Ok(SemaValue::new(Type::Ptr { pointee_ty: Type::ptr_never() }));
-                }
-
-                match self.get_symbol(*text, expr.span)? {
-                    SemaSymbol::Finished(v) if v.check_constness(is_const) => Ok(*v),
-                    SemaSymbol::Finished(_) => err(SemaErrorKind::NotAConstExpr, span),
-                    SemaSymbol::NotFinished(Some(ty)) if !is_const => Ok(SemaValue::new(*ty)),
-                    SemaSymbol::NotFinished(_) => NotFinished,
-                }
-            },
-            ExprKind::IntLit(code) => {
-                let ty = match ty_hint {
-                    Type::Never
-                    | Type::Int { .. }
-                    | Type::Float { .. }
-                    | Type::IntLiteral
-                    | Type::FloatLiteral => ty_hint,
-                    _ => Type::IntLiteral,
-                };
-                lit_to_val!(ty, code.parse::<i128>().unwrap_debug())
-            },
-            ExprKind::FloatLit(code) => {
-                let ty = match ty_hint {
-                    Type::Never | Type::Float { .. } | Type::FloatLiteral => ty_hint,
-                    _ => Type::FloatLiteral,
-                };
-                lit_to_val!(ty, code.parse::<f64>().unwrap_debug())
-            },
-            ExprKind::BoolLit(val) => lit_to_val!(Type::Bool, *val),
-            ExprKind::CharLit(char) => lit_to_val!(Type::U8, *char), // TODO: change this to a real char type
-            ExprKind::BCharLit(byte) => lit_to_val!(Type::U8, *byte),
-            #[allow(unused_variables)]
-            ExprKind::StrLit(_) => lit_to_val!(Type::str_slice(), {
-                todo!();
-                ()
-            }),
-            #[allow(unused_variables)]
-            ExprKind::PtrTy { ty, is_mut } => {
-                self.eval_type(ty)?;
-                debug_assert!(ty.is_valid());
-                let pointee_ty = self.alloc(*ty)?;
-                self.alloc(Type::Ptr { pointee_ty }).map_ok(SemaValue::type_)
-            },
-            #[allow(unused_variables)]
-            ExprKind::SliceTy { ty, is_mut } => {
-                self.eval_type(ty)?;
-                debug_assert!(ty.is_valid());
-                let elem_ty = self.alloc(*ty)?;
-                self.alloc(Type::Slice { elem_ty }).map_ok(SemaValue::type_)
-            },
-            ExprKind::ArrayTy { count, ty } => {
-                let count_val = self.analyze(*count, Type::U64, true)?;
-                let count = count_val.int().map_err(|kind| SemaError { kind, span: count.span })?;
-                let count = count.try_into().expect("todo: array to long");
-                self.eval_type(ty)?;
-                let elem_ty = self.alloc(*ty)?;
-                let arr_ty = Type::Array { len: count, elem_ty };
-                self.alloc(arr_ty).map_ok(SemaValue::type_)
-            },
-            ExprKind::Fn(func) => {
-                assert!(is_const, "todo: non-const function");
-                let fn_ptr = Ptr::from(&*func);
-                let Fn { mut params, ret_type, body } = func;
-                self.eval_type(ret_type)?;
-                self.function_stack.push(fn_ptr);
-                self.open_scope();
-                let res: SemaResult<SemaValue> = try {
-                    for param in params.iter_mut() {
-                        assert!(!param.is_const, "todo: const param");
-                        self.analyze_var_decl(param)?;
+        match expr.matchable().as_mut() {
+            AstEnum::Ident { text, .. } => {
+                let sym = self.get_symbol(*text, expr.span);
+                if sym.is_err()
+                    && let Some(mut i) = self.try_custom_bitwith_int_type(*text)
+                {
+                    i.span = expr.span;
+                    i.ty = Some(self.primitives.type_ty);
+                    debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntVal>());
+                    *expr.cast::<ast::IntTy>().as_mut() = i;
+                } else {
+                    let sym = sym?;
+                    if sym.is_const {
+                        let cv = sym.init.u().rep();
+                        debug_assert!(cv.is_const_val());
+                        debug_assert!(expr.replacement.is_none());
+                        expr.replacement = Some(cv);
+                    } else if is_const {
+                        if sym.is_extern {
+                            todo!("use of extern symbol in const expr")
+                        };
+                        return err(NotAConstExpr, expr.full_span());
                     }
-                    match body {
-                        Some(body) => {
-                            let body_ty = self.analyze(*body, *ret_type, false)?.ty;
-                            check_or_set_type!(ret_type, body_ty, body.span)?; // TODO: better span if `body` is a block
-                            SemaValue::new_const(Type::Function(func.into()), EMPTY_PTR)
-                        },
-                        None => SemaValue::new(Type::Type(self.alloc(Type::Function(fn_ptr))?)),
-                    }
-                };
-                debug_assert!(!res.is_ok() || func.ret_type.is_valid());
-                self.close_scope()?;
-                self.function_stack.pop();
-                res
+                    expr.ty = Some(sym.var_ty.u());
+                }
             },
-            ExprKind::Parenthesis { expr } => self.analyze(*expr, ty_hint, is_const),
-            ExprKind::Block { stmts, has_trailing_semicolon } => {
+            AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
                 self.open_scope();
-                let res: SemaResult<SemaValue> = try {
-                    let mut val = SemaValue::void();
+                let res: SemaResult<()> = try {
                     let max_idx = stmts.len().wrapping_sub(1);
-                    for (idx, s) in stmts.iter_mut().enumerate() {
-                        let expected_ty = if max_idx == idx { ty_hint } else { Type::Unset };
-                        match self.analyze(s.expr, expected_ty, is_const) {
-                            Ok(mut new_val) => {
-                                new_val.ty = new_val.ty.finalize();
-                                s.ty = new_val.ty;
-                                debug_assert!(s.ty.is_valid());
-                                debug_assert!(new_val.check_constness(is_const));
-                                val = new_val
+                    for (idx, s) in stmts.iter().enumerate() {
+                        let expected_ty = if max_idx == idx { ty_hint } else { &None };
+                        match self.analyze(*s, expected_ty, is_const) {
+                            Ok(()) => {
+                                // s.ty = s.ty.finalize();
+                                debug_assert!(s.ty.is_some());
                             },
                             NotFinished => NotFinished?,
                             Err(err) => {
                                 self.errors.push(err);
-                                val = SemaValue::never()
+                                s.as_mut().ty = Some(self.primitives.never);
                             },
                         }
                     }
-                    val
                 };
                 self.close_scope()?;
-                let val = res?;
-                Ok(if !*has_trailing_semicolon || val.ty == Type::Never {
-                    val
+                res?;
+                let last_ty = stmts.last().map(|s| s.ty.u()).unwrap_or(self.primitives.void_ty);
+                expr.ty = Some(if !*has_trailing_semicolon || last_ty == self.primitives.never {
+                    last_ty
                 } else {
-                    SemaValue::void()
+                    self.primitives.void_ty
                 })
             },
-            ExprKind::StructDef(fields) => {
-                let mut field_names = HashSet::new();
-                for field in fields.iter_mut() {
-                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
-                    if is_duplicate {
-                        return err(DuplicateField, field.ident.span);
-                    }
-                    if field.is_const {
-                        todo!("const struct field")
-                    }
-                    let _f = self.var_decl_to_value(field)?;
-                }
-                let ty = self.alloc(Type::Struct { fields: *fields })?;
-                self.struct_stack.last_mut().unwrap_debug().push(ty);
-                Ok(SemaValue::type_(ty))
-            },
-            ExprKind::UnionDef(fields) => {
-                let mut field_names = HashSet::new();
-                for field in fields.iter_mut() {
-                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
-                    if is_duplicate {
-                        return err(DuplicateField, field.ident.span);
-                    }
-                    if field.is_const {
-                        todo!("const struct field")
-                    }
-                    if let Some(d) = field.default {
-                        return err(UnionFieldWithDefaultValue, d.full_span());
-                    }
-                    let _f = self.var_decl_to_value(field)?;
-                }
-                let ty = self.alloc(Type::Union { fields: *fields })?;
-                Ok(SemaValue::type_(ty))
-            },
-            ExprKind::EnumDef(variants) => {
-                let mut variant_names = HashSet::new();
-                for variant in variants.iter_mut() {
-                    let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
-                    if is_duplicate {
-                        return err(DuplicateEnumVariant, variant.ident.span);
-                    }
-                    let _ = self.var_decl_to_value(variant)?;
-                }
-                let ty = self.alloc(Type::Enum { variants: *variants })?;
-                self.enum_stack.last_mut().unwrap_debug().push(ty);
-                Ok(SemaValue::type_(ty))
-            },
-            ExprKind::OptionShort(ty) => {
-                self.eval_type(ty)?;
-                Ok(SemaValue::type_(self.alloc(Type::Option { ty: self.alloc(*ty)? })?))
-            },
-            ExprKind::PositionalInitializer { lhs: Some(ty_expr), lhs_ty, args } => {
-                assert!(!is_const, "todo: const initializer");
-                let lhs_val = self.analyze(*ty_expr, Type::Unset, false)?;
-                *lhs_ty = lhs_val.ty;
-                match *lhs_ty {
-                    Type::Never => return Ok(SemaValue::never()),
-                    Type::Type(t) => {
-                        let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&*fields, args.iter().copied(), is_const, span.end())?;
-                        Ok(SemaValue::new(*t))
-                    },
-                    Type::Ptr { pointee_ty: t } => {
-                        let Type::Struct { fields } = *t else { todo!("error") };
-                        self.validate_call(&*fields, args.iter().copied(), is_const, span.end())?;
-                        Ok(lhs_val)
-                    },
-                    ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
-                }
-            },
-            ExprKind::PositionalInitializer { lhs: None, lhs_ty, args } => match ty_hint {
-                t @ Type::Struct { fields } => {
-                    *lhs_ty = Type::Type(self.alloc(t)?);
-                    self.validate_call(&*fields, args.iter().copied(), is_const, span.end())?;
-                    Ok(SemaValue::new(t))
-                },
-                _ => err(CannotApplyInitializer { ty: ty_hint }, span.start_pos()),
-            },
-            ExprKind::NamedInitializer { lhs: Some(ty_expr), lhs_ty, fields: values } => {
-                assert!(!is_const, "todo: const initializer");
-                let lhs_val = self.analyze(*ty_expr, Type::Unset, false)?;
-                *lhs_ty = lhs_val.ty;
-                match *lhs_ty {
-                    Type::Never => return Ok(SemaValue::never()),
-                    Type::Type(t) => {
-                        self.validate_initializer(*t, *values, is_const, span)?;
-                        Ok(SemaValue::new(*t))
-                    },
-                    Type::Ptr { pointee_ty: t } => {
-                        self.validate_initializer(*t, *values, is_const, span)?;
-                        Ok(lhs_val)
-                    },
-                    ty => err(CannotApplyInitializer { ty }, ty_expr.full_span()),
-                }
-            },
-            ExprKind::NamedInitializer { lhs: None, lhs_ty, fields: values } => {
-                let struct_ty = if let Type::Struct { .. } | Type::Slice { .. } = ty_hint {
-                    self.alloc(ty_hint)?
+            AstEnum::PositionalInitializer { lhs, args, .. } => {
+                let lhs = if let Some(lhs) = *lhs {
+                    analyze!(lhs, None, false);
+                    lhs
+                } else if let Some(s_def) = ty_hint.try_downcast::<ast::StructDef>() {
+                    s_def.upcast()
                 } else {
-                    debug_assert_matches!(ty_hint, Type::Unset);
-                    // TODO: benchmark this
-                    let mut struct_ty_iter =
-                        self.struct_stack.iter().flat_map(|scope| scope.iter()).copied().filter(
-                            |struct_ty| match **struct_ty {
-                                Type::Struct { fields } => values
-                                    .iter()
-                                    .all(|(i, _)| fields.iter().any(|f| *f.ident.text == *i.text)),
-                                _ => false,
-                            },
-                        );
-                    let Some(struct_ty) = struct_ty_iter.next() else {
-                        *lhs_ty = Type::Never;
-                        return err(CannotInferNamedInitializerTy, span.start_pos());
-                    };
-                    if struct_ty_iter.next().is_some() {
-                        *lhs_ty = Type::Never;
-                        return err(MultiplePossibleInitializerTy, span.start_pos());
-                    }
-                    drop(struct_ty_iter);
-                    #[cfg(debug_assertions)]
-                    println!("INFO: lookup type {}", *struct_ty);
-                    struct_ty
+                    return err(CannotInferInitializerTy, expr.full_span());
                 };
-                *lhs_ty = Type::Type(struct_ty);
-                let struct_ty = *struct_ty;
-                self.validate_initializer(struct_ty, *values, is_const, span)?;
-                Ok(SemaValue::new(struct_ty))
-            },
-            #[allow(unused_variables)]
-            ExprKind::ArrayInitializer { lhs: Some(_), elements, .. } => todo!(),
-            ExprKind::ArrayInitializer { lhs: None, elements, .. } => {
-                let mut val_ty: Option<Type> = None;
-                for elem in elements.iter() {
-                    let val = self.analyze(*elem, Type::Unset, is_const)?;
-                    let ty = if let Some(prev) = val_ty {
-                        prev.common_type(val.ty).ok_or_else(|| {
-                            err_val(
-                                MismatchedTypes { expected: prev, got: val.ty },
-                                elem.full_span(),
-                            )
-                        })?
-                    } else {
-                        val.ty
-                    };
-                    val_ty = Some(ty);
-                }
-
-                let count = elements.len();
-                let val_ty = self.alloc(val_ty.expect("todo: empty array lit"))?;
-                let ty = Type::Array { len: count, elem_ty: val_ty };
-                if is_const {
-                    Ok(SemaValue::new_const(ty, todo!()))
+                if let Some(mut s) = lhs.try_downcast::<ast::StructDef>() {
+                    // allow slices?
+                    self.validate_call(&mut s.fields, args.iter_mut(), span.end())?;
+                    expr.ty = Some(s.upcast_to_type())
+                } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
+                    && let Some(mut s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
+                {
+                    self.validate_call(&mut s.fields, args.iter_mut(), span.end())?;
+                    expr.ty = Some(ptr_ty.upcast_to_type())
                 } else {
-                    Ok(SemaValue::new(ty))
-                }
-            },
-            #[allow(unused_variables)]
-            ExprKind::ArrayInitializerShort { lhs: Some(_), lhs_ty, val, count } => todo!(),
-            #[allow(unused_variables)]
-            ExprKind::ArrayInitializerShort { lhs: None, lhs_ty, val, count } => {
-                let val = self.analyze(*val, Type::U64, is_const)?;
-                let count_val = self.analyze(*count, Type::Unset, true)?;
-                let count_val =
-                    count_val.int().map_err(|kind| SemaError { kind, span: count.full_span() })?;
-                if count_val.is_negative() {
-                    return err(NegativeArrayLen, count.full_span());
-                }
-
-                let count = count_val.try_into().expect("todo: large arr len");
-                let ty = Type::Array { len: count, elem_ty: self.alloc(val.ty)? };
-                if is_const {
-                    let val = todo!();
-                    Ok(SemaValue::new_const(ty, val))
-                } else {
-                    Ok(SemaValue::new(ty))
-                }
-            },
-            ExprKind::Dot { lhs: Some(lhs), lhs_ty, rhs } => {
-                assert!(!is_const, "todo: const dot");
-                *lhs_ty = try_not_never!(self.analyze(*lhs, Type::Unset, is_const)?).ty;
-                debug_assert!(lhs_ty.is_valid());
-                // field access or enum variant
-                match *lhs_ty {
-                    Type::Struct { fields } | Type::Union { fields } => {
-                        if let Some(field) = fields.iter().find(|f| *f.ident.text == *rhs.text) {
-                            return Ok(SemaValue::new(field.ty));
-                        }
-                    },
-                    Type::Type(t) if let Type::Enum { variants } = *t => {
-                        if let Some((variant_idx, _)) =
-                            variants.iter().enumerate().find(|(_, f)| *f.ident.text == *rhs.text)
-                        {
-                            return Ok(SemaValue::enum_variant(t, variant_idx));
-                        }
-                    },
-                    Type::Slice { elem_ty } => match &*rhs.text {
-                        "ptr" => return Ok(SemaValue::new(Type::Ptr { pointee_ty: elem_ty })),
-                        "len" => return Ok(SemaValue::new(Type::U64)),
-                        _ => {},
-                    },
-                    _ => {},
-                }
-
-                let function =
-                    match self.get_symbol(rhs.text, rhs.span).and_then(SemaSymbol::get_type) {
-                        Ok(Type::Function(function)) => function,
-                        NotFinished => return NotFinished,
-                        _ => return err(UnknownField { ty: *lhs_ty, field: rhs.text }, rhs.span),
-                    };
-
-                Ok(SemaValue::new(Type::MethodStub { function, first_expr: *lhs }))
-            },
-            ExprKind::Dot { lhs: None, lhs_ty, rhs } => {
-                // `.<ident>` must be an enum
-                let (enum_ty, idx) = if let Type::Enum { variants } = ty_hint {
-                    let Some(idx) = variants.iter().position(|v| *v.ident.text == *rhs.text) else {
-                        return err(UnknownField { ty: ty_hint, field: rhs.text }, rhs.span);
-                    };
-                    (self.alloc(ty_hint)?, idx)
-                } else {
-                    //debug_assert_matches!(ty_hint, Type::Unset);
-                    // TODO: benchmark this
-                    let mut enum_ty_iter =
-                        self.enum_stack.iter().flat_map(|scope| scope.iter()).copied().filter_map(
-                            |enum_ty| match *enum_ty {
-                                Type::Enum { variants } => {
-                                    let idx =
-                                        variants.iter().position(|v| *v.ident.text == *rhs.text)?;
-                                    Some((enum_ty, idx))
-                                },
-                                _ => None,
-                            },
-                        );
-                    let Some((enum_ty, idx)) = enum_ty_iter.next() else {
-                        return err(CannotInferNamedInitializerTy, expr.span.start_pos());
-                    };
-                    if enum_ty_iter.next().is_some() {
-                        return err(MultiplePossibleInitializerTy, expr.span.start_pos());
-                    }
-                    drop(enum_ty_iter);
-                    #[cfg(debug_assertions)]
-                    println!("INFO: lookup type {}", *enum_ty);
-                    (enum_ty, idx)
+                    return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
                 };
-                *lhs_ty = Type::Type(enum_ty);
-                Ok(SemaValue::enum_variant(enum_ty, idx))
             },
-            ExprKind::Index { lhs, idx } => {
-                assert!(!is_const, "todo: const index");
-                let arr = try_not_never!(self.analyze_typed(lhs, Type::Unset, is_const)?);
-                let (Type::Array { elem_ty, .. } | Type::Slice { elem_ty }) = arr.ty else {
-                    return err(CanOnlyIndexArrays, lhs.full_span());
+            AstEnum::NamedInitializer { lhs, fields: values, .. } => {
+                let lhs = if let Some(lhs) = *lhs {
+                    analyze!(lhs, None, false);
+                    lhs
+                } else if let Some(s_def) = ty_hint.filter(|t| t.kind.is_struct_kind()) {
+                    s_def.upcast()
+                } else {
+                    return err(CannotInferInitializerTy, expr.full_span());
                 };
-                let idx_val =
-                    try_not_never!(self.analyze_typed(idx, Type::Unset, is_const)?).finalize_ty();
-                idx.ty = idx_val.ty;
-                Ok(SemaValue::new(match idx_val.ty {
-                    Type::Int { .. } => *elem_ty,
-                    Type::Range { elem_ty: i, kind }
-                        if i.matches_int() || kind == RangeKind::Full =>
+                if let Some(struct_ty) = lhs.try_downcast_type()
+                    && struct_ty.kind.is_struct_kind()
+                {
+                    self.validate_initializer(struct_ty, *values, is_const, span)?;
+                    expr.ty = Some(struct_ty)
+                } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
+                    && let Some(pointee) = ptr_ty.pointee.try_downcast_const_val()
+                    && pointee.kind.is_struct_kind()
+                {
+                    let struct_ty = pointee.downcast_type();
+                    self.validate_initializer(struct_ty, *values, is_const, span)?;
+                    expr.ty = Some(ptr_ty.upcast_to_type())
+                } else {
+                    return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
+                };
+            },
+            AstEnum::ArrayInitializer { lhs, elements, .. } => {
+                if let Some(lhs) = *lhs {
+                    analyze!(lhs, None);
+                }
+                let lhs = lhs.or_else(|| ty_hint.upcast().filter(|t| t.kind == AstKind::ArrayTy));
+
+                let mut elem_iter = elements.iter();
+
+                let mut elem_ty = if let Some(lhs) = lhs {
+                    let arr_ty = if let Some(arr_ty) = lhs.try_downcast::<ast::ArrayTy>() {
+                        expr.ty = Some(arr_ty.upcast_to_type());
+                        arr_ty
+                    } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
+                        && let Some(arr_ty) = ptr_ty.pointee.try_downcast::<ast::ArrayTy>()
                     {
-                        Type::Slice { elem_ty }
-                    },
-                    t => todo!("other idx ({t:#?})"),
-                }))
-            },
-            ExprKind::Cast { lhs, target_ty } => {
-                self.eval_type(target_ty)?;
-                let _v = self.analyze_typed(lhs, *target_ty, false)?;
-                // TODO: check if cast is possible
-                Ok(SemaValue::new(*target_ty))
-            },
-            ExprKind::Call { func: f, args, .. } => {
-                assert!(!is_const, "todo: const call");
-                match self.analyze_typed(f, Type::Unset, is_const)?.ty {
-                    Type::Never => Ok(SemaValue::never()),
-                    Type::Function(mut func) => {
-                        let Fn { params, ret_type, .. } = func.as_mut();
-                        self.validate_call(&params, args.iter().copied(), is_const, span.end())?;
-                        debug_assert!(ret_type.is_valid());
-                        Ok(SemaValue::new(*ret_type))
-                    },
-                    Type::MethodStub { mut function, first_expr } => {
-                        let Fn { params, ret_type, .. } = function.as_mut();
-                        let args = std::iter::once(first_expr).chain(args.iter().copied());
-                        self.validate_call(&params, args, is_const, span.end())?;
-                        debug_assert!(ret_type.is_valid());
-                        Ok(SemaValue::new(*ret_type))
-                    },
-                    Type::EnumVariant { enum_ty, idx } => {
-                        let Type::Enum { variants } = *enum_ty else { unreachable_debug() };
-                        let variant = variants[idx];
-                        self.validate_call(&[variant], args.iter().copied(), is_const, span.end())?;
-                        Ok(SemaValue::new(*enum_ty))
-                    },
-                    _ => err(CallOfANonFunction, span),
-                }
-            },
-            &mut ExprKind::UnaryOp { kind, expr, .. } => {
-                //assert!(!is_const, "todo: PreOp in const");
-                let ty = self.analyze(expr, Type::Unset, is_const)?.ty;
-                let out_ty = match (kind, ty) {
-                    (_, Type::Unset | Type::Unevaluated(_)) => return err(CannotInfer, span),
-                    (_, Type::Void) => None,
-                    (_, Type::Never) => Some(ty),
-                    //(UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf, Type::Function(_)) => todo!(),
-                    (UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf, ty) => {
-                        Some(Type::Ptr { pointee_ty: self.alloc(ty)? })
-                    },
-                    (UnaryOpKind::Deref, Type::Ptr { pointee_ty }) => Some(*pointee_ty),
-                    (UnaryOpKind::Deref, _) => None,
-                    (UnaryOpKind::Not, Type::Int { .. } | Type::IntLiteral | Type::Bool) => {
-                        Some(ty)
-                    },
-                    (UnaryOpKind::Not, _) => None,
-                    (
-                        UnaryOpKind::Neg,
-                        Type::Int { .. }
-                        | Type::IntLiteral
-                        | Type::Float { .. }
-                        | Type::FloatLiteral,
-                    ) => Some(ty),
-                    (UnaryOpKind::Neg, _) => None,
-                    (UnaryOpKind::Try, _) => todo!("try"),
+                        expr.ty = Some(ptr_ty.upcast_to_type());
+                        arr_ty
+                    } else {
+                        return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
+                    };
+
+                    if elements.len() != arr_ty.len.int() {
+                        return err(
+                            MismatchedArrayLen { expected: arr_ty.len.int(), got: elements.len() },
+                            expr.full_span(),
+                        );
+                    }
+
+                    arr_ty.elem_ty.downcast_type()
+                } else {
+                    let Some(elem) = elem_iter.next() else {
+                        expr.ty = Some(self.primitives.empty_array_ty.upcast_to_type()); // `.[]`
+                        return Ok(());
+                    };
+                    *analyze!(*elem, None)
                 };
-                match out_ty {
-                    Some(t) => Ok(SemaValue::new(t)),
-                    None => err(InvalidPreOp { ty, kind }, span),
+                #[cfg(debug_assertions)]
+                let orig_elem_ty = elem_ty;
+
+                for elem in elem_iter {
+                    let ty = *analyze!(*elem, Some(elem_ty));
+                    let Some(common_ty) = common_type(ty, elem_ty) else {
+                        return err(
+                            MismatchedTypes { expected: elem_ty, got: ty },
+                            elem.full_span(),
+                        );
+                    };
+                    elem_ty = common_ty;
+                }
+
+                #[cfg(debug_assertions)]
+                debug_assert!(lhs.is_none() || elem_ty == orig_elem_ty);
+
+                if lhs.is_none() {
+                    debug_assert!(expr.ty.is_none());
+                    let len = elements.len() as i128;
+                    let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
+                    let elem_ty = elem_ty.upcast();
+                    let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?;
+                    expr.ty = Some(arr_ty.upcast_to_type());
                 }
             },
-            ExprKind::BinOp { lhs, op, rhs, arg_ty } => {
+            AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
+                assert!(!is_const, "todo: const array");
+                assert!(lhs.is_none(), "todo: array initializer with lhs");
+                let u64_ty = self.primitives.u64;
+                let count_ty = *analyze!(*count, Some(u64_ty), true);
+                debug_assert!(count.is_const_val());
+                if count_ty != u64_ty {
+                    return err(
+                        MismatchedTypes { expected: u64_ty, got: count_ty },
+                        count.full_span(),
+                    );
+                }
+                let elem_ty = analyze!(*val, None).upcast();
+                let arr_ty =
+                    self.alloc(type_new!(ArrayTy { len: *count, elem_ty }))?.upcast_to_type();
+                expr.ty = Some(arr_ty);
+                *lhs = Some(arr_ty.upcast())
+            },
+            AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
+                assert!(!is_const, "todo: const dot");
+                let lhs_ty = *analyze!(*lhs, None);
+                let lhs = lhs.rep();
+                let t = if lhs_ty == self.primitives.type_ty
+                    && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
+                    && let Some((_, variant)) = enum_ty.variants.find_field(&rhs.text)
+                {
+                    if variant.var_ty.u() == self.primitives.void_ty {
+                        enum_ty.upcast_to_type()
+                    } else {
+                        self.primitives.enum_variant
+                    }
+                } else if let TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } =
+                    lhs_ty.matchable().as_ref()
+                    && let Some((_, field)) = fields.find_field(&rhs.text)
+                {
+                    field.var_ty.u()
+                } else if let TypeEnum::SliceTy { elem_ty, is_mut, .. } = *lhs_ty.matchable()
+                    && &*rhs.text == "ptr"
+                {
+                    // TODO: remove this allocation (test if cast SliceTy -> PointerTy is valid)
+                    self.alloc(type_new!(PtrTy { pointee: elem_ty, is_mut }))?.upcast_to_type()
+                } else if lhs_ty.kind == AstKind::SliceTy && &*rhs.text == "len" {
+                    self.primitives.u64
+                } else {
+                    // method-like call:
+                    match self.get_symbol(rhs.text, rhs.span) {
+                        Ok(s)
+                            if s.var_ty == self.primitives.fn_val
+                                && let f = s.init.u().downcast::<ast::Fn>()
+                                && let Some(first_param) = f.params.get(0)
+                                && ty_match(lhs.ty.u(), first_param.var_ty.u()) =>
+                        {
+                            debug_assert!(rhs.replacement.is_none());
+                            rhs.replacement = Some(f.upcast());
+                        },
+                        NotFinished => return NotFinished,
+                        _ => return err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span),
+                    };
+                    self.primitives.method_stub
+                };
+                expr.ty = Some(t);
+            },
+            AstEnum::Dot { lhs: lhs @ None, rhs, .. } => {
+                // `.<ident>` must be an enum
+                let Some(enum_ty) = ty_hint.try_downcast::<ast::EnumDef>() else {
+                    if *ty_hint == self.primitives.never {
+                        expr.ty = Some(self.primitives.never);
+                        return Ok(());
+                    }
+                    return err(CannotInfer, expr.full_span());
+                };
+                let Some((_, variant)) = enum_ty.variants.find_field(&rhs.text) else {
+                    let ty = enum_ty.upcast_to_type();
+                    return err(UnknownField { ty, field: rhs.text }, rhs.span);
+                };
+                *lhs = Some(enum_ty.upcast());
+                expr.ty = Some(if variant.var_ty.u() == self.primitives.void_ty {
+                    enum_ty.upcast_to_type()
+                } else {
+                    self.primitives.enum_variant
+                });
+            },
+            AstEnum::Index { lhs, idx, .. } => {
+                assert!(!is_const, "todo: const index");
+                let lhs_ty = analyze!(*lhs, None);
+                let (elem_ty, is_mut) = match lhs_ty.matchable().as_ref() {
+                    TypeEnum::SliceTy { elem_ty, is_mut, .. } => (*elem_ty, *is_mut),
+                    TypeEnum::ArrayTy { elem_ty, .. } => (*elem_ty, true),
+                    _ => return err(CanOnlyIndexArrays, lhs.full_span()),
+                };
+                let elem_ty = elem_ty.downcast_const_val().downcast_type();
+                analyze!(*idx, None).finalize();
+                expr.ty = Some(match idx.ty.matchable().as_ref() {
+                    TypeEnum::IntTy { .. } => elem_ty,
+                    TypeEnum::RangeTy { elem_ty: i, rkind, .. }
+                        if i.matches_int() || *rkind == RangeKind::Full =>
+                    {
+                        let elem_ty = elem_ty.upcast();
+                        self.alloc(type_new!(SliceTy { elem_ty, is_mut }))?.upcast_to_type()
+                    },
+                    _ => return err(InvalidArrayIndex { ty: idx.ty.u() }, idx.full_span()),
+                });
+            },
+            AstEnum::Cast { expr: lhs, target_ty, .. } => {
+                let ty = self.analyze_type(*target_ty)?;
+                analyze!(*lhs, Some(ty));
+                // TODO: check if cast is possible
+                expr.ty = Some(ty);
+            },
+            AstEnum::Autocast { expr, .. } => {
+                if ty_hint.is_some() {
+                    analyze!(*expr, ty_hint);
+                    // TODO: check if cast is possible
+                    expr.ty = *ty_hint;
+                } else {
+                    return err(SemaErrorKind::CannotInferAutocastTy, expr.full_span());
+                }
+            },
+            AstEnum::Call { func, args, .. } => {
+                if is_const {
+                    return err(NotAConstExpr, expr.full_span());
+                }
+                let ty_hint =
+                    ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
+                let fn_ty = *analyze!(*func, ty_hint);
+                expr.ty = Some(if let Some(fn_ty) = func.try_downcast::<ast::Fn>().as_mut() {
+                    let params = &mut fn_ty.params;
+                    self.validate_call(params, args.iter_mut(), span.end())?;
+                    fn_ty.ret_ty.u()
+                } else if fn_ty == self.primitives.method_stub {
+                    let dot = func.downcast::<ast::Dot>().as_mut();
+                    debug_assert_eq!(dot.rhs.upcast().rep().kind, AstKind::Fn);
+                    let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
+                    let args = std::iter::once(dot.lhs.as_mut().u()).chain(args.iter_mut());
+                    self.validate_call(&mut fn_ty.as_mut().params, args, span.end())?;
+                    fn_ty.ret_ty.u()
+                } else if fn_ty == self.primitives.enum_variant {
+                    let Some(dot) = func.try_downcast::<ast::Dot>() else { unreachable_debug() };
+                    let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
+                    let variant = enum_ty.variants.find_field(&dot.rhs.text).u().1;
+                    self.validate_call(&mut [variant], args.iter_mut(), span.end())?;
+                    enum_ty.upcast_to_type()
+                } else {
+                    panic!("{:#?}", func);
+                    return err(CallOfANonFunction, expr.full_span());
+                });
+            },
+            AstEnum::UnaryOp { op, expr: inner, .. } => {
+                //assert!(!is_const, "todo: PreOp in const");
+                let expr_ty = *analyze!(*inner, None);
+                let const_val = then!(is_const => inner.downcast_const_val());
+                expr.ty = Some(match *op {
+                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                        let is_mut = *op == UnaryOpKind::AddrMutOf;
+                        let pointee = expr_ty.upcast();
+                        debug_assert!(const_val.is_none(), "todo: const addr of");
+                        self.alloc(type_new!(PtrTy { pointee, is_mut }))?.upcast_to_type()
+                    },
+                    UnaryOpKind::Deref
+                        if let Some(ptr_ty) = expr_ty.try_downcast::<ast::PtrTy>() =>
+                    {
+                        debug_assert!(const_val.is_none(), "todo: const deref");
+                        ptr_ty.pointee.downcast_type()
+                    },
+                    UnaryOpKind::Not if expr_ty == self.primitives.bool => {
+                        if let Some(const_val) = const_val {
+                            let b = const_val.downcast::<ast::BoolVal>().val;
+                            debug_assert!(expr.replacement.is_none());
+                            // TODO: no allocation
+                            expr.replacement = Some(
+                                self.alloc(ast_new!(BoolVal { val: !b, span: Span::ZERO }))?
+                                    .upcast(),
+                            )
+                        }
+                        self.primitives.bool
+                    },
+                    UnaryOpKind::Neg
+                        if expr_ty.kind == AstKind::IntTy || expr_ty == self.primitives.int_lit =>
+                    {
+                        if let Some(const_val) = const_val {
+                            let i = const_val.downcast::<ast::IntVal>().val;
+                            debug_assert!(expr.replacement.is_none());
+                            // TODO: no allocation
+                            expr.replacement = Some(
+                                self.alloc(ast_new!(IntVal { val: -i, span: Span::ZERO }))?
+                                    .upcast(),
+                            )
+                        }
+                        expr_ty
+                    },
+                    UnaryOpKind::Neg
+                        if expr_ty.kind == AstKind::FloatTy
+                            || expr_ty == self.primitives.float_lit =>
+                    {
+                        if let Some(const_val) = const_val {
+                            let f = const_val.downcast::<ast::FloatVal>().val;
+                            debug_assert!(expr.replacement.is_none());
+                            // TODO: no allocation
+                            expr.replacement = Some(
+                                self.alloc(ast_new!(FloatVal { val: -f, span: Span::ZERO }))?
+                                    .upcast(),
+                            )
+                        }
+                        expr_ty
+                    },
+                    UnaryOpKind::Deref | UnaryOpKind::Not | UnaryOpKind::Neg => {
+                        return err(InvalidPreOp { ty: expr_ty, op: *op }, span);
+                    },
+                    UnaryOpKind::Try => todo!("try"),
+                });
+            },
+            AstEnum::BinOp { lhs, op, rhs, .. } => {
                 assert!(!is_const, "todo: BinOp in const");
-                let lhs_ty = self.analyze(*lhs, Type::Unset, is_const)?.ty;
-                debug_assert!(lhs_ty.is_valid());
-                let rhs_ty = self.analyze(*rhs, lhs_ty, is_const)?.ty;
-                debug_assert!(rhs_ty.is_valid());
-                let Some(common_ty) = lhs_ty.common_type(rhs_ty) else {
+                let lhs_ty = *analyze!(*lhs, None);
+                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
+                let Some(mut common_ty) = common_type(rhs_ty, lhs_ty) else {
                     return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span);
                 };
-                *arg_ty = common_ty;
                 // todo: check if binop can be applied to type
-                let ty = match op {
+                expr.ty = Some(match op {
                     BinOpKind::Mul
                     | BinOpKind::Div
                     | BinOpKind::Mod
@@ -636,252 +570,370 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                     | BinOpKind::Le
                     | BinOpKind::Gt
                     | BinOpKind::Ge => {
-                        *arg_ty = common_ty.finalize();
-                        Type::Bool
+                        common_ty.finalize();
+                        lhs.ty = Some(common_ty);
+                        rhs.ty = Some(common_ty);
+                        self.primitives.bool
                     },
                     BinOpKind::And | BinOpKind::Or => {
-                        if common_ty == Type::Bool {
-                            Type::Bool
+                        if common_ty == self.primitives.bool {
+                            self.primitives.bool
                         } else {
-                            todo!()
+                            todo!("err")
                         }
                     },
-                };
-                Ok(SemaValue::new(ty))
+                });
             },
-            ExprKind::Range { start, end, is_inclusive } => {
-                let (elem_ty, kind) = match (start, end) {
-                    (None, None) => (Type::ptr_u0(), RangeKind::Full),
-                    (None, Some(end)) => {
-                        let end_ty = self.analyze(*end, Type::Unset, is_const)?.ty;
-                        debug_assert!(end_ty.is_valid());
-                        let kind =
-                            if *is_inclusive { RangeKind::ToInclusive } else { RangeKind::To };
-                        (self.alloc(end_ty)?, kind)
-                    },
-                    (Some(start), None) => {
-                        let start_ty = self.analyze(*start, Type::Unset, is_const)?.ty;
-                        debug_assert!(start_ty.is_valid());
-                        (self.alloc(start_ty)?, RangeKind::From)
-                    },
+            AstEnum::Range { start, end, is_inclusive, .. } => {
+                let (elem_ty, rkind): (Ptr<ast::Type>, _) = match (start, end) {
+                    (None, None) => (self.primitives.u0, RangeKind::Full),
+                    (None, Some(end)) => (
+                        *analyze!(*end, None),
+                        if *is_inclusive { RangeKind::ToInclusive } else { RangeKind::To },
+                    ),
+                    (Some(start), None) => (*analyze!(*start, None), RangeKind::From),
                     (Some(start), Some(end)) => {
-                        let start_ty = self.analyze(*start, Type::Unset, is_const)?.ty;
-                        debug_assert!(start_ty.is_valid());
-                        let end_ty = self.analyze(*end, start_ty, is_const)?.ty;
-                        debug_assert!(end_ty.is_valid());
                         let kind =
                             if *is_inclusive { RangeKind::BothInclusive } else { RangeKind::Both };
-                        (self.alloc(end_ty)?, kind)
+                        let start_ty = *analyze!(*start, None);
+                        let end_ty = *analyze!(*end, Some(start_ty));
+                        let Some(common_ty) = common_type(start_ty, end_ty) else {
+                            return err(
+                                MismatchedTypesBinOp { lhs_ty: start_ty, rhs_ty: end_ty },
+                                expr.span,
+                            );
+                        };
+                        (common_ty, kind)
                     },
                 };
-                Ok(SemaValue::new(Type::Range { elem_ty, kind }))
+                let range_ty = self.alloc(type_new!(RangeTy { elem_ty, rkind }))?;
+                expr.ty = Some(range_ty.upcast_to_type());
             },
-            ExprKind::Assign { lhs, rhs, .. } => {
-                if is_const {
-                    return err(AssignToConst, span);
-                }
+            AstEnum::Assign { lhs, rhs, .. } => {
                 assert!(!is_const, "todo: Assign in const");
-                let lhs_ty = self.analyze_typed(lhs, Type::Unset, is_const)?.ty;
-                debug_assert!(lhs_ty.is_valid());
-                let rhs_ty = self.analyze(*rhs, lhs_ty, is_const)?.ty;
-                debug_assert!(rhs_ty.is_valid());
-                if lhs_ty.matches(rhs_ty) {
-                    // todo: check if binop can be applied to type
-                    Ok(SemaValue::void())
-                } else {
-                    err(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.full_span())
+                let lhs_ty = *analyze!(*lhs, None);
+                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
+                if !ty_match(lhs_ty, rhs_ty) {
+                    return err(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.full_span());
                 }
-            },
-            #[allow(unused_variables)]
-            ExprKind::BinOpAssign { lhs, op, rhs } => {
-                assert!(!is_const, "todo: BinOpAssign in const");
-                let lhs_ty = self.analyze_typed(lhs, Type::Unset, is_const)?.ty;
-                debug_assert!(lhs_ty.is_valid());
-                let rhs_ty = self.analyze(*rhs, lhs_ty, is_const)?.ty;
-                debug_assert!(rhs_ty.is_valid());
-                let Some(common_ty) = lhs_ty.common_type(rhs_ty) else {
-                    return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span);
-                };
-                lhs.ty = common_ty;
                 // todo: check if binop can be applied to type
-                Ok(SemaValue::void())
+                expr.ty = Some(self.primitives.void_ty);
             },
-            ExprKind::VarDecl(decl) => {
-                if is_const && !decl.is_const {
-                    return err(NotAConstExpr, span);
+            AstEnum::BinOpAssign { lhs, rhs, .. } => {
+                assert!(!is_const, "todo: BinOpAssign in const");
+                let lhs_ty = *analyze!(*lhs, None);
+                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
+                if !ty_match(lhs_ty, rhs_ty) {
+                    return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, rhs.full_span());
                 }
-                self.analyze_var_decl(decl)?;
-                Ok(SemaValue::void())
+                // todo: check if binop can be applied to type
+                expr.ty = Some(self.primitives.void_ty);
             },
-            ExprKind::Extern { ident, ty } => {
-                self.eval_type(ty)?;
-                if let Type::Function(f) = ty
-                    && let Type::Type(ret_type) = f.ret_type
-                {
-                    f.ret_type = *ret_type;
-                }
-                let _ = self.symbols.insert(ident.text, SemaSymbol::Finished(SemaValue::new(*ty)));
-                Ok(SemaValue::void())
-            },
-            ExprKind::If { condition, then_body, else_body, .. } => {
+            AstEnum::Decl { .. } => self.analyze_decl(expr.downcast::<ast::Decl>(), is_const)?,
+            //AstEnum::Extern { .. } => self.analyze_extern(expr.downcast::<ast::Extern>())?,
+            AstEnum::If { condition, then_body, else_body, .. } => {
                 assert!(!is_const, "todo: if in const");
-                let cond = self.analyze(*condition, Type::Bool, is_const)?.ty;
-                debug_assert!(cond.is_valid());
-                if cond != Type::Bool && cond != Type::Never {
-                    return err(
-                        MismatchedTypes { expected: Type::Bool, got: cond },
-                        condition.full_span(),
-                    );
+                let bool_ty = self.primitives.bool;
+                let cond_ty = *analyze!(*condition, Some(bool_ty));
+                if cond_ty != bool_ty {
+                    let span = condition.full_span();
+                    return err(MismatchedTypes { expected: bool_ty, got: cond_ty }, span);
                 }
-                let then_ty = self.analyze(*then_body, Type::Unset, is_const)?.ty;
-                debug_assert!(then_ty.is_valid());
-                if let Some(else_body) = else_body {
-                    let else_ty = self.analyze(*else_body, then_ty, is_const)?.ty;
-                    debug_assert!(else_ty.is_valid());
-                    then_ty.common_type(else_ty).map(SemaValue::new).ok_or_else2(|| {
-                        err(
+                self.analyze(*then_body, &None, is_const)?;
+                let then_ty = then_body.ty.u();
+                expr.ty = if let Some(else_body) = *else_body {
+                    self.analyze(else_body, &Some(then_ty), is_const)?;
+                    let else_ty = else_body.ty.u();
+                    let Some(common_ty) = common_type(then_ty, else_ty) else {
+                        return err(
                             IncompatibleBranches { expected: then_ty, got: else_ty },
                             else_body.full_span(),
-                        )
-                    })
-                } else if matches!(then_ty, Type::Void | Type::Never) {
-                    Ok(SemaValue::void())
+                        );
+                    };
+                    Some(common_ty)
+                } else if then_body.ty == Some(self.primitives.void_ty)
+                    || then_body.ty == Some(self.primitives.never)
+                {
+                    Some(self.primitives.void_ty)
                 } else {
-                    err(MissingElseBranch, expr.full_span())
+                    return err(MissingElseBranch, expr.full_span());
                 }
             },
-            ExprKind::Match { .. } => todo!(),
-            ExprKind::For { source, iter_var, body, .. } => {
-                let source = try_not_never!(self.analyze_typed(source, Type::Unset, is_const)?);
-                let elem_ty = match source.ty.finalize() {
-                    Type::Array { elem_ty, .. } | Type::Slice { elem_ty } => elem_ty,
-                    Type::Range { elem_ty, kind } if elem_ty.matches_int() && kind.has_start() => {
-                        elem_ty
+            AstEnum::Match { .. } => todo!(),
+            AstEnum::For { source, iter_var, body, .. } => {
+                analyze!(*source, None).finalize();
+                let elem_ty = match source.ty.matchable().as_ref() {
+                    TypeEnum::ArrayTy { elem_ty, .. } | TypeEnum::SliceTy { elem_ty, .. } => {
+                        elem_ty.downcast_const_val().downcast_type()
+                    },
+                    TypeEnum::RangeTy { elem_ty, rkind, .. }
+                        if elem_ty.matches_int() && rkind.has_start() =>
+                    {
+                        *elem_ty
                     },
                     _ => todo!("for over non-array"),
                 };
 
                 self.open_scope();
-                self.analyze_var_decl(&mut VarDecl {
-                    markers: DeclMarkers::default(),
-                    ident: *iter_var,
-                    ty: *elem_ty,
-                    default: None,
-                    is_const: false,
-                })?;
-                let body_ty = self.analyze(*body, Type::Void, is_const)?;
-                if !matches!(body_ty.ty, Type::Void | Type::Never) {
+                let mut iter_var_decl = ast::Decl::from_ident(*iter_var);
+                iter_var_decl.var_ty = Some(elem_ty);
+                // SAFETY: `iter_var_decl` lives until `close_scope` is called so this is fine
+                self.analyze_decl(Ptr::from_ref(&iter_var_decl), false)?;
+
+                self.analyze(*body, &Some(self.primitives.void_ty), is_const)?;
+                if body.ty.u() != self.primitives.void_ty && body.ty.u() != self.primitives.never {
                     return err(CannotReturnFromLoop, body.full_span());
                 }
                 self.close_scope()?;
-                Ok(SemaValue::void())
+                expr.ty = Some(self.primitives.void_ty);
             },
-            ExprKind::While { condition, body, .. } => {
-                let cond_ty =
-                    try_not_never!(self.analyze(*condition, Type::Bool, is_const)?).ty.finalize();
-                if cond_ty != Type::Bool {
-                    let span = condition.full_span();
-                    return err(MismatchedTypes { expected: Type::Bool, got: cond_ty }, span);
+            AstEnum::While { condition, body, .. } => {
+                let bool_ty = self.primitives.bool;
+                analyze!(*condition, Some(bool_ty));
+                if condition.ty.u() != bool_ty {
+                    let got = condition.ty.u();
+                    return err(MismatchedTypes { expected: bool_ty, got }, condition.full_span());
                 }
                 self.open_scope();
-                let body_ty = self.analyze(*body, Type::Void, is_const)?;
-                if !matches!(body_ty.ty, Type::Void | Type::Never) {
+                self.analyze(*body, &Some(self.primitives.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
+                if body.ty.u() != self.primitives.void_ty && body.ty.u() != self.primitives.never {
                     return err(CannotReturnFromLoop, body.full_span());
                 }
                 self.close_scope()?;
-                //Ok(body_ty)
-                Ok(SemaValue::void())
+                expr.ty = Some(self.primitives.void_ty);
             },
-            #[allow(unused_variables)]
-            ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Autocast { expr } => {
-                let _val = self.analyze_typed(expr, ty_hint, is_const)?;
-                // TODO: check if cast is possible
-                if ty_hint.is_valid() {
-                    Ok(SemaValue::new(ty_hint))
-                } else {
-                    err(SemaErrorKind::CannotInferAutocastTy, expr.full_span())
-                }
+            AstEnum::Catch { .. } => todo!(),
+            AstEnum::Defer { expr: inner, .. } => {
+                self.analyze(*inner, &None, false)?;
+                self.defer_stack.push(*inner);
+                expr.ty = Some(self.primitives.void_ty);
             },
-            ExprKind::Defer(expr) => {
-                self.defer_stack.push(*expr);
-                Ok(SemaValue::void())
-            },
-            ExprKind::Return { expr: val } => {
+            AstEnum::Return { expr: val, parent_fn, .. } => {
                 let Some(mut func) = self.function_stack.last().copied() else {
                     return err(ReturnNotInAFunction, expr.full_span());
                 };
-                let ret_type = if let Some(val) = val {
-                    self.analyze_typed(val, func.ret_type, is_const)?.ty
+                *parent_fn = Some(func);
+                expr.ty = Some(self.primitives.never);
+                let val_ty = if let Some(val) = *val {
+                    self.analyze(val, &func.ret_ty, is_const)?;
+                    val.ty.u()
                 } else {
-                    Type::Void
+                    self.primitives.void_ty
                 };
-                check_or_set_type!(
-                    &mut func.ret_type,
-                    ret_type,
-                    val.map(|v| v.full_span()).unwrap_or(span),
-                )?;
-                if let Some(val) = val {
-                    val.ty = func.ret_type;
-                }
-                Ok(SemaValue::never())
+                check_and_set_target!(
+                    val_ty,
+                    &mut func.ret_ty,
+                    val.map(|v| v.full_span()).unwrap_or(span)
+                );
             },
-            ExprKind::Break { expr } => {
-                if expr.is_some() {
+            AstEnum::Break { expr: inner, .. } => {
+                if inner.is_some() {
                     todo!("break with value")
                 }
                 // check if in loop
-                Ok(SemaValue::never())
+                expr.ty = Some(self.primitives.never)
             },
-            ExprKind::Continue => {
+            AstEnum::Continue { .. } => {
                 // check if in loop
-                Ok(SemaValue::never())
+                expr.ty = Some(self.primitives.never)
             },
-            // ExprKind::Semicolon(_) => todo!(),
-        };
-        #[cfg(debug_assertions)]
-        if self.debug_types {
-            use crate::util::display_span_in_code_with_label;
-            let text = match &res {
-                Ok(v) => format!("{}", v.ty),
-                res => format!("{:?}", res),
-            };
-            display_span_in_code_with_label(expr.full_span(), self.code, format!("type: {text}"));
+
+            AstEnum::IntVal { .. } => {
+                let ty = ty_hint
+                    .filter(|t| matches!(t.kind, AstKind::IntTy | AstKind::FloatTy))
+                    .unwrap_or(self.primitives.int_lit);
+                expr.ty = Some(ty);
+            },
+            AstEnum::FloatVal { .. } => {
+                let ty = ty_hint
+                    .filter(|t| t.kind == AstKind::FloatTy)
+                    .unwrap_or(self.primitives.float_lit);
+                expr.ty = Some(ty);
+            },
+            AstEnum::BoolVal { .. } => expr.ty = Some(self.primitives.bool),
+            AstEnum::CharVal { .. } => expr.ty = Some(self.primitives.u8), // TODO: use `self.primitives.char`
+            /*
+            AstEnum::BCharLit { .. } => {
+                expr.downcast::<ast::BCharLit>().reinterpret_as_const();
+                finish_ret!(ast::Type::U8)
+            },
+            */
+            AstEnum::StrVal { .. } => expr.ty = Some(self.primitives.str_slice_ty),
+            AstEnum::PtrVal { .. } => todo!(),
+            AstEnum::Fn { params, ret_ty_expr, ret_ty, body, .. } => {
+                assert!(is_const, "todo: non-const function");
+                let fn_ptr = expr.downcast::<ast::Fn>();
+                if let Some(ret) = *ret_ty_expr {
+                    *ret_ty = Some(self.analyze_type(ret)?);
+                }
+                self.function_stack.push(fn_ptr);
+                self.open_scope();
+                let res: SemaResult<()> = try {
+                    for param in params.iter_mut() {
+                        assert!(!param.is_const, "todo: const param");
+                        self.analyze_decl(*param, false)?;
+                    }
+
+                    if let Some(body) = *body {
+                        self.analyze(body, ret_ty, false)?;
+                        check_and_set_target!(
+                            body.ty.u(),
+                            ret_ty,
+                            body.try_downcast::<ast::Block>()
+                                .and_then(|b| b.stmts.last().copied())
+                                .unwrap_or(body)
+                                .full_span()
+                        );
+                        ret_ty.as_mut().u().finalize();
+                    } else {
+                        panic_debug("this function has already been analyzed as a function type")
+                    }
+                };
+                self.close_scope()?;
+                self.function_stack.pop();
+                res?;
+                debug_assert!(ret_ty.is_some());
+
+                let is_fn_ty =
+                    *ret_ty == self.primitives.type_ty && body.u().kind != AstKind::Block;
+                if is_fn_ty {
+                    *ret_ty_expr = Some(body.u());
+                    *ret_ty = Some(body.cv().downcast_type());
+                    *body = None;
+                    expr.ty = Some(self.primitives.type_ty);
+                } else {
+                    // expr.ty = Some(fn_ptr.upcast_to_type());
+                    //expr.ty = Some(self.primitives.type_ty);
+                    expr.ty = Some(self.primitives.fn_val);
+                }
+            },
+
+            AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => {
+                expr.ty = Some(self.primitives.type_ty)
+            },
+            AstEnum::PtrTy { pointee, .. } => {
+                self.analyze_type(*pointee)?;
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::SliceTy { elem_ty, .. } => {
+                self.analyze_type(*elem_ty)?;
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::ArrayTy { len, elem_ty, .. } => {
+                self.analyze_type(*elem_ty)?;
+                let u64_ty = self.primitives.u64;
+                let len_ty = *analyze!(*len, Some(u64_ty), true);
+                if !ty_match(len_ty, u64_ty) {
+                    return err(MismatchedTypes { expected: u64_ty, got: len_ty }, len.span);
+                }
+                if !len.rep().is_const_val() {
+                    return err(NotAConstExpr, len.full_span());
+                }
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::StructDef { fields, .. } => {
+                let mut field_names = HashSet::new();
+                for field in fields.iter().copied() {
+                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateField, field.ident.span);
+                    }
+                    if field.is_const {
+                        todo!("const struct field")
+                    }
+                    let _f = self.var_decl_to_value(field)?;
+                }
+                //self.struct_stack.last_mut().unwrap_debug().push(ty);
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::UnionDef { fields, .. } => {
+                let mut field_names = HashSet::new();
+                for field in fields.iter().copied() {
+                    let is_duplicate = !field_names.insert(field.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateField, field.ident.span);
+                    }
+                    if field.is_const {
+                        todo!("const struct field")
+                    }
+                    if let Some(d) = field.init {
+                        return err(UnionFieldWithDefaultValue, d.full_span());
+                    }
+                    let _f = self.var_decl_to_value(field)?;
+                }
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::EnumDef { variants, .. } => {
+                let mut variant_names = HashSet::new();
+                for variant in variants.iter_mut() {
+                    let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
+                    if is_duplicate {
+                        return err(DuplicateEnumVariant, variant.ident.span);
+                    }
+                    if variant.var_ty.is_none() {
+                        variant.var_ty = Some(self.primitives.void_ty);
+                    }
+                    let _ = self.var_decl_to_value(*variant)?;
+                }
+                //self.enum_stack.last_mut().unwrap_debug().push(ty);
+                expr.ty = Some(self.primitives.type_ty);
+            },
+            AstEnum::RangeTy { .. } => todo!(),
+            AstEnum::OptionTy { inner_ty: ty, .. } => {
+                self.analyze_type(*ty)?;
+                expr.ty = Some(self.primitives.type_ty);
+            },
         }
-        res
+        debug_assert!(expr.ty.is_some());
+        Ok(())
     }
 
-    pub fn analyze_typed(
+    fn analyze_and_finalize_with_known_type(
         &mut self,
-        expr: &mut ExprWithTy,
-        ty_hint: Type,
+        expr: Ptr<Ast>,
+        expected_ty: Ptr<ast::Type>,
         is_const: bool,
-    ) -> SemaResult<SemaValue> {
-        let res = self.analyze(expr.expr, ty_hint, is_const);
-        if let Ok(val) = res {
-            expr.ty = val.ty;
-        }
-        res
+    ) -> SemaResult<()> {
+        self.analyze(expr, &Some(expected_ty), is_const)?;
+        let expr_ty = expr.ty.u();
+        let Some(common_ty) = common_type(expr_ty, expected_ty) else {
+            return err(MismatchedTypes { expected: expected_ty, got: expr_ty }, expr.full_span());
+        };
+        expr.as_mut().ty = Some(common_ty);
+        Ok(())
+    }
+
+    pub fn try_custom_bitwith_int_type(&self, name: Ptr<str>) -> Option<ast::IntTy> {
+        let is_signed = match name.bytes().next() {
+            Some(b'i') => true,
+            Some(b'u') => false,
+            _ => return None,
+        };
+        let bits = name[1..].parse().ok()?;
+        debug_assert!(![8, 16, 32, 64, 128].contains(&bits));
+        Some(type_new!(IntTy { bits, is_signed }))
     }
 
     pub fn validate_initializer(
         &mut self,
-        struct_ty: Type,
-        initializer_values: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
+        struct_ty: Ptr<ast::Type>,
+        mut initializer_values: Ptr<[(Ptr<ast::Ident>, Option<Ptr<Ast>>)]>,
         is_const: bool,
         initializer_span: Span,
     ) -> SemaResult<()> {
-        let fields = match &struct_ty {
-            Type::Struct { fields } => &**fields,
-            Type::Slice { elem_ty } => &Type::slice_fields(*elem_ty),
-            &ty => return err(CannotApplyInitializer { ty }, initializer_span),
+        let fields = match struct_ty.matchable().as_ref() {
+            TypeEnum::StructDef { fields, .. } => &**fields,
+            TypeEnum::SliceTy { elem_ty, is_mut, .. } => {
+                &self.slice_fields(elem_ty.downcast_const_val().downcast_type(), *is_mut)?
+            },
+            _ => unreachable_debug(),
         };
 
         let mut is_initialized_field = vec![false; fields.len()];
-        for (f, init) in initializer_values.iter() {
+        for (f, init) in initializer_values.iter_mut() {
             match try {
                 let field = f.text;
-                let Some((f_idx, f_decl)) = fields.find_field(&*field) else {
+                let Some((f_idx, f_decl)) = fields.find_field(&field) else {
                     err(UnknownField { ty: struct_ty, field }, f.span)?
                 };
 
@@ -890,15 +942,10 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
                 }
                 is_initialized_field[f_idx] = true;
 
-                let (init_ty, span) = match init {
-                    Some(expr) => (self.analyze(*expr, f_decl.ty, is_const)?.ty, expr.full_span()),
-                    None => (self.get_symbol(field, f.span)?.get_type()?, f.span),
-                };
-                debug_assert!(f_decl.ty.is_valid() && f_decl.ty != Type::Never);
-                debug_assert!(init_ty.is_valid());
-                if !f_decl.ty.matches(init_ty) {
-                    err(MismatchedTypes { expected: f_decl.ty, got: init_ty }, span)?
+                if init.is_none() {
+                    *init = Some(f.upcast())
                 }
+                self.analyze_and_finalize_with_known_type(init.u(), f_decl.var_ty.u(), is_const)?;
             } {
                 Ok(()) => {},
                 NotFinished => NotFinished?,
@@ -911,7 +958,7 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             .enumerate()
             .filter(|(_, is_init)| !is_init)
             .map(|(idx, _)| fields[idx])
-            .filter(|f| f.default.is_none())
+            .filter(|f| f.init.is_none())
         {
             let field = missing_field.ident.text;
             self.errors.push(err_val(MissingFieldInInitializer { field }, initializer_span))
@@ -921,123 +968,161 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
 
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
     /// declaration. This also doesn't insert into `self.symbols`.
-    fn var_decl_to_value(&mut self, decl: &mut VarDecl) -> SemaResult<SemaValue> {
-        let ty = &mut decl.ty;
-        self.eval_type(ty)?;
-        if let Some(init) = &mut decl.default {
-            let mut init_val = self.analyze(*init, *ty, decl.is_const)?;
-            check_or_set_type!(ty, init_val.ty, init.span)?;
-            init_val.ty = *ty;
-            Ok(init_val)
-        } else if *ty == Type::Unset {
-            err(VarDeclNoType, decl.ident.span)
-        } else {
-            debug_assert!(ty.is_valid());
+    fn var_decl_to_value(&mut self, decl_ptr: Ptr<ast::Decl>) -> SemaResult<()> {
+        let decl = decl_ptr.as_mut();
+        decl.ty = Some(self.primitives.void_ty);
+        if let Some(t) = decl.var_ty_expr {
+            let ty = self.analyze_type(t)?;
+            decl.var_ty = Some(ty);
+            if decl.is_extern
+                && let Some(f) = ty.try_downcast::<ast::Fn>()
+            {
+                // TODO: remove this special case
+                debug_assert!(f.body.is_none());
+                debug_assert!(decl.init.is_none());
+                decl.init = Some(f.upcast());
+                decl.var_ty = Some(self.primitives.fn_val);
+                decl.is_const = true;
+                return Ok(());
+            }
+            if ty == self.primitives.never {
+                decl.ty = Some(self.primitives.never);
+            }
+        }
+        if let Some(init) = decl.init {
+            self.analyze(init, &decl.var_ty, decl.is_const)?;
+            check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span());
+            decl.var_ty.as_mut().u().finalize();
+            Ok(())
+        } else if decl.var_ty.is_some() {
             debug_assert!(!decl.is_const);
-            Ok(SemaValue::new(*ty))
+            Ok(())
+        } else {
+            err(VarDeclNoType, decl_ptr.upcast().full_span())
         }
     }
 
-    fn analyze_var_decl(&mut self, decl: &mut VarDecl) -> SemaResult<()> {
-        let res = self.var_decl_to_value(decl);
-        let name = decl.ident.text;
-        match res {
-            Ok(val) => {
-                let _ = self.symbols.insert(name, SemaSymbol::Finished(val));
-                Ok(())
-            },
-            NotFinished => {
-                let _ = self.symbols.insert(name, SemaSymbol::NotFinished(None));
-                NotFinished
-            },
+    fn analyze_decl(&mut self, mut decl: Ptr<ast::Decl>, is_const: bool) -> SemaResult<()> {
+        let res = try {
+            if is_const && !(decl.is_const || decl.is_extern) {
+                err(NotAConstExpr, decl.upcast().full_span())?;
+            }
+            self.var_decl_to_value(decl)?
+        };
+        #[cfg(debug_assertions)]
+        if self.debug_types {
+            let label = match &res {
+                Ok(()) => format!("type: {}", decl.var_ty.u()),
+                NotFinished => "not finished".to_string(),
+                Err(e) => format!("err: {}", e.kind),
+            };
+            crate::util::display_span_in_code_with_label(decl.ident.span, self.code, label);
+        }
+        let res = match res {
             Err(err) => {
                 self.errors.push(err);
-                let ty = decl.ty.into_valid().unwrap_or(Type::Never);
-                let _ = self.symbols.insert(name, SemaSymbol::Finished(SemaValue::new(ty)));
+                decl.var_ty = Some(self.primitives.never);
+                decl.ty = Some(self.primitives.never);
+                decl.init = Some(self.primitives.never.upcast());
                 Ok(())
             },
+            NotFinished => NotFinished,
+            Ok(()) => {
+                decl.ty = Some(self.primitives.void_ty);
+                Ok(())
+            },
+        };
+        let is_top_level = self.function_stack.len() == 0;
+        if !is_top_level {
+            debug_assert!(!self.symbols.get_cur_scope().contains(&decl));
+            self.symbols.push(decl);
         }
-
-        // println!("INFO: '{}' was shadowed in the same scope", &*decl.ident.text);
+        res
     }
 
     /// works for function calls and call initializers
     /// ...(arg1, ..., argX, paramX1=argX1, ... paramN=argN)
     /// paramN1, ... -> default values
-    fn validate_call(
+    fn validate_call<'i>(
         &mut self,
-        params: &[VarDecl],
-        args: impl IntoIterator<Item = Ptr<Expr>>,
-        is_const: bool,
+        params: &mut [Ptr<ast::Decl>],
+        args: impl IntoIterator<Item = &'i mut Ptr<Ast>>,
         close_p_span: Span,
     ) -> SemaResult<()> {
         let mut args = args.into_iter();
         // TODO: check for duplicate named arguments
-        for p in params.iter() {
+        for p in params.iter_mut() {
             let Some(arg) = args.next() else {
-                if p.default.is_some() {
+                if p.init.is_some() {
                     continue;
                 }
                 return err(MissingArg, close_p_span);
             };
-            let arg_ty = self.analyze(arg, p.ty, is_const)?.ty;
-            debug_assert!(p.ty.is_valid()); // TODO: infer?
-            if !p.ty.matches(arg_ty) {
-                return err(MismatchedTypes { expected: p.ty, got: arg_ty }, arg.full_span());
-            }
+            self.analyze_and_finalize_with_known_type(*arg, p.var_ty.u(), false)?;
         }
         Ok(())
     }
 
-    /// [`Type::Unevaluated`] -> a valid [`Type`]
-    fn eval_type(&mut self, ty: &mut Type) -> SemaResult<()> {
-        if let Type::Unevaluated(ty_expr) = *ty {
-            *ty = *match self.analyze(ty_expr, Type::Unset, true)?.ty {
-                Type::Never => Type::ptr_never(),
-                Type::Type(t) => t,
-                _ => return Err(err_val(NotAType, ty_expr.full_span())),
-            };
-            debug_assert!(ty.is_valid());
+    fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
+        self.analyze(ty_expr, &Some(self.primitives.type_ty), true)?;
+        let ty = ty_expr.ty.u();
+        if ty != self.primitives.type_ty {
+            if ty == self.primitives.never {
+                return Ok(self.primitives.never);
+            }
+            return err(NotAType, ty_expr.full_span());
         }
-        Ok(())
+        Ok(ty_expr.downcast_type())
+    }
+
+    pub fn slice_fields(
+        &self,
+        elem_ty: Ptr<ast::Type>,
+        is_mut: bool,
+    ) -> SemaResult<[Ptr<ast::Decl>; 2]> {
+        let elem_ptr_ty = self.alloc(type_new!(PtrTy { pointee: elem_ty.upcast(), is_mut }))?;
+        let mut ptr = self.alloc(Decl::new(self.primitives.slice_ptr_field_ident, Span::ZERO))?;
+        ptr.var_ty = Some(elem_ptr_ty.upcast_to_type());
+        Ok([ptr, self.primitives.slice_len_field])
     }
 
     #[inline]
-    fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<&SemaSymbol> {
+    fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<Ptr<ast::Decl>> {
         match self.symbols.get(&name) {
-            Some(sym) => Ok(sym),
+            Some(sym) if sym.var_ty.is_some() => Ok(sym),
+            Some(_) => NotFinished,
             None => err(UnknownIdent(name), err_span),
         }
     }
 
     fn open_scope(&mut self) {
         self.symbols.open_scope();
-        self.struct_stack.push(vec![]);
-        self.enum_stack.push(vec![]);
+        //self.struct_stack.push(vec![]);
+        //self.enum_stack.push(vec![]);
         self.defer_stack.open_scope();
     }
 
     fn close_scope(&mut self) -> SemaResult<()> {
         let res = self.analyze_defer_exprs();
         self.symbols.close_scope();
-        self.struct_stack.pop();
-        self.enum_stack.pop();
+        //self.struct_stack.pop();
+        //self.enum_stack.pop();
         self.defer_stack.close_scope();
         res
     }
 
     #[inline]
     fn analyze_defer_exprs(&mut self) -> SemaResult<()> {
-        let exprs = unsafe { forget_lifetime(self.defer_stack.get_cur_scope()) };
+        let exprs = unsafe { forget_lifetime_mut(self.defer_stack.get_cur_scope_mut()) };
         for expr in exprs.iter().rev() {
-            self.analyze(*expr, Type::Unset, false)?;
+            self.analyze(*expr, &None, false)?;
         }
         Ok(())
     }
 
     #[inline]
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> SemaResult<Ptr<T>> {
-        match self.alloc.try_alloc(val) {
+        match self.alloc.alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(e) => err(AllocErr(e), todo!()),
         }

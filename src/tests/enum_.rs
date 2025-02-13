@@ -128,7 +128,7 @@ MyEnum :: enum {
     A,
     B(struct { a: i64, b: f64 }),
 };
-mut val := .A;
+mut val: MyEnum = .A;
 val = .B(.{ a = 5, b = 10.123 });
 val" => MyEnum)
     .unwrap();

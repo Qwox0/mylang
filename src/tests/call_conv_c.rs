@@ -108,6 +108,24 @@ test_struct_return!(return_struct_i64_i64_i64 : {
 });
 
 #[test]
+fn return_struct_ptr_i64() {
+    #[derive(Debug, PartialEq)]
+    #[repr(C)]
+    struct Struct {
+        ptr: *const i64,
+        b: i64,
+    }
+    let out = jit_run_test!("struct{ptr : *i64 = &100, b : i64 = 200 ,}.{}" => Struct).unwrap();
+    let a: i64 = 100;
+    let ptr = &a as *const i64;
+    assert!(
+        (ptr as u64 - out.ptr as u64) < 2000,
+        "The stack pointers should be close to each other"
+    );
+    assert_eq!(out.b, 200);
+}
+
+#[test]
 fn return_nested_struct() {
     #[derive(Debug, PartialEq)]
     #[repr(C)]
@@ -124,9 +142,6 @@ fn return_nested_struct() {
         c: i32,
     }
 
-    let out =
-        jit_run_test!("struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}" => Struct)
-            .unwrap();
-
-    assert_eq!(out, Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
+    let out = jit_run_test!("struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}" => Struct);
+    assert_eq!(out.unwrap(), Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
 }

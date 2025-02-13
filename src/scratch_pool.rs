@@ -1,12 +1,14 @@
-use crate::ptr::Ptr;
-use bumpalo::{AllocErr, Bump};
+use crate::{
+    arena_allocator::{AllocErr, Arena},
+    ptr::Ptr,
+};
 use core::slice;
 use std::{alloc::Layout, marker::PhantomData, mem};
 
-pub struct ScratchPool<'bump, T: 'bump> {
+pub struct ScratchPool<'alloc, T: 'alloc> {
     //bump: &'bump mut Bump,
-    bump: Bump,
-    _marker: PhantomData<(&'bump mut Bump, T)>,
+    arena: Arena,
+    _marker: PhantomData<(&'alloc mut Arena, T)>,
     len: usize,
     // chunk_count: usize,
     // prev_cap: usize,
@@ -22,7 +24,7 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
     #[inline]
     pub fn new() -> ScratchPool<'bump, T> {
         Self::assert_no_padding();
-        ScratchPool { bump: bumpalo::Bump::new(), _marker: PhantomData, len: 0 }
+        ScratchPool { arena: Arena::new(), _marker: PhantomData, len: 0 }
     }
 
     #[inline]
@@ -48,7 +50,7 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
 
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), AllocErr> {
-        self.bump.try_alloc(val)?;
+        self.arena.alloc(val)?;
         self.len += 1;
         Ok(())
     }
@@ -70,7 +72,7 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
 
         let mut rev_target_iter = target.iter_mut().rev();
 
-        for (ptr, len) in unsafe { self.bump.iter_allocated_chunks_raw() } {
+        for (ptr, len) in unsafe { self.arena.0.iter_allocated_chunks_raw() } {
             let ptr = ptr as *const T;
             let len = len / mem::size_of::<T>();
             for x in unsafe { slice::from_raw_parts(ptr, len) } {
@@ -80,11 +82,11 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
         }
     }
 
-    pub fn clone_to_slice_in_bump(&self, target_bump: &Bump) -> Result<Ptr<[T]>, AllocErr>
+    pub fn clone_to_slice_into_arena(&self, target_bump: &Arena) -> Result<Ptr<[T]>, AllocErr>
     where T: Clone {
         let len = self.get_item_count();
         let layout = Layout::array::<T>(len).unwrap();
-        let ptr = target_bump.alloc_layout(layout).cast::<T>();
+        let ptr = target_bump.alloc_layout(layout)?.cast::<T>();
         let target_slice = unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), len) };
         self.clone_to_slice(target_slice);
         Ok(Ptr::from(target_slice))
@@ -117,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_to_slice_in_bump() {
+    fn test_clone_to_slice_into_arena() {
         // let mut scratch_alloc = Bump::new();
         // let mut scratch = ScratchPool::<i32>::new(&mut scratch_alloc);
         let mut scratch = ScratchPool::<i32>::new();
@@ -130,10 +132,8 @@ mod tests {
 
         assert!(scratch.len == count);
 
-        let mut target_bump = Bump::new();
-        let result_slice = scratch.clone_to_slice_in_bump(&mut target_bump).unwrap();
-
-        println!("{:?}", result_slice);
+        let mut target_bump = Arena::new();
+        let result_slice = scratch.clone_to_slice_into_arena(&mut target_bump).unwrap();
 
         assert!(result_slice.iter().enumerate().all(|(idx, x)| idx == *x as usize));
     }
@@ -193,13 +193,13 @@ mod tests {
         // let mut scratch = ScratchPool::<i32>::new(&mut scratch_alloc);
         let mut scratch = ScratchPool::<i32>::new();
 
-        let mut chunk_count = unsafe { scratch.bump.iter_allocated_chunks_raw() }.count();
-        let mut prev_cap = scratch.bump.chunk_capacity();
+        let mut chunk_count = unsafe { scratch.arena.0.iter_allocated_chunks_raw() }.count();
+        let mut prev_cap = scratch.arena.0.chunk_capacity();
 
         for x in 0..10000 {
             scratch.push(x).unwrap();
 
-            let cap = scratch.bump.chunk_capacity();
+            let cap = scratch.arena.0.chunk_capacity();
             if cap > prev_cap {
                 chunk_count += 1;
             }
@@ -208,9 +208,9 @@ mod tests {
 
         println!(
             "{} == {}",
-            unsafe { scratch.bump.iter_allocated_chunks_raw() }.count(),
+            unsafe { scratch.arena.0.iter_allocated_chunks_raw() }.count(),
             chunk_count
         );
-        assert!(unsafe { scratch.bump.iter_allocated_chunks_raw() }.count() == chunk_count);
+        assert!(unsafe { scratch.arena.0.iter_allocated_chunks_raw() }.count() == chunk_count);
     }
 }

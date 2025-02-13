@@ -293,6 +293,7 @@ keywords! {
 }
 
 /// byte range offset for a [`Code`].
+/// TODO: see [`core::range::Range<usize>`]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Span {
     pub start: usize,
@@ -306,7 +307,9 @@ impl fmt::Debug for Span {
 }
 
 impl Span {
-    pub fn new(start: usize, end: usize) -> Span {
+    pub const ZERO: Span = Span::new(0, 0);
+
+    pub const fn new(start: usize, end: usize) -> Span {
         Span { start, end }
     }
 

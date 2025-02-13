@@ -1,421 +1,460 @@
 use crate::{
-    ast::{Expr, Fn, Ident, VarDecl, VarDeclList, VarDeclListTrait, debug::DebugAst},
-    ptr::Ptr,
+    ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
+    ptr::{OPtr, Ptr},
+    sema::primitives::primitives,
     util::{
-        aligned_add, panic_debug, round_up_to_nearest_power_of_two, variant_count_to_tag_size_bits,
-        variant_count_to_tag_size_bytes,
+        Layout, UnwrapDebug, aligned_add, round_up_to_nearest_power_of_two, unreachable_debug,
+        variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
     },
 };
-use core::fmt;
 
-// TODO: benchmark this
-// pub type Type = Ptr<TypeInfo>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Type {
-    Void,
-    Never,
-    Int {
-        bits: u32,
-        is_signed: bool,
-    },
-    Bool,
-    Float {
-        bits: u32,
-    },
-
-    Ptr {
-        pointee_ty: Ptr<Type>,
-    },
-    Slice {
-        elem_ty: Ptr<Type>,
-    },
-    Array {
-        len: usize,
-        elem_ty: Ptr<Type>,
-    },
-
-    Function(Ptr<Fn>),
-
-    Struct {
-        fields: VarDeclList,
-    },
-    Union {
-        fields: VarDeclList,
-    },
-    Enum {
-        variants: VarDeclList, // TODO
-    },
-
-    Range {
-        elem_ty: Ptr<Type>,
-        kind: RangeKind,
-    },
-
-    Option {
-        ty: Ptr<Type>,
-    },
-
-    /// `a :: int`
-    /// -> type of `a`: [`Type::Type`]
-    /// -> value of `a`: [`Type::Int`]
-    Type(Ptr<Type>),
-
-    // --------------------------------
-    // compiletime only types:
-    //
-    IntLiteral,
-    FloatLiteral,
-
-    /// `lhs.method`
-    MethodStub {
-        function: Ptr<Fn>,
-        first_expr: Ptr<Expr>,
-    },
-    /// ```mylang
-    /// MyEnum :: enum { A, B(i64) };
-    /// a := MyEnum.A; // variant -> valid val
-    /// b1 := MyEnum.B; // variant -> invalid val
-    /// b2 := MyEnum.B(5); // variant initialization
-    /// ```
-    EnumVariant {
-        enum_ty: Ptr<Type>,
-        idx: usize,
-    },
-
-    /// The type was not explicitly set in the original source code and must
-    /// still be inferred.
-    Unset,
-    /// The type was explicitly set in the original source code, but hasn't been
-    /// analyzed yet.
-    Unevaluated(Ptr<Expr>),
+enum CommonTypeSelection {
+    Lhs,
+    Rhs,
+    Mismatch,
 }
 
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl CommonTypeSelection {
+    #[inline]
+    pub fn flip(self) -> CommonTypeSelection {
         match self {
-            Type::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            Type::Unset => write!(f, "Unset"),
-            Type::Unevaluated(arg0) => f.debug_tuple("Unevaluated").field(arg0).finish(),
-            ti => write!(f, "{}", ti.to_text()),
+            CommonTypeSelection::Lhs => CommonTypeSelection::Rhs,
+            CommonTypeSelection::Rhs => CommonTypeSelection::Lhs,
+            CommonTypeSelection::Mismatch => CommonTypeSelection::Mismatch,
         }
+    }
+
+    #[inline]
+    pub fn flip_if(self, cond: bool) -> CommonTypeSelection {
+        if cond { self.flip() } else { self }
     }
 }
 
-impl Type {
-    pub const F32: Type = Type::Float { bits: 32 };
-    pub const F64: Type = Type::Float { bits: 64 };
-    pub const I64: Type = Type::Int { bits: 64, is_signed: true };
-    pub const U64: Type = Type::Int { bits: 64, is_signed: false };
-    pub const U8: Type = Type::Int { bits: 8, is_signed: false };
+fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonTypeSelection {
+    use CommonTypeSelection::*;
+    let p = primitives();
 
-    pub fn try_internal_ty(name: Ptr<str>) -> Option<Self> {
-        match name.bytes().next()? {
-            b'i' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: true }),
-            b'u' => name[1..].parse().ok().map(|bits| Type::Int { bits, is_signed: false }),
-            _ if &*name == "bool" => Some(Type::Bool),
-            b'f' => name[1..].parse().ok().map(|bits| Type::Float { bits }),
-            _ if &*name == "void" => Some(Type::Void),
-            _ if &*name == "never" => Some(Type::Never),
-            _ => None,
+    #[cfg(debug_assertions)]
+    if lhs == p.type_ty || rhs == p.type_ty {
+        println!("WARN: checking common_type_impl for primitive `type`");
+    }
+
+    if lhs == rhs {
+        return Lhs;
+    }
+
+    if lhs == p.never {
+        return Rhs;
+    } else if rhs == p.never {
+        return Lhs;
+    }
+
+    let swap_inputs = rhs == p.int_lit || rhs == p.float_lit || rhs.kind == AstKind::OptionTy;
+    if swap_inputs {
+        let tmp = rhs;
+        rhs = lhs;
+        lhs = tmp;
+    }
+
+    if lhs == p.int_lit {
+        debug_assert_ne!(rhs, p.int_lit, "was already checked above");
+        let matches = matches!(rhs.kind, AstKind::IntTy | AstKind::FloatTy) || rhs == p.float_lit;
+        return if matches { Rhs.flip_if(swap_inputs) } else { Mismatch };
+    }
+
+    if lhs == p.float_lit {
+        // Note: float_lit and int_lit match but float_lit and IntTy don't.
+        debug_assert_ne!(rhs, p.float_lit, "was already checked above");
+        return if rhs.kind == AstKind::FloatTy {
+            Rhs.flip_if(swap_inputs)
+        } else if rhs == p.int_lit {
+            Lhs.flip_if(swap_inputs)
+        } else {
+            Mismatch
+        };
+    }
+
+    if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
+        let lhs_inner = lhs.inner_ty.downcast_type();
+        return match rhs.try_downcast::<ast::OptionTy>() {
+            Some(rhs) => common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()),
+            // i32 + ?ilit
+            None if rhs.is_non_null() => common_type_impl(lhs_inner, rhs),
+            None => Mismatch,
+        };
+    }
+
+    debug_assert!(!swap_inputs);
+
+    #[allow(unused)]
+    if let Some(lhs) = lhs.try_downcast::<ast::PtrTy>() {
+        let lhs_pointee = lhs.pointee.downcast_type();
+        if let Some(rhs) = rhs.try_downcast::<ast::PtrTy>() {
+            return Lhs; // TODO: remove this
+            return common_type_impl(lhs_pointee, rhs.pointee.downcast_type());
         }
+        return Mismatch;
     }
 
-    pub fn ptr_unset() -> Ptr<Type> {
-        thread_local!(static TYPE: Type = Type::Unset);
-        TYPE.with(|t| Ptr::from(t))
+    if let Some(lhs) = lhs.try_downcast::<ast::SliceTy>() {
+        return match rhs.try_downcast::<ast::SliceTy>() {
+            Some(rhs) => common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type()),
+            None => Mismatch,
+        };
     }
 
-    /// returns `Ptr(Type::Ptr(Type::Void))`
-    pub fn ptr_void_ptr() -> Ptr<Type> {
-        thread_local!(static TYPE: Type = Type::Ptr { pointee_ty: Type::ptr_void() });
-        TYPE.with(|t| Ptr::from(t))
+    if let Some(lhs) = lhs.try_downcast::<ast::ArrayTy>() {
+        return match rhs.try_downcast::<ast::ArrayTy>() {
+            Some(rhs) if lhs.len.int::<u64>() == lhs.len.int::<u64>() => {
+                common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type())
+            },
+            _ => Mismatch,
+        };
     }
 
-    /// returns `Ptr(Type::Void)`
-    pub fn ptr_void() -> Ptr<Type> {
-        thread_local!(static TYPE: Type = Type::Void);
-        TYPE.with(|t| Ptr::from(t))
+    if let Some(lhs) = lhs.try_downcast::<ast::RangeTy>() {
+        return match rhs.try_downcast::<ast::RangeTy>() {
+            Some(rhs) if lhs.rkind == rhs.rkind => common_type_impl(lhs.elem_ty, rhs.elem_ty),
+            _ => Mismatch,
+        };
     }
 
-    /// returns `Ptr(Type::Void)`
-    pub fn ptr_never() -> Ptr<Type> {
-        thread_local!(static TYPE: Type = Type::Never);
-        TYPE.with(|t| Ptr::from(t))
+    if let Some(lhs) = lhs.try_downcast::<ast::Fn>() {
+        if let Some(rhs) = rhs.try_downcast::<ast::Fn>()
+            && lhs.params.len() == rhs.params.len()
+            && ty_match(lhs.ret_ty.u(), rhs.ret_ty.u())
+            && lhs
+                .params
+                .iter()
+                .map(|p| p.var_ty.u())
+                .zip(rhs.params.iter().map(|p| p.var_ty.u()))
+                .all(|(g, e)| ty_match(g, e))
+        {
+            return Lhs; // or Rhs? idk
+        }
+        return Mismatch;
     }
 
-    pub fn ptr_u0() -> Ptr<Type> {
-        thread_local!(static TYPE: Type = Type::Int { bits: 0, is_signed: false });
-        TYPE.with(|t| Ptr::from(t))
+    Mismatch
+}
+
+/// symmetrical
+pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
+    match common_type_impl(lhs, rhs) {
+        CommonTypeSelection::Lhs => Some(lhs),
+        CommonTypeSelection::Rhs => Some(rhs),
+        CommonTypeSelection::Mismatch => None,
+    }
+}
+
+/// might not be symmetrical
+pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
+    let p = primitives();
+
+    #[cfg(debug_assertions)]
+    if got == p.type_ty || expected == p.type_ty {
+        println!("WARN: checking ty_match for primitive `type`");
     }
 
-    pub fn str_slice() -> Type {
-        thread_local!(static TYPE: Type = Type::Int { bits: 8, is_signed: false });
-        TYPE.with(|t| Type::Slice { elem_ty: Ptr::from(t) })
+    if got == expected {
+        return true;
+    }
+
+    if expected == p.never {
+        return false;
+    }
+
+    debug_assert!(expected != p.int_lit && expected != p.float_lit);
+
+    if got == p.int_lit {
+        return matches!(expected.kind, AstKind::IntTy | AstKind::FloatTy)
+            || expected == p.float_lit;
+    }
+
+    if got == p.float_lit {
+        return expected.kind == AstKind::FloatTy || expected == p.int_lit;
+    }
+
+    // needs to be above every non_null `got` value.
+    if let Some(expected) = expected.try_downcast::<ast::OptionTy>() {
+        let expected_inner = expected.inner_ty.downcast_type();
+        return match got.try_downcast::<ast::OptionTy>() {
+            Some(got) => ty_match(got.inner_ty.downcast_type(), expected_inner),
+            None if got.is_non_null() => ty_match(got, expected_inner),
+            None => false,
+        };
+    }
+
+    // TODO: remove this rule when implementing option lifting
+    if let Some(got_opt) = got.try_downcast::<ast::OptionTy>()
+        && expected.kind == AstKind::PtrTy
+        //&& ty_match_no_expr(got_opt.inner_ty.downcast_type_ref(), expected)
+        && got_opt.inner_ty.kind == AstKind::PtrTy
+    {
+        return true;
+    }
+
+    #[allow(unused)]
+    if let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() {
+        let got_pointee = got_ptr.pointee.downcast_type();
+        if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
+            return true; // TODO: remove this
+            return ty_match(got_pointee, expected_ptr.pointee.downcast_type());
+        }
+        return false;
+    }
+
+    if let Some(got_slice) = got.try_downcast::<ast::SliceTy>() {
+        return match expected.try_downcast::<ast::SliceTy>() {
+            Some(expected_slice) => {
+                ty_match(got_slice.elem_ty.downcast_type(), expected_slice.elem_ty.downcast_type())
+            },
+            None => false,
+        };
+    }
+
+    if let Some(got_arr) = got.try_downcast::<ast::ArrayTy>() {
+        return match expected.try_downcast::<ast::ArrayTy>() {
+            Some(expected_arr) if got_arr.len.int::<u64>() == got_arr.len.int::<u64>() => {
+                ty_match(got_arr.elem_ty.downcast_type(), expected_arr.elem_ty.downcast_type())
+            },
+            _ => false,
+        };
+    }
+
+    if let Some(got_range) = got.try_downcast::<ast::RangeTy>() {
+        return match expected.try_downcast::<ast::RangeTy>() {
+            Some(expected_range) if got_range.rkind == expected_range.rkind => {
+                ty_match(got_range.elem_ty, expected_range.elem_ty)
+            },
+            _ => false,
+        };
+    }
+
+    if let Some(got_fn) = got.try_downcast::<ast::Fn>() {
+        if let Some(expected_fn) = expected.try_downcast::<ast::Fn>()
+            && got_fn.params.len() == expected_fn.params.len()
+            && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
+            && got_fn
+                .params
+                .iter()
+                .map(|p| p.var_ty.u())
+                .zip(expected_fn.params.iter().map(|p| p.var_ty.u()))
+                .all(|(g, e)| ty_match(g, e))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    false
+}
+
+const ZST_ALIGNMENT: usize = 1;
+
+impl Ptr<ast::Type> {
+    pub fn matches_int(self) -> bool {
+        self.kind == AstKind::IntTy || self == primitives().never
+    }
+
+    pub fn matches_bool(self) -> bool {
+        let p = primitives();
+        self == p.bool || self == p.never
+    }
+
+    pub fn matches_void(self) -> bool {
+        let p = primitives();
+        self == p.void_ty || self == p.never
+    }
+
+    /// This might mutate values behind [`Ptr`]s in `self`.
+    /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
+    pub fn finalize(&mut self) {
+        let p = primitives();
+        debug_assert!(self.ty == p.type_ty || self.kind == AstKind::Fn);
+        match self.matchable().as_mut() {
+            TypeEnum::SimpleTy { .. } => {
+                if *self == p.int_lit {
+                    *self = p.i64;
+                } else if *self == p.float_lit {
+                    *self = p.f64;
+                }
+            },
+            TypeEnum::IntTy { .. }
+            | TypeEnum::FloatTy { .. }
+            | TypeEnum::StructDef { .. }
+            | TypeEnum::UnionDef { .. }
+            | TypeEnum::EnumDef { .. } => {},
+            TypeEnum::PtrTy { pointee: t, .. }
+            | TypeEnum::SliceTy { elem_ty: t, .. }
+            | TypeEnum::ArrayTy { elem_ty: t, .. }
+            | TypeEnum::OptionTy { inner_ty: t, .. } => {
+                let ty = t.rep_mut().downcast_type_ref();
+                ty.finalize();
+            },
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.finalize(),
+            TypeEnum::Fn { .. } => {
+                //todo!()
+            },
+            TypeEnum::Unset => unreachable_debug(),
+        }
     }
 
     /// size of stack allocation in bytes
-    pub fn size(&self) -> usize {
-        match self {
-            Type::Void | Type::Never => 0,
-            Type::Int { bits, .. } | Type::Float { bits } => {
-                round_up_to_nearest_power_of_two(*bits as usize).div_ceil(8)
+    pub fn size(self) -> usize {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => {
+                let p = primitives();
+                if self == p.void_ty || self == p.never || self == p.type_ty {
+                    0
+                } else if self == p.bool {
+                    1
+                } else {
+                    unreachable_debug()
+                }
             },
-            Type::Bool => 1,
-            Type::Function(_) => todo!(),
-            Type::Ptr { .. } => 8,
-            Type::Slice { .. } => 16,
-            Type::Array { len, elem_ty } => elem_ty.size() * len,
-            Type::Struct { fields } => fields.iter().map(|f| &f.ty).fold(0, aligned_add),
-            Type::Union { fields } => fields.iter().map(|f| f.ty.size()).max().unwrap_or(0),
-            Type::Enum { variants } => aligned_add(
+            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_size(*bits),
+            TypeEnum::PtrTy { .. } => 8,
+            TypeEnum::SliceTy { .. } => 16,
+            TypeEnum::ArrayTy { len, elem_ty, .. } => {
+                elem_ty.downcast_type().size() * len.int::<usize>()
+            },
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::StructDef { fields, .. } => {
+                fields.iter_types().map(Ptr::layout).fold(0, aligned_add)
+            },
+            TypeEnum::UnionDef { fields, .. } => union_size(*fields),
+            TypeEnum::EnumDef { variants, .. } => aligned_add(
                 variant_count_to_tag_size_bytes(variants.len()) as usize,
-                &Type::Union { fields: *variants },
+                Layout::new(union_size(*variants), union_alignment(*variants)),
             ),
-            Type::Range { elem_ty, kind } => elem_ty.size() * kind.get_field_count(),
-            Type::Option { ty } if ty.is_non_null() => ty.size(),
-            Type::Option { ty } => aligned_add(1, ty),
-            Type::Type(_) => 0,
-            Type::IntLiteral
-            | Type::FloatLiteral
-            | Type::MethodStub { .. }
-            | Type::EnumVariant { .. }
-            | Type::Unset
-            | Type::Unevaluated(_) => panic_debug("cannot find stack size"),
+            TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
+            TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
+                t.downcast_type().size()
+            },
+            TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
+            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::Unset => unreachable_debug(),
         }
     }
 
     /// alignment of stack allocation in bytes
-    pub fn alignment(&self) -> usize {
-        const ZST_ALIGNMENT: usize = 1;
-        let alignment = match self {
-            Type::Void | Type::Never => ZST_ALIGNMENT,
-            Type::Int { .. } => self.size().min(16),
-            Type::Bool => 1,
-            Type::Float { .. } => self.size().min(16),
-            Type::Function(_) => todo!(),
-            Type::Ptr { .. } | Type::Slice { .. } => 8,
-            Type::Array { elem_ty, .. } => elem_ty.alignment(),
-            Type::Struct { fields } => {
-                fields.iter().map(|f| f.ty.alignment()).max().unwrap_or(ZST_ALIGNMENT)
+    pub fn alignment(self) -> usize {
+        let alignment = match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => {
+                let p = primitives();
+                if self == p.void_ty || self == p.never || self == p.type_ty {
+                    ZST_ALIGNMENT
+                } else if self == p.bool {
+                    1
+                } else {
+                    todo!()
+                }
             },
-            Type::Union { fields } => {
-                fields.iter().map(|f| f.ty.alignment()).max().unwrap_or(ZST_ALIGNMENT)
+            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_alignment(*bits),
+            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } => 8,
+            TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().alignment(),
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::StructDef { fields, .. } => {
+                fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
             },
-            Type::Enum { variants } => {
-                Type::Int { bits: variant_count_to_tag_size_bits(variants.len()), is_signed: false }
-                    .alignment()
-                    .max(Type::Union { fields: *variants }.alignment())
-            },
-            Type::Range { kind: RangeKind::Full, .. } => ZST_ALIGNMENT,
-            Type::Range { elem_ty, .. } => elem_ty.alignment(),
-            Type::Option { ty } => ty.alignment(),
-            Type::IntLiteral
-            | Type::FloatLiteral
-            | Type::MethodStub { .. }
-            | Type::EnumVariant { .. }
-            | Type::Type(..)
-            | Type::Unset
-            | Type::Unevaluated(_) => panic_debug("cannot find stack alignment"),
+            TypeEnum::UnionDef { fields, .. } => union_alignment(*fields),
+            TypeEnum::EnumDef { variants, .. } => enum_alignment(*variants),
+            TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
+            TypeEnum::OptionTy { ty, .. } => ty.u().alignment(),
+            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::Unset => unreachable_debug(),
         };
         debug_assert!(alignment.is_power_of_two());
         alignment
     }
 
-    /// Checks if the two types equal or can be coerced into a common type.
-    ///
-    /// For exact equality use `==`.
-    pub fn matches(self, other: Self) -> bool {
-        self.common_type(other).is_some()
+    /// Returns `(self.size(), self.alignment())`
+    pub fn layout(self) -> Layout {
+        Layout::new(self.size(), self.alignment())
     }
 
-    /// Returns the common type after type coercion or [`None`] if the types
-    /// don't match (see [`Type::matches`]).
-    pub fn common_type(self, other: Self) -> Option<Type> {
-        enum Selection {
-            Left,
-            Right,
+    pub fn is_non_null(self) -> bool {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => todo!("{:?}", self),
+            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => false,
+            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } => true,
+            TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().is_non_null(),
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::StructDef { fields, .. } => fields.iter_types().any(Ptr::is_non_null),
+            TypeEnum::UnionDef { .. } => todo!(),
+            TypeEnum::EnumDef { .. } => todo!(),
+            TypeEnum::RangeTy { .. } => todo!(),
+            TypeEnum::OptionTy { .. } => false,
+            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::Unset => unreachable_debug(),
         }
-        use Selection::*;
-
-        fn inner(l: Type, r: Type) -> Option<Selection> {
-            macro_rules! match_and_select {
-                (match $i:expr => $($body:tt)*) => { match_and_select!(@inner $i; $($body)*) };
-                (@inner $i:expr;) => {};
-                (@inner $i:expr; mirror ($l_pat:pat, $r_pat:pat) $(if $guard:expr)? => Some(Left), $($tail:tt)*) => {
-                    if let ($l_pat, $r_pat) = $i $( && $guard )? {
-                        return Some(Left)
-                    } else if let ($r_pat, $l_pat) = $i $( && $guard )? {
-                        return Some(Right)
-                    }
-                    match_and_select!(@inner $i; $($tail)*)
-                };
-                (@inner $i:expr; $pat:pat $(if $guard:expr)? => $return:expr, $($tail:tt)*) => {
-                    #[allow(irrefutable_let_patterns)]
-                    if let $pat = $i $( && $guard )? {
-                        return $return;
-                    }
-                    match_and_select!(@inner $i; $($tail)*)
-                };
-            }
-
-            match_and_select!(match (l, r) =>
-                (l, r) if l == r => Some(Left),
-                mirror (_, Type::Never) => Some(Left),
-                (Type::Slice { elem_ty: t1 }, Type::Slice { elem_ty: t2 }) => inner(*t1, *t2),
-                (Type::Array { len: l1, elem_ty: t1 }, Type::Array { len: l2, elem_ty: t2 })
-                    if l1 == l2 => inner(*t1, *t2),
-
-                (Type::Ptr { pointee_ty: p1 }, Type::Ptr { pointee_ty: p2 }) => inner(*p1, *p2),
-                // TODO: remove these rules:
-                mirror (Type::Ptr { .. }, Type::Option { ty: p }) if matches!(*p, Type::Ptr { .. }) => Some(Left), // allows `?*T == *U`
-
-                mirror (Type::Int { .. } | Type::Float { .. } | Type::FloatLiteral, Type::IntLiteral) => Some(Left),
-                mirror (Type::Float { .. }, Type::FloatLiteral) => Some(Left),
-
-                mirror (e @ Type::Enum { variants }, Type::EnumVariant { enum_ty, idx })
-                    if *enum_ty == e && variants[idx].ty == Type::Void => Some(Left),
-                (Type::Option { ty: t1 }, Type::Option { ty: t2 }) => inner(*t1, *t2),
-
-                (Type::Range { elem_ty: e1, kind: k1 }, Type::Range { elem_ty: e2, kind: k2 })
-                    if k1 == k2 => inner(*e1, *e2),
-
-                (Type::Function(f1), Type::Function(f2)) => {
-                    let functions_match = f1.ret_type.matches(f2.ret_type)
-                        && f1.params.len() == f2.params.len()
-                        && f1.params.iter().zip(f2.params.iter()).all(|(a, b)| a.ty.matches(b.ty));
-                    Some(Left).filter(|_| functions_match)
-                },
-            );
-            None
-        }
-
-        inner(self, other).map(|s| match s {
-            Selection::Left => self,
-            Selection::Right => other,
-        })
     }
 
-    /// This might mutate values behind [`Ptr`]s in `self`.
-    /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
-    pub fn finalize(self) -> Self {
-        match self {
-            Type::IntLiteral => Type::I64,
-            Type::FloatLiteral => Type::F64,
-            // Type::Range { kind: RangeKind::Full, .. } => self,
-            Type::Array { mut elem_ty, .. } | Type::Range { mut elem_ty, .. } => {
-                *elem_ty = elem_ty.finalize();
-                self
+    pub fn pass_arg_as_ptr(self) -> bool {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => {
+                let p = primitives();
+                self == p.void_ty || self == p.never
             },
-            Type::EnumVariant { enum_ty, .. } => *enum_ty,
-            Type::Unset | Type::Unevaluated(_) => panic_debug("cannot finalize invalid type"),
-            t => t,
+            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
+            TypeEnum::SliceTy { .. } => false,
+            TypeEnum::ArrayTy { .. } => todo!(),
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::StructDef { .. } | TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => {
+                true
+            },
+            TypeEnum::RangeTy { .. } => todo!(),
+            TypeEnum::OptionTy { .. } => todo!(),
+            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::Unset => unreachable_debug(),
         }
     }
 
-    pub fn matches_int(&self) -> bool {
-        match self {
-            Type::Never | Type::Int { .. } => true,
-            _ => false,
+    pub fn is_aggregate(self) -> bool {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => false,
+            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
+            TypeEnum::OptionTy { ty, .. } if ty.u().is_non_null() => ty.u().is_aggregate(),
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::SliceTy { .. }
+            | TypeEnum::ArrayTy { .. }
+            | TypeEnum::StructDef { .. }
+            | TypeEnum::UnionDef { .. }
+            | TypeEnum::EnumDef { .. }
+            | TypeEnum::RangeTy { .. }
+            | TypeEnum::OptionTy { .. } => true,
+            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::Unset => unreachable_debug(),
         }
     }
+}
 
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        match self {
-            Type::Unset | Type::Unevaluated(_) => false,
-            _ => true,
-        }
-    }
+#[inline]
+pub fn int_size(bits: u32) -> usize {
+    round_up_to_nearest_power_of_two(bits as usize).div_ceil(8)
+}
 
-    /// if `self` [Type::is_valid] this returns `Some(self)`, otherwise [`None`]
-    #[inline]
-    pub fn into_valid(self) -> Option<Type> {
-        match self {
-            Type::Unset | Type::Unevaluated(_) => None,
-            t => Some(t),
-        }
-    }
+#[inline]
+pub fn int_alignment(bits: u32) -> usize {
+    int_size(bits).min(16)
+}
 
-    pub fn is_non_null(&self) -> bool {
-        match self {
-            Type::Void => todo!(),
-            Type::Never => todo!(),
-            Type::Int { .. } | Type::Bool | Type::Float { .. } => false,
-            Type::Ptr { .. } | Type::Slice { .. } => true,
-            Type::Array { .. } => todo!(),
-            Type::Function(..) => todo!(),
-            Type::Struct { fields } => fields.as_type_iter().any(|t| t.is_non_null()),
-            Type::Union { .. } => todo!(),
-            Type::Enum { .. } => todo!(),
-            Type::Range { .. } => todo!(),
-            Type::Option { .. } => false,
-            Type::Type(..) => todo!(),
-            Type::IntLiteral
-            | Type::FloatLiteral
-            | Type::MethodStub { .. }
-            | Type::EnumVariant { .. }
-            | Type::Unset
-            | Type::Unevaluated(_) => todo!(),
-        }
-    }
+#[inline]
+pub fn union_size(fields: DeclList) -> usize {
+    fields.iter_types().map(Ptr::size).max().unwrap_or(0)
+}
 
-    pub fn pass_arg_as_ptr(&self) -> bool {
-        match self {
-            Type::Void
-            | Type::Never
-            | Type::Int { .. }
-            | Type::Bool
-            | Type::Float { .. }
-            | Type::Ptr { .. } => false,
-            Type::Slice { .. } => false,
-            Type::Array { .. } => todo!(),
-            Type::Function(_) => todo!(),
-            Type::Struct { .. } | Type::Union { .. } | Type::Enum { .. } => true,
-            Type::Range { .. } | Type::Option { .. } | Type::Type(_) => todo!(),
-            Type::IntLiteral
-            | Type::FloatLiteral
-            | Type::MethodStub { .. }
-            | Type::EnumVariant { .. }
-            | Type::Unset
-            | Type::Unevaluated(_) => panic_debug("invalid type"),
-        }
-    }
+#[inline]
+pub fn union_alignment(fields: DeclList) -> usize {
+    fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
+}
 
-    pub(crate) fn slice_fields(elem_ty: Ptr<Type>) -> [VarDecl; 2] {
-        [
-            VarDecl::new_basic(Ident::from("ptr"), Type::Ptr { pointee_ty: elem_ty }),
-            VarDecl::new_basic(Ident::from("len"), Type::U64),
-        ]
-    }
-
-    pub fn is_aggregate(&self) -> bool {
-        match self {
-            Type::Void
-            | Type::Never
-            | Type::Int { .. }
-            | Type::Bool
-            | Type::Float { .. }
-            | Type::Ptr { .. } => false,
-            Type::Option { ty } if ty.is_non_null() => ty.is_aggregate(),
-            Type::Function(_) => todo!(),
-            Type::Slice { .. }
-            | Type::Array { .. }
-            | Type::Struct { .. }
-            | Type::Union { .. }
-            | Type::Enum { .. }
-            | Type::Range { .. }
-            | Type::Option { .. } => true,
-
-            Type::Type(_) => todo!(),
-
-            Type::IntLiteral
-            | Type::FloatLiteral
-            | Type::MethodStub { .. }
-            | Type::EnumVariant { .. }
-            | Type::Unset
-            | Type::Unevaluated(_) => panic_debug("invalid type"),
-        }
-    }
+#[inline]
+pub fn enum_alignment(variants: DeclList) -> usize {
+    int_alignment(variant_count_to_tag_size_bits(variants.len())).max(union_alignment(variants))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,83 +515,4 @@ impl RangeKind {
             RangeKind::BothInclusive => "RangeInclusive",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(unused)]
-enum SemaType {
-    RuntimeType(Type),
-    IntLiteral,
-    FloatLiteral,
-    /// ```mylang
-    /// MyEnum :: enum { A, B(i64) };
-    /// a := MyEnum.A; // variant -> valid val
-    /// b1 := MyEnum.B; // variant -> invalid val
-    /// b2 := MyEnum.B(5); // variant initialization
-    /// ```
-    EnumVariant {
-        enum_ty: Ptr<Type>,
-        idx: usize,
-    },
-
-    /// The type was not explicitly set in the original source code and must
-    /// still be inferred.
-    Unset,
-    /// The type was explicitly set in the original source code, but hasn't been
-    /// analyzed yet.
-    Unevaluated(Ptr<Expr>),
-}
-
-#[test]
-fn test_sema_type_transmute_to_type() {
-    fn t(sema_type: SemaType) -> Type {
-        unsafe { std::mem::transmute::<SemaType, Type>(sema_type) }
-    }
-
-    let alloc = bumpalo::Bump::new();
-    let void_ty_ptr = Ptr::from(alloc.alloc(Type::Void));
-    let void_ptr = Type::Ptr { pointee_ty: void_ty_ptr };
-    let bool_ty_ptr = Ptr::from(alloc.alloc(Type::Bool));
-    let bool_ptr = Type::Ptr { pointee_ty: bool_ty_ptr };
-    let i64_ty = Type::Int { bits: 64, is_signed: true };
-    let i32_ty = Type::Int { bits: 32, is_signed: true };
-    let u64_ty = Type::Int { bits: 64, is_signed: false };
-    let f64_ty = Type::Float { bits: 64 };
-    let f32_ty = Type::Float { bits: 32 };
-
-    assert_eq!(t(SemaType::RuntimeType(Type::Void)), Type::Void);
-    assert_eq!(t(SemaType::RuntimeType(Type::Never)), Type::Never);
-
-    assert_eq!(t(SemaType::RuntimeType(void_ptr)), void_ptr);
-    assert_ne!(t(SemaType::RuntimeType(bool_ptr)), void_ptr);
-    assert_ne!(t(SemaType::RuntimeType(void_ptr)), bool_ptr);
-
-    assert_eq!(t(SemaType::RuntimeType(i64_ty)), i64_ty);
-    assert_ne!(t(SemaType::RuntimeType(i64_ty)), u64_ty);
-    assert_ne!(t(SemaType::RuntimeType(i64_ty)), i32_ty);
-
-    assert_eq!(t(SemaType::RuntimeType(Type::Bool)), Type::Bool);
-
-    assert_eq!(t(SemaType::RuntimeType(f64_ty)), f64_ty);
-    assert_ne!(t(SemaType::RuntimeType(f64_ty)), f32_ty);
-
-    /*
-    Function(Ptr<Fn>),
-    Array {
-        len: usize,
-        elem_ty: Ptr<Type>,
-    },
-    Struct {
-        fields: VarDeclList,
-    },
-    Union {
-        fields: VarDeclList,
-    },
-    Enum {
-        variants: VarDeclList, // TODO
-    },
-    */
-
-    assert_eq!(t(SemaType::RuntimeType(Type::Type(void_ty_ptr))), Type::Type(void_ty_ptr));
-    assert_ne!(t(SemaType::RuntimeType(Type::Type(void_ty_ptr))), Type::Type(bool_ty_ptr));
 }

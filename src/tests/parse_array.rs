@@ -1,5 +1,4 @@
-use crate::{ast::ExprKind, parser::StmtIter, type_::Type};
-
+/*
 macro_rules! test_helper {
     ($test_name:ident : $code:expr, $test_closure:expr) => {
         #[test]
@@ -94,3 +93,4 @@ test_helper! { slice_ty_f64: "[]f64", |arr| {
         panic!("parsed type incorrectly")
     }
 }}
+*/

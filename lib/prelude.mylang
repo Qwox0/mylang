@@ -71,6 +71,8 @@ panic :: (msg: []u8) -> never {
     exit(1)
 }
 
+assert :: (cond: bool) -> if !cond do panic("Assertion failed!");
+
 malloc0 :: (size: c_size_t) -> {
     ptr := malloc(size);
     memset(ptr, 0, size);

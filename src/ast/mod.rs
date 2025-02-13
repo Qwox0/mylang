@@ -1,87 +1,385 @@
-use crate::{parser::lexer::Span, ptr::Ptr, type_::Type, util::forget_lifetime};
-use debug::DebugAst;
-use std::{fmt, ops::Deref};
+use crate::{
+    codegen::llvm::finalize_ty,
+    parser::lexer::Span,
+    ptr::{OPtr, Ptr},
+    sema::primitives::primitives,
+    type_::{RangeKind, ty_match},
+    util::{UnwrapDebug, then},
+};
+use core::fmt;
 
 pub mod debug;
 
-#[derive(Debug, Clone, Copy)]
-pub struct ExprWithTy {
-    pub expr: Ptr<Expr>,
-    pub ty: Type,
+/*
+macro_rules! ast_variants2 {
+    ($($(#[$attr:meta])* $name:ident : $base:ident {
+        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
+    }),+ $(,)?) => {
+        $(ast_variants2! {
+            _ $base => $(#[$attr])* $name {
+                $($(#[$field_attr])* $field : $ty),*
+            }
+        })+
+
+        /// [`Ast`] as a rust enum which can be used with pattern matching
+        ///
+        /// This works because `#[repr]` forces the tag to be the first field <https://doc.rust-lang.org/reference/items/enumerations.html#pointer-casting>
+        ///
+        #[derive(Debug)]
+        #[repr(u8)]
+        pub enum AstEnum {
+            $($name {
+                ty: OPtr<Type>,
+                span: Span,
+                parenthesis_count: u8,
+                $($field : $ty),*
+            },)+
+        }
+    };
+    (_ Ast => $(#[$attr:meta])* $name:ident {
+        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
+    }) => {
+        #[derive(Debug)]
+        $(#[$attr])*
+        #[repr(C)]
+        pub struct $name {
+            pub kind: AstKind,
+            pub ty: OPtr<$crate::ast::Type>,
+            pub span: Span,
+            pub parenthesis_count: u8,
+            $(
+                $(#[$field_attr])*
+                pub $field : $ty
+            ),*
+        }
+
+        impl HasAstKind for $name {
+            #[inline]
+            fn get_kind(&self) -> AstKind { self.kind }
+        }
+    };
+    (_ ConstVal => $(#[$attr:meta])* $name:ident {
+        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
+    }) => {
+        ast_variants2! {
+            _ Ast => $(#[$attr])* $name {
+                // more_fields: u64,
+                $($(#[$field_attr])* $field : $ty),*
+            }
+        }
+    };
+    (_ Type => $(#[$attr:meta])* $name:ident {
+        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
+    }) => {
+        ast_variants2! {
+            _ ConstVal => $(#[$attr])* $name {
+                // more_fields2: u64,
+                $($(#[$field_attr])* $field : $ty),*
+            }
+        }
+    };
 }
 
-impl ExprWithTy {
-    pub fn untyped(expr: Ptr<Expr>) -> ExprWithTy {
-        ExprWithTy { expr, ty: Type::Unset }
+mod new {
+    use super::{AstKind, HasAstKind, OPtr, Ptr, Span};
+
+    ast_variants2! {
+        Ast : Ast {},
+        ConstVal : ConstVal {},
+        Type : Type {},
     }
 }
+*/
 
-impl Deref for ExprWithTy {
-    type Target = Expr;
+// --------------
 
-    fn deref(&self) -> &Self::Target {
-        &*self.expr
-    }
+// don't forget to change `AstEnum`, `ConstValEnum`, `TypeEnum`
+macro_rules! inherit_ast {
+    (
+        $(#[$attr:meta])*
+        struct $name:ident {
+            $(
+                $(#[$field_attr:meta])*
+                $field:ident : $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$attr])*
+        #[repr(C)]
+        pub struct $name {
+            pub kind: AstKind,
+            pub ty: OPtr<$crate::ast::Type>,
+            /// If the [`Ast`] node is replaced directly, we would lose the correct [`Span`].
+            pub replacement: OPtr<Ast>,
+            pub span: Span,
+            pub parenthesis_count: u8,
+            $(
+                $(#[$field_attr])*
+                pub $field : $ty
+            ),*
+        }
+
+        impl HasAstKind for $name {
+            #[inline]
+            fn get_kind(&self) -> AstKind { self.kind }
+        }
+    };
+}
+pub(crate) use inherit_ast;
+
+inherit_ast! {
+    struct Ast {}
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ExprKind {
-    Ident(Ptr<str>),
+/// Constructor for ast nodes
+macro_rules! ast_new {
+    ($kind:ident {
+        $(
+            $field:ident
+            $( : $val:expr )?
+        ),* $(,)?
+    }) => {
+        crate::ast::$kind {
+            kind: crate::ast::AstKind::$kind,
+            ty: None,
+            replacement: None,
+            parenthesis_count: 0,
+            $( $field $(: $val)? ),*
+        }
+    };
+}
+pub(crate) use ast_new;
 
-    IntLit(Ptr<str>),
-    FloatLit(Ptr<str>),
-    /// `true`, `false`
-    BoolLit(bool),
-    /// `'a'`
-    CharLit(char),
-    /// `b'a'`
-    BCharLit(u8),
-    /// `"hello world"`
-    StrLit(Ptr<str>),
+macro_rules! type_new {
+    ($kind:ident {
+        $(
+            $field:ident
+            $( : $val:expr )?
+        ),* $(,)?
+    }) => {{
+        let kind = crate::ast::AstKind::$kind;
+        debug_assert!(crate::ast::Type::KINDS.contains(&kind));
+        crate::ast::$kind {
+            kind,
+            ty: Some(crate::sema::primitives::primitives().type_ty),
+            replacement: None,
+            parenthesis_count: 0,
+            span: Span::ZERO,
+            $( $field $(: $val)? ),*
+        }
+    }};
+}
+pub(crate) use type_new;
 
-    /// `*<ty>`
-    /// `*mut <ty>`
-    PtrTy {
-        ty: Type,
-        is_mut: bool,
-    },
-    /// `[]T` -> `struct { ptr: *T, len: u64 }`
-    /// `[]mut T`
-    SliceTy {
-        ty: Type,
-        is_mut: bool,
-    },
-    /// `[<count>]ty`
-    ArrayTy {
-        count: Ptr<Expr>,
-        ty: Type,
-    },
-    /// `?<ty>`
-    OptionShort(Type),
+pub trait HasAstKind {
+    fn get_kind(&self) -> AstKind;
+}
 
-    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
-    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
-    /// `-> <type> { <body> }`
-    /// `-> <body>`
-    /// `^ expr.span`
-    Fn(Fn),
+pub unsafe trait AstVariant: HasAstKind {
+    const KIND: AstKind;
+}
+pub unsafe trait ConstValVariant: AstVariant {}
+pub unsafe trait TypeVariant: ConstValVariant {}
 
-    /// `( <expr> )`
-    Parenthesis {
-        expr: Ptr<Expr>,
+macro_rules! ast_variants {
+    (
+        $(
+            $(#[$attr:meta])*
+            $name:ident {
+                $(
+                    $(#[$field_attr:meta])*
+                    $field:ident : $ty:ty
+                ),* $(,)?
+            }
+        ),+ $(,)?
+        ===== Constant Values =====
+        $(
+            $(#[$c_attr:meta])*
+            $c_name:ident {
+                $(
+                    $(#[$c_field_attr:meta])*
+                    $c_field:ident : $c_ty:ty
+                ),* $(,)?
+            }
+        ),+ $(,)?
+        ===== Types =====
+        $(
+            $(#[$t_attr:meta])*
+            $t_name:ident {
+                $(
+                    $(#[$t_field_attr:meta])*
+                    $t_field:ident : $t_ty:ty
+                ),* $(,)?
+            }
+        ),+ $(,)?
+    ) => {
+        $(
+            inherit_ast! {
+                #[derive(Debug)]
+                $(#[$attr])* struct $name {
+                    $(
+                        $(#[$field_attr])*
+                        $field : $ty
+                    ),*
+                }
+            }
+
+            unsafe impl AstVariant for $name { const KIND: AstKind = AstKind::$name; }
+        )+
+        $(
+            inherit_ast! {
+                $(#[$c_attr])* struct $c_name {
+                    $(
+                        $(#[$c_field_attr])*
+                        $c_field : $c_ty
+                    ),*
+                }
+            }
+
+            impl std::fmt::Debug for $c_name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    ConstVal::fmt(&Ptr::from_ref(self).cast(), f)
+                }
+            }
+
+            unsafe impl AstVariant for $c_name { const KIND: AstKind = AstKind::$c_name; }
+            unsafe impl ConstValVariant for $c_name {}
+        )+
+        $(
+            inherit_ast! {
+                $(#[$t_attr])* struct $t_name {
+                    $(
+                        $(#[$t_field_attr])*
+                        $t_field : $t_ty
+                    ),*
+                }
+            }
+
+            impl std::fmt::Debug for $t_name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    Type::fmt(&Ptr::from_ref(self).upcast_to_type(), f)
+                }
+            }
+
+            unsafe impl AstVariant for $t_name { const KIND: AstKind = AstKind::$t_name; }
+            unsafe impl ConstValVariant for $t_name {}
+            unsafe impl TypeVariant for $t_name {}
+        )+
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum AstKind {
+            $($name,)+
+            $($c_name,)+
+            $($t_name,)+
+        }
+
+        /// [`Ast`] as a rust enum which can be used with pattern matching
+        ///
+        /// This works because `#[repr]` forces the tag to be the first field <https://doc.rust-lang.org/reference/items/enumerations.html#pointer-casting>
+        ///
+        #[derive(Debug)]
+        #[repr(u8)]
+        pub enum AstEnum {
+            // don't forget to change `inherit_ast`
+            $($name {
+                ty: OPtr<$crate::ast::Type>,
+                replacement: OPtr<Ast>,
+                span: Span,
+                parenthesis_count: u8,
+                $($field : $ty),*
+            },)+
+            $($c_name {
+                ty: OPtr<$crate::ast::Type>,
+                replacement: OPtr<Ast>,
+                span: Span,
+                parenthesis_count: u8,
+                $($c_field : $c_ty),*
+            },)+
+            $($t_name {
+                ty: OPtr<$crate::ast::Type>,
+                replacement: OPtr<Ast>,
+                span: Span,
+                parenthesis_count: u8,
+                $($t_field : $t_ty),*
+            },)+
+        }
+
+        #[derive(Debug)]
+        #[repr(u8)]
+        pub enum ConstValEnum {
+            $(
+                $c_name {
+                    ty: OPtr<Type>,
+                    replacement: OPtr<Ast>,
+                    span: Span,
+                    parenthesis_count: u8,
+                    $($c_field : $c_ty),*
+                } = AstKind::$c_name as u8,
+            )+
+            $(
+                $t_name {
+                    ty: OPtr<Type>,
+                    replacement: OPtr<Ast>,
+                    span: Span,
+                    parenthesis_count: u8,
+                    $($t_field : $t_ty),*
+                } = AstKind::$t_name as u8,
+            )+
+        }
+
+        #[derive(Debug)]
+        #[repr(u8)]
+        pub enum TypeEnum {
+            $(
+                $t_name {
+                    ty: OPtr<Type>,
+                    replacement: OPtr<Ast>,
+                    span: Span,
+                    parenthesis_count: u8,
+                    $(
+                        $(#[$t_field_attr])*
+                        $t_field : $t_ty
+                    ),*
+                } = AstKind::$t_name as u8,
+            )+
+            Unset = u8::MAX,
+        }
+
+        impl AstKind {
+            pub const fn size_of_variant(self) -> usize {
+                match self {
+                    $(AstKind::$name => size_of::<$name>(),)+
+                    $(AstKind::$c_name => size_of::<$c_name>(),)+
+                    $(AstKind::$t_name => size_of::<$t_name>(),)+
+                }
+            }
+        }
+
+        impl ConstVal {
+            pub const KINDS: [AstKind; 18] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+        }
+
+        impl Type {
+            pub const KINDS: [AstKind; 12] = [$(AstKind::$t_name,)+];
+        }
+    };
+}
+
+ast_variants! {
+    Ident {
+        text: Ptr<str>,
     },
+
     /// `{ <stmt>`*` }`
     Block {
-        stmts: Ptr<[ExprWithTy]>,
+        // parent: OPtr<Block>,
+        // pos_in_parent: StmtPos,
+        /// all statements in this block
+        stmts: Ptr<[Ptr<Ast>]>,
+        //decls: Vec<Ptr<Decl>>,
         has_trailing_semicolon: bool,
     },
-
-    /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef(VarDeclList),
-    /// `union { a: int, b: String, c: (u8, u32) }`
-    UnionDef(VarDeclList),
-    /// `enum { A, B(i64) }`
-    EnumDef(VarDeclList),
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
     /// `               ^^^^^^^^^^^^^^^^^^^^^^` expr.span
@@ -89,9 +387,8 @@ pub enum ExprKind {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     PositionalInitializer {
-        lhs: Option<Ptr<Expr>>,
-        lhs_ty: Type,
-        args: Ptr<[Ptr<Expr>]>,
+        lhs: OPtr<Ast>,
+        args: Ptr<[Ptr<Ast>]>,
     },
     /// `alloc(MyStruct).{ a = <expr>, b, }`
     /// `               ^^^^^^^^^^^^^^^^^^^` expr.span
@@ -99,93 +396,86 @@ pub enum ExprKind {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     NamedInitializer {
-        lhs: Option<Ptr<Expr>>,
-        lhs_ty: Type,
-        fields: Ptr<[(Ident, Option<Ptr<Expr>>)]>,
+        lhs: OPtr<Ast>,
+        fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SOA
     },
     /// `alloc(MyArray).[<expr>, <expr>, ..., <expr>,]`
     ArrayInitializer {
-        lhs: Option<Ptr<Expr>>,
-        lhs_ty: Type,
-        elements: Ptr<[Ptr<Expr>]>,
+        lhs: OPtr<Ast>,
+        elements: Ptr<[Ptr<Ast>]>,
     },
     /// `alloc(MyArray).[<expr>; <count>]`
     ArrayInitializerShort {
-        lhs: Option<Ptr<Expr>>,
-        lhs_ty: Type,
-        val: Ptr<Expr>,
-        count: Ptr<Expr>,
+        lhs: OPtr<Ast>,
+        val: Ptr<Ast>,
+        count: Ptr<Ast>,
     },
 
     /// `expr . ident`, `.ident`
     /// `     ^` `       ^` expr.span
     Dot {
-        lhs: Option<Ptr<Expr>>,
-        lhs_ty: Type,
-        rhs: Ident,
+        has_lhs: bool,
+        lhs: OPtr<Ast>,
+        rhs: Ptr<Ident>,
     },
     /// `<lhs> [ <idx> ]`
     /// `              ^` expr.span
     Index {
-        lhs: ExprWithTy,
-        idx: ExprWithTy,
+        lhs: Ptr<Ast>,
+        idx: Ptr<Ast>,
     },
 
     /// `expr.as(ty)`
-    /// TODO: remove this [`ExprKind`] when implementing method calls.
+    /// TODO: remove this [`Ast`] when implementing generic method calls.
     Cast {
-        lhs: ExprWithTy,
-        target_ty: Type,
+        expr: Ptr<Ast>,
+        target_ty: Ptr<Ast>,
+    },
+    /// `xx input`
+    /// source: Jai
+    Autocast {
+        expr: Ptr<Ast>,
     },
 
-    /*
-    /// `<func> < <params> >`
-    CompCall {
-        func: Ptr<Expr>,
-        args: Vec<Expr>,
-    },
-    */
     /// `<func> ( <expr>, ..., param=<expr>, ... )`
     /// `                                        ^ expr.span`
     Call {
-        func: ExprWithTy,
-        args: Ptr<[Ptr<Expr>]>,
-        /// which argument was piped into this [`ExprKind::Call`]
+        func: Ptr<Ast>,
+        args: Ptr<[Ptr<Ast>]>,
+        /// which argument was piped into this [`Ast::Call`]
         pipe_idx: Option<usize>,
     },
 
     /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
     /// `          ^` `             ^^` ` ^ expr.span`
     UnaryOp {
-        kind: UnaryOpKind,
-        expr: Ptr<Expr>,
+        op: UnaryOpKind,
+        expr: Ptr<Ast>,
         is_postfix: bool,
     },
     /// `<lhs> op <lhs>`
     /// `      ^^ expr.span`
     BinOp {
-        lhs: Ptr<Expr>,
+        lhs: Ptr<Ast>,
         op: BinOpKind,
-        rhs: Ptr<Expr>,
-        arg_ty: Type,
+        rhs: Ptr<Ast>,
     },
-
     Range {
-        start: Option<Ptr<Expr>>,
-        end: Option<Ptr<Expr>>,
+        start: OPtr<Ast>,
+        end: OPtr<Ast>,
         is_inclusive: bool,
     },
 
     /// `<lhs> = <lhs>`
     Assign {
-        lhs: ExprWithTy,
-        rhs: Ptr<Expr>,
+        lhs: Ptr<Ast>,
+        rhs: Ptr<Ast>,
     },
     /// `<lhs> op= <lhs>`
     BinOpAssign {
-        lhs: ExprWithTy,
+        lhs: Ptr<Ast>,
         op: BinOpKind,
-        rhs: Ptr<Expr>,
+        rhs: Ptr<Ast>,
     },
 
     /// variable declaration (and optional initialization)
@@ -196,190 +486,597 @@ pub enum ExprKind {
     /// `mut rec <name> :: <init>`
     /// `expr.span` must describe the entire expression if `default.is_none()`,
     /// otherwise only the start is important
-    VarDecl(VarDecl),
-    Extern {
-        ident: Ident,
-        ty: Type,
+    Decl {
+        is_const: bool,
+        is_extern: bool,
+        markers: DeclMarkers,
+        ident: Ptr<Ident>,
+        var_ty_expr: OPtr<Ast>,
+        var_ty: OPtr<Type>,
+        /// also used for default value in fn params, struct fields, ...
+        init: OPtr<Ast>,
+        // init_const_val: OPtr<ConstVal>, // TODO: benchmark this
     },
+    /*
+    Extern {
+        ident: Ptr<Ident>,
+        var_ty_expr: Ptr<Ast>,
+        var_ty: OPtr<Type>,
+    },
+    */
 
-    // /// `pub extern my_fn: (a: i32, b: f64) -> bool`
-    // ExternDecl {
-    //     is_pub: bool,
-    //     ident: Ptr<Expr>,
-    //     ty: Ptr<Expr>,
-    // },
     /// `if <cond> <then>` (`else <else>`)
     /// `^^` expr.span
     If {
-        condition: Ptr<Expr>,
-        then_body: Ptr<Expr>,
-        else_body: Option<Ptr<Expr>>,
+        condition: Ptr<Ast>,
+        then_body: Ptr<Ast>,
+        else_body: OPtr<Ast>,
         was_piped: bool,
     },
     /// `match <val> <body>` (`else <else>`)
     Match {
-        val: Ptr<Expr>,
+        val: Ptr<Ast>,
         // TODO
-        else_body: Option<Ptr<Expr>>,
+        else_body: OPtr<Ast>,
         was_piped: bool,
     },
 
     /// `for <iter_var> in <source> <body>`
     /// `<source> | for <iter_var> <body>`
     For {
-        source: ExprWithTy,
-        iter_var: Ident,
-        body: Ptr<Expr>,
+        source: Ptr<Ast>,
+        iter_var: Ptr<Ident>,
+        body: Ptr<Ast>,
         was_piped: bool,
     },
     /// `while <cond> <body>`
     While {
-        condition: Ptr<Expr>,
-        body: Ptr<Expr>,
+        condition: Ptr<Ast>,
+        body: Ptr<Ast>,
         was_piped: bool,
     },
 
     /// `lhs catch ...`
     Catch {
-        lhs: Ptr<Expr>,
+        lhs: Ptr<Ast>,
         // TODO
     },
 
-    /// `xx input`
-    /// source: Jai
-    Autocast {
-        expr: ExprWithTy,
-    },
-
-    /*
-    /// `lhs | rhs`
-    /// Note: `lhs | if ...`, `lhs | match ...`, `lhs | for ...` and
-    /// `lhs | while ...` are inlined during parsing
-    Pipe {
-        lhs: Ptr<Expr>,
-        // TODO
-    },
-    */
-    Defer(Ptr<Expr>),
+    Defer { expr: Ptr<Ast> },
 
     /// `return <expr>`
     /// `^^^^^^` expr.span
     Return {
-        expr: Option<ExprWithTy>,
+        expr: OPtr<Ast>,
+        parent_fn: OPtr<Fn>,
     },
     Break {
-        expr: Option<ExprWithTy>,
+        expr: OPtr<Ast>,
     },
-    Continue,
-    // Semicolon(Option<Ptr<Expr>>),
+    Continue {},
+
+    ===== Constant Values =====
+
+    IntVal { val: i128 },
+    FloatVal { val: f64 },
+    BoolVal { val: bool },
+    CharVal { val: char },
+    // BCharLit { val: u8 },
+    StrVal { text: Ptr<str>},
+    PtrVal { val: u64 },
+
+
+    ===== Types =====
+
+    /// `void`, `never`, `bool`, `type`
+    SimpleTy {
+        decl: Ptr<Decl>,
+    },
+    IntTy {
+        bits: u32,
+        is_signed: bool,
+    },
+    FloatTy {
+        bits: u32,
+    },
+
+    /// `*<ty>`
+    /// `*mut <ty>`
+    PtrTy {
+        pointee: Ptr<Ast>,
+        is_mut: bool,
+    },
+    /// `[]T` -> `struct { ptr: *T, len: u64 }`
+    /// `[]mut T`
+    SliceTy {
+        elem_ty: Ptr<Ast>,
+        is_mut: bool,
+    },
+    /// `[<count>]ty`
+    ArrayTy {
+        len: Ptr<Ast>,
+        elem_ty: Ptr<Ast>,
+    },
+
+    /// `struct { a: int, b: String, c: (u8, u32) }`
+    StructDef { fields: DeclList },
+    /// `union { a: int, b: String, c: (u8, u32) }`
+    UnionDef { fields: DeclList },
+    /// `enum { A, B(i64) }`
+    EnumDef { variants: DeclList },
+
+    RangeTy {
+        elem_ty: Ptr<Type>,
+        rkind: RangeKind,
+    },
+
+    /// `?<ty>`
+    OptionTy {
+        inner_ty: Ptr<Ast>,
+    },
+
+    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <type> { <body> }`
+    /// `(<ident>, <ident>: <ty>, ..., <ident>,) -> <body>`
+    /// `-> <type> { <body> }`
+    /// `-> <body>`
+    /// `^ expr.span`
+    Fn {
+        params: DeclList,
+        ret_ty_expr: OPtr<Ast>,
+        ret_ty: OPtr<Type>,
+        /// if `body == None` this is a function type
+        body: OPtr<Ast>,
+    },
 }
 
-impl ExprKind {
-    pub(crate) fn block_expects_trailing_semicolon(&self) -> bool {
-        match self {
-            ExprKind::Block { .. } => false,
-            /*
-            | ExprKind::StructDef(..)
-            | ExprKind::UnionDef(..)
-            | ExprKind::EnumDef(..) => false,
-            ExprKind::VarDecl(var_decl) => var_decl
-                .default
-                .map(|e| e.kind.block_expects_trailing_semicolon())
-                .unwrap_or(true),
-            ExprKind::Extern { .. } => todo!(),
-            */
-            &ExprKind::If { then_body, else_body, .. } => {
-                else_body.unwrap_or(then_body).kind.block_expects_trailing_semicolon()
-            },
-            ExprKind::Match { .. } => todo!(),
-            // ExprKind::Fn(Fn { body, .. })
-            ExprKind::For { body, .. } | ExprKind::While { body, .. } => {
-                body.kind.block_expects_trailing_semicolon()
-            },
-            // ExprKind::Catch { .. } => todo!(),
-            _ => true,
+inherit_ast! {
+    struct ConstVal {}
+}
+
+inherit_ast! {
+    struct Type {}
+}
+
+pub trait UpcastToAst {
+    fn upcast(self) -> Ptr<Ast>;
+}
+
+macro_rules! impl_UpcastToAst {
+    ($($name:ty),*) => { $(
+        impl UpcastToAst for Ptr<$name> {
+            fn upcast(self) -> Ptr<Ast> {
+                self.cast()
+            }
         }
+    )* };
+}
+
+impl_UpcastToAst! { AstEnum, ConstVal, Type }
+
+impl<V: AstVariant> UpcastToAst for Ptr<V> {
+    fn upcast(self) -> Ptr<Ast> {
+        debug_assert_eq!(self.get_kind(), V::KIND);
+        self.cast()
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Expr {
-    pub kind: ExprKind,
-    pub span: Span,
+impl<V: ConstValVariant> Ptr<V> {
+    pub fn upcast_to_const_val(self) -> Ptr<ConstVal> {
+        debug_assert_eq!(self.get_kind(), V::KIND);
+        self.cast()
+    }
 }
 
-impl Expr {
+impl<V: TypeVariant> Ptr<V> {
+    pub fn upcast_to_type(self) -> Ptr<Type> {
+        debug_assert_eq!(self.get_kind(), V::KIND);
+        self.cast()
+    }
+}
+
+impl Ptr<Ast> {
+    pub fn is_const_val(self) -> bool {
+        self.kind.is_const_val_kind()
+    }
+
+    /// TODO: check if this is cheaper than [`Ptr::has_type_kind`]
+    pub fn is_type(self) -> bool {
+        if self.ty.u() != primitives().type_ty {
+            return false;
+        }
+        debug_assert!(self.has_type_kind(), "expected type kind; got: {:?}", self.kind);
+        debug_assert_ne!(self.ty, None);
+        true
+    }
+
+    /// only use this for debugging. otherwise use [`Ptr::is_type`] instead
+    pub fn has_type_kind(self) -> bool {
+        self.kind.is_type_kind()
+    }
+
+    /// resolve all replacements
+    pub fn rep(self) -> Ptr<Ast> {
+        let mut active = self;
+        while let Some(replacement) = active.replacement {
+            debug_assert!(replacement != active);
+            debug_assert!(replacement != self);
+            active = replacement;
+        }
+        active
+    }
+
+    /// resolve all replacements
+    pub fn rep_mut(&mut self) -> &mut Ptr<Ast> {
+        let mut active = self;
+        while let Some(replacement) = active.as_mut().replacement.as_mut() {
+            debug_assert!(*replacement != *active);
+            active = replacement;
+        }
+        active
+    }
+
+    pub fn downcast<V: AstVariant>(self) -> Ptr<V> {
+        let p = self.rep();
+        debug_assert_eq!(p.kind, V::KIND);
+        p.cast()
+    }
+
+    pub fn try_downcast<V: AstVariant>(self) -> OPtr<V> {
+        let p = self.rep();
+        then!(p.kind == V::KIND => p.downcast())
+    }
+
+    /// downcast to a [`ConstVal`]
+    pub fn downcast_const_val(self) -> Ptr<ConstVal> {
+        let p = self.rep();
+        debug_assert!(p.is_const_val());
+        p.cast()
+    }
+
+    pub fn try_downcast_const_val(self) -> OPtr<ConstVal> {
+        let p = self.rep();
+        then!(p.is_const_val() => p.downcast_const_val())
+    }
+
     #[inline]
-    pub fn new(kind: ExprKind, span: Span) -> Self {
-        //Self { kind, span, ty: Type::Unset }
-        Self { kind, span }
+    pub fn downcast_type(self) -> Ptr<Type> {
+        let p = self.rep();
+        debug_assert!(p.is_type());
+        p.cast()
+    }
+
+    pub fn try_downcast_type(self) -> OPtr<Type> {
+        let p = self.rep();
+        then!(p.is_type() => p.downcast_type())
+    }
+
+    pub fn downcast_type_ref(&mut self) -> &mut Ptr<Type> {
+        let p = self.rep_mut();
+        debug_assert!(p.is_type());
+        Ptr::from_ref(p).cast::<Ptr<Type>>().as_mut()
+    }
+
+    pub fn int<Int: TryFrom<i128>>(self) -> Int
+    where Int::Error: fmt::Debug {
+        let int = self.downcast::<IntVal>().val;
+        debug_assert!(Int::try_from(int).is_ok());
+        Int::try_from(int).u()
+    }
+}
+
+impl Ptr<ConstVal> {
+    pub fn downcast<V: ConstValVariant>(self) -> Ptr<V> {
+        debug_assert!(self.replacement.is_none());
+        debug_assert_eq!(self.kind, V::KIND);
+        debug_assert!(self.upcast().is_const_val());
+        self.cast()
+    }
+
+    pub fn try_downcast<V: ConstValVariant>(self) -> OPtr<V> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.kind == V::KIND => self.downcast())
+    }
+
+    pub fn downcast_type(self) -> Ptr<Type> {
+        debug_assert!(self.replacement.is_none());
+        debug_assert!(self.upcast().is_type());
+        self.cast()
+    }
+
+    pub fn try_downcast_type(self) -> OPtr<Type> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.upcast().has_type_kind() => self.downcast_type())
+    }
+}
+
+impl Ptr<Type> {
+    pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
+        debug_assert!(self.replacement.is_none());
+        debug_assert_eq!(self.kind, V::KIND);
+        debug_assert!(self.upcast().has_type_kind());
+        self.cast()
+    }
+
+    pub fn downcast_ref<V: TypeVariant>(&mut self) -> &mut Ptr<V> {
+        debug_assert!(self.replacement.is_none());
+        debug_assert_eq!(self.kind, V::KIND);
+        debug_assert!(self.upcast().has_type_kind());
+        Ptr::from_ref(self).cast::<Ptr<V>>().as_mut()
+    }
+
+    pub fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.kind == V::KIND => self.downcast())
+    }
+
+    pub fn try_downcast_ref<V: TypeVariant>(&mut self) -> Option<&mut Ptr<V>> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.kind == V::KIND => self.downcast_ref())
+    }
+}
+
+impl Ast {
+    /// Convert the ast node into a matchable rust enum
+    #[inline]
+    pub fn matchable(&self) -> Ptr<AstEnum> {
+        Ptr::<Ast>::from_ref(self).cast::<AstEnum>()
+    }
+
+    pub(crate) fn block_expects_trailing_semicolon(&self) -> bool {
+        match self.matchable().as_ref() {
+            AstEnum::Block { .. } => false,
+            AstEnum::Decl { init, is_const, .. } => {
+                if !is_const {
+                    return true;
+                }
+                let Some(init) = init else { return true };
+                !matches!(
+                    init.kind,
+                    AstKind::StructDef | AstKind::UnionDef | AstKind::EnumDef | AstKind::Fn
+                )
+            },
+            &AstEnum::If { then_body, else_body, .. } => {
+                else_body.unwrap_or(then_body).block_expects_trailing_semicolon()
+            },
+            AstEnum::Match { .. } => todo!(),
+            AstEnum::For { body, .. } | AstEnum::While { body, .. } => {
+                body.block_expects_trailing_semicolon()
+            },
+            _ => true,
+        }
     }
 
     /// Returns a [`Span`] representing the entire expression.
     pub fn full_span(&self) -> Span {
-        #[allow(unused_variables)]
-        match self.kind {
-            ExprKind::Fn(Fn { params, ret_type, body: Some(body) }) => {
-                self.span.join(body.full_span())
+        let span = self.span;
+        match self.matchable().as_ref() {
+            AstEnum::PositionalInitializer { lhs, .. } | AstEnum::NamedInitializer { lhs, .. } => {
+                lhs.map(|e| e.full_span().join(span)).unwrap_or(span)
             },
-            ExprKind::Fn(Fn { params, ret_type: Type::Unevaluated(t), body: None }) => {
-                self.span.join(t.full_span())
+            AstEnum::Dot { lhs, has_lhs, rhs, .. } => {
+                lhs.filter(|_| *has_lhs).map(|l| l.full_span()).unwrap_or(span).join(rhs.span)
             },
-            ExprKind::Fn(Fn { params, ret_type, body: None }) => self.span,
-            ExprKind::PositionalInitializer { lhs, .. }
-            | ExprKind::NamedInitializer { lhs, .. } => {
-                lhs.map(|e| e.full_span().join(self.span)).unwrap_or(self.span)
+            AstEnum::Index { lhs, .. } | AstEnum::Cast { expr: lhs, .. } => {
+                lhs.full_span().join(span)
             },
-            ExprKind::Dot { lhs, lhs_ty: _, rhs } => {
-                lhs.map(|l| l.full_span()).unwrap_or(self.span).join(rhs.span)
+            AstEnum::Call { func, args, pipe_idx, .. } => match *pipe_idx {
+                Some(i) => args[i].full_span().join(span),
+                None => func.full_span().join(span),
             },
-            ExprKind::Index { lhs, idx } => lhs.full_span().join(self.span),
-            ExprKind::Call { func, args, pipe_idx } => match pipe_idx {
-                Some(i) => args[i].full_span().join(self.span),
-                None => func.full_span().join(self.span),
+            AstEnum::UnaryOp { expr, .. } => span.join(expr.full_span()),
+            AstEnum::BinOp { lhs, rhs, .. }
+            | AstEnum::Assign { lhs, rhs, .. }
+            | AstEnum::BinOpAssign { lhs, rhs, .. } => lhs.full_span().join(rhs.full_span()),
+            AstEnum::Range { start, end, .. } => {
+                let start = start.map(|s| s.full_span()).unwrap_or(span);
+                let end = end.map(|e| e.full_span()).unwrap_or(span);
+                start.join(end)
             },
-            ExprKind::UnaryOp { expr, .. } => self.span.join(expr.full_span()),
-            ExprKind::BinOp { lhs, rhs, .. }
-            | ExprKind::Assign { lhs: ExprWithTy { expr: lhs, .. }, rhs }
-            | ExprKind::BinOpAssign { lhs: ExprWithTy { expr: lhs, .. }, rhs, .. } => {
-                lhs.full_span().join(rhs.full_span())
+            AstEnum::Decl { is_extern: false, init, .. } => match &init {
+                Some(e) => span.join(e.full_span()),
+                None => span,
             },
-            ExprKind::VarDecl(decl) => match &decl.default {
-                Some(e) => self.span.join(e.full_span()),
-                None => self.span,
+            AstEnum::Decl { is_extern: true, var_ty_expr, .. } => {
+                span.join(var_ty_expr.u().full_span())
             },
-            ExprKind::If { condition, then_body, else_body, was_piped } => {
-                let r_span = else_body.unwrap_or(then_body).full_span();
-                if was_piped { condition.full_span() } else { self.span }.join(r_span)
+            AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
+                let r_span = else_body.unwrap_or(*then_body).full_span();
+                if *was_piped { condition.full_span() } else { span }.join(r_span)
             },
-            ExprKind::Match { val, else_body, was_piped } => todo!(),
-            ExprKind::For { source: ExprWithTy { expr: l, .. }, iter_var: _, body, was_piped }
-            | ExprKind::While { condition: l, body, was_piped } => {
-                if was_piped { l.full_span() } else { self.span }.join(body.full_span())
+            AstEnum::Match { .. } => todo!(),
+            AstEnum::For { source: l, iter_var: _, body, was_piped, .. }
+            | AstEnum::While { condition: l, body, was_piped, .. } => {
+                if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
-            ExprKind::Catch { lhs } => todo!(),
-            ExprKind::Return { expr } => match expr {
-                Some(expr) => self.span.join(expr.full_span()),
-                None => self.span,
+            AstEnum::Catch { .. } => todo!(),
+            AstEnum::Return { expr, .. } => match expr {
+                Some(expr) => span.join(expr.full_span()),
+                None => span,
             },
-            // ExprKind::Semicolon(_) => todo!(),
-            _ => self.span,
-        }
-    }
-
-    pub fn as_var_decl(self) -> Option<VarDecl> {
-        let Expr { kind, span } = self;
-        match kind {
-            ExprKind::VarDecl(decl) => Some(decl),
-            ExprKind::Ident(text) => Some(VarDecl::new_basic(Ident { text, span }, Type::Unset)),
-            _ => None,
+            AstEnum::Fn { body, ret_ty_expr, .. } => {
+                span.join(body.or(*ret_ty_expr).u().full_span())
+            },
+            _ => span,
         }
     }
 }
 
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_text())
+impl ConstVal {
+    #[inline]
+    pub fn matchable(&self) -> Ptr<ConstValEnum> {
+        Ptr::from(self).cast()
+    }
+}
+
+impl Type {
+    #[inline]
+    pub fn matchable(&self) -> Ptr<TypeEnum> {
+        Ptr::from(self).cast()
+    }
+}
+
+impl TypeEnum {
+    #[inline]
+    pub fn as_type(&self) -> OPtr<Type> {
+        match self {
+            TypeEnum::Unset => None,
+            _ => Some(Ptr::from(self).cast()),
+        }
+    }
+}
+
+pub trait OptionAstExt {
+    fn is_type(self) -> bool;
+
+    fn cv(self) -> Ptr<ConstVal>;
+
+    //fn ref_downcast_type(&mut self) -> &mut OPtr<Type>;
+
+    //fn downcast_type_ref(&mut self) -> &mut Ptr<Type>;
+}
+
+impl OptionAstExt for Option<Ptr<Ast>> {
+    #[inline]
+    fn is_type(self) -> bool {
+        self.map(Ptr::<Ast>::is_type).unwrap_or(false)
+    }
+
+    fn cv(self) -> Ptr<ConstVal> {
+        self.u().downcast_const_val()
+    }
+}
+
+pub trait OptionTypeExt {
+    fn matchable(self) -> Ptr<TypeEnum>;
+    fn downcast<V: TypeVariant>(self) -> Ptr<V>;
+    fn try_downcast<V: TypeVariant>(self) -> OPtr<V>;
+    fn upcast(self) -> OPtr<Ast>;
+}
+
+impl OptionTypeExt for Option<Ptr<Type>> {
+    #[inline]
+    fn matchable(self) -> Ptr<TypeEnum> {
+        match self {
+            Some(t) => t.matchable(),
+            None => Ptr::from_ref(&TypeEnum::Unset),
+        }
+    }
+
+    #[inline]
+    fn downcast<V: TypeVariant>(self) -> Ptr<V> {
+        self.u().downcast()
+    }
+
+    #[inline]
+    fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
+        self?.try_downcast()
+    }
+
+    #[inline]
+    fn upcast(self) -> OPtr<Ast> {
+        self.map(Ptr::cast)
+    }
+}
+
+/// The number of [`Decl`]s before this statement.
+///
+/// ```text
+/// stmt pos=0
+/// decl pos=0
+/// stmt pos=1
+/// stmt pos=1
+/// decl pos=1
+/// stmt pos=2
+/// ```
+///
+/// A [`Decl`] has the same pos as the statement before it because ...
+///
+/// ```mylang
+/// a := a + 1; // the `a` in the init expr shouldn't be resolved to this decl.
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StmtPos(pub usize);
+
+impl AstEnum {
+    #[inline]
+    pub fn as_ast(&self) -> Ptr<Ast> {
+        Ptr::from(self).cast()
+    }
+}
+
+impl AstKind {
+    #[inline]
+    pub fn can_be_overwritten_with_const_val(self) -> bool {
+        match self {
+            AstKind::Fn => false,
+            _ => true,
+        }
+    }
+
+    #[inline]
+    pub fn is_struct_kind(self) -> bool {
+        matches!(self, AstKind::StructDef | AstKind::SliceTy)
+    }
+
+    #[inline]
+    pub fn is_const_val_kind(self) -> bool {
+        ConstVal::KINDS.contains(&self)
+    }
+
+    #[inline]
+    pub fn is_type_kind(self) -> bool {
+        Type::KINDS.contains(&self)
+    }
+}
+
+impl Ident {
+    #[inline]
+    pub const fn new(text: Ptr<str>, span: Span) -> Ident {
+        ast_new!(Ident { span, text /* decl: None */ })
+    }
+}
+
+impl Block {
+    pub fn new(stmts: Ptr<[Ptr<Ast>]>, has_trailing_semicolon: bool, span: Span) -> Block {
+        ast_new!(Block {
+            span,
+            // parent: None,
+            // pos_in_parent: StmtPos(0),
+            stmts,
+            // decls: Vec::new(),
+            has_trailing_semicolon,
+        })
+    }
+
+    /*
+    pub fn add_decl(&mut self, decl: Ptr<Decl>) {
+        self.decls.push(decl)
+    }
+    */
+}
+
+impl Dot {
+    pub const fn new(lhs: Option<Ptr<Ast>>, rhs: Ptr<Ident>, span: Span) -> Dot {
+        ast_new!(Dot { span, lhs, has_lhs: lhs.is_some(), rhs })
+    }
+}
+
+impl Decl {
+    pub const fn new(ident: Ptr<Ident>, span: Span) -> Decl {
+        ast_new!(Decl {
+            span,
+            is_const: false,
+            is_extern: false,
+            markers: DeclMarkers::default(),
+            ident,
+            var_ty_expr: None,
+            var_ty: None,
+            init: None,
+        })
+    }
+
+    pub fn from_ident(ident: Ptr<Ident>) -> Decl {
+        Decl::new(ident, ident.span)
     }
 }
 
@@ -473,7 +1170,13 @@ impl BinOpKind {
         }
     }
 
-    pub fn finalize_arg_type(&self, arg_ty: Type, out_ty: Type) -> Type {
+    /// used during codegen
+    pub fn finalize_arg_type(
+        &self,
+        lhs_ty: &mut Ptr<Type>,
+        rhs_ty: &mut Ptr<Type>,
+        out_ty: Ptr<Type>,
+    ) {
         match self {
             BinOpKind::Mul
             | BinOpKind::Div
@@ -486,17 +1189,20 @@ impl BinOpKind {
             | BinOpKind::BitXor
             | BinOpKind::BitOr
             | BinOpKind::And
-            | BinOpKind::Or => out_ty,
+            | BinOpKind::Or => {
+                finalize_ty(lhs_ty, out_ty);
+                finalize_ty(rhs_ty, out_ty);
+            },
             BinOpKind::Eq
             | BinOpKind::Ne
             | BinOpKind::Lt
             | BinOpKind::Le
             | BinOpKind::Gt
             | BinOpKind::Ge => {
-                debug_assert_eq!(out_ty, Type::Bool);
-                arg_ty
+                debug_assert_eq!(out_ty, primitives().bool);
+                // debug_assert_eq!(lhs_ty, rhs_ty);
             },
-        }
+        };
     }
 }
 
@@ -524,32 +1230,30 @@ pub enum UnaryOpKind {
     */
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Fn {
-    pub params: VarDeclList,
-    pub ret_type: Type,
-    /// if `body == None` this is a function type
-    pub body: Option<Ptr<Expr>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VarDecl {
-    pub markers: DeclMarkers,
-    pub ident: Ident,
-    pub ty: Type,
-    /// * default value for fn params, struct fields, ...
-    /// * init for local veriable declarations
-    pub default: Option<Ptr<Expr>>,
-    pub is_const: bool,
-}
-
-impl VarDecl {
-    pub fn new_basic(ident: Ident, ty: Type) -> Self {
-        VarDecl { markers: DeclMarkers::default(), ident, ty, default: None, is_const: false }
+impl UnaryOpKind {
+    /// used during codegen
+    pub fn finalize_arg_type(self, arg_ty: &mut Ptr<Type>, out_ty: Ptr<Type>) {
+        match self {
+            UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                let pointee = out_ty.downcast::<PtrTy>().pointee.downcast_type();
+                debug_assert!(ty_match(*arg_ty, pointee));
+                *arg_ty = pointee;
+            },
+            UnaryOpKind::Deref => {
+                let pointee = arg_ty.downcast_ref::<PtrTy>().pointee.downcast_type_ref();
+                debug_assert!(ty_match(*pointee, out_ty));
+                *pointee = out_ty;
+            },
+            UnaryOpKind::Not | UnaryOpKind::Neg => {
+                debug_assert!(ty_match(*arg_ty, out_ty));
+                *arg_ty = out_ty;
+            },
+            UnaryOpKind::Try => todo!(),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclMarkers {
     pub is_pub: bool,
     pub is_mut: bool,
@@ -557,6 +1261,10 @@ pub struct DeclMarkers {
 }
 
 impl DeclMarkers {
+    pub const fn default() -> Self {
+        Self { is_pub: false, is_mut: false, is_rec: false }
+    }
+
     pub fn is_empty(&self) -> bool {
         !(self.is_pub || self.is_mut || self.is_rec)
     }
@@ -569,67 +1277,20 @@ pub enum DeclMarkerKind {
     Rec,
 }
 
-/*
-#[derive(Debug, Clone, Copy)]
-pub enum VarDeclKind {
-    /// `<name>: <ty>;`
-    /// `<name>: <ty> = <init>;`
-    WithTy { ty: Ptr<Expr>, init: Option<Ptr<Expr>> },
-    /// `<name> := <init>;`
-    InferTy { init: Ptr<Expr> },
+pub type DeclList = Ptr<[Ptr<Decl>]>;
+
+pub trait DeclListExt {
+    fn find_field(&self, name: &str) -> Option<(usize, Ptr<Decl>)>;
+
+    fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_;
 }
 
-impl VarDeclKind {
-    pub fn get_init(&self) -> Option<&Ptr<Expr>> {
-        match self {
-            VarDeclKind::WithTy { init, .. } => init.as_ref(),
-            VarDeclKind::InferTy { init } => Some(init),
-        }
-    }
-}
-*/
-
-#[derive(Debug, Clone, Copy)]
-pub struct Ident {
-    pub(super) text: Ptr<str>,
-    pub span: Span,
-}
-
-impl Ident {
-    pub fn into_expr(self) -> Expr {
-        Expr::new(ExprKind::Ident(self.text), self.span)
-    }
-}
-
-impl From<&'static str> for Ident {
-    fn from(value: &'static str) -> Self {
-        Ident { text: Ptr::from(value), span: Span::new(0, 0) }
-    }
-}
-
-#[allow(unused)]
-pub struct Pattern {
-    kind: ExprKind, // TODO: own kind enum
-    span: Span,
-}
-
-pub type VarDeclList = Ptr<[VarDecl]>;
-
-pub trait VarDeclListTrait {
-    fn find_field(&self, name: &str) -> Option<(usize, &VarDecl)>;
-
-    fn as_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_;
-}
-
-impl VarDeclListTrait for [VarDecl] {
-    fn find_field(&self, name: &str) -> Option<(usize, &VarDecl)> {
-        unsafe { forget_lifetime(&*self) }
-            .into_iter()
-            .enumerate()
-            .find(|(_, f)| &*f.ident.text == name)
+impl DeclListExt for [Ptr<Decl>] {
+    fn find_field(&self, name: &str) -> Option<(usize, Ptr<Decl>)> {
+        self.iter().copied().enumerate().find(|(_, d)| *d.ident.text == *name)
     }
 
-    fn as_type_iter(&self) -> impl DoubleEndedIterator<Item = Type> + '_ {
-        self.iter().map(|decl| decl.ty)
+    fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_ {
+        self.iter().map(|decl| decl.var_ty.u())
     }
 }

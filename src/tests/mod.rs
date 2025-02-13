@@ -1,8 +1,10 @@
 use crate::{
+    arena_allocator::Arena,
     codegen::llvm,
+    compiler::set_code,
     error::Error,
     parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
-    sema::Sema,
+    sema::{Sema, primitives::deinit_primitives_global},
     util::display_spanned_error,
 };
 
@@ -49,35 +51,37 @@ const DEBUG_AST: bool = true;
 const DEBUG_TYPES: bool = true;
 const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
 const PRINT_ERROR: bool = true;
-const PRINT_LLVM_MODULE: bool = true;
+const PRINT_LLVM_MODULE: bool = false;
 
 pub fn jit_run_test_impl<RetTy>(
     code: &crate::parser::lexer::Code,
 ) -> Result<(RetTy, String), Error>
 where [(); std::mem::size_of::<RetTy>()]: Sized {
     let context = inkwell::context::Context::create();
-    let res = compile_test(&context, code).and_then(|codegen| {
-        let llvm_module_text = codegen.module.print_to_string().to_string();
+    let res = compile_test(&context, code).and_then(|module| {
+        let llvm_module_text = module.0.print_to_string().to_string();
         if PRINT_LLVM_MODULE {
             println!("{}", llvm_module_text);
         }
-        let out = codegen.jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)?;
+        let out = module.jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)?;
         Ok((out, llvm_module_text))
     });
     if PRINT_ERROR && let Err(err) = res.as_ref() {
         display_spanned_error(err, code);
     }
+    deinit_primitives_global();
     res
 }
 
 pub fn compile_test<'ctx, RetTy>(
     context: &'ctx inkwell::context::Context,
     code: &crate::parser::lexer::Code,
-) -> Result<llvm::Codegen<'ctx>, Error>
+) -> Result<llvm::CodegenModule<'ctx>, Error>
 where
     [(); std::mem::size_of::<RetTy>()]: Sized,
 {
-    let alloc = bumpalo::Bump::new();
+    set_code(code);
+    let alloc = Arena::new();
 
     if DEBUG_TOKENS {
         println!("### Tokens:");
@@ -96,7 +100,7 @@ where
         println!();
     }
 
-    let stmts = match StmtIter::try_parse_all(code, &alloc) {
+    let mut stmts = match StmtIter::try_parse_all(code, &alloc) {
         Ok(stmts) => stmts,
         Err(errs) => {
             println!("### Parsing Errors:");
@@ -108,7 +112,7 @@ where
     };
 
     let mut sema = Sema::new(code, &alloc, DEBUG_TYPES);
-    let order = sema.analyze_all(&stmts);
+    let order = sema.analyze_all(&mut stmts);
 
     match sema.errors.len() {
         0 => {},
@@ -122,11 +126,11 @@ where
         },
     }
 
-    let mut codegen = llvm::Codegen::new_module(&context, "dev");
+    let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
     codegen.compile_all(&stmts, &order);
 
     let target_machine = llvm::Codegen::init_target_machine(None);
-    codegen.optimize_module(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
-
-    Ok(codegen)
+    let module = codegen.module;
+    module.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
+    Ok(module)
 }

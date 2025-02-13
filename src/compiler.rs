@@ -1,5 +1,6 @@
 use crate::{
-    ast::{Expr, debug::DebugAst},
+    arena_allocator::Arena,
+    ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm,
     parser::{
@@ -17,10 +18,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[thread_local]
+static mut CODE: Option<Ptr<Code>> = None;
+
+pub fn set_code(c: &Code) {
+    unsafe { CODE = Some(Ptr::from_ref(c)) }
+}
+
+pub fn code() -> &'static Code {
+    #[allow(static_mut_refs)]
+    unsafe {
+        CODE.as_ref().unwrap()
+    }
+}
+
 impl<'c, 'alloc> Sema<'c, 'alloc> {
     /// This doesn't panic if an error is found.
     /// the caller has to check if `sema.errors` contains an error
-    pub fn analyze_all<'ctx>(&mut self, stmts: &[Ptr<Expr>]) -> Vec<usize> {
+    pub fn analyze_all<'ctx>(&mut self, stmts: &mut [Ptr<Ast>]) -> Vec<usize> {
         for s in stmts.iter().copied() {
             self.preload_top_level(s);
         }
@@ -32,11 +47,11 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             let old_remaining_count = remaining_count;
             debug_assert!(stmts.len() == finished.len());
             remaining_count = 0;
-            for (idx, (&s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
+            for (idx, (s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
                 if *finished {
                     continue;
                 }
-                let res = self.analyze_top_level(s);
+                let res = self.analyze_top_level(*s);
                 *finished = res != SemaResult::NotFinished;
                 match res {
                     SemaResult::Ok(_) => order.push(idx),
@@ -46,6 +61,25 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
             }
             // println!("finished statements: {:?}", finished);
             if remaining_count == old_remaining_count {
+                /*
+                eprintln!("cycle detected");
+                for (s, finished) in stmts.iter().zip(finished) {
+                    if finished {
+                        continue;
+                    }
+                    eprint!("{:?} -> ", s);
+                    let decl = s.try_downcast::<crate::ast::Decl>();
+                    eprintln!(
+                        "{:?}",
+                        decl.map(|d| d.ident.text.as_ref()).unwrap_or("{top level expr}"),
+                    );
+                }
+                */
+                /*
+                for s in not_finished {
+                    println!("{:#?}", s.get::<crate::ast::Decl>().init.unwrap().get::<crate::ast::Fn>());
+                }
+                */
                 panic!("cycle detected") // TODO: find location of cycle
             }
         }
@@ -54,8 +88,8 @@ impl<'c, 'alloc> Sema<'c, 'alloc> {
     }
 }
 
-impl<'ctx> llvm::Codegen<'ctx> {
-    pub fn compile_all(&mut self, stmts: &[Ptr<Expr>], order: &[usize]) {
+impl<'ctx> llvm::Codegen<'ctx, '_> {
+    pub fn compile_all(&mut self, stmts: &[Ptr<Ast>], order: &[usize]) {
         debug_assert_eq!(stmts.len(), order.len());
         for idx in order {
             let s = stmts[*idx];
@@ -75,7 +109,7 @@ pub enum CompileMode {
     Codegen,
 }
 
-pub fn compile2(mode: CompileMode, args: &BuildArgs) {
+pub fn compile2(mode: CompileMode, args: &BuildArgs) -> i32 {
     let mut code = String::with_capacity(4096);
     if !args.no_prelude {
         let prelude_path = concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang");
@@ -104,13 +138,14 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) {
 }
 
 #[inline]
-pub fn parse(code: &Code, alloc: &bumpalo::Bump) -> Vec<Ptr<Expr>> {
+pub fn parse(code: &Code, alloc: &Arena) -> Vec<Ptr<Ast>> {
     StmtIter::parse_all_or_fail(code, alloc)
 }
 
-pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
+pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
+    set_code(code);
     let mut compile_time = CompileDurations::default();
-    let alloc = bumpalo::Bump::new();
+    let alloc = Arena::new();
 
     if args.debug_tokens {
         println!("### Tokens:");
@@ -124,24 +159,24 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
     if args.debug_ast {
         println!("### AST Nodes:");
         if let Err(()) = StmtIter::parse_and_debug(code) {
-            std::process::exit(1)
+            return 1;
         }
         println!();
     }
 
     let frontend_parse_start = Instant::now();
-    let stmts = parse(code, &alloc);
+    let mut stmts = parse(code, &alloc);
     compile_time.parser = frontend_parse_start.elapsed();
 
     if mode == CompileMode::Parse {
-        return;
+        return 0;
     }
 
     // ##### Sema #####
 
     let sema_start = Instant::now();
     let mut sema = sema::Sema::new(code, &alloc, args.debug_types);
-    let order = sema.analyze_all(&stmts);
+    let order = sema.analyze_all(&mut stmts);
     compile_time.sema = sema_start.elapsed();
 
     if !sema.errors.is_empty() {
@@ -149,40 +184,43 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
         for e in sema.errors.iter() {
             display_spanned_error(e, sema.code);
         }
-        std::process::exit(1);
+        return 1;
     }
 
     if args.debug_typed_ast {
         println!("\n### Typed AST Nodes:");
         for s in stmts.iter().copied() {
-            println!("stmt @ {:?}", s);
+            println!("stmt @ {:x?}", s);
             s.print_tree();
         }
         println!();
     }
 
     if mode == CompileMode::Check {
-        return;
+        #[cfg(not(test))]
+        compile_time.print();
+        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
+        return 0;
     }
 
     // ##### Codegen #####
 
     let codegen_start = Instant::now();
     let context = Context::create();
-    let mut codegen = llvm::Codegen::new_module(&context, "dev");
+    let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
     codegen.compile_all(&stmts, &order);
     compile_time.codegen = codegen_start.elapsed();
 
     if args.debug_functions {
         print!("functions:");
-        for a in codegen.module.get_functions() {
+        for a in codegen.module.0.get_functions() {
             print!("{:?},", a.get_name());
         }
         println!("\n");
     }
 
     if mode == CompileMode::Codegen {
-        return;
+        return 0;
     }
 
     // ##### Backend #####
@@ -191,21 +229,22 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
 
     let backend_setup_start = Instant::now();
     let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
+    let module = codegen.module;
     compile_time.backend_setup = backend_setup_start.elapsed();
 
     if args.debug_llvm_ir_unoptimized {
         println!("### Unoptimized LLVM IR:");
-        codegen.module.print_to_stderr();
+        module.0.print_to_stderr();
         println!();
     }
 
     let backend_start = Instant::now();
-    codegen.optimize_module(&target_machine, args.optimization_level).unwrap();
+    module.optimize(&target_machine, args.optimization_level).unwrap();
     compile_time.optimization = backend_start.elapsed();
 
     if args.debug_llvm_ir_optimized {
         println!("### Optimized LLVM IR:");
-        codegen.module.print_to_stderr();
+        module.0.print_to_stderr();
         println!();
     }
 
@@ -214,15 +253,17 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
     }
 
     if args.out == OutKind::None {
-        return;
+        #[cfg(not(test))]
+        compile_time.print();
+        return 0;
     }
 
     let mut exe_file_path = args.path.with_file_name("out");
     exe_file_path.push(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
     let write_obj_file_start = Instant::now();
-    codegen.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
-    compile_time.writing_obj = Some(write_obj_file_start.elapsed());
+    module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
+    compile_time.writing_obj = write_obj_file_start.elapsed();
 
     if args.out == OutKind::Executable {
         let linking_start = std::time::Instant::now();
@@ -237,7 +278,7 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
             println!("linking with gcc failed: {:?}", err);
         }
 
-        compile_time.linking = Some(linking_start.elapsed());
+        compile_time.linking = linking_start.elapsed();
     }
 
     compile_time.print();
@@ -246,9 +287,10 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) {
         println!("\nRunning `{}`", exe_file_path.display());
         if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
             println!("{e}");
-            std::process::exit(e.code().unwrap_or(1));
+            return e.code().unwrap_or(1);
         }
     }
+    0
 }
 
 #[derive(Default)]
@@ -261,9 +303,9 @@ pub struct CompileDurations {
     // backend:
     backend_setup: Duration,
     optimization: Duration,
-    writing_obj: Option<Duration>,
+    writing_obj: Duration,
 
-    linking: Option<Duration>,
+    linking: Duration,
 }
 
 impl CompileDurations {
@@ -272,22 +314,26 @@ impl CompileDurations {
         println!("  Frontend:              {:?}", frontend_total);
         println!("    Lexer, Parser:         {:?}", self.parser);
         println!("    Semantic Analysis:     {:?}", self.sema);
+        if self.codegen.is_zero() {
+            return;
+        }
         println!("    LLVM IR Codegen:       {:?}", self.codegen);
 
-        let backend_total =
-            self.backend_setup + self.optimization + self.writing_obj.unwrap_or_default();
+        let backend_total = self.backend_setup + self.optimization + self.writing_obj;
         println!("  Backend:               {:?}", backend_total);
         println!("    LLVM Setup:            {:?}", self.backend_setup);
         println!("    LLVM pass pipeline:    {:?}", self.optimization);
-        if let Some(d) = self.writing_obj {
-            println!("    writing obj file:      {:?}", d);
+        if self.writing_obj.is_zero() {
+            return;
         }
+        println!("    writing obj file:      {:?}", self.writing_obj);
 
-        if let Some(d) = self.linking {
-            println!("  Linking with gcc:      {:?}", d);
+        if self.linking.is_zero() {
+            return;
         }
+        println!("  Linking with gcc:      {:?}", self.linking);
 
-        let total = frontend_total + backend_total + self.linking.unwrap_or_default();
+        let total = frontend_total + backend_total + self.linking;
         println!("  Total:                 {:?}", total);
     }
 }

@@ -1,8 +1,7 @@
 use crate::{
-    ast::{Expr, UnaryOpKind},
+    ast::{self, Ast, UnaryOpKind},
     parser::lexer::Span,
     ptr::Ptr,
-    type_::Type,
 };
 use SemaResult::*;
 use std::{
@@ -19,17 +18,17 @@ pub enum SemaErrorKind {
 
     #[error("MismatchedTypes (expected: {expected}, got: {got})")]
     MismatchedTypes {
-        expected: Type,
-        got: Type,
+        expected: Ptr<ast::Type>,
+        got: Ptr<ast::Type>,
     },
     #[error("MismatchedTypesBinOp (lhs: {lhs_ty}, rhs: {rhs_ty})")]
     MismatchedTypesBinOp {
-        lhs_ty: Type,
-        rhs_ty: Type,
+        lhs_ty: Ptr<ast::Type>,
+        rhs_ty: Ptr<ast::Type>,
     },
     #[error("ExpectedNumber (got: {got})")]
     ExpectedNumber {
-        got: Type,
+        got: Ptr<ast::Type>,
     },
     /// rust error:
     /// ```notest
@@ -40,17 +39,16 @@ pub enum SemaErrorKind {
     ///    |                 ^^^ cannot apply unary operator `!`
     /// ```
     InvalidPreOp {
-        ty: Type,
-        kind: UnaryOpKind,
+        ty: Ptr<ast::Type>,
+        op: UnaryOpKind,
     },
     DuplicateEnumVariant,
     DuplicateField,
     #[error("CannotApplyInitializer to {ty}")]
     CannotApplyInitializer {
-        ty: Type,
+        ty: Ptr<ast::Type>,
     },
-    CannotInferPositionalInitializerTy,
-    CannotInferNamedInitializerTy,
+    CannotInferInitializerTy,
     CannotInferAutocastTy,
     MultiplePossibleInitializerTy,
     DuplicateInInitializer,
@@ -65,8 +63,8 @@ pub enum SemaErrorKind {
     MissingElseBranch,
     #[error("IncompatibleBranches (expected: {expected}, got: {got})")]
     IncompatibleBranches {
-        expected: Type,
-        got: Type,
+        expected: Ptr<ast::Type>,
+        got: Ptr<ast::Type>,
     },
 
     #[error("unknown ident `{}`", &**_0)]
@@ -74,21 +72,29 @@ pub enum SemaErrorKind {
     /// unknown struct or union field or enum variant
     #[error("no field `{}` on type `{ty}`", &**field)]
     UnknownField {
-        ty: Type,
+        ty: Ptr<ast::Type>,
         field: Ptr<str>,
     },
     CannotInfer,
     UnionFieldWithDefaultValue,
 
     TopLevelDuplicate,
-    UnexpectedTopLevelExpr(Ptr<Expr>),
+    UnexpectedTopLevelExpr(Ptr<Ast>),
 
     NotAConstExpr,
     AssignToConst,
     AssignToNotMut,
 
     NegativeArrayLen,
+    MismatchedArrayLen {
+        expected: usize,
+        got: usize,
+    },
     CanOnlyIndexArrays,
+    #[error("cannot index into array with {}", ty)]
+    InvalidArrayIndex {
+        ty: Ptr<ast::Type>,
+    },
     CannotReturnFromLoop,
 
     AllocErr(bumpalo::AllocErr),
@@ -118,6 +124,14 @@ impl<T, E> SemaResult<T, E> {
         }
     }
 
+    pub fn map_err<E2>(self, f: impl FnOnce(E) -> E2) -> SemaResult<T, E2> {
+        match self {
+            Ok(t) => Ok(t),
+            NotFinished => NotFinished,
+            Err(err) => Err(f(err)),
+        }
+    }
+
     pub fn and_then<U>(self, f: impl FnOnce(T) -> SemaResult<U, E>) -> SemaResult<U, E> {
         match self {
             Ok(t) => f(t),
@@ -134,10 +148,11 @@ impl<T, E> SemaResult<T, E> {
     }
 
     pub fn is_ok(&self) -> bool {
-        match self {
-            Ok(_) => true,
-            _ => false,
-        }
+        matches!(self, Ok(_))
+    }
+
+    pub fn is_err(&self) -> bool {
+        matches!(self, Err(_))
     }
 
     pub fn is_ok_and(&self, cond: impl FnOnce(&T) -> bool) -> bool {

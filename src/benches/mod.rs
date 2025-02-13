@@ -94,17 +94,19 @@ macro_rules! bench_compilation {
     };
     (@body@ $b:expr; $code:expr; codegen_only) => {
         let code = $code.as_ref();
-        let alloc = bumpalo::Bump::new();
-        let stmts = parse(code, &alloc);
+        $crate::compiler::set_code(code);
+        let alloc = Arena::new();
+        let mut stmts = parse(code, &alloc);
 
         let mut sema = sema::Sema::new(code, &alloc, false);
 
-        let order = sema.analyze_all(&stmts);
+        let order = sema.analyze_all(&mut stmts);
         assert!(sema.errors.is_empty());
+
 
         $b.iter(|| {
             let context = Context::create();
-            let mut codegen = llvm::Codegen::new_module(&context, "dev");
+            let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
             codegen.compile_all(&stmts, &order);
         });
     };

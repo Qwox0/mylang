@@ -1,11 +1,11 @@
 extern crate test;
 
-use crate::parser::StmtIter;
+use crate::{arena_allocator::Arena, parser::StmtIter};
 use test::*;
 
 #[inline]
 fn bench_parse(code: &str) {
-    let alloc = bumpalo::Bump::new();
+    let alloc = Arena::new();
     let code = code.as_ref();
     let mut stmts = StmtIter::parse(code, &alloc);
     while let Some(res) = black_box(StmtIter::next(black_box(&mut stmts))) {

@@ -2,6 +2,7 @@ extern crate test;
 
 use super::bench_compilation;
 use crate::{
+    arena_allocator::Arena,
     codegen::llvm,
     compiler::{CompileMode, compile, parse},
     sema,

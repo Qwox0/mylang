@@ -15,15 +15,21 @@
 #![feature(path_add_extension)]
 #![feature(exit_status_error)]
 #![feature(non_null_from_ref)]
+#![feature(ptr_as_ref_unchecked)]
+#![feature(thread_local)]
+#![feature(formatting_options)]
 
+pub mod arena_allocator;
 pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
-pub mod scoped_stack;
+//pub mod const_dst_enum;
 pub mod error;
+pub mod literals;
 pub mod parser;
 pub mod ptr;
+pub mod scoped_stack;
 mod scratch_pool;
 pub mod sema;
 pub mod symbol_table;

@@ -4,6 +4,7 @@ use super::{
 };
 use crate::parser::lexer::Span;
 use core::fmt;
+use std::num::{ParseFloatError, ParseIntError};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseErrorKind {
@@ -13,6 +14,8 @@ pub enum ParseErrorKind {
     MissingToken(TokenKind),
     NotAKeyword,
     NotAnIdent,
+    InvalidIntLit(ParseIntError),
+    InvalidFloatLit(ParseFloatError),
     InvalidCharLit,
     InvalidBCharLit,
     RangeInclusiveWithoutEnd,
@@ -78,7 +81,7 @@ pub trait ParseResultExt<T> {
     fn opt(self) -> ParseResult<Option<T>>;
 }
 
-impl<T: core::fmt::Debug> ParseResultExt<T> for ParseResult<T> {
+impl<T> ParseResultExt<T> for ParseResult<T> {
     /// unexpected start token -> [`None`]
     /// [`ParseErrorKind::NoInput`] -> [`None`]
     fn opt(self) -> ParseResult<Option<T>> {

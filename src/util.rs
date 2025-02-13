@@ -1,15 +1,14 @@
 use crate::{
-    ast::VarDecl,
+    ast::DeclList,
     error::SpannedError,
     parser::lexer::{Code, Span},
     ptr::Ptr,
-    type_::Type,
+    sema::primitives::primitives,
 };
 use core::fmt;
 use std::{
     hint::unreachable_unchecked,
     io::{self, Read},
-    ops::Try,
     path::Path,
 };
 
@@ -36,9 +35,22 @@ macro_rules! get_aligned_offset {
 }
 pub(crate) use get_aligned_offset;
 
+#[derive(Debug, Clone, Copy)]
+pub struct Layout {
+    pub size: usize,
+    pub align: usize,
+}
+
+impl Layout {
+    #[inline]
+    pub fn new(size: usize, align: usize) -> Layout {
+        Layout { size, align }
+    }
+}
+
 #[inline]
-pub fn aligned_add(offset: usize, ty: &Type) -> usize {
-    get_aligned_offset!(offset, ty.alignment()) + ty.size()
+pub fn aligned_add(offset: usize, ty_layout: Layout) -> usize {
+    get_aligned_offset!(offset, ty_layout.align) + ty_layout.size
 }
 
 /// <https://jameshfisher.com/2018/03/30/round-up-power-2/>
@@ -67,29 +79,35 @@ pub fn display_span_in_code(span: Span, code: &Code) {
     display_span_in_code_with_label(span, code, "")
 }
 
+/// TODO: span behind end of code and code ends in '\n'
 pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt::Display) {
-    let start_offset = if code.0[..span.start].ends_with("\n") {
-        0
-    } else {
-        code.0[..span.start].lines().last().map(str::len).unwrap_or(span.start)
-    };
-    if span == Span::pos(code.0.len()) {
-        eprintln!("|");
-        eprintln!("| {}", code.lines().last().unwrap_or(""));
-        let offset = " ".repeat(start_offset);
-        eprintln!("| {offset}{} {label}", "^".repeat(span.len()));
-        eprintln!("|");
-        return;
-    }
-    let end_offset = code.0[span.end..].lines().next().map(str::len).unwrap_or(0);
-    let line = &code.0[span.start - start_offset..span.end + end_offset];
-
-    let linecount_in_span = code[span].lines().count();
-    eprintln!("|");
-    eprintln!("| {}", line.lines().intersperse("\\n").collect::<String>());
+    let start_offset = code
+        .get(..span.start)
+        .unwrap_or("")
+        .bytes()
+        .rev()
+        .position(|b| b == b'\n')
+        .unwrap_or(span.start);
+    let loc = resolve_file_loc(span.start, code);
+    let line_num = loc.line.to_string();
+    let line_num_padding = " ".repeat(line_num.len());
+    let end_offset = code.get(span.end..).and_then(|l| l.lines().next().map(str::len)).unwrap_or(0);
+    let line = code
+        .get(span.start - start_offset..span.end + end_offset)
+        .or_else(|| code.lines().last())
+        .unwrap_or("")
+        .lines()
+        .intersperse("\\n")
+        .collect::<String>();
+    let linebreaks_in_span = code
+        .get(span.start..span.end)
+        .map(|s| s.lines().count().saturating_sub(1))
+        .unwrap_or(0);
+    let marker_len = span.len().saturating_add(linebreaks_in_span);
     let offset = " ".repeat(start_offset);
-    eprintln!("| {offset}{} {label}", "^".repeat(span.len() + linecount_in_span - 1));
-    eprintln!("|");
+    eprintln!("{} |", line_num_padding);
+    eprintln!("{} | {}", line_num, line);
+    eprintln!("{} | {offset}{} {label}", line_num_padding, "^".repeat(marker_len));
 }
 
 pub fn debug_span_in_code(span: Span, code: &Code) {
@@ -103,18 +121,46 @@ pub fn debug_span_in_code(span: Span, code: &Code) {
     );
 }
 
+#[allow(unused)]
+pub struct SourceLoc {
+    file: Ptr<str>,
+    pos: FileLoc,
+}
+
+#[allow(unused)]
+pub struct FileLoc {
+    /// 1-indexed
+    line: usize,
+    /// 1-indexed, char count
+    col: usize,
+}
+
+pub fn resolve_file_loc(byte_pos: usize, code: &Code) -> FileLoc {
+    //assert_ne!(code.0.as_bytes()[byte_pos], b'\n');
+    let mut line = 1;
+    let mut last_line_break_pos = 0;
+    for (idx, b) in code.0[..byte_pos].as_bytes().iter().copied().enumerate() {
+        if b == b'\n' {
+            line += 1;
+            last_line_break_pos = idx;
+        }
+    }
+    let col = code.0[last_line_break_pos..byte_pos].chars().count() + 1;
+    FileLoc { line, col }
+}
+
 pub trait UnwrapDebug {
     type Inner;
 
     /// like [`Option::unwrap`] but UB in release mode.
     #[track_caller]
-    fn unwrap_debug(self) -> Self::Inner;
+    fn u(self) -> Self::Inner;
 }
 
 impl<T> UnwrapDebug for Option<T> {
     type Inner = T;
 
-    fn unwrap_debug(self) -> Self::Inner {
+    fn u(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()
         } else {
@@ -126,7 +172,7 @@ impl<T> UnwrapDebug for Option<T> {
 impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
     type Inner = T;
 
-    fn unwrap_debug(self) -> Self::Inner {
+    fn u(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()
         } else {
@@ -183,34 +229,6 @@ pub unsafe fn forget_lifetime_mut<'a, T: ?Sized>(r: &mut T) -> &'a mut T {
     unsafe { &mut *(r as *mut T) }
 }
 
-pub trait OkOrWithTry<T> {
-    fn ok_or2<Result>(self, err: Result::Residual) -> Result
-    where Result: Try<Output = T>;
-
-    fn ok_or_else2<Result>(self, err: impl FnOnce() -> Result::Residual) -> Result
-    where Result: Try<Output = T>;
-}
-
-impl<T> OkOrWithTry<T> for Option<T> {
-    #[inline]
-    fn ok_or2<Result>(self, err: Result::Residual) -> Result
-    where Result: Try<Output = T> {
-        match self {
-            Some(t) => Result::from_output(t),
-            None => Result::from_residual(err),
-        }
-    }
-
-    #[inline]
-    fn ok_or_else2<Result>(self, err: impl FnOnce() -> Result::Residual) -> Result
-    where Result: Try<Output = T> {
-        match self {
-            Some(t) => Result::from_output(t),
-            None => Result::from_residual(err()),
-        }
-    }
-}
-
 pub fn variant_count_to_tag_size_bits(variant_count: usize) -> u32 {
     if variant_count <= 1 { 0 } else { (variant_count - 1).ilog2() + 1 }
 }
@@ -237,21 +255,24 @@ pub fn transmute_unchecked<T, U>(val: &T) -> U {
     unsafe { std::ptr::read(val as *const T as *const U) }
 }
 
+pub fn any_as_bytes<T: Sized>(p: &T) -> &[u8; core::mem::size_of::<T>()] {
+    //let slice = unsafe { core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>()) };
+    unsafe { (p as *const T as *const [u8; core::mem::size_of::<T>()]).as_ref_unchecked() }
+}
+
 pub fn write_file_to_string(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
     std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
     Ok(())
 }
 
-pub fn replace_escape_chars(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\\\", "\\")
-        .replace("\\0", "\0")
-        .replace("\\'", "\'")
-        .replace("\\\"", "\"")
+pub fn is_simple_enum(variants: DeclList) -> bool {
+    variants.iter().all(|v| v.var_ty == primitives().void_ty)
 }
 
-pub fn is_simple_enum(variants: Ptr<[VarDecl]>) -> bool {
-    variants.iter().all(|v| v.ty == Type::Void)
+/// better [`bool::then`]
+macro_rules! then {
+    ($b:expr => $some:expr) => {
+        if $b { Some($some) } else { None }
+    };
 }
+pub(crate) use then;
