@@ -3,11 +3,9 @@ use crate::{
     ast::{self, UpcastToAst},
     parser::lexer::Span,
     ptr::Ptr,
-    symbol_table::SymbolTable2,
-    util::UnwrapDebug,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Primitives {
     // Types:
     pub void_ty: Ptr<ast::Type>,
@@ -50,18 +48,12 @@ pub struct Primitives {
 }
 
 impl Primitives {
-    pub fn setup(global_scope: &mut SymbolTable2, alloc: &Arena) -> Self {
-        Self::try_setup(global_scope, alloc).unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
+    pub fn setup(decls: &mut Vec<Ptr<ast::Decl>>, alloc: &Arena) -> Self {
+        Self::try_setup(decls, alloc).unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
     }
 
-    pub fn try_setup(global_scope: &mut SymbolTable2, alloc: &Arena) -> Result<Self, AllocErr> {
-        #[cfg(not(test))]
-        unsafe {
-            #[allow(static_mut_refs)]
-            if PRIMITIVES.is_some() {
-                panic!("Primitives::setup was called already")
-            }
-        }
+    pub fn try_setup(decls: &mut Vec<Ptr<ast::Decl>>, alloc: &Arena) -> Result<Self, AllocErr> {
+        decls.reserve(30);
 
         macro_rules! ast_new {
             ($kind:ident {
@@ -90,11 +82,11 @@ impl Primitives {
         };
 
         let type_ty_decl = new_primitive_decl("type")?;
-        global_scope.insert_no_duplicate(type_ty_decl).unwrap();
+        insert_symbol_no_duplicate(decls, type_ty_decl);
         let type_ty = ast_new!(SimpleTy { decl: type_ty_decl }).upcast_to_type();
 
         let void_ty_decl = new_primitive_decl("void")?;
-        global_scope.insert_no_duplicate(void_ty_decl).unwrap();
+        insert_symbol_no_duplicate(decls, void_ty_decl);
         let void_ty = ast_new!(SimpleTy { decl: void_ty_decl }).upcast_to_type();
 
         let init_ty = |t: Ptr<ast::Type>| t.as_mut().ty = Some(type_ty);
@@ -121,7 +113,7 @@ impl Primitives {
         macro_rules! new_primitive_ty {
             ($decl_name:expr,simple_ty) => {{
                 let decl = new_primitive_decl($decl_name)?;
-                global_scope.insert_no_duplicate(decl).unwrap();
+                insert_symbol_no_duplicate(decls, decl);
                 let ty = ast_new!(SimpleTy { decl }).upcast_to_type();
                 init_ty_decl(decl, ty);
                 ty
@@ -130,7 +122,7 @@ impl Primitives {
                 $( $field:ident : $val:expr),* $(,)?
             }) => {{
                 let decl = new_primitive_decl($decl_name)?;
-                global_scope.insert_no_duplicate(decl).unwrap();
+                insert_symbol_no_duplicate(decls, decl);
                 let ty = ast_new!($ty_kind { $($field: $val),* }).upcast_to_type();
                 init_ty_decl(decl, ty);
                 ty
@@ -152,7 +144,7 @@ impl Primitives {
         let slice_len_field = new_primitive_decl("len")?;
         init_decl(slice_len_field, u64, None);
 
-        let p = Primitives {
+        Ok(Primitives {
             void_ty,
             never,
             never_ptr_ty,
@@ -188,7 +180,7 @@ impl Primitives {
             nil: {
                 let decl = new_primitive_decl("nil")?;
                 init_decl(decl, never_ptr_ty, Some(ast_new!(PtrVal { val: 0 }).upcast()));
-                global_scope.insert_no_duplicate(decl).u();
+                insert_symbol_no_duplicate(decls, decl);
                 decl
             },
             slice_ptr_field_ident: untyped_slice_ptr_field.ident,
@@ -208,28 +200,13 @@ impl Primitives {
                 init_ty(arr.upcast_to_type());
                 arr
             },
-        };
-        unsafe {
-            PRIMITIVES = Some(p.clone());
-        }
-        Ok(p)
+        })
     }
 }
 
-pub fn deinit_primitives_global() {
-    #[allow(static_mut_refs)]
-    unsafe {
-        debug_assert!(PRIMITIVES.is_some());
-        let p = PRIMITIVES.take();
-        let _ = std::mem::ManuallyDrop::new(p);
+fn insert_symbol_no_duplicate(decls: &mut Vec<Ptr<ast::Decl>>, decl: Ptr<ast::Decl>) {
+    if decls.iter().any(|d| &*d.ident.text == &*decl.ident.text) {
+        panic!("duplicate symbol")
     }
-}
-
-/// the same as `Primitives.type_`
-/// This is only used in [`debug_assert`]s, so a global should be fine.
-#[thread_local]
-static mut PRIMITIVES: Option<Primitives> = None;
-
-pub fn primitives() -> Ptr<Primitives> {
-    Ptr::from_ref(unsafe { (&raw const PRIMITIVES).as_ref().u() }.as_ref().u())
+    decls.push(decl);
 }

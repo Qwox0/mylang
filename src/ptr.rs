@@ -1,4 +1,5 @@
 use std::{
+    mem::MaybeUninit,
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
@@ -94,6 +95,19 @@ impl<T: ?Sized> Ptr<T> {
 
     pub fn drop_in_place(self) {
         unsafe { self.0.drop_in_place() }
+    }
+}
+
+impl<T> Ptr<[T]> {
+    pub fn cast_slice<U>(self) -> Ptr<[U]> {
+        unsafe { std::mem::transmute(self) }
+    }
+}
+
+impl<T> Ptr<MaybeUninit<T>> {
+    pub fn write(self, val: T) -> Ptr<T> {
+        self.as_mut().write(val);
+        self.cast::<T>()
     }
 }
 

@@ -1,12 +1,13 @@
 use crate::{
-    arena_allocator::Arena,
-    codegen::llvm,
-    compiler::set_code,
-    error::Error,
-    parser::{StmtIter, lexer::Lexer, parser_helper::ParserInterface},
-    sema::{Sema, primitives::deinit_primitives_global},
-    util::display_spanned_error,
+    cli::{BuildArgs, OutKind},
+    codegen::llvm::CodegenModuleExt,
+    compiler::{BackendOut, CompileMode, compile_ctx},
+    context::CompilationContext,
+    diagnostic_reporter::SavedDiagnosticMessage,
+    parser::lexer::Code,
+    ptr::Ptr,
 };
+use std::{fmt::Display, path::PathBuf, str::FromStr};
 
 mod alignment;
 mod binop;
@@ -28,109 +29,74 @@ mod todo;
 mod union_;
 mod while_loop;
 
-macro_rules! jit_run_test {
-    (raw $code:expr => $ret_type:ty,llvm_module) => {
-        $crate::tests::jit_run_test_impl::<$ret_type>($code.as_ref())
-    };
-    ($code:expr => $ret_type:ty,llvm_module) => {{
-        let code = format!("test :: -> {{ {} }};", $code);
-        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref())
-    }};
-    (raw $code:expr => $ret_type:ty) => {
-        $crate::tests::jit_run_test_impl::<$ret_type>($code.as_ref()).map(|(out, _)| out)
-    };
-    ($code:expr => $ret_type:ty) => {{
-        let code = format!("test :: -> {{ {} }};", $code);
-        $crate::tests::jit_run_test_impl::<$ret_type>(code.as_ref()).map(|(out, _)| out)
-    }};
-}
-pub(crate) use jit_run_test;
-
 const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = true;
 const DEBUG_TYPES: bool = true;
+const DEBUG_TYPED_AST: bool = false;
 const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
-const PRINT_ERROR: bool = true;
 const PRINT_LLVM_MODULE: bool = false;
 
-pub fn jit_run_test_impl<RetTy>(
-    code: &crate::parser::lexer::Code,
-) -> Result<(RetTy, String), Error>
-where [(); std::mem::size_of::<RetTy>()]: Sized {
-    let context = inkwell::context::Context::create();
-    let res = compile_test(&context, code).and_then(|module| {
-        let llvm_module_text = module.0.print_to_string().to_string();
-        if PRINT_LLVM_MODULE {
-            println!("{}", llvm_module_text);
-        }
-        let out = module.jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)?;
-        Ok((out, llvm_module_text))
-    });
-    if PRINT_ERROR && let Err(err) = res.as_ref() {
-        display_spanned_error(err, code);
-    }
-    deinit_primitives_global();
-    res
+pub struct JitRunTestResult<RetTy> {
+    ctx: CompilationContext,
+    //compilation_out: BackendOut,
+    ret: Option<RetTy>,
+    //module: Option<inkwell::module::Module<'static>>,
+    backend_out: Option<BackendOut>,
 }
 
-pub fn compile_test<'ctx, RetTy>(
-    context: &'ctx inkwell::context::Context,
-    code: &crate::parser::lexer::Code,
-) -> Result<llvm::CodegenModule<'ctx>, Error>
-where
-    [(); std::mem::size_of::<RetTy>()]: Sized,
-{
-    set_code(code);
-    let alloc = Arena::new();
+impl<RetTy> JitRunTestResult<RetTy> {
+    pub fn ok(&self) -> &RetTy {
+        debug_assert_eq!(
+            self.ret.is_some(),
+            self.ctx.diagnostic_reporter.diagnostics.borrow().as_slice().is_empty()
+        );
+        self.ret.as_ref().unwrap_or_else(|| panic!("Test failed! Expected no errors"))
+    }
 
-    if DEBUG_TOKENS {
-        println!("### Tokens:");
-        let mut lex = Lexer::new(code);
-        while let Some(t) = lex.next() {
-            println!("{:?}", t)
+    pub fn err(&self) -> Vec<SavedDiagnosticMessage> {
+        let diag = self.ctx.diagnostic_reporter.diagnostics.take();
+        debug_assert_eq!(self.ret.is_some(), diag.is_empty());
+        if self.ret.is_some() {
+            panic!("Test failed! Expected compiler error, but compilation succeded.")
         }
-        println!();
+        diag
     }
 
-    if DEBUG_AST {
-        println!("### AST Nodes:");
-        if let Err(()) = StmtIter::parse_and_debug(code) {
-            panic!("Parsing Error")
-        }
-        println!();
+    pub fn module_text(&self) -> Option<String> {
+        self.backend_out
+            .as_ref()
+            .map(|o| o.codegen_module().print_to_string().to_string())
     }
+}
 
-    let mut stmts = match StmtIter::try_parse_all(code, &alloc) {
-        Ok(stmts) => stmts,
-        Err(errs) => {
-            println!("### Parsing Errors:");
-            for e in errs {
-                display_spanned_error(&e, code);
-            }
-            panic!("Parsing Failed")
-        },
-    };
+pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> {
+    let code = format!("test :: -> {{ {code} }};");
+    jit_run_test_raw(code)
+}
 
-    let mut sema = Sema::new(code, &alloc, DEBUG_TYPES);
-    let order = sema.analyze_all(&mut stmts);
-
-    match sema.errors.len() {
-        0 => {},
-        1 => return Err(Error::Sema(sema.errors.into_iter().next().unwrap())),
-        _ => {
-            eprintln!("### Sema Errors:");
-            for e in sema.errors {
-                display_spanned_error(&e, code);
-            }
-            panic!("multiple sema errors")
-        },
-    }
-
-    let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
-    codegen.compile_all(&stmts, &order);
-
-    let target_machine = llvm::Codegen::init_target_machine(None);
-    let module = codegen.module;
-    module.optimize(&target_machine, LLVM_OPTIMIZATION_LEVEL)?;
-    Ok(module)
+pub fn jit_run_test_raw<'ctx, RetTy>(code: impl AsRef<Code>) -> JitRunTestResult<RetTy> {
+    let mut ctx = CompilationContext::new(Ptr::from_ref(code.as_ref()));
+    let res = compile_ctx(&mut ctx, CompileMode::Build, &BuildArgs {
+        path: PathBuf::from_str("test").unwrap(),
+        optimization_level: LLVM_OPTIMIZATION_LEVEL,
+        target_triple: None,
+        out: OutKind::None,
+        no_prelude: true,
+        print_compile_time: false,
+        debug_tokens: DEBUG_TOKENS,
+        debug_ast: DEBUG_AST,
+        debug_types: DEBUG_TYPES,
+        debug_typed_ast: DEBUG_TYPED_AST,
+        debug_functions: false,
+        debug_llvm_ir_unoptimized: false,
+        debug_llvm_ir_optimized: PRINT_LLVM_MODULE,
+    });
+    let backend_out = res.backend_out;
+    debug_assert!(!res.ok || backend_out.is_some());
+    let ret = backend_out.as_ref().map(|o| {
+        o.codegen_module()
+            .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
+            .unwrap()
+    });
+    JitRunTestResult { ret, ctx, backend_out }
 }

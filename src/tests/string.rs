@@ -2,7 +2,7 @@ use crate::tests::jit_run_test;
 
 #[test]
 fn string_lit() {
-    let out = jit_run_test!("
+    let code = "
 ERR_BYTE : u8 : 0;
 my_string := \"Hello World\";
 if my_string[ 0] !=  72 return ERR_BYTE; // 'H'
@@ -16,7 +16,6 @@ if my_string[ 7] != 111 return ERR_BYTE; // 'o'
 if my_string[ 8] != 114 return ERR_BYTE; // 'r'
 if my_string[ 9] != 108 return ERR_BYTE; // 'l'
 if my_string[10] != 100 return ERR_BYTE; // 'd'
-my_string[6]" => u8)
-    .unwrap();
-    assert_eq!(out as char, 'W');
+my_string[6]";
+    assert_eq!(*jit_run_test::<u8>(code).ok() as char, 'W');
 }

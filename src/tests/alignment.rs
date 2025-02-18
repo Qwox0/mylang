@@ -2,7 +2,9 @@ use crate::tests::jit_run_test;
 
 #[test]
 fn correct_alignment_on_store_instruction() {
-    let (_, llvm_module_text) = jit_run_test!("mut a := 1;" => (), llvm_module).unwrap();
+    let res = jit_run_test::<()>("mut a := 1;");
+    debug_assert!(res.ret.is_some());
+    let llvm_module_text = res.module_text().unwrap();
     let store_instructions = llvm_module_text
         .lines()
         .filter(|l| l.trim_start().starts_with("store"))

@@ -11,7 +11,7 @@ mut x := 0;
 if my_bool {variant_body};
 x"
             );
-            let out = jit_run_test!(&code => i32).unwrap();
+            let out = *jit_run_test::<i32>(&code).ok();
             let expected = if my_bool { 1 } else { 0 };
             assert!(out == expected, "```{code}\n``` -> expected: {expected}; got: {out}");
         }
@@ -23,7 +23,7 @@ fn if_expr() {
     for my_bool in [true, false] {
         for variant_then_body in ["5", "do 5", "{ 5 }"] {
             let code = format!("my_bool := {my_bool}; if my_bool {variant_then_body} else 10");
-            let out = jit_run_test!(&code => i32).unwrap();
+            let out = *jit_run_test::<i32>(&code).ok();
             let expected = if my_bool { 5 } else { 10 };
             assert!(out == expected, "```{code}\n``` -> expected: {expected}; got: {out}");
         }

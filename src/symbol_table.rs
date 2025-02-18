@@ -49,3 +49,15 @@ impl SymbolTable2 {
             .find(|d| *d.ident.text == *name)
     }
 }
+
+impl Ptr<ast::Block> {
+    pub fn find_symbol(self, name: &str) -> Option<Ptr<ast::Decl>> {
+        // `rev()` because of shadowing
+        self.stmts
+            .iter()
+            .copied()
+            .rev()
+            .filter_map(|a| a.try_downcast::<ast::Decl>())
+            .find(|d| *d.ident.text == *name)
+    }
+}

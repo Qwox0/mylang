@@ -20,8 +20,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(code => bool).unwrap();
-    assert!(ok);
+    assert!(jit_run_test::<bool>(code).ok());
 }
 
 #[test]
@@ -44,8 +43,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(code => bool).unwrap();
-    assert!(ok);
+    assert!(jit_run_test::<bool>(code).ok());
 }
 
 #[test]
@@ -62,8 +60,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(code => bool).unwrap();
-    assert!(ok);
+    assert!(jit_run_test::<bool>(code).ok());
 }
 
 #[test]
@@ -77,8 +74,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    let ok = jit_run_test!(code => bool).unwrap();
-    assert!(ok);
+    assert!(jit_run_test::<bool>(code).ok());
 }
 
 #[test]
@@ -101,8 +97,7 @@ ptr.*.c |> for x {
     sum += x;
 };
 sum";
-    let out = jit_run_test!(code => f64).unwrap();
-    assert_eq!(out, 10.5);
+    assert_eq!(*jit_run_test::<f64>(code).ok(), 10.5);
 }
 
 #[test]
@@ -125,9 +120,10 @@ if a.inner.b[2] != 5 return false;
 if a.inner.b[3] != 7 return false;
 if a.inner.c != 12.34 return false;
 true";
-    let (ok, llvm_module_text) = jit_run_test!(code => bool,llvm_module).unwrap();
-    assert!(ok);
-    let stack_allocations = llvm_module_text.lines().filter(|l| l.contains("alloca")).count();
+    let res = jit_run_test::<bool>(code);
+    assert!(res.ok());
+    let stack_allocations =
+        res.module_text().unwrap().lines().filter(|l| l.contains("alloca")).count();
     assert_eq!(stack_allocations, 1, "this code should only do one stack allocation");
 }
 
@@ -140,9 +136,9 @@ fn positional_initializer() {
         y: f32,
         z: f32,
     }
-    let out = jit_run_test!("
+    let code = "
 Vec3 :: struct { x: f32, y: f32, z: f32 };
-Vec3.(1.0, 0.0, 2.5)" => Vec3)
-    .unwrap();
-    assert_eq!(out, Vec3 { x: 1.0, y: 0.0, z: 2.5 });
+Vec3.(1.0, 0.0, 2.5)";
+    let res = jit_run_test::<Vec3>(code);
+    assert_eq!(*res.ok(), Vec3 { x: 1.0, y: 0.0, z: 2.5 });
 }

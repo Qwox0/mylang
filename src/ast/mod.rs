@@ -1,8 +1,8 @@
 use crate::{
     codegen::llvm::finalize_ty,
+    context::primitives,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    sema::primitives::primitives,
     type_::{RangeKind, ty_match},
     util::{UnwrapDebug, then},
 };
@@ -161,7 +161,7 @@ macro_rules! type_new {
         debug_assert!(crate::ast::Type::KINDS.contains(&kind));
         crate::ast::$kind {
             kind,
-            ty: Some(crate::sema::primitives::primitives().type_ty),
+            ty: Some(crate::context::primitives().type_ty),
             replacement: None,
             parenthesis_count: 0,
             span: Span::ZERO,
@@ -371,14 +371,14 @@ ast_variants! {
         text: Ptr<str>,
     },
 
-    /// `{ <stmt>`*` }`
+    /// `{ <stmt>* }`
     Block {
+        has_trailing_semicolon: bool,
         // parent: OPtr<Block>,
         // pos_in_parent: StmtPos,
         /// all statements in this block
         stmts: Ptr<[Ptr<Ast>]>,
         //decls: Vec<Ptr<Decl>>,
-        has_trailing_semicolon: bool,
     },
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
@@ -449,9 +449,9 @@ ast_variants! {
     /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
     /// `          ^` `             ^^` ` ^ expr.span`
     UnaryOp {
+        is_postfix: bool,
         op: UnaryOpKind,
         expr: Ptr<Ast>,
-        is_postfix: bool,
     },
     /// `<lhs> op <lhs>`
     /// `      ^^ expr.span`
@@ -461,9 +461,9 @@ ast_variants! {
         rhs: Ptr<Ast>,
     },
     Range {
+        is_inclusive: bool,
         start: OPtr<Ast>,
         end: OPtr<Ast>,
-        is_inclusive: bool,
     },
 
     /// `<lhs> = <lhs>`
@@ -508,32 +508,32 @@ ast_variants! {
     /// `if <cond> <then>` (`else <else>`)
     /// `^^` expr.span
     If {
+        was_piped: bool,
         condition: Ptr<Ast>,
         then_body: Ptr<Ast>,
         else_body: OPtr<Ast>,
-        was_piped: bool,
     },
     /// `match <val> <body>` (`else <else>`)
     Match {
+        was_piped: bool,
         val: Ptr<Ast>,
         // TODO
         else_body: OPtr<Ast>,
-        was_piped: bool,
     },
 
     /// `for <iter_var> in <source> <body>`
     /// `<source> | for <iter_var> <body>`
     For {
+        was_piped: bool,
         source: Ptr<Ast>,
         iter_var: Ptr<Ident>,
         body: Ptr<Ast>,
-        was_piped: bool,
     },
     /// `while <cond> <body>`
     While {
+        was_piped: bool,
         condition: Ptr<Ast>,
         body: Ptr<Ast>,
-        was_piped: bool,
     },
 
     /// `lhs catch ...`
@@ -573,8 +573,8 @@ ast_variants! {
         decl: Ptr<Decl>,
     },
     IntTy {
-        bits: u32,
         is_signed: bool,
+        bits: u32,
     },
     FloatTy {
         bits: u32,
@@ -583,14 +583,14 @@ ast_variants! {
     /// `*<ty>`
     /// `*mut <ty>`
     PtrTy {
-        pointee: Ptr<Ast>,
         is_mut: bool,
+        pointee: Ptr<Ast>,
     },
     /// `[]T` -> `struct { ptr: *T, len: u64 }`
     /// `[]mut T`
     SliceTy {
-        elem_ty: Ptr<Ast>,
         is_mut: bool,
+        elem_ty: Ptr<Ast>,
     },
     /// `[<count>]ty`
     ArrayTy {
@@ -1034,25 +1034,6 @@ impl Ident {
     pub const fn new(text: Ptr<str>, span: Span) -> Ident {
         ast_new!(Ident { span, text /* decl: None */ })
     }
-}
-
-impl Block {
-    pub fn new(stmts: Ptr<[Ptr<Ast>]>, has_trailing_semicolon: bool, span: Span) -> Block {
-        ast_new!(Block {
-            span,
-            // parent: None,
-            // pos_in_parent: StmtPos(0),
-            stmts,
-            // decls: Vec::new(),
-            has_trailing_semicolon,
-        })
-    }
-
-    /*
-    pub fn add_decl(&mut self, decl: Ptr<Decl>) {
-        self.decls.push(decl)
-    }
-    */
 }
 
 impl Dot {

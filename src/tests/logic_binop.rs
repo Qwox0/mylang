@@ -6,7 +6,7 @@ fn test_and() {
     for a in [false, true] {
         for b in [false, true] {
             let code = format!("{a} && {b}");
-            let out = jit_run_test!(&code => bool).unwrap();
+            let out = *jit_run_test::<bool>(&code).ok();
             let expected = a && b;
             assert_eq!(out, expected)
         }
@@ -18,7 +18,7 @@ fn test_or() {
     for a in [false, true] {
         for b in [false, true] {
             let code = format!("{a} || {b}");
-            let out = jit_run_test!(&code => bool).unwrap();
+            let out = *jit_run_test::<bool>(&code).ok();
             let expected = a || b;
             assert_eq!(out, expected)
         }
@@ -29,12 +29,12 @@ fn test_or() {
 #[test]
 fn test_type_missmatch() {
     for op in Op::VARIANTS {
-        let out = jit_run_test!(format!("true {op} {{}}") => bool).unwrap_err().sema();
+        let out = jit_run_test::<bool>(format!("true {op} {{}}")).unwrap_err().sema();
         assert!(matches!(out.kind, SemaErrorKind::MismatchedTypesBinOp {
             lhs_ty: Type::Bool,
             rhs_ty: Type::Void
         }));
-        let out = jit_run_test!(format!("{{}} {op} true") => bool).unwrap_err().sema();
+        let out = jit_run_test::<bool>(format!("{{}} {op} true")).unwrap_err().sema();
         assert!(matches!(out.kind, SemaErrorKind::MismatchedTypesBinOp {
             lhs_ty: Type::Void,
             rhs_ty: Type::Bool
@@ -57,7 +57,7 @@ fn test_short_circuit() {
     tmp == 0
 }}"
             );
-            let out = jit_run_test!(code => bool).unwrap();
+            let out = *jit_run_test::<bool>(code).ok();
             let expected = match op {
                 Op::And => {
                     let mut tmp = 0;

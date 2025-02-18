@@ -94,20 +94,19 @@ macro_rules! bench_compilation {
     };
     (@body@ $b:expr; $code:expr; codegen_only) => {
         let code = $code.as_ref();
-        $crate::compiler::set_code(code);
+        let _ctx = CompilationContext::new(Ptr::from_ref(code));
         let alloc = Arena::new();
-        let mut stmts = parse(code, &alloc);
+        let parse_result = Parser::parse(code, &alloc);
+        assert!(parse_result.errors.is_empty());
+        let top_level_scope = parse_result.top_level_scope.unwrap();
 
-        let mut sema = sema::Sema::new(code, &alloc, false);
-
-        let order = sema.analyze_all(&mut stmts);
+        let (sema, order) = Sema::analyze2(top_level_scope, false);
         assert!(sema.errors.is_empty());
-
 
         $b.iter(|| {
             let context = Context::create();
-            let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
-            codegen.compile_all(&stmts, &order);
+            let mut codegen = llvm::Codegen::new(&context, "dev");
+            codegen.compile_all(&top_level_scope.stmts, &order);
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {

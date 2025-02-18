@@ -1,7 +1,7 @@
 use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
+    context::primitives,
     ptr::{OPtr, Ptr},
-    sema::primitives::primitives,
     util::{
         Layout, UnwrapDebug, aligned_add, round_up_to_nearest_power_of_two, unreachable_debug,
         variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,

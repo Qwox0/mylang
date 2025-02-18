@@ -1,94 +1,26 @@
 use crate::{
-    arena_allocator::Arena,
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
-    codegen::llvm,
+    codegen::llvm::{self, CodegenModuleExt},
+    context::CompilationContext,
+    diagnostic_reporter::DiagnosticReporter,
     parser::{
-        StmtIter,
+        Parser,
         lexer::{Code, Lexer},
         parser_helper::ParserInterface,
     },
     ptr::Ptr,
-    sema::{self, Sema, SemaResult},
-    util::{self, display_spanned_error},
+    sema::Sema,
+    util::{self, UnwrapDebug},
 };
-use inkwell::context::Context;
+use inkwell::{context::Context, targets::TargetMachine};
 use std::{
     assert_matches::debug_assert_matches,
+    mem::ManuallyDrop,
     time::{Duration, Instant},
 };
 
-#[thread_local]
-static mut CODE: Option<Ptr<Code>> = None;
-
-pub fn set_code(c: &Code) {
-    unsafe { CODE = Some(Ptr::from_ref(c)) }
-}
-
-pub fn code() -> &'static Code {
-    #[allow(static_mut_refs)]
-    unsafe {
-        CODE.as_ref().unwrap()
-    }
-}
-
-impl<'c, 'alloc> Sema<'c, 'alloc> {
-    /// This doesn't panic if an error is found.
-    /// the caller has to check if `sema.errors` contains an error
-    pub fn analyze_all<'ctx>(&mut self, stmts: &mut [Ptr<Ast>]) -> Vec<usize> {
-        for s in stmts.iter().copied() {
-            self.preload_top_level(s);
-        }
-
-        let mut finished = vec![false; stmts.len()];
-        let mut remaining_count = stmts.len();
-        let mut order = Vec::with_capacity(stmts.len());
-        while finished.iter().any(std::ops::Not::not) {
-            let old_remaining_count = remaining_count;
-            debug_assert!(stmts.len() == finished.len());
-            remaining_count = 0;
-            for (idx, (s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
-                if *finished {
-                    continue;
-                }
-                let res = self.analyze_top_level(*s);
-                *finished = res != SemaResult::NotFinished;
-                match res {
-                    SemaResult::Ok(_) => order.push(idx),
-                    SemaResult::NotFinished => remaining_count += 1,
-                    SemaResult::Err(_) => {},
-                }
-            }
-            // println!("finished statements: {:?}", finished);
-            if remaining_count == old_remaining_count {
-                /*
-                eprintln!("cycle detected");
-                for (s, finished) in stmts.iter().zip(finished) {
-                    if finished {
-                        continue;
-                    }
-                    eprint!("{:?} -> ", s);
-                    let decl = s.try_downcast::<crate::ast::Decl>();
-                    eprintln!(
-                        "{:?}",
-                        decl.map(|d| d.ident.text.as_ref()).unwrap_or("{top level expr}"),
-                    );
-                }
-                */
-                /*
-                for s in not_finished {
-                    println!("{:#?}", s.get::<crate::ast::Decl>().init.unwrap().get::<crate::ast::Fn>());
-                }
-                */
-                panic!("cycle detected") // TODO: find location of cycle
-            }
-        }
-
-        order
-    }
-}
-
-impl<'ctx> llvm::Codegen<'ctx, '_> {
+impl<'ctx> llvm::Codegen<'ctx> {
     pub fn compile_all(&mut self, stmts: &[Ptr<Ast>], order: &[usize]) {
         debug_assert_eq!(stmts.len(), order.len());
         for idx in order {
@@ -98,7 +30,7 @@ impl<'ctx> llvm::Codegen<'ctx, '_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CompileMode {
     Check,
     Build,
@@ -137,116 +69,17 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) -> i32 {
     compile(code.as_ref(), mode, args)
 }
 
-#[inline]
-pub fn parse(code: &Code, alloc: &Arena) -> Vec<Ptr<Ast>> {
-    StmtIter::parse_all_or_fail(code, alloc)
-}
-
 pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
-    set_code(code);
-    let mut compile_time = CompileDurations::default();
-    let alloc = Arena::new();
-
-    if args.debug_tokens {
-        println!("### Tokens:");
-        let mut lex = Lexer::new(code);
-        while let Some(t) = lex.next() {
-            println!("{:?}", t)
-        }
-        println!();
-    }
-
-    if args.debug_ast {
-        println!("### AST Nodes:");
-        if let Err(()) = StmtIter::parse_and_debug(code) {
-            return 1;
-        }
-        println!();
-    }
-
-    let frontend_parse_start = Instant::now();
-    let mut stmts = parse(code, &alloc);
-    compile_time.parser = frontend_parse_start.elapsed();
-
-    if mode == CompileMode::Parse {
-        return 0;
-    }
-
-    // ##### Sema #####
-
-    let sema_start = Instant::now();
-    let mut sema = sema::Sema::new(code, &alloc, args.debug_types);
-    let order = sema.analyze_all(&mut stmts);
-    compile_time.sema = sema_start.elapsed();
-
-    if !sema.errors.is_empty() {
-        eprintln!("Sema Error in {:?}", compile_time.sema);
-        for e in sema.errors.iter() {
-            display_spanned_error(e, sema.code);
-        }
+    let mut ctx = CompilationContext::new(Ptr::from_ref(code));
+    let res = compile_ctx(&mut ctx, mode, args);
+    if !res.ok {
         return 1;
     }
-
-    if args.debug_typed_ast {
-        println!("\n### Typed AST Nodes:");
-        for s in stmts.iter().copied() {
-            println!("stmt @ {:x?}", s);
-            s.print_tree();
-        }
-        println!();
-    }
-
-    if mode == CompileMode::Check {
-        #[cfg(not(test))]
-        compile_time.print();
-        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
+    let Some(out) = res.backend_out else {
         return 0;
-    }
-
-    // ##### Codegen #####
-
-    let codegen_start = Instant::now();
-    let context = Context::create();
-    let mut codegen = llvm::Codegen::new_module(&context, "dev", &sema.primitives);
-    codegen.compile_all(&stmts, &order);
-    compile_time.codegen = codegen_start.elapsed();
-
-    if args.debug_functions {
-        print!("functions:");
-        for a in codegen.module.0.get_functions() {
-            print!("{:?},", a.get_name());
-        }
-        println!("\n");
-    }
-
-    if mode == CompileMode::Codegen {
-        return 0;
-    }
-
-    // ##### Backend #####
+    };
 
     debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run);
-
-    let backend_setup_start = Instant::now();
-    let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
-    let module = codegen.module;
-    compile_time.backend_setup = backend_setup_start.elapsed();
-
-    if args.debug_llvm_ir_unoptimized {
-        println!("### Unoptimized LLVM IR:");
-        module.0.print_to_stderr();
-        println!();
-    }
-
-    let backend_start = Instant::now();
-    module.optimize(&target_machine, args.optimization_level).unwrap();
-    compile_time.optimization = backend_start.elapsed();
-
-    if args.debug_llvm_ir_optimized {
-        println!("### Optimized LLVM IR:");
-        module.0.print_to_stderr();
-        println!();
-    }
 
     if args.path.is_dir() {
         todo!()
@@ -254,7 +87,7 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
 
     if args.out == OutKind::None {
         #[cfg(not(test))]
-        compile_time.print();
+        ctx.compile_time.print();
         return 0;
     }
 
@@ -262,8 +95,10 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
     exe_file_path.push(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
     let write_obj_file_start = Instant::now();
-    module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
-    compile_time.writing_obj = write_obj_file_start.elapsed();
+    out.codegen_module()
+        .compile_to_obj_file(&out.target_machine, &obj_file_path)
+        .unwrap();
+    ctx.compile_time.writing_obj = write_obj_file_start.elapsed();
 
     if args.out == OutKind::Executable {
         let linking_start = std::time::Instant::now();
@@ -278,10 +113,10 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
             println!("linking with gcc failed: {:?}", err);
         }
 
-        compile_time.linking = linking_start.elapsed();
+        ctx.compile_time.linking = linking_start.elapsed();
     }
 
-    compile_time.print();
+    ctx.compile_time.print();
 
     if args.out == OutKind::Executable && mode == CompileMode::Run {
         println!("\nRunning `{}`", exe_file_path.display());
@@ -291,6 +126,128 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
         }
     }
     0
+}
+
+pub fn compile_ctx(
+    ctx: &mut CompilationContext,
+    mode: CompileMode,
+    args: &BuildArgs,
+) -> CompileResult {
+    let code = ctx.code.as_ref();
+
+    if args.debug_tokens {
+        println!("### Tokens:");
+        let mut lex = Lexer::new(code);
+        while let Some(t) = lex.next() {
+            println!("{:?}", t)
+        }
+        println!();
+    }
+
+    let frontend_parse_start = Instant::now();
+    let parse_res = Parser::parse(code, &ctx.alloc);
+    ctx.compile_time.parser = frontend_parse_start.elapsed();
+
+    if !parse_res.errors.is_empty() {
+        eprintln!("Parse Error in {:?}", ctx.compile_time.parser);
+        for e in &parse_res.errors {
+            ctx.error(e);
+        }
+        return CompileResult::ERR;
+    }
+
+    let top_level_scope = parse_res.top_level_scope.u();
+
+    if args.debug_ast {
+        println!("### AST Nodes:");
+        for s in top_level_scope.stmts.iter() {
+            println!("stmt @ {:x?}", s);
+            s.print_tree();
+        }
+        println!();
+    }
+
+    if mode == CompileMode::Parse {
+        return CompileResult { ok: true, backend_out: None };
+    }
+
+    // ##### Sema #####
+
+    let sema_start = Instant::now();
+    let (sema, order) = Sema::analyze2(top_level_scope, args.debug_types);
+    ctx.compile_time.sema = sema_start.elapsed();
+
+    if !sema.errors.is_empty() {
+        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
+        for e in &sema.errors {
+            ctx.error(e);
+        }
+        return CompileResult::ERR;
+    }
+
+    if args.debug_typed_ast {
+        println!("\n### Typed AST Nodes:");
+        for s in top_level_scope.stmts.iter() {
+            println!("stmt @ {:x?}", s);
+            s.print_tree();
+        }
+        println!();
+    }
+
+    if mode == CompileMode::Check {
+        #[cfg(not(test))]
+        ctx.compile_time.print();
+        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
+        return CompileResult { ok: true, backend_out: None };
+    }
+
+    // ##### Codegen #####
+
+    let codegen_start = Instant::now();
+    let context = Context::create();
+    let mut codegen = llvm::Codegen::new(&context, "dev");
+    codegen.compile_all(&top_level_scope.stmts, &order);
+    let module = codegen.module.take().u();
+    drop(codegen);
+    ctx.compile_time.codegen = codegen_start.elapsed();
+
+    if args.debug_functions {
+        print!("functions:");
+        for a in module.get_functions() {
+            print!("{:?},", a.get_name());
+        }
+        println!("\n");
+    }
+
+    if mode == CompileMode::Codegen {
+        return CompileResult { ok: true, backend_out: None };
+    }
+
+    // ##### Backend #####
+
+    debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run);
+
+    let backend_setup_start = Instant::now();
+    let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
+    ctx.compile_time.backend_setup = backend_setup_start.elapsed();
+
+    if args.debug_llvm_ir_unoptimized {
+        println!("### Unoptimized LLVM IR:");
+        println!("{}\n", module.print_to_string());
+    }
+
+    let backend_start = Instant::now();
+    module.optimize(&target_machine, args.optimization_level).unwrap();
+    ctx.compile_time.optimization = backend_start.elapsed();
+
+    if args.debug_llvm_ir_optimized {
+        println!("### Optimized LLVM IR:");
+        println!("{}\n", module.print_to_string());
+    }
+
+    let module = ManuallyDrop::new(module);
+    let module = module.as_mut_ptr();
+    CompileResult { ok: true, backend_out: Some(BackendOut { context, target_machine, module }) }
 }
 
 #[derive(Default)]
@@ -336,4 +293,32 @@ impl CompileDurations {
         let total = frontend_total + backend_total + self.linking;
         println!("  Total:                 {:?}", total);
     }
+}
+
+pub struct BackendOut {
+    #[allow(unused)]
+    context: inkwell::context::Context,
+    target_machine: TargetMachine,
+    module: *const inkwell::llvm_sys::LLVMModule,
+}
+
+impl Drop for BackendOut {
+    fn drop(&mut self) {
+        drop(ManuallyDrop::into_inner(self.codegen_module()));
+    }
+}
+
+impl BackendOut {
+    pub fn codegen_module<'m>(&'m self) -> ManuallyDrop<inkwell::module::Module<'m>> {
+        ManuallyDrop::new(unsafe { inkwell::module::Module::new(self.module as *mut _) })
+    }
+}
+
+pub struct CompileResult {
+    pub ok: bool,
+    pub backend_out: Option<BackendOut>,
+}
+
+impl CompileResult {
+    pub const ERR: Self = Self { ok: false, backend_out: None };
 }

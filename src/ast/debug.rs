@@ -1,8 +1,8 @@
 use super::{HasAstKind, OptionTypeExt};
 use crate::{
     ast::{self, Ast, AstEnum, AstKind, UnaryOpKind, UpcastToAst},
+    context::primitives,
     ptr::Ptr,
-    sema::primitives::primitives,
     util::{self, UnwrapDebug, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};

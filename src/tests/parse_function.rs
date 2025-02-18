@@ -1,10 +1,10 @@
-use crate::tests::jit_run_test;
+use super::jit_run_test_raw;
 
 #[test]
 #[ignore = "unfinished test"]
 fn parse_currying() {
-    let _ = jit_run_test!(raw "test :: -> -> 1;" => ()).unwrap();
-    let _ = jit_run_test!(raw "test :: -> -> i32 { 1 };" => ()).unwrap();
+    jit_run_test_raw::<()>("test :: -> -> 1;").ok();
+    jit_run_test_raw::<()>("test :: -> -> i32 { 1 };").ok();
 }
 
 /*

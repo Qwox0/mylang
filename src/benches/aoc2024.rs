@@ -4,8 +4,11 @@ use super::bench_compilation;
 use crate::{
     arena_allocator::Arena,
     codegen::llvm,
-    compiler::{CompileMode, compile, parse},
-    sema,
+    compiler::{CompileMode, compile},
+    context::CompilationContext,
+    parser::Parser,
+    ptr::Ptr,
+    sema::Sema,
 };
 use inkwell::context::Context;
 use std::path::PathBuf;

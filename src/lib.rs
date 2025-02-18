@@ -24,6 +24,8 @@ pub mod ast;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+pub mod context;
+pub mod diagnostic_reporter;
 //pub mod const_dst_enum;
 pub mod error;
 pub mod literals;

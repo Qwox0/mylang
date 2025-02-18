@@ -3,11 +3,10 @@ use crate::{
         self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, OptionTypeExt, TypeEnum,
         UnaryOpKind, UpcastToAst,
     },
-    compiler::code,
+    context::{code, primitives},
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
-    sema::primitives::{Primitives, primitives},
     symbol_table::SymbolTable,
     type_::{RangeKind, enum_alignment, ty_match, union_size},
     util::{
@@ -38,9 +37,7 @@ use inkwell::{
         IntValue, PhiValue, PointerValue, StructValue,
     },
 };
-use std::{
-    assert_matches::debug_assert_matches, collections::HashMap, marker::PhantomData, path::Path,
-};
+use std::{collections::HashMap, marker::PhantomData, path::Path};
 
 pub mod jit;
 
@@ -111,12 +108,10 @@ macro_rules! try_get_symbol_as_val {
 }
 */
 
-pub struct CodegenModule<'ctx>(pub Module<'ctx>);
-
-pub struct Codegen<'ctx, 'prim> {
+pub struct Codegen<'ctx> {
     pub context: &'ctx Context,
     pub builder: Builder<'ctx>,
-    pub module: CodegenModule<'ctx>,
+    pub module: Option<Module<'ctx>>,
 
     symbols: SymbolTable<Symbol<'ctx>>,
     type_table: HashMap<Ptr<ast::Type>, CodegenType<'ctx>>,
@@ -129,31 +124,14 @@ pub struct Codegen<'ctx, 'prim> {
 
     return_depth: usize,
     continue_break_depth: usize,
-
-    primitives: &'prim Primitives,
-    // /// Use this instead of `self.context.void_type()`
-    // /// <https://discourse.llvm.org/t/void-values/16155>
-    // /// ```
-    // /// let void_type = context.opaque_struct_type("void");
-    // /// if !void_type.set_body(&[], false) {
-    // ///     panic!("invalid struct type")
-    // /// }
-    // ///
-    // /// ```
-    // void_type: StructType<'ctx>,
 }
 
-impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
-    pub fn new(
-        context: &'ctx Context,
-        builder: Builder<'ctx>,
-        module: Module<'ctx>,
-        primitives: &'prim Primitives,
-    ) -> Codegen<'ctx, 'prim> {
+impl<'ctx> Codegen<'ctx> {
+    pub fn new(context: &'ctx Context, module_name: &str) -> Codegen<'ctx> {
         Codegen {
             context,
-            builder,
-            module: CodegenModule(module),
+            builder: context.create_builder(),
+            module: Some(context.create_module(module_name)),
             symbols: SymbolTable::default(),
             type_table: HashMap::new(),
             defer_stack: ScopedStack::default(),
@@ -163,18 +141,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
             sret_ptr: None,
             return_depth: 0,
             continue_break_depth: 0,
-            primitives,
         }
-    }
-
-    pub fn new_module(
-        context: &'ctx Context,
-        module_name: &str,
-        primitives: &'prim Primitives,
-    ) -> Self {
-        let builder = context.create_builder();
-        let module = context.create_module(module_name);
-        Codegen::new(context, builder, module, primitives)
     }
 
     pub fn compile_top_level(&mut self, stmt: Ptr<Ast>) {
@@ -220,8 +187,11 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResult<Symbol<'ctx>> {
         let out_ty = expr.ty.u();
-        /* // see `if`
-        if out_ty == self.primitives.never_ty {
+
+        let p = primitives();
+
+        /* // see `If`
+        if out_ty == p.never_ty {
             return Ok(Symbol::Never);
         }
         */
@@ -269,7 +239,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 if out_ty.kind.is_struct_kind() {
                     let s_def = match out_ty.kind {
                         AstKind::StructDef => out_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => self.primitives.untyped_slice_struct_def,
+                        AstKind::SliceTy => p.untyped_slice_struct_def,
                         _ => unreachable_debug(),
                     };
                     let s_ty = s_def.upcast_to_type();
@@ -293,7 +263,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 if out_ty.kind.is_struct_kind() {
                     let s_def = match out_ty.kind {
                         AstKind::StructDef => out_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => self.primitives.untyped_slice_struct_def,
+                        AstKind::SliceTy => p.untyped_slice_struct_def,
                         _ => unreachable_debug(),
                     };
                     let s_ty = s_def.upcast_to_type();
@@ -313,7 +283,8 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                     unreachable_debug()
                 }
             },
-            AstEnum::ArrayInitializer { elements, .. } => {
+            AstEnum::ArrayInitializer { lhs, elements, .. } => {
+                debug_assert!(lhs.is_none(), "todo");
                 let arr_ty = out_ty.downcast::<ast::ArrayTy>();
                 let elem_ty = arr_ty.elem_ty.downcast_type();
                 let elem_cty = self.llvm_type(elem_ty);
@@ -338,6 +309,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 stack_val(arr_ptr)
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
+                debug_assert!(lhs.is_none(), "todo");
                 let elem_ty = val.ty.u();
                 let elem_cty = self.llvm_type(elem_ty).basic_ty();
                 let len = count.int();
@@ -373,14 +345,14 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 let lhs_ty = lhs.ty.u();
                 if let Some(enum_def) = lhs.try_downcast::<ast::EnumDef>() {
                     debug_assert_eq!(out_ty.kind, AstKind::EnumDef);
-                    debug_assert_eq!(lhs_ty, self.primitives.type_ty);
+                    debug_assert_eq!(lhs_ty, p.type_ty);
                     let _ = self.llvm_type(enum_def.upcast_to_type());
                     let (tag, _) = enum_def.variants.find_field(&rhs.text).u();
                     self.compile_enum_val(enum_def, tag, None, write_target.take())
                 } else if lhs_ty.kind == AstKind::StructDef || lhs_ty.kind == AstKind::SliceTy {
                     let s_def = match lhs_ty.kind {
                         AstKind::StructDef => lhs_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => self.primitives.untyped_slice_struct_def,
+                        AstKind::SliceTy => p.untyped_slice_struct_def,
                         _ => unreachable_debug(),
                     };
                     let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty();
@@ -487,7 +459,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                         unreachable_debug()
                     };
                     self.compile_call(f, val, args.iter().copied(), write_target.take())
-                } else if func.ty == self.primitives.method_stub {
+                } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
                     let f = dot.rhs.upcast().downcast::<ast::Fn>();
                     let Symbol::Function { val } = self.get_symbol(&dot.rhs.text) else {
@@ -495,7 +467,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                     };
                     let args = std::iter::once(dot.lhs.u()).chain(args.iter().copied());
                     self.compile_call(f, val, args, write_target.take())
-                } else if func.ty == self.primitives.enum_variant {
+                } else if func.ty == p.enum_variant {
                     let dot = func.downcast::<ast::Dot>();
                     let enum_ty = out_ty.downcast::<ast::EnumDef>();
                     debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty);
@@ -521,11 +493,11 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                         _ => todo!(),
                     }),
                     UnaryOpKind::Deref => {
-                        stack_val(self.sym_as_val(sym, self.primitives.never_ptr_ty)?.ptr_val())
+                        stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
                     },
                     UnaryOpKind::Not => {
-                        debug_assert_eq!(inner.ty, self.primitives.bool);
-                        debug_assert_eq!(out_ty, self.primitives.bool);
+                        debug_assert_eq!(inner.ty, p.bool);
+                        debug_assert_eq!(out_ty, p.bool);
                         let v = self.sym_as_val(sym, out_ty)?;
                         reg(self.builder.build_not(v.bool_val(), "not")?)
                     },
@@ -549,7 +521,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 let arg_ty = lhs.ty.u();
                 let lhs_sym = try_not_never!(self.compile_expr(*lhs)?);
                 if matches!(op, BinOpKind::And | BinOpKind::Or) {
-                    debug_assert_eq!(arg_ty, self.primitives.bool);
+                    debug_assert_eq!(arg_ty, p.bool);
                     let lhs = self.sym_as_val(lhs_sym, arg_ty)?.bool_val();
                     return self.build_bool_short_circuit_binop(lhs, *rhs, op);
                 }
@@ -571,7 +543,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
 
                 let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?;
                 let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?;
-                if arg_ty == self.primitives.bool {
+                if arg_ty == p.bool {
                     return self.build_bool_binop(lhs_val.bool_val(), rhs_val.bool_val(), op);
                 }
                 match arg_ty.matchable().as_ref() {
@@ -628,7 +600,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 let lhs_val = self.build_load(lhs_llvm_ty, stack_var, "lhs", arg_ty.alignment())?;
 
                 if matches!(op, BinOpKind::And | BinOpKind::Or) {
-                    debug_assert_eq!(arg_ty, self.primitives.bool);
+                    debug_assert_eq!(arg_ty, p.bool);
                     return self.build_bool_short_circuit_binop(lhs_val.into_int_value(), rhs, op);
                 }
 
@@ -665,7 +637,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
 
                 const ENABLE_NON_MUT_TO_REG: bool = false;
 
-                let sym = if  var_ty == self.primitives.fn_val {
+                let sym = if var_ty == p.fn_val {
                     debug_assert!(*is_const);
                     let f = init.u().downcast::<ast::Fn>();
                     if !*is_extern {
@@ -673,13 +645,13 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                     } else {
                         Symbol::Function { val: self.compile_prototype(&ident.text, f).0 }
                     }
-                } else if var_ty == self.primitives.type_ty {
+                } else if var_ty == p.type_ty {
                     debug_assert!(*is_const);
                     self.llvm_type(init.u().downcast_type());
                     Symbol::Type
                 } else if *is_extern {
                     let ty = self.llvm_type(var_ty).basic_ty();
-                    let val = self.module.0.add_global(ty, None, &ident.text);
+                    let val = self.module().add_global(ty, None, &ident.text);
                     Symbol::Global { val }
                 } else if *is_const {
                     let init = init.u().rep();
@@ -711,12 +683,12 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
             },
             /*
             AstEnum::Extern { ident, ty, .. } => {
-                debug_assert!(ty.u().ty == self.primitives.type_ty);
+                debug_assert!(ty.u().ty == p.type_ty);
                 let sym = if let Some(f) = ty.u().try_downcast::<ast::FunctionTy>() {
                     Symbol::Function { val: self.compile_prototype(&ident.text, f.func).0 }
                 } else {
                     let ty = self.llvm_type(ty.u()).basic_ty();
-                    let val = self.module.0.add_global(ty, None, &ident.text);
+                    let val = self.module.add_global(ty, None, &ident.text);
                     Symbol::Global { val }
                 };
                 let _ = self.symbols.insert(ident.text, sym);
@@ -725,7 +697,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
             */
             AstEnum::If { condition, then_body, else_body, .. } => {
                 let func = self.cur_fn.u();
-                debug_assert!(condition.ty == self.primitives.bool);
+                debug_assert!(condition.ty == p.bool);
                 let condition = try_compile_expr_as_val!(self, *condition).bool_val();
                 let condition = if condition.get_type().get_bit_width() > 1 {
                     let i1 = self.context.custom_width_int_type(1);
@@ -765,9 +737,9 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
 
                 self.builder.position_at_end(merge_bb);
 
-                if out_ty == self.primitives.void_ty {
+                if out_ty == p.void_ty {
                     return Ok(Symbol::Void);
-                } else if out_ty == self.primitives.never {
+                } else if out_ty == p.never {
                     self.builder.build_unreachable()?;
                     return Ok(Symbol::Never);
                 }
@@ -907,7 +879,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                         self.build_return(sym, val.ty.u())?;
                     }
                 } else {
-                    debug_assert_eq!(f.ret_ty, self.primitives.void_ty);
+                    debug_assert_eq!(f.ret_ty, p.void_ty);
                     if self.compile_multiple_defer_scopes(self.return_depth)? {
                         self.builder.build_return(None)?;
                     }
@@ -951,17 +923,17 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 reg(self.float_type(float_ty.bits).const_float(*val))
             },
             AstEnum::BoolVal { val, .. } => {
-                debug_assert!(expr.ty == self.primitives.bool);
+                debug_assert!(expr.ty == p.bool);
                 reg(self.bool_val(*val))
             },
             AstEnum::CharVal { val, .. } => {
-                //debug_assert!(expr.ty == self.primitives.char);
-                debug_assert!(expr.ty == self.primitives.u8);
+                //debug_assert!(expr.ty == p.char);
+                debug_assert!(expr.ty == p.u8);
                 reg(self.int_type(8).const_int(*val as u8 as u64, false)) // TODO: real char type
             },
             // AstEnum::BCharLit { val, .. } => reg(self.int_type(8).const_int(*val as u64, false)),
             AstEnum::StrVal { text, .. } => {
-                debug_assert!(expr.ty == self.primitives.str_slice_ty);
+                debug_assert!(expr.ty == p.str_slice_ty);
                 let value = replace_escape_chars(&text);
                 let ptr = self.builder.build_global_string_ptr(&value, "")?;
                 let len = self.int_type(64).const_int(value.len() as u64, false);
@@ -1040,10 +1012,11 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
             let ret = CodegenValue::new(ret.as_value_ref()).basic_val();
             self.build_store(write_target, ret, ret_ty.alignment())?;
         }
-        if ret_ty == self.primitives.never {
+        let p = primitives();
+        if ret_ty == p.never {
             self.builder.build_unreachable()?;
             Ok(Symbol::Never)
-        } else if ret_ty == self.primitives.void_ty {
+        } else if ret_ty == p.void_ty {
             Ok(Symbol::Void)
         } else if use_sret {
             stack_val(sret_arg.u())
@@ -1129,7 +1102,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
             Some(ret_type) => ret_type.fn_type(&param_types, false),
             None => self.context.void_type().fn_type(&param_types, false),
         };
-        let fn_val = self.module.0.add_function(name, fn_type, Some(Linkage::External));
+        let fn_val = self.module().add_function(name, fn_type, Some(Linkage::External));
         let mut params_iter = fn_val.get_param_iter();
 
         if use_sret {
@@ -1191,7 +1164,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 func
             } else {
                 #[cfg(debug_assertions)]
-                self.module.0.print_to_stderr();
+                self.module().print_to_stderr();
                 unsafe { func.delete() };
                 panic_debug("invalid generated function");
                 Err(CodegenError::InvalidGeneratedFunction)?
@@ -1274,7 +1247,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
         expr: Ptr<Ast>,
         target_ty: Ptr<ast::Type>,
     ) -> CodegenResult<Symbol<'ctx>> {
-        let p = self.primitives;
+        let p = primitives();
         let expr_ty = expr.ty.u();
         let sym = self.compile_expr(expr)?;
 
@@ -1549,12 +1522,12 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
         &mut self,
         slice_sym: Symbol<'ctx>,
     ) -> CodegenResult<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        let p = primitives();
         let slice_ty = self.slice_ty();
         let ptr = self.build_struct_access(slice_ty, slice_sym, 0, "")?;
-
-        let ptr = self.sym_as_val(ptr, self.primitives.never_ptr_ty)?.ptr_val();
+        let ptr = self.sym_as_val(ptr, p.never_ptr_ty)?.ptr_val();
         let len = self.build_struct_access(slice_ty, slice_sym, 1, "")?;
-        let len = self.sym_as_val(len, self.primitives.u64)?.int_val();
+        let len = self.sym_as_val(len, p.u64)?.int_val();
         Ok((ptr, len))
     }
 
@@ -1700,7 +1673,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 self.builder.build_conditional_branch(lhs, rhs_bb, merge_bb)?;
 
                 self.builder.position_at_end(rhs_bb);
-                debug_assert_eq!(rhs.ty, self.primitives.bool);
+                debug_assert_eq!(rhs.ty, primitives().bool);
                 let rhs = try_compile_expr_as_val!(self, rhs).bool_val();
                 self.builder.build_unconditional_branch(merge_bb)?;
                 rhs_bb = self.builder.get_insert_block().expect("has block");
@@ -1720,7 +1693,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 self.builder.build_conditional_branch(lhs, merge_bb, rhs_bb)?;
 
                 self.builder.position_at_end(rhs_bb);
-                debug_assert_eq!(rhs.ty, self.primitives.bool);
+                debug_assert_eq!(rhs.ty, primitives().bool);
                 let rhs = try_compile_expr_as_val!(self, rhs).bool_val();
                 self.builder.build_unconditional_branch(merge_bb)?;
                 rhs_bb = self.builder.get_insert_block().expect("has block");
@@ -1948,19 +1921,20 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 )
             };
         }
+        let p = primitives();
         if ty.kind == AstKind::SimpleTy {
-            return if ty == self.primitives.void_ty {
+            return if ty == p.void_ty {
                 t!(self.context.void_type())
-            } else if ty == self.primitives.never {
+            } else if ty == p.never {
                 unreachable_debug()
-            } else if ty == self.primitives.bool {
+            } else if ty == p.bool {
                 t!(self.context.bool_type())
-            } else if ty == self.primitives.char {
+            } else if ty == p.char {
                 todo!("char ty")
-            } else if ty == self.primitives.str_slice_ty {
-                todo!("char ty")
-            } else if ty == self.primitives.type_ty {
-                todo!("char ty")
+            } else if ty == p.str_slice_ty {
+                todo!("str_slice_ty")
+            } else if ty == p.type_ty {
+                todo!("type_ty")
             } else {
                 unreachable_debug()
             };
@@ -1981,9 +1955,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                  of the `ast::SliceTy`"
             ),
             */
-            TypeEnum::SliceTy { .. } => {
-                self.llvm_type(self.primitives.untyped_slice_struct_def.upcast_to_type())
-            },
+            TypeEnum::SliceTy { .. } => self.llvm_type(p.untyped_slice_struct_def.upcast_to_type()),
             TypeEnum::ArrayTy { len, elem_ty, .. } => {
                 t!(self.llvm_type(elem_ty.downcast_type()).basic_ty().array_type(len.int()))
             },
@@ -2122,7 +2094,7 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
 
             match f.matchable().as_ref() {
                 TypeEnum::SimpleTy { .. } => {
-                    if f == self.primitives.bool {
+                    if f == primitives().bool {
                         prev_state = PrevState::Int;
                         prev_bytes += 1;
                     } else {
@@ -2158,122 +2130,6 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
                 _ => todo!("{f:#?}"),
                 //_ => unreachable_debug(),
                 //_ => new_fields.push(self.llvm_type(f).basic_ty()),
-            }
-        }
-
-        // finished the last 8 bytes
-        push_prev_state_to_new_fields!();
-
-        RetType::Basic(self.struct_type_inner(&new_fields, None, false).as_basic_type_enum())
-    }
-
-    #[allow(unused)]
-    fn ret_type_for_flattened_struct<'a>(
-        &mut self,
-        field_types: impl DoubleEndedIterator<Item = Ptr<ast::Type>>,
-        size: usize,
-    ) -> RetType<'ctx> {
-        #[derive(Debug, PartialEq)]
-        enum PrevState {
-            None,
-            Int,
-            Float,
-            FloatFloat,
-        }
-
-        let mut new_fields = Vec::with_capacity(size);
-        let mut prev_state = PrevState::None;
-        let mut prev_bytes: u32 = 0;
-
-        macro_rules! push_prev_state_to_new_fields {
-            () => {
-                match prev_state {
-                    PrevState::None => {},
-                    PrevState::Int => new_fields.push(
-                        self.context.custom_width_int_type(prev_bytes << 3).as_basic_type_enum(),
-                    ),
-                    PrevState::Float => {
-                        new_fields.push(self.context.f32_type().as_basic_type_enum())
-                    },
-                    PrevState::FloatFloat => {
-                        new_fields.push(self.context.f32_type().vec_type(2).as_basic_type_enum())
-                    },
-                }
-            };
-        }
-
-        let mut traverse_stack = field_types.rev().collect::<Vec<_>>();
-        while let Some(next) = traverse_stack.pop() {
-            if next.size() == 0 {
-                continue;
-            }
-            //println!("{:?} (size: {}) @ {} ({:?})", next, next.size(), prev_bytes, prev_state);
-
-            if get_aligned_offset!(prev_bytes, next.alignment() as u32) >= 8 {
-                // finished the first 8 bytes
-                push_prev_state_to_new_fields!();
-                prev_state = PrevState::None;
-                prev_bytes = 0;
-            }
-
-            let padding = get_padding!(prev_bytes, next.alignment() as u32);
-            prev_bytes += padding;
-
-            macro_rules! handle_int {
-                ($bits:expr) => {{
-                    prev_state = PrevState::Int;
-                    prev_bytes += $bits.div_ceil(8);
-                }};
-            }
-
-            match next.matchable().as_ref() {
-                TypeEnum::SimpleTy { .. } => {
-                    if next == self.primitives.bool {
-                        prev_state = PrevState::Int;
-                        prev_bytes += 1;
-                    } else {
-                        unreachable_debug()
-                    }
-                },
-                TypeEnum::IntTy { bits, .. } => {
-                    handle_int!(bits);
-                },
-                TypeEnum::FloatTy { bits: 64, .. } => {
-                    debug_assert_eq!(prev_state, PrevState::None);
-                    debug_assert_eq!(prev_bytes, 0);
-                    new_fields.push(self.context.f64_type().as_basic_type_enum());
-                },
-                TypeEnum::FloatTy { bits: 32, .. } => {
-                    prev_bytes += 4;
-                    prev_state = match prev_state {
-                        PrevState::None => PrevState::Float,
-                        PrevState::Int => PrevState::Int,
-                        PrevState::Float => PrevState::FloatFloat,
-                        PrevState::FloatFloat => unreachable_debug(),
-                    }
-                },
-                TypeEnum::FloatTy { .. } => todo!("float with other sizes"),
-                TypeEnum::ArrayTy { len, elem_ty, .. } => {
-                    traverse_stack.extend(std::iter::repeat_n(elem_ty.downcast_type(), len.int()));
-                    continue;
-                },
-                TypeEnum::StructDef { fields, .. } => {
-                    traverse_stack.extend(fields.iter_types().rev());
-                    continue;
-                },
-                TypeEnum::UnionDef { .. } => handle_int!(next.size() as u32 * 8),
-                TypeEnum::EnumDef { variants, .. } => {
-                    todo!();
-                    /*
-                    traverse_stack.push(TypeEnum::UnionDef { fields: variants, .. });
-                    traverse_stack.push(TypeEnum::IntTy {
-                        bits: util::variant_count_to_tag_size_bits(variants.len()),
-                        is_signed: false,
-                    });
-                    continue;
-                    */
-                },
-                _ => new_fields.push(self.llvm_type(next).basic_ty()),
             }
         }
 
@@ -2418,11 +2274,28 @@ impl<'ctx, 'prim> Codegen<'ctx, 'prim> {
         self.build_store(alloca, v, ty.alignment())?;
         Ok(alloca)
     }
+
+    #[inline]
+    fn module(&self) -> &Module<'ctx> {
+        self.module.as_ref().u()
+    }
+}
+
+pub trait CodegenModuleExt {
+    fn optimize(&self, target_machine: &TargetMachine, level: u8) -> CodegenResult<()>;
+
+    fn compile_to_obj_file(
+        &self,
+        target_machine: &TargetMachine,
+        obj_file_path: &Path,
+    ) -> Result<(), CodegenError>;
+
+    fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret>;
 }
 
 // optimizations
-impl<'ctx> CodegenModule<'ctx> {
-    pub fn optimize(&self, target_machine: &TargetMachine, level: u8) -> CodegenResult<()> {
+impl<'ctx> CodegenModuleExt for Module<'ctx> {
+    fn optimize(&self, target_machine: &TargetMachine, level: u8) -> CodegenResult<()> {
         assert!((0..=3).contains(&level));
         let passes = format!("default<O{}>", level);
 
@@ -2433,24 +2306,23 @@ impl<'ctx> CodegenModule<'ctx> {
         //"mem2reg",].join(","), );
 
         Ok(self
-            .0
             .run_passes(&passes, target_machine, PassBuilderOptions::create())
             .map_err(|err| CodegenError::CannotOptimizeModule(err))?)
     }
 
-    pub fn compile_to_obj_file(
+    fn compile_to_obj_file(
         &self,
         target_machine: &TargetMachine,
         obj_file_path: &Path,
     ) -> Result<(), CodegenError> {
         std::fs::create_dir_all(obj_file_path.parent().unwrap()).unwrap();
         target_machine
-            .write_to_file(&self.0, inkwell::targets::FileType::Object, obj_file_path)
+            .write_to_file(&self, inkwell::targets::FileType::Object, obj_file_path)
             .map_err(|err| CodegenError::CannotCompileObjFile(err))
     }
 
-    pub fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
-        match self.0.create_jit_execution_engine(opt) {
+    fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
+        match self.create_jit_execution_engine(opt) {
             Ok(jit) => {
                 Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>(fn_name)?.call() })
             },
@@ -2599,12 +2471,6 @@ impl<'ctx> CodegenType<'ctx> {
         unsafe { IntType::new(self.inner) }
     }
 
-    pub fn bool_ty(&self) -> IntType<'ctx> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.sema_ty == primitives().bool);
-        unsafe { IntType::new(self.inner) }
-    }
-
     pub fn float_ty(&self) -> FloatType<'ctx> {
         #[cfg(debug_assertions)]
         debug_assert!(self.sema_ty.kind == AstKind::FloatTy);
@@ -2625,7 +2491,7 @@ impl<'ctx> CodegenType<'ctx> {
 
     pub fn struct_ty(&self) -> StructType<'ctx> {
         #[cfg(debug_assertions)]
-        debug_assert_matches!(
+        std::assert_matches::debug_assert_matches!(
             self.sema_ty.kind,
             AstKind::StructDef
                 | AstKind::UnionDef
@@ -2696,7 +2562,7 @@ mod return_strategy {
     ///
     /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
     /// ```
-    pub fn one_int<'ctx>(c: &mut Codegen<'ctx, '_>, bytes: usize) -> BasicTypeEnum<'ctx> {
+    pub fn one_int<'ctx>(c: &mut Codegen<'ctx>, bytes: usize) -> BasicTypeEnum<'ctx> {
         debug_assert!(bytes <= 8);
         c.context.custom_width_int_type(bytes as u32 * 8).as_basic_type_enum()
     }
@@ -2720,7 +2586,7 @@ mod return_strategy {
     ///
     /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
     /// ```
-    pub fn two_int<'ctx>(c: &mut Codegen<'ctx, '_>, bytes: usize) -> BasicTypeEnum<'ctx> {
+    pub fn two_int<'ctx>(c: &mut Codegen<'ctx>, bytes: usize) -> BasicTypeEnum<'ctx> {
         debug_assert!(bytes > 8 && bytes <= 16);
         let ty_i64 = c.context.i64_type().as_basic_type_enum();
         let remaining_bits = (bytes as u32 - 8) * 8;

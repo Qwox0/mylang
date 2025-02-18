@@ -21,8 +21,8 @@ macro_rules! test_struct_return {
             #[derive(Debug, PartialEq)]
             #[repr(C)]
             struct Struct { $($field: $ty,)* }
-            let out = jit_run_test!(concat!("struct{", stringify!($( $field: $ty = $val, )* ), "}.{}") => Struct).unwrap();
-            assert_eq!(out, Struct { $( $field : $val ),* });
+            let res = jit_run_test::<Struct>(concat!("struct{", stringify!($( $field: $ty = $val, )* ), "}.{}"));
+            assert_eq!(*res.ok(), Struct { $( $field : $val ),* });
         }
     };
 }
@@ -109,13 +109,13 @@ test_struct_return!(return_struct_i64_i64_i64 : {
 
 #[test]
 fn return_struct_ptr_i64() {
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
     #[repr(C)]
     struct Struct {
         ptr: *const i64,
         b: i64,
     }
-    let out = jit_run_test!("struct{ptr : *i64 = &100, b : i64 = 200 ,}.{}" => Struct).unwrap();
+    let out = *jit_run_test::<Struct>("struct{ptr : *i64 = &100, b : i64 = 200 ,}.{}").ok();
     let a: i64 = 100;
     let ptr = &a as *const i64;
     assert!(
@@ -142,6 +142,6 @@ fn return_nested_struct() {
         c: i32,
     }
 
-    let out = jit_run_test!("struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}" => Struct);
-    assert_eq!(out.unwrap(), Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
+    let code = "struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}";
+    assert_eq!(*jit_run_test::<Struct>(code).ok(), Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
 }

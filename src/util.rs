@@ -1,9 +1,8 @@
 use crate::{
     ast::DeclList,
-    error::SpannedError,
+    context::primitives,
     parser::lexer::{Code, Span},
     ptr::Ptr,
-    sema::primitives::primitives,
 };
 use core::fmt;
 use std::{
@@ -68,11 +67,6 @@ pub fn test_round_up_to_nearest_power_of_two() {
     assert_eq!(round_up_to_nearest_power_of_two(5), 8);
     assert_eq!(round_up_to_nearest_power_of_two(8), 8);
     assert_eq!(round_up_to_nearest_power_of_two(9), 16);
-}
-
-pub fn display_spanned_error(err: &impl SpannedError, code: &Code) {
-    eprintln!("ERROR: {}", err.get_text());
-    display_span_in_code(err.span(), code)
 }
 
 pub fn display_span_in_code(span: Span, code: &Code) {

@@ -1,8 +1,7 @@
 use crate::{
     arena_allocator::Arena,
-    error::SpannedError,
-    parser::{ParseErrorKind, StmtIter, lexer::Span},
-    tests::jit_run_test,
+    parser::{ParseErrorKind, Parser, lexer::Span},
+    tests::{jit_run_test, jit_run_test_raw},
 };
 
 #[test]
@@ -20,16 +19,18 @@ pub test :: (mut x := 1) { // TODO: test this (better error)
 #[test]
 #[ignore = "unfinished test"]
 fn good_error_message2() {
-    jit_run_test!(raw "
-test :: -> { 1 " => ())
-    .unwrap();
+    let _msg = jit_run_test_raw::<()>(
+        "
+test :: -> { 1 ",
+    )
+    .err();
     /*
-    jit_run_test!(raw "
+    jit_run_test_raw("
 test :: -> {
     MyStruct :: struct { x: i64 };
     MyStruct.{ x = 5 }
-" => ())
-    .unwrap();
+" )
+    .ok();
     */
     todo!("better error message");
     panic!("OK")
@@ -37,7 +38,7 @@ test :: -> {
 
 #[test]
 fn return_struct_u2_i64_correctly() {
-    let out = jit_run_test!("struct { tag: u2 = 1, val: i64 = -1 }.{}" => u128).unwrap();
+    let out = *jit_run_test::<u128>("struct { tag: u2 = 1, val: i64 = -1 }.{}").ok();
     let out_hex_string = format!("{out:032x}");
     println!("{out_hex_string}");
     // expect "ffffffffffffffff______________01"
@@ -51,7 +52,7 @@ fn return_struct_f64() {
     let big_float_bits: u64 = 0xEFFFFFFFFFFFFFF3;
     let big_float = f64::from_bits(big_float_bits);
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone, Copy)]
     struct Out {
         tag: u8,
         val: f64,
@@ -69,40 +70,41 @@ test :: -> {{
     retval
 }};"
     );
-    let out = jit_run_test!(raw &code => Out).unwrap();
+    let out = *jit_run_test_raw::<Out>(&code).ok();
     assert_eq!(out.tag, 1);
     assert_eq!(format!("{:x}", out.val.to_bits()), format!("{:x}", big_float_bits));
 }
 
 #[test]
 #[ignore = "unfinished test"]
-fn sret() {
+fn sret_no_memcpy() {
     #[derive(Debug, PartialEq)]
     struct MyStruct {
         a: i64,
         b: i64,
         c: i64,
     }
-    let (out, llvm_module_text) = jit_run_test!(raw "
+    let code = "
         MyStruct :: struct { a: i64, b: i64, c: i64 };
-        test :: -> MyStruct.{ a = 5, b = 10, c = 15 };" => MyStruct,llvm_module)
-    .unwrap();
-    assert_eq!(out, MyStruct { a: 5, b: 10, c: 15 });
+        test :: -> MyStruct.{ a = 5, b = 10, c = 15 };";
+    let res = jit_run_test_raw::<MyStruct>(code);
+    assert_eq!(*res.ok(), MyStruct { a: 5, b: 10, c: 15 });
+    let llvm_module_text = res.module_text().unwrap();
     assert!(!llvm_module_text.contains("memcpy")); // TODO: implement this
 }
 
 #[test]
 #[ignore = "unfinished test"]
 fn parse_weird_var_decl() {
-    jit_run_test!("a : i32 : b : 2;" => ()).unwrap();
+    jit_run_test::<()>("a : i32 : b : 2;").ok();
     panic!("OK")
 }
 
 #[test]
 fn parse_err_missing_if_body() {
-    let results = StmtIter::parse("if a .A".as_ref(), &Arena::new()).collect::<Vec<_>>();
-    assert_eq!(results.len(), 1);
-    let err = results[0].as_ref().unwrap_err();
+    let results = Parser::parse("if a .A".as_ref(), &Arena::new());
+    assert_eq!(results.errors.len(), 1);
+    let err = &results.errors[0];
     assert_eq!(err.kind, ParseErrorKind::NoInput);
     assert_eq!(err.span, Span::new(7, 8));
 }
@@ -110,17 +112,17 @@ fn parse_err_missing_if_body() {
 #[test]
 #[ignore = "unfinished test"]
 fn fix_shadowing_for_defer() {
-    let out = jit_run_test!("
+    let code = "
 mut a := 10;
 defer a += 1;
 mut a := 3; // this `mut` is only needed because this test fails.
-a" => i64)
-    .unwrap();
-    assert_eq!(out, 3);
+a";
+    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
 }
 
 #[test]
 #[ignore = "unfinished test"]
+#[allow(unused)]
 fn fix_precedence_range() {
     let a = 1..{
         let x = 1;
@@ -136,21 +138,22 @@ fn fix_precedence_range() {
         break;
     }
 
-    //jit_run_test!("for x in 0.. do break;" => ()).unwrap();
-    //jit_run_test!("if 1 == 0.. do {};" => ()).unwrap();
-    jit_run_test!("if true do 0.. else 1..;" => ()).unwrap();
+    //jit_run_test!("for x in 0.. do break;" ).ok();
+    //jit_run_test!("if 1 == 0.. do {};" ).ok();
+    jit_run_test::<()>("if true do 0.. else 1..;").ok();
 }
 
 #[test]
 #[ignore = "unfinished test"]
 fn prevent_too_many_pos_init_args() {
-    jit_run_test!("T :: struct {}; T.(1);" => ()).unwrap_err();
+    jit_run_test::<()>("T :: struct {}; T.(1);").err();
 }
 
 #[test]
 fn good_error_message3() {
-    let err = jit_run_test!("A :: enum { B }; x := 1; A.B.(1);" => ()).unwrap_err();
-    debug_assert_eq!(err.span(), Span::new(38, 41));
+    let errors = jit_run_test::<()>("A :: enum { B }; x := 1; A.B.(1);").err();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].span, Span::new(38, 41));
 }
 
 #[test]
@@ -158,31 +161,32 @@ fn good_error_message4() {
     let code = "A :: enum { B }; test :: -> A { .B.(1) };";
     let start = code.find(".B.(1)").unwrap();
     let span = Span::new(start, start + 2);
-    let err = jit_run_test!(raw code => ()).unwrap_err();
-    debug_assert_eq!(err.span(), span);
+    let errors = jit_run_test_raw::<()>(code).err();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].span, span);
 }
 
 #[test]
 fn specialize_return_type() {
-    let a = jit_run_test!(raw "test :: -> {
+    let code = "test :: -> {
         if false return 1;
         5.0
-    };" => f64);
-    debug_assert_eq!(a.unwrap(), 5.0);
+    };";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
 }
 
 #[test]
 #[ignore = "unfinished test"]
 fn test_display_span1() {
-    jit_run_test!(raw "test :: ->" => ()).unwrap()
+    jit_run_test_raw::<()>("test :: ->").err();
 }
 
 #[test]
 #[ignore = "unfinished test"]
 fn test_display_span2() {
-    jit_run_test!(raw "test :: ->
-" => ())
-    .unwrap()
+    let code = "test :: ->
+";
+    jit_run_test_raw::<()>(code).err();
 }
 
 #[test]
@@ -196,7 +200,7 @@ fn call_fn_with_sret() {
         d: u64,
     }
 
-    let out = jit_run_test!(raw "
+    let code = "
 MyStruct :: struct {
     a: i8,
     b: u32,
@@ -207,7 +211,6 @@ new :: -> MyStruct.(-5, 10, 123);
 test :: -> {
     a := new();
     return a;
-}" => MyStruct);
-    println!("{:?}", out);
-    debug_assert_eq!(out.unwrap(), MyStruct { a: -5, b: 10, c: 123, d: 4 });
+}";
+    assert_eq!(*jit_run_test_raw::<MyStruct>(code).ok(), MyStruct { a: -5, b: 10, c: 123, d: 4 });
 }

@@ -13,6 +13,5 @@ ok &&= union_val.int == {int};
 ok &&= union_val.float == {float};
 ok"
     );
-    let ok = jit_run_test!(&code => bool);
-    assert!(ok.unwrap(), "```{code}\n``` -> expected `true`");
+    assert!(*jit_run_test::<bool>(&code).ok(), "```{code}\n``` -> expected `true`");
 }

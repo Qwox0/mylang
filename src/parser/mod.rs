@@ -7,12 +7,12 @@ use crate::{
     arena_allocator::Arena,
     ast::{
         self, Ast, BinOpKind, Decl, DeclList, DeclMarkerKind, DeclMarkers, Ident, UnaryOpKind,
-        UpcastToAst, ast_new, debug::DebugAst,
+        UpcastToAst, ast_new,
     },
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
-    util::{collect_all_result_errors, display_spanned_error, then},
+    util::then,
 };
 use core::str;
 use error::ParseErrorKind::*;
@@ -37,36 +37,47 @@ impl Ptr<Ast> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Parser<'code, 'alloc> {
     lex: Lexer<'code>,
+    // scope: OPtr<ast::Block>,
+    pub errors: Vec<ParseError>,
     alloc: &'alloc Arena,
 }
 
+#[derive(Debug)]
+pub struct FullParseResult {
+    pub top_level_scope: OPtr<ast::Block>,
+    pub errors: Vec<ParseError>,
+}
+
 impl<'code, 'alloc> Parser<'code, 'alloc> {
-    pub fn new(lex: Lexer<'code>, alloc: &'alloc Arena) -> Parser<'code, 'alloc> {
-        Self { lex, alloc }
+    pub fn parse(code: &'code Code, alloc: &'alloc Arena) -> FullParseResult {
+        let mut parser = Parser::new(Lexer::new(code), alloc);
+        parser.ws0();
+        let top_level_scope = parser.top_level_scope();
+        FullParseResult { top_level_scope, errors: parser.errors }
     }
 
-    pub fn top_level_item(&mut self) -> ParseResult<Option<Ptr<Ast>>> {
-        if self.lex.is_empty() {
-            return Ok(None);
-        }
-        let res = self.expr();
-        if let Err(ParseError { kind: ParseErrorKind::UnexpectedToken(_), .. }) = res {
-            // skip over the unexpected token to prevent an infinite loop
-            self.lex.advance();
-        }
-        self.lex
-            .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
-        res.map(Some)
+    fn new(lex: Lexer<'code>, alloc: &'alloc Arena) -> Parser<'code, 'alloc> {
+        Self { lex, errors: Vec::new(), alloc }
     }
 
-    pub fn expr(&mut self) -> ParseResult<Ptr<Ast>> {
+    fn top_level_scope(&mut self) -> OPtr<ast::Block> {
+        match self.block_inner() {
+            Ok(block) => Some(block),
+            Err(e) => {
+                self.errors.push(e);
+                None
+            },
+        }
+    }
+
+    fn expr(&mut self) -> ParseResult<Ptr<Ast>> {
         self.expr_(MIN_PRECEDENCE)
     }
 
-    pub fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
+    fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
         let mut lhs = self.ws0().value(/*min_precedence*/).context("expr first val")?;
         loop {
             match self.op_chain(lhs, min_precedence) {
@@ -77,7 +88,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
     }
 
-    pub fn op_chain(&mut self, lhs: Ptr<Ast>, min_precedence: u8) -> ParseResult<Option<Ptr<Ast>>> {
+    fn op_chain(&mut self, lhs: Ptr<Ast>, min_precedence: u8) -> ParseResult<Option<Ptr<Ast>>> {
         let Some(Token { kind, span }) = self.ws0().lex.peek() else { return Ok(None) };
 
         let op = match FollowingOperator::new(kind) {
@@ -211,7 +222,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// anything which has higher precedence than any operator
     //pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
-    pub fn value(&mut self) -> ParseResult<Ptr<Ast>> {
+    fn value(&mut self) -> ParseResult<Ptr<Ast>> {
         let Token { kind, span } = self.peek_tok().context("expected value")?;
 
         macro_rules! expr {
@@ -578,7 +589,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// also parses the `}`
-    pub fn parse_initializer_fields(
+    fn parse_initializer_fields(
         &mut self,
     ) -> ParseResult<(Ptr<[(Ptr<ast::Ident>, OPtr<Ast>)]>, Span)> {
         let mut fields = ScratchPool::new();
@@ -607,11 +618,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// parsing starts after the '->'
-    pub fn function_tail(
-        &mut self,
-        params: DeclList,
-        start_span: Span,
-    ) -> ParseResult<Ptr<ast::Fn>> {
+    fn function_tail(&mut self, params: DeclList, start_span: Span) -> ParseResult<Ptr<ast::Fn>> {
         let expr = self.expr().context("fn return type or body")?;
         let (ret_ty_expr, body) = match self.lex.next_if_kind(TokenKind::OpenBrace) {
             Some(brace) => (Some(expr), self.block(brace.span).context("fn body")?.upcast()),
@@ -620,7 +627,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body: Some(body) }, start_span))
     }
 
-    pub fn if_after_cond(
+    fn if_after_cond(
         &mut self,
         condition: Ptr<Ast>,
         start_span: Span,
@@ -640,10 +647,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// `... ( ... )`
     /// `     ^` starts here
     /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
-    pub fn parse_call(
-        &mut self,
-        args: ScratchPool<Ptr<Ast>>,
-    ) -> ParseResult<(Ptr<[Ptr<Ast>]>, Span)> {
+    fn parse_call(&mut self, args: ScratchPool<Ptr<Ast>>) -> ParseResult<(Ptr<[Ptr<Ast>]>, Span)> {
         let res: ParseResult<_> = try {
             //let args = self.parse_call_args(args)?;
             let args = self.expr_list(TokenKind::Comma, args).context("call args")?.0;
@@ -667,7 +671,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         res
     }
 
-    pub fn call(
+    fn call(
         &mut self,
         func: Ptr<Ast>,
         args: ScratchPool<Ptr<Ast>>,
@@ -678,51 +682,58 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     }
 
     /// parses block context and '}', doesn't parse the '{'
-    pub fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<ast::Block>> {
-        let res = self._block_inner(open_brace_span);
-        if res.is_err() {
-            // skip the remaining block
-            let mut depth: usize = 0;
-            self.lex.advance_while(|t| {
-                match t.kind {
-                    TokenKind::OpenBrace => depth += 1,
-                    TokenKind::CloseBrace if depth == 0 => return false,
-                    TokenKind::CloseBrace => depth -= 1,
-                    _ => {},
-                };
-                true
-            });
-            self.lex.advance();
+    fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<ast::Block>> {
+        let mut res = self.block_inner();
+        match res.as_mut() {
+            Ok(block) => {
+                let closing_brace =
+                    self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?;
+                block.span = open_brace_span.join(closing_brace.span);
+            },
+            Err(_) => {
+                // skip the remaining block
+                let mut depth: usize = 0;
+                self.lex.advance_while(|t| {
+                    match t.kind {
+                        TokenKind::OpenBrace => depth += 1,
+                        TokenKind::CloseBrace if depth == 0 => return false,
+                        TokenKind::CloseBrace => depth -= 1,
+                        _ => {},
+                    };
+                    true
+                });
+                self.lex.advance();
+            },
         }
         res
     }
 
     #[inline]
-    fn _block_inner(&mut self, open_brace_span: Span) -> ParseResult<Ptr<ast::Block>> {
+    fn block_inner(&mut self) -> ParseResult<Ptr<ast::Block>> {
         let mut list_pool = ScratchPool::new();
+        //let mut list_pool = Vec::new(); // TODO: compare
         let mut has_trailing_semicolon = false;
+        self.ws0();
         loop {
-            if matches!(
-                self.ws0().lex.peek(),
-                None | Some(Token { kind: TokenKind::CloseBrace, .. })
-            ) {
+            if self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
                 break;
             }
             let expr = self.expr().context("expr in block")?;
             list_pool.push(expr).map_err(|e| self.wrap_alloc_err(e))?;
+            // list_pool.push(expr);
             has_trailing_semicolon = self.ws0().lex.advance_if_kind(TokenKind::Semicolon);
             if !has_trailing_semicolon && expr.block_expects_trailing_semicolon() {
                 break;
             }
+            self.lex
+                .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
         }
         let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
-        let closing_brace = self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?;
-        let span = open_brace_span.join(closing_brace.span);
-        self.alloc(ast::Block::new(stmts, has_trailing_semicolon, span))
+        Ok(self.alloc(ast_new!(Block { span: Span::ZERO, has_trailing_semicolon, stmts }))?)
     }
 
     /// Also returns a `has_trailing_sep` [`bool`].
-    pub fn expr_list(
+    fn expr_list(
         &mut self,
         sep: TokenKind,
         mut list_pool: ScratchPool<Ptr<Ast>>,
@@ -742,11 +753,11 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
 
     /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
     /// allows a trailing `sep`.
-    pub fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<DeclList> {
+    fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<DeclList> {
         self.var_decl_list_with_start_list(sep, ScratchPool::new())
     }
 
-    pub fn var_decl_list_with_start_list(
+    fn var_decl_list_with_start_list(
         &mut self,
         sep: TokenKind,
         mut list: ScratchPool<Ptr<ast::Decl>>,
@@ -762,7 +773,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         self.clone_slice_from_scratch_pool(list)
     }
 
-    pub fn var_decl(&mut self) -> ParseResult<Ptr<ast::Decl>> {
+    fn var_decl(&mut self) -> ParseResult<Ptr<ast::Decl>> {
         let mut markers = DeclMarkers::default();
         let mut t = self.peek_tok().context("expected variable marker or ident")?;
 
@@ -809,7 +820,7 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     /// `      ^`
     ///
     /// Also returns the [`Span`] of the parsed type.
-    pub fn typed_decl(
+    fn typed_decl(
         &mut self,
         markers: DeclMarkers,
         ident: Ptr<ast::Ident>,
@@ -823,13 +834,13 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         self.alloc(d)
     }
 
-    pub fn ident(&mut self) -> ParseResult<Ptr<ast::Ident>> {
+    fn ident(&mut self) -> ParseResult<Ptr<ast::Ident>> {
         let t = self.tok(TokenKind::Ident)?;
         self.ident_from_span(t.span)
     }
 
     /// this doesn't check if the text at span is valid
-    pub fn ident_from_span(&self, span: Span) -> ParseResult<Ptr<ast::Ident>> {
+    fn ident_from_span(&self, span: Span) -> ParseResult<Ptr<ast::Ident>> {
         self.alloc(Ident::new(self.get_text_from_span(span), span))
     }
 
@@ -842,23 +853,23 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
     // -------
 
     /// 0+ whitespace
-    pub fn ws0(&mut self) -> &mut Self {
+    fn ws0(&mut self) -> &mut Self {
         self.lex.advance_while(|t| t.kind.is_whitespace());
         self
     }
 
     /// 1+ whitespace
-    pub fn ws1(&mut self) -> ParseResult<()> {
+    fn ws1(&mut self) -> ParseResult<()> {
         self.tok_where(|t| t.kind.is_whitespace())?;
         self.ws0();
         Ok(())
     }
 
-    pub fn tok(&mut self, tok: TokenKind) -> ParseResult<Token> {
+    fn tok(&mut self, tok: TokenKind) -> ParseResult<Token> {
         self.tok_where(|t| t.kind == tok).with_context(|| format!("token ({:?})", tok))
     }
 
-    pub fn tok_where(&mut self, cond: impl FnOnce(Token) -> bool) -> ParseResult<Token> {
+    fn tok_where(&mut self, cond: impl FnOnce(Token) -> bool) -> ParseResult<Token> {
         let t = self.peek_tok()?;
         if cond(t) {
             self.lex.advance();
@@ -868,18 +879,18 @@ impl<'code, 'alloc> Parser<'code, 'alloc> {
         }
     }
 
-    pub fn advanced(&mut self) -> &mut Self {
+    fn advanced(&mut self) -> &mut Self {
         self.lex.advance();
         self
     }
 
     #[inline]
-    pub fn next_tok(&mut self) -> ParseResult<Token> {
+    fn next_tok(&mut self) -> ParseResult<Token> {
         self.lex.next().ok_or(err_val(NoInput, self.lex.pos_span()))
     }
 
     #[inline]
-    pub fn peek_tok(&mut self) -> ParseResult<Token> {
+    fn peek_tok(&mut self) -> ParseResult<Token> {
         self.lex.peek().ok_or(err_val(NoInput, self.lex.pos_span()))
     }
 
@@ -1108,68 +1119,5 @@ impl BinOpKind {
             BinOpKind::And => 12,
             BinOpKind::Or => 11,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StmtIter<'code, 'alloc> {
-    parser: Parser<'code, 'alloc>,
-}
-
-impl<'code, 'alloc> Iterator for StmtIter<'code, 'alloc> {
-    type Item = ParseResult<Ptr<Ast>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.parser.top_level_item().transpose()
-    }
-}
-
-impl<'code, 'alloc> StmtIter<'code, 'alloc> {
-    /// Parses top-level items until the end of the [`Code`] or until an
-    /// [`PError`] occurs.
-    #[inline]
-    pub fn parse(code: &'code Code, alloc: &'alloc Arena) -> Self {
-        let mut parser = Parser::new(Lexer::new(code), alloc);
-        parser.ws0();
-        Self { parser }
-    }
-
-    #[inline]
-    pub fn collect_or_fail(self, code: &'code Code) -> Vec<Ptr<Ast>> {
-        collect_all_result_errors(self).unwrap_or_else(|errors| {
-            for e in errors {
-                display_spanned_error(&e, code);
-            }
-            std::process::exit(1);
-        })
-    }
-
-    #[inline]
-    pub fn parse_all_or_fail(code: &'code Code, alloc: &'alloc Arena) -> Vec<Ptr<Ast>> {
-        Self::parse(code, alloc).collect_or_fail(code)
-    }
-
-    pub fn try_parse_all(
-        code: &'code Code,
-        alloc: &'alloc Arena,
-    ) -> Result<Vec<Ptr<Ast>>, Vec<ParseError>> {
-        collect_all_result_errors(Self::parse(code, alloc))
-    }
-
-    pub fn parse_and_debug(code: &'code Code) -> Result<(), ()> {
-        let mut has_err = false;
-        for s in StmtIter::parse(code, &Arena::new()) {
-            match s {
-                Ok(s) => {
-                    println!("stmt @ {:x?}", s);
-                    s.print_tree();
-                },
-                Err(e) => {
-                    display_spanned_error(&e, code);
-                    has_err = true;
-                },
-            }
-        }
-        if has_err { Err(()) } else { Ok(()) }
     }
 }
