@@ -12,9 +12,9 @@ use crate::{
 use std::ops::{Deref, DerefMut};
 
 #[cfg(not(test))]
-type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticPrinter;
+pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticPrinter;
 #[cfg(test)]
-type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticCollector;
+pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticCollector;
 
 pub struct CompilationContextInner {
     pub alloc: Arena,
@@ -26,7 +26,7 @@ pub struct CompilationContextInner {
     pub global_scope: Ptr<ast::Block>,
 }
 
-pub struct CompilationContext(Ptr<CompilationContextInner>);
+pub struct CompilationContext(pub Ptr<CompilationContextInner>);
 
 impl Deref for CompilationContext {
     type Target = CompilationContextInner;
@@ -86,11 +86,21 @@ impl CompilationContext {
 #[thread_local]
 static mut CTX: Option<CompilationContextInner> = None;
 
-impl DiagnosticReporter for CompilationContext {
-    fn report(&self, severity: DiagnosticSeverity, err: &dyn SpannedError) {
-        self.0.diagnostic_reporter.report(severity, err);
-    }
+macro_rules! impl_diagnostic_reporter_for_ctx {
+    ($ty:ty) => {
+        impl DiagnosticReporter for $ty {
+            fn report(&mut self, severity: DiagnosticSeverity, err: &impl SpannedError) {
+                self.diagnostic_reporter.report(severity, err)
+            }
+
+            fn max_past_severity(&self) -> Option<DiagnosticSeverity> {
+                self.diagnostic_reporter.max_past_severity()
+            }
+        }
+    };
 }
+impl_diagnostic_reporter_for_ctx! {CompilationContextInner}
+impl_diagnostic_reporter_for_ctx! {CompilationContext}
 
 #[inline]
 pub fn ctx() -> &'static CompilationContextInner {

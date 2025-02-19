@@ -2,13 +2,12 @@ extern crate test;
 
 use super::bench_compilation;
 use crate::{
-    arena_allocator::Arena,
     codegen::llvm,
     compiler::{CompileMode, compile},
     context::CompilationContext,
-    parser::Parser,
+    diagnostic_reporter::DiagnosticReporter,
+    parser,
     ptr::Ptr,
-    sema::Sema,
 };
 use inkwell::context::Context;
 use std::path::PathBuf;

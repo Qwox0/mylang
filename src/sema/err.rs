@@ -44,7 +44,7 @@ pub enum SemaErrorKind {
     },
     DuplicateEnumVariant,
     DuplicateField,
-    #[error("CannotApplyInitializer to {ty}")]
+    #[error("Cannot initialize a value of type `{ty}` using an initializer")]
     CannotApplyInitializer {
         ty: Ptr<ast::Type>,
     },

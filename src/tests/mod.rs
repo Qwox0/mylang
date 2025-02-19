@@ -31,7 +31,7 @@ mod while_loop;
 
 const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = true;
-const DEBUG_TYPES: bool = true;
+const DEBUG_TYPES: bool = false;
 const DEBUG_TYPED_AST: bool = false;
 const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
 const PRINT_LLVM_MODULE: bool = false;
@@ -48,13 +48,13 @@ impl<RetTy> JitRunTestResult<RetTy> {
     pub fn ok(&self) -> &RetTy {
         debug_assert_eq!(
             self.ret.is_some(),
-            self.ctx.diagnostic_reporter.diagnostics.borrow().as_slice().is_empty()
+            self.ctx.diagnostic_reporter.diagnostics.as_slice().is_empty()
         );
         self.ret.as_ref().unwrap_or_else(|| panic!("Test failed! Expected no errors"))
     }
 
-    pub fn err(&self) -> Vec<SavedDiagnosticMessage> {
-        let diag = self.ctx.diagnostic_reporter.diagnostics.take();
+    pub fn err(&self) -> &[SavedDiagnosticMessage] {
+        let diag = self.ctx.diagnostic_reporter.diagnostics.as_slice();
         debug_assert_eq!(self.ret.is_some(), diag.is_empty());
         if self.ret.is_some() {
             panic!("Test failed! Expected compiler error, but compilation succeded.")

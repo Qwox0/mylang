@@ -9,6 +9,8 @@ use crate::{
         self, Ast, BinOpKind, Decl, DeclList, DeclMarkerKind, DeclMarkers, Ident, UnaryOpKind,
         UpcastToAst, ast_new,
     },
+    context::{CompilationContextInner, CtxDiagnosticReporter},
+    diagnostic_reporter::DiagnosticReporter,
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -17,7 +19,7 @@ use crate::{
 use core::str;
 use error::ParseErrorKind::*;
 pub use error::*;
-use lexer::{Code, Keyword, Lexer, Span, Token, TokenKind};
+use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
 
 pub mod error;
@@ -37,37 +39,29 @@ impl Ptr<Ast> {
     }
 }
 
-#[derive(Debug)]
-pub struct Parser<'code, 'alloc> {
-    lex: Lexer<'code>,
+pub fn parse(cctx: &mut CompilationContextInner) -> OPtr<ast::Block> {
+    let mut parser = Parser::new(cctx);
+    parser.ws0();
+    parser.top_level_scope()
+}
+
+pub struct Parser<'cctx> {
+    lex: Lexer<'cctx>,
     // scope: OPtr<ast::Block>,
-    pub errors: Vec<ParseError>,
-    alloc: &'alloc Arena,
+    dr: &'cctx mut CtxDiagnosticReporter,
+    alloc: &'cctx Arena,
 }
 
-#[derive(Debug)]
-pub struct FullParseResult {
-    pub top_level_scope: OPtr<ast::Block>,
-    pub errors: Vec<ParseError>,
-}
-
-impl<'code, 'alloc> Parser<'code, 'alloc> {
-    pub fn parse(code: &'code Code, alloc: &'alloc Arena) -> FullParseResult {
-        let mut parser = Parser::new(Lexer::new(code), alloc);
-        parser.ws0();
-        let top_level_scope = parser.top_level_scope();
-        FullParseResult { top_level_scope, errors: parser.errors }
-    }
-
-    fn new(lex: Lexer<'code>, alloc: &'alloc Arena) -> Parser<'code, 'alloc> {
-        Self { lex, errors: Vec::new(), alloc }
+impl<'cctx> Parser<'cctx> {
+    fn new(cctx: &'cctx mut CompilationContextInner) -> Parser<'cctx> {
+        Self { lex: Lexer::new(&cctx.code), dr: &mut cctx.diagnostic_reporter, alloc: &cctx.alloc }
     }
 
     fn top_level_scope(&mut self) -> OPtr<ast::Block> {
         match self.block_inner() {
             Ok(block) => Some(block),
             Err(e) => {
-                self.errors.push(e);
+                self.dr.error(&e);
                 None
             },
         }

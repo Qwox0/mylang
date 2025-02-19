@@ -178,39 +178,3 @@ if val == MyBasicEnum.B {
 true";
     assert!(*jit_run_test::<bool>(code).ok())
 }
-
-/*
-#[test]
-fn dev() {
-    use inkwell::{context::Context, llvm_sys::core::LLVMBuildStore, module::Linkage};
-
-    let context = Context::create();
-    let builder = context.create_builder();
-    let module = context.create_module("dev");
-
-    let i64_ty = context.i64_type();
-    let main_fn = i64_ty.fn_type(&[], false);
-    let main_fn = module.add_function("main", main_fn, Some(Linkage::External));
-    type Ret = i64;
-    let entry = context.append_basic_block(main_fn, "entry");
-    builder.position_at_end(entry);
-
-    let a_ptr = builder.build_alloca(i64_ty, "a").unwrap();
-
-    let ten = i64_ty.const_int(10, true);
-    let b = transmute_unchecked::<_, LLVMBuilderRef>(&builder);
-    let value = unsafe { LLVMBuildStore(b, ten.as_value_ref(), a_ptr.as_value_ref()) };
-
-    let v = builder.build_store(a_ptr, ten).unwrap();
-    v.set_alignment(8);
-
-    let ret = builder.build_load(i64_ty, a_ptr, "").unwrap();
-    builder.build_return(Some(&ret)).unwrap();
-
-    module.print_to_stderr();
-
-    let jit = module.create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
-    let out = unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>("main").unwrap().call() };
-    panic!("{}", out)
-}
-*/

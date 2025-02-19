@@ -1,14 +1,16 @@
 extern crate test;
 
-use crate::{arena_allocator::Arena, parser::Parser};
+use crate::{
+    context::CompilationContext, diagnostic_reporter::DiagnosticReporter, parser, ptr::Ptr,
+};
 use test::*;
 
 #[inline]
 fn bench_parse(code: &str) {
-    let alloc = Arena::new();
-    let code = code.as_ref();
-    let stmts = Parser::parse(code, &alloc);
-    assert!(stmts.errors.is_empty());
+    let mut ctx = CompilationContext::new(Ptr::from_ref(code.as_ref()));
+    parser::parse(&mut ctx);
+    assert!(!ctx.do_abort_compilation());
+    assert!(ctx.diagnostic_reporter.diagnostics.is_empty());
 }
 
 /// old: 11ms  <- so bad

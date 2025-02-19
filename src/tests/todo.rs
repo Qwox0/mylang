@@ -1,6 +1,7 @@
 use crate::{
-    arena_allocator::Arena,
-    parser::{ParseErrorKind, Parser, lexer::Span},
+    context::CompilationContext,
+    parser::{self, lexer::Span},
+    ptr::Ptr,
     tests::{jit_run_test, jit_run_test_raw},
 };
 
@@ -102,10 +103,11 @@ fn parse_weird_var_decl() {
 
 #[test]
 fn parse_err_missing_if_body() {
-    let results = Parser::parse("if a .A".as_ref(), &Arena::new());
-    assert_eq!(results.errors.len(), 1);
-    let err = &results.errors[0];
-    assert_eq!(err.kind, ParseErrorKind::NoInput);
+    let mut ctx = CompilationContext::new(Ptr::from_ref("if a .A".as_ref()));
+    parser::parse(&mut ctx);
+    assert_eq!(ctx.diagnostic_reporter.diagnostics.len(), 1);
+    let err = &ctx.diagnostic_reporter.diagnostics[0];
+    assert!(err.msg.starts_with("NoInput"));
     assert_eq!(err.span, Span::new(7, 8));
 }
 
@@ -151,7 +153,8 @@ fn prevent_too_many_pos_init_args() {
 
 #[test]
 fn good_error_message3() {
-    let errors = jit_run_test::<()>("A :: enum { B }; x := 1; A.B.(1);").err();
+    let res = jit_run_test::<()>("A :: enum { B }; x := 1; A.B.(1);");
+    let errors = res.err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].span, Span::new(38, 41));
 }
@@ -161,9 +164,23 @@ fn good_error_message4() {
     let code = "A :: enum { B }; test :: -> A { .B.(1) };";
     let start = code.find(".B.(1)").unwrap();
     let span = Span::new(start, start + 2);
-    let errors = jit_run_test_raw::<()>(code).err();
+    let res = jit_run_test_raw::<()>(code);
+    let errors = res.err();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].span, span);
+}
+
+#[test]
+#[ignore = "TODO: better error"]
+fn good_error_cannot_apply_initializer_to_type() {
+    let code = "A :: enum { B }; test :: -> A.(1);";
+    let start = code.find("A.(1)").unwrap();
+    let span = Span::new(start, start + 1);
+    let res = jit_run_test_raw::<()>(code);
+    let errors = res.err();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].span, span);
+    assert!(!errors[0].msg.contains("of type `type`"))
 }
 
 #[test]
@@ -213,4 +230,16 @@ test :: -> {
     return a;
 }";
     assert_eq!(*jit_run_test_raw::<MyStruct>(code).ok(), MyStruct { a: -5, b: 10, c: 123, d: 4 });
+}
+
+extern crate test;
+
+#[bench]
+fn bench(b: &mut test::Bencher) {
+    b.iter(|| {
+        let res = jit_run_test::<()>(test::black_box("A :: enum { B }; x := 1; A.B.(1);"));
+        let errors = res.err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].span, Span::new(38, 41));
+    });
 }

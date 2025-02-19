@@ -5,12 +5,12 @@ use crate::{
     context::CompilationContext,
     diagnostic_reporter::DiagnosticReporter,
     parser::{
-        Parser,
+        self,
         lexer::{Code, Lexer},
         parser_helper::ParserInterface,
     },
     ptr::Ptr,
-    sema::Sema,
+    sema,
     util::{self, UnwrapDebug},
 };
 use inkwell::{context::Context, targets::TargetMachine};
@@ -133,11 +133,9 @@ pub fn compile_ctx(
     mode: CompileMode,
     args: &BuildArgs,
 ) -> CompileResult {
-    let code = ctx.code.as_ref();
-
     if args.debug_tokens {
         println!("### Tokens:");
-        let mut lex = Lexer::new(code);
+        let mut lex = Lexer::new(ctx.code.as_ref());
         while let Some(t) = lex.next() {
             println!("{:?}", t)
         }
@@ -145,18 +143,15 @@ pub fn compile_ctx(
     }
 
     let frontend_parse_start = Instant::now();
-    let parse_res = Parser::parse(code, &ctx.alloc);
+    let top_level_scope = parser::parse(ctx);
     ctx.compile_time.parser = frontend_parse_start.elapsed();
 
-    if !parse_res.errors.is_empty() {
-        eprintln!("Parse Error in {:?}", ctx.compile_time.parser);
-        for e in &parse_res.errors {
-            ctx.error(e);
-        }
+    if ctx.do_abort_compilation() {
+        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
         return CompileResult::ERR;
     }
 
-    let top_level_scope = parse_res.top_level_scope.u();
+    let top_level_scope = top_level_scope.u();
 
     if args.debug_ast {
         println!("### AST Nodes:");
@@ -174,14 +169,11 @@ pub fn compile_ctx(
     // ##### Sema #####
 
     let sema_start = Instant::now();
-    let (sema, order) = Sema::analyze2(top_level_scope, args.debug_types);
+    let order = sema::analyze(ctx, top_level_scope, args.debug_types);
     ctx.compile_time.sema = sema_start.elapsed();
 
-    if !sema.errors.is_empty() {
+    if ctx.do_abort_compilation() {
         eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
-        for e in &sema.errors {
-            ctx.error(e);
-        }
         return CompileResult::ERR;
     }
 

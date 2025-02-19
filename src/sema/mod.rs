@@ -7,7 +7,8 @@ use crate::{
         self, Ast, AstEnum, AstKind, BinOpKind, Decl, DeclListExt, OptionAstExt, OptionTypeExt,
         TypeEnum, UnaryOpKind, UpcastToAst, ast_new, type_new,
     },
-    context::{code, ctx, primitives as p},
+    context::{CompilationContextInner, primitives as p},
+    diagnostic_reporter::DiagnosticReporter,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
@@ -46,84 +47,73 @@ macro_rules! check_and_set_target {
 }
 
 /// Semantic analyzer
-pub struct Sema {
+pub struct Sema<'cctx> {
     pub symbols: SymbolTable2,
     function_stack: Vec<Ptr<ast::Fn>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
 
-    pub errors: Vec<SemaError>,
+    cctx: &'cctx mut CompilationContextInner,
 
     #[cfg(debug_assertions)]
     debug_types: bool,
 }
 
-impl Sema {
-    pub fn analyze2(top_level_scope: Ptr<ast::Block>, debug_types: bool) -> (Sema, Vec<usize>) {
-        let mut sema = Sema::new(debug_types);
-        let stmts = top_level_scope.stmts;
-        for s in stmts.iter().copied() {
-            sema.preload_top_level(s);
-        }
-
-        let mut finished = vec![false; stmts.len()];
-        let mut remaining_count = stmts.len();
-        let mut order = Vec::with_capacity(stmts.len());
-        while finished.iter().any(std::ops::Not::not) {
-            let old_remaining_count = remaining_count;
-            debug_assert!(stmts.len() == finished.len());
-            remaining_count = 0;
-            for (idx, (s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
-                if *finished {
-                    continue;
-                }
-                let res = sema.analyze_top_level(*s);
-                *finished = res != SemaResult::NotFinished;
-                match res {
-                    SemaResult::Ok(_) => order.push(idx),
-                    SemaResult::NotFinished => remaining_count += 1,
-                    SemaResult::Err(_) => {},
-                }
-            }
-            // println!("finished statements: {:?}", finished);
-            if remaining_count == old_remaining_count {
-                for (s, finished) in stmts.iter().zip(finished) {
-                    if finished {
-                        continue;
-                    }
-                    display_span_in_code(s.full_span(), code());
-                }
-                /*
-                eprintln!("cycle detected");
-                for (s, finished) in stmts.iter().zip(finished) {
-                    if finished {
-                        continue;
-                    }
-                    eprint!("{:?} -> ", s);
-                    let decl = s.try_downcast::<crate::ast::Decl>();
-                    eprintln!(
-                        "{:?}",
-                        decl.map(|d| d.ident.text.as_ref()).unwrap_or("{top level expr}"),
-                    );
-                }
-                */
-                /*
-                for s in not_finished {
-                    println!("{:#?}", s.get::<crate::ast::Decl>().init.unwrap().get::<crate::ast::Fn>());
-                }
-                */
-                panic!("cycle detected") // TODO: find location of cycle
-            }
-        }
-
-        (sema, order)
+pub fn analyze(
+    cctx: &mut CompilationContextInner,
+    top_level_scope: Ptr<ast::Block>,
+    debug_types: bool,
+) -> Vec<usize> {
+    let mut sema = Sema::new(cctx, debug_types);
+    let stmts = top_level_scope.stmts;
+    for s in stmts.iter().copied() {
+        sema.preload_top_level(s);
     }
 
-    fn new(#[allow(unused)] debug_types: bool) -> Sema {
+    let mut finished = vec![false; stmts.len()];
+    let mut remaining_count = stmts.len();
+    let mut order = Vec::with_capacity(stmts.len());
+    while finished.iter().any(std::ops::Not::not) {
+        let old_remaining_count = remaining_count;
+        debug_assert!(stmts.len() == finished.len());
+        remaining_count = 0;
+        for (idx, (s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
+            if *finished {
+                continue;
+            }
+            let res = sema.analyze_top_level(*s);
+            *finished = res != SemaResult::NotFinished;
+            match res {
+                SemaResult::Ok(_) => order.push(idx),
+                SemaResult::NotFinished => remaining_count += 1,
+                SemaResult::Err(_) => {},
+            }
+        }
+        // println!("finished statements: {:?}", finished);
+        if remaining_count == old_remaining_count {
+            eprintln!("cycle(s) detected:");
+            for (s, finished) in stmts.iter().zip(finished) {
+                if finished {
+                    continue;
+                }
+                display_span_in_code(s.full_span(), &cctx.code);
+            }
+            panic!("cycle detected") // TODO: find location of cycle
+        }
+    }
+
+    order
+}
+
+impl<'cctx> Sema<'cctx> {
+    fn new(
+        cctx: &'cctx mut CompilationContextInner,
+        #[allow(unused)] debug_types: bool,
+    ) -> Sema<'cctx> {
         Sema {
             symbols: ScopedStack::default(),
             function_stack: vec![],
             defer_stack: ScopedStack::default(),
-            errors: vec![],
+            cctx,
             #[cfg(debug_assertions)]
             debug_types,
         }
@@ -141,7 +131,7 @@ impl Sema {
             }
         };
         if let Err(e) = res {
-            self.errors.push(e);
+            self.cctx.error(&e);
         }
     }
 
@@ -150,7 +140,7 @@ impl Sema {
             Ok(_) => Ok(()),
             NotFinished => NotFinished,
             Err(e) => {
-                self.errors.push(e);
+                self.cctx.error(&e);
                 Err(())
             },
         }
@@ -170,7 +160,7 @@ impl Sema {
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(expr.full_span(), code(), label);
+            crate::util::display_span_in_code_with_label(expr.full_span(), &self.cctx.code, label);
         }
         #[cfg(debug_assertions)]
         if res.is_ok() {
@@ -252,7 +242,7 @@ impl Sema {
                             },
                             NotFinished => NotFinished?,
                             Err(err) => {
-                                self.errors.push(err);
+                                self.cctx.error(&err);
                                 s.as_mut().ty = Some(p.never);
                             },
                         }
@@ -982,7 +972,7 @@ impl Sema {
             } {
                 Ok(()) => {},
                 NotFinished => NotFinished?,
-                Err(err) => self.errors.push(err),
+                Err(err) => self.cctx.error(&err),
             }
         }
 
@@ -994,7 +984,7 @@ impl Sema {
             .filter(|f| f.init.is_none())
         {
             let field = missing_field.ident.text;
-            self.errors.push(err_val(MissingFieldInInitializer { field }, initializer_span))
+            self.cctx.error(&err_val(MissingFieldInInitializer { field }, initializer_span));
         }
         Ok(())
     }
@@ -1051,11 +1041,11 @@ impl Sema {
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(decl.ident.span, code(), label);
+            crate::util::display_span_in_code_with_label(decl.ident.span, &self.cctx.code, label);
         }
         let res = match res {
             Err(err) => {
-                self.errors.push(err);
+                self.cctx.error(&err);
                 decl.var_ty = Some(p.never);
                 decl.ty = Some(p.never);
                 decl.init = Some(p.never.upcast());
@@ -1125,7 +1115,7 @@ impl Sema {
 
     #[inline]
     fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<Ptr<ast::Decl>> {
-        match self.symbols.get(&name).or_else(|| ctx().global_scope.find_symbol(&name)) {
+        match self.symbols.get(&name).or_else(|| self.cctx.global_scope.find_symbol(&name)) {
             Some(sym) if sym.var_ty.is_some() => Ok(sym),
             Some(_) => NotFinished,
             None => err(UnknownIdent(name), err_span),
@@ -1159,7 +1149,7 @@ impl Sema {
 
     #[inline]
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> SemaResult<Ptr<T>> {
-        match ctx().alloc.alloc(val) {
+        match self.cctx.alloc.alloc(val) {
             Result::Ok(ok) => Ok(Ptr::from(ok)),
             Result::Err(e) => err(AllocErr(e), todo!()),
         }

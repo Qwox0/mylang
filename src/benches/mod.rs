@@ -94,14 +94,13 @@ macro_rules! bench_compilation {
     };
     (@body@ $b:expr; $code:expr; codegen_only) => {
         let code = $code.as_ref();
-        let _ctx = CompilationContext::new(Ptr::from_ref(code));
-        let alloc = Arena::new();
-        let parse_result = Parser::parse(code, &alloc);
-        assert!(parse_result.errors.is_empty());
-        let top_level_scope = parse_result.top_level_scope.unwrap();
+        let mut ctx = CompilationContext::new(Ptr::from_ref(code));
+        let top_level_scope = parser::parse(&mut ctx);
+        assert!(!ctx.do_abort_compilation());
+        let top_level_scope = top_level_scope.unwrap();
 
-        let (sema, order) = Sema::analyze2(top_level_scope, false);
-        assert!(sema.errors.is_empty());
+        let order = crate::sema::analyze(&mut ctx, top_level_scope, false);
+        assert!(!ctx.do_abort_compilation());
 
         $b.iter(|| {
             let context = Context::create();
