@@ -2,7 +2,6 @@ use crate::{
     ast::DeclList,
     context::primitives,
     parser::lexer::{Code, Span},
-    ptr::Ptr,
 };
 use core::fmt;
 use std::{
@@ -69,12 +68,14 @@ pub fn test_round_up_to_nearest_power_of_two() {
     assert_eq!(round_up_to_nearest_power_of_two(9), 16);
 }
 
-pub fn display_span_in_code(span: Span, code: &Code) {
-    display_span_in_code_with_label(span, code, "")
+pub fn display_span_in_code(span: Span) {
+    display_span_in_code_with_label(span, "")
 }
 
 /// TODO: span behind end of code and code ends in '\n'
-pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt::Display) {
+pub fn display_span_in_code_with_label(span: Span, label: impl fmt::Display) {
+    let file = span.file.expect("span has file");
+    let code = file.code.as_ref();
     let start_offset = code
         .get(..span.start)
         .unwrap_or("")
@@ -87,9 +88,8 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
     let line_num_padding = " ".repeat(line_num.len());
     let end_offset = code.get(span.end..).and_then(|l| l.lines().next().map(str::len)).unwrap_or(0);
     let line = code
-        .get(span.start - start_offset..span.end + end_offset)
-        .or_else(|| code.lines().last())
-        .unwrap_or("")
+        .get(span.start - start_offset..(span.end + end_offset).min(code.len()))
+        .unwrap()
         .lines()
         .intersperse("\\n")
         .collect::<String>();
@@ -99,9 +99,16 @@ pub fn display_span_in_code_with_label(span: Span, code: &Code, label: impl fmt:
         .unwrap_or(0);
     let marker_len = span.len().saturating_add(linebreaks_in_span);
     let offset = " ".repeat(start_offset);
-    eprintln!("{} |", line_num_padding);
-    eprintln!("{} | {}", line_num, line);
-    eprintln!("{} | {offset}{} {label}", line_num_padding, "^".repeat(marker_len));
+    eprintln!(
+        "{}--> {}:{}:{}", // ─┬─
+        line_num_padding,
+        file.path.as_ref().display(),
+        line_num,
+        start_offset + 1
+    );
+    eprintln!("{} │", line_num_padding);
+    eprintln!("{} │ {}", line_num, line);
+    eprintln!("{} │ {offset}{} {label}", line_num_padding, "^".repeat(marker_len));
 }
 
 pub fn debug_span_in_code(span: Span, code: &Code) {
@@ -113,12 +120,6 @@ pub fn debug_span_in_code(span: Span, code: &Code) {
         " ".repeat(span.start + line_num.saturating_sub(1)),
         "^".repeat(span.len() + linecount_in_span.saturating_sub(1))
     );
-}
-
-#[allow(unused)]
-pub struct SourceLoc {
-    file: Ptr<str>,
-    pos: FileLoc,
 }
 
 #[allow(unused)]
@@ -246,7 +247,11 @@ fn test_variant_count_to_tag_size_bits() {
 }
 
 pub fn transmute_unchecked<T, U>(val: &T) -> U {
-    unsafe { std::ptr::read(val as *const T as *const U) }
+    let ptr = val as *const T;
+    debug_assert!(ptr.is_aligned());
+    let ptr = ptr as *const U;
+    debug_assert!(ptr.is_aligned());
+    unsafe { std::ptr::read(ptr) }
 }
 
 pub fn any_as_bytes<T: Sized>(p: &T) -> &[u8; core::mem::size_of::<T>()] {
@@ -254,7 +259,7 @@ pub fn any_as_bytes<T: Sized>(p: &T) -> &[u8; core::mem::size_of::<T>()] {
     unsafe { (p as *const T as *const [u8; core::mem::size_of::<T>()]).as_ref_unchecked() }
 }
 
-pub fn write_file_to_string(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
+pub fn read_file_to_buf(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
     std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
     Ok(())
 }

@@ -1,8 +1,8 @@
 use crate::{
     context::CompilationContext,
+    diagnostic_reporter::DiagnosticSeverity,
     parser::{self, lexer::Span},
-    ptr::Ptr,
-    tests::{jit_run_test, jit_run_test_raw},
+    tests::{jit_run_test, jit_run_test_raw, test_file_mock},
 };
 
 #[test]
@@ -18,13 +18,40 @@ pub test :: (mut x := 1) { // TODO: test this (better error)
 }
 
 #[test]
-#[ignore = "unfinished test"]
 fn good_error_message2() {
-    let _msg = jit_run_test_raw::<()>(
-        "
-test :: -> { 1 ",
-    )
-    .err();
+    let code = "test :: -> A; A :: 1 ";
+    let res = jit_run_test_raw::<()>(code);
+    let err = res.one_err();
+    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
+    debug_assert_eq!(err.msg.as_ref(), "expected ';'");
+    debug_assert_eq!(err.span.range(), Span::pos(code.len() - 1, None).range());
+    drop(res);
+
+    let code = "test :: -> { 1 ";
+    let res = jit_run_test_raw::<()>(code);
+    let err = res.one_err();
+    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
+    debug_assert_eq!(err.msg.as_ref(), "expected '}'");
+    debug_assert_eq!(err.span.range(), Span::pos(code.len(), None).range());
+    drop(res);
+
+    let code = "
+test :: -> {
+    MyStruct :: struct { x: i64 };
+    MyStruct.{ x = 5 }
+";
+    let res = jit_run_test_raw::<()>(code);
+    let err = res.one_err();
+    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
+    debug_assert_eq!(err.msg.as_ref(), "expected '}'");
+    debug_assert_eq!(err.span.range(), Span::pos(code.len(), None).range());
+}
+
+/*
+#[test]
+fn good_error_message2_2() {
+    let msg = res.err();
+    println!("{:?}", msg );
     /*
     jit_run_test_raw("
 test :: -> {
@@ -36,6 +63,7 @@ test :: -> {
     todo!("better error message");
     panic!("OK")
 }
+*/
 
 #[test]
 fn return_struct_u2_i64_correctly() {
@@ -103,12 +131,13 @@ fn parse_weird_var_decl() {
 
 #[test]
 fn parse_err_missing_if_body() {
-    let mut ctx = CompilationContext::new(Ptr::from_ref("if a .A".as_ref()));
-    parser::parse(&mut ctx);
+    let ctx = CompilationContext::new();
+    let test_file = test_file_mock("if a .A".as_ref());
+    parser::parse(ctx.0, test_file, true);
     assert_eq!(ctx.diagnostic_reporter.diagnostics.len(), 1);
     let err = &ctx.diagnostic_reporter.diagnostics[0];
     assert!(err.msg.starts_with("NoInput"));
-    assert_eq!(err.span, Span::new(7, 8));
+    assert_eq!(err.span.range(), 7..8);
 }
 
 #[test]
@@ -156,18 +185,18 @@ fn good_error_message3() {
     let res = jit_run_test::<()>("A :: enum { B }; x := 1; A.B.(1);");
     let errors = res.err();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].span, Span::new(38, 41));
+    assert_eq!(errors[0].span.range(), 38..41);
 }
 
 #[test]
 fn good_error_message4() {
     let code = "A :: enum { B }; test :: -> A { .B.(1) };";
     let start = code.find(".B.(1)").unwrap();
-    let span = Span::new(start, start + 2);
+    let range = start..start + 2;
     let res = jit_run_test_raw::<()>(code);
     let errors = res.err();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].span, span);
+    assert_eq!(errors[0].span.range(), range);
 }
 
 #[test]
@@ -175,21 +204,12 @@ fn good_error_message4() {
 fn good_error_cannot_apply_initializer_to_type() {
     let code = "A :: enum { B }; test :: -> A.(1);";
     let start = code.find("A.(1)").unwrap();
-    let span = Span::new(start, start + 1);
+    let range = start..start + 1;
     let res = jit_run_test_raw::<()>(code);
     let errors = res.err();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].span, span);
+    assert_eq!(errors[0].span.range(), range);
     assert!(!errors[0].msg.contains("of type `type`"))
-}
-
-#[test]
-fn specialize_return_type() {
-    let code = "test :: -> {
-        if false return 1;
-        5.0
-    };";
-    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
 }
 
 #[test]
@@ -235,11 +255,17 @@ test :: -> {
 extern crate test;
 
 #[bench]
-fn bench(b: &mut test::Bencher) {
+fn bench_sema_error(b: &mut test::Bencher) {
     b.iter(|| {
         let res = jit_run_test::<()>(test::black_box("A :: enum { B }; x := 1; A.B.(1);"));
         let errors = res.err();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].span, Span::new(38, 41));
+        assert_eq!(errors[0].span.range(), 38..41);
     });
+}
+
+#[test]
+#[ignore = "not yet implemented"]
+fn todo_fix_pos_initializer_codegen() {
+    jit_run_test::<()>("if false { struct { ok: bool }.(true); };").ok();
 }

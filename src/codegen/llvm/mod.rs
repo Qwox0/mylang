@@ -3,7 +3,7 @@ use crate::{
         self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, OptionTypeExt, TypeEnum,
         UnaryOpKind, UpcastToAst,
     },
-    context::{code, primitives},
+    context::primitives,
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
@@ -186,6 +186,7 @@ impl<'ctx> Codegen<'ctx> {
         expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResult<Symbol<'ctx>> {
+        // println!("compile {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
         let out_ty = expr.ty.u();
 
         let p = primitives();
@@ -256,6 +257,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_positional_initializer_body(struct_ty, ptr, s_def.fields, args)?;
                     reg(ptr)
                 } else {
+                    todo!();
                     unreachable_debug()
                 }
             },
@@ -560,7 +562,7 @@ impl<'ctx> Codegen<'ctx> {
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
                         .map(reg_sym),
                     _ => {
-                        display_span_in_code(expr.full_span(), code());
+                        display_span_in_code(expr.full_span());
                         todo!("binop {op:?} for {}", arg_ty)},
                 }
             },
@@ -864,7 +866,7 @@ impl<'ctx> Codegen<'ctx> {
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
             },
-            AstEnum::Catch { .. } => todo!(),
+            // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { expr: inner, .. } => {
                 self.defer_stack.push(*inner);
                 debug_assert!(out_ty.matches_void());
@@ -901,6 +903,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
             },
+            AstEnum::ImportDirective { .. } => todo!(),
 
             AstEnum::IntVal { val, .. } => {
                 match expr.ty.matchable().as_ref() {
@@ -908,9 +911,8 @@ impl<'ctx> Codegen<'ctx> {
                         reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
                     },
                     TypeEnum::FloatTy { bits, .. } => {
-                        // `f64: TryFrom<i128>` doesn't exist
                         let float = *val as f64;
-                        if float as i128 != *val {
+                        if float as i64 != *val {
                             panic!("literal precision loss")
                         }
                         reg(self.float_type(*bits).const_float(float))
@@ -1391,7 +1393,7 @@ impl<'ctx> Codegen<'ctx> {
         }
         */
 
-        display_span_in_code(expr.full_span(), code());
+        display_span_in_code(expr.full_span());
 
         todo!("cast {} to {}", expr_ty, target_ty);
     }

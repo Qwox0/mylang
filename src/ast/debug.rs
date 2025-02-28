@@ -246,7 +246,7 @@ impl DebugAst for Ast {
                 lines.write(" ");
                 lines.write_tree(body);
             },
-            AstEnum::Catch { .. } => todo!(),
+            // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { expr, .. } => {
                 lines.write("defer ");
                 lines.write_tree(expr);
@@ -268,6 +268,10 @@ impl DebugAst for Ast {
                 }
             },
             AstEnum::Continue { .. } => lines.write("continue"),
+            AstEnum::ImportDirective { path, .. } => {
+                lines.write("#import ");
+                lines.write_tree(path);
+            },
 
             AstEnum::IntVal { val, .. } => lines.write(&val.to_string()),
             AstEnum::FloatVal { val, .. } => lines.write(&val.to_string()),

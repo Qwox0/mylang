@@ -62,7 +62,7 @@ impl<T: ?Sized> Ptr<T> {
     }
 
     #[inline]
-    pub const fn as_ref<'a>(&self) -> &'a T {
+    pub fn as_ref<'a>(&self) -> &'a T {
         unsafe { self.0.as_ref() }
     }
 
@@ -77,8 +77,12 @@ impl<T: ?Sized> Ptr<T> {
     }
 
     #[inline]
-    pub const fn cast<U>(self) -> Ptr<U> {
-        Ptr(self.0.cast::<U>())
+    pub fn cast<U>(self) -> Ptr<U>
+    where T: Sized {
+        debug_assert!(self.raw().is_aligned());
+        let p = Ptr(self.0.cast::<U>());
+        debug_assert!(p.raw().is_aligned());
+        p
     }
 
     /*
@@ -89,7 +93,7 @@ impl<T: ?Sized> Ptr<T> {
 
     pub fn from_ref(r: &T) -> Ptr<T> {
         let p = Ptr(NonNull::from_ref(r));
-        debug_assert!((p.raw() as *const () as usize) > 0x500);
+        debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr might be invalid");
         p
     }
 

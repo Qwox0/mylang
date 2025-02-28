@@ -2,14 +2,18 @@ use crate::{
     arena_allocator::Arena,
     ast::{self, ast_new},
     compiler::CompileDurations,
-    diagnostic_reporter::{self, DiagnosticReporter, DiagnosticSeverity},
-    error::SpannedError,
-    parser::lexer::{Code, Span},
+    diagnostic_reporter,
+    parser::lexer::Span,
     ptr::Ptr,
     sema::primitives::Primitives,
+    source_file::SourceFile,
     util::UnwrapDebug,
 };
-use std::ops::{Deref, DerefMut};
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
+};
 
 #[cfg(not(test))]
 pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticPrinter;
@@ -18,13 +22,21 @@ pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticCollector;
 
 pub struct CompilationContextInner {
     pub alloc: Arena,
-    pub code: Ptr<Code>,
     pub diagnostic_reporter: CtxDiagnosticReporter,
     pub compile_time: CompileDurations,
 
     pub primitives: Primitives,
     pub global_scope: Ptr<ast::Block>,
+
+    /// absolute import file path -> index into `files`
+    pub imports: HashMap<PathBuf, FilesIndex>,
+    pub files: Vec<SourceFile>,
+
+    #[cfg(debug_assertions)]
+    pub debug_types: bool,
 }
+
+pub type FilesIndex = usize;
 
 pub struct CompilationContext(pub Ptr<CompilationContextInner>);
 
@@ -53,7 +65,7 @@ impl Drop for CompilationContext {
 }
 
 impl CompilationContext {
-    pub fn new(code: Ptr<Code>) -> CompilationContext {
+    pub fn new() -> CompilationContext {
         let alloc = Arena::new();
 
         let mut stmts = Vec::new();
@@ -67,11 +79,17 @@ impl CompilationContext {
 
         let ctx = CompilationContextInner {
             alloc,
-            code,
             diagnostic_reporter: CtxDiagnosticReporter::default(),
             compile_time: CompileDurations::default(),
+
             primitives,
             global_scope,
+
+            imports: HashMap::new(),
+            files: Vec::new(),
+
+            #[cfg(debug_assertions)]
+            debug_types: false,
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {
@@ -83,17 +101,53 @@ impl CompilationContext {
     }
 }
 
+impl Ptr<CompilationContextInner> {
+    pub fn add_import(self, mut path: PathBuf) -> Result<FilesIndex, std::io::Error> {
+        if path == Path::new("prelude") {
+            // TODO: use `std::env::current_exe().unwrap().canonicalize()`
+            path = PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"));
+        }
+        let path = path.canonicalize()?;
+        if let Some(idx) = self.imports.get(&path) {
+            return Ok(*idx);
+        }
+        let file = SourceFile::read(Ptr::from_ref(path.as_path()), &self.alloc)?;
+        self.as_mut().files.push(file);
+        let idx = self.files.len() - 1;
+        self.as_mut().imports.insert(path, idx);
+        Ok(idx)
+    }
+
+    pub fn add_import_from_file(self, file: SourceFile) -> FilesIndex {
+        if let Some(idx) = self.imports.get(file.path.as_ref()) {
+            return *idx;
+        }
+        let path = file.path.to_path_buf();
+        self.as_mut().files.push(file);
+        let idx = self.files.len() - 1;
+        self.as_mut().imports.insert(path, idx);
+        idx
+    }
+}
+
 #[thread_local]
 static mut CTX: Option<CompilationContextInner> = None;
 
 macro_rules! impl_diagnostic_reporter_for_ctx {
     ($ty:ty) => {
-        impl DiagnosticReporter for $ty {
-            fn report(&mut self, severity: DiagnosticSeverity, err: &impl SpannedError) {
-                self.diagnostic_reporter.report(severity, err)
+        impl crate::diagnostic_reporter::DiagnosticReporter for $ty {
+            fn report<M>(
+                &mut self,
+                severity: crate::diagnostic_reporter::DiagnosticSeverity,
+                span: Span,
+                msg: &M,
+            ) where
+                M: std::fmt::Display + ?Sized,
+            {
+                self.diagnostic_reporter.report(severity, span, msg)
             }
 
-            fn max_past_severity(&self) -> Option<DiagnosticSeverity> {
+            fn max_past_severity(&self) -> Option<crate::diagnostic_reporter::DiagnosticSeverity> {
                 self.diagnostic_reporter.max_past_severity()
             }
         }
@@ -116,11 +170,6 @@ pub fn ctx_mut() -> &'static mut CompilationContextInner {
     unsafe {
         CTX.as_mut().unwrap()
     }
-}
-
-#[inline]
-pub fn code() -> &'static Code {
-    &ctx().code
 }
 
 #[inline]

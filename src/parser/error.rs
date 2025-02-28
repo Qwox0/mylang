@@ -20,7 +20,10 @@ pub enum ParseErrorKind {
     InvalidBCharLit,
     RangeInclusiveWithoutEnd,
     DuplicateDeclMarker(DeclMarkerKind),
+    UnknownDirective,
     AllocErr(bumpalo::AllocErr),
+
+    HandledErr,
 }
 
 pub struct ParseError {
@@ -37,6 +40,12 @@ pub fn err<T>(kind: ParseErrorKind, span: Span) -> ParseResult<T> {
 
 pub fn err_val(kind: ParseErrorKind, span: Span) -> ParseError {
     ParseError::new(kind, span)
+}
+
+impl From<()> for ParseError {
+    fn from(_: ()) -> Self {
+        err_val(ParseErrorKind::HandledErr, Span::ZERO)
+    }
 }
 
 impl std::fmt::Debug for ParseError {

@@ -47,24 +47,16 @@ macro_rules! check_and_set_target {
 }
 
 /// Semantic analyzer
-pub struct Sema<'cctx> {
+pub struct Sema {
     pub symbols: SymbolTable2,
     function_stack: Vec<Ptr<ast::Fn>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
 
-    cctx: &'cctx mut CompilationContextInner,
-
-    #[cfg(debug_assertions)]
-    debug_types: bool,
+    cctx: Ptr<CompilationContextInner>,
 }
 
-pub fn analyze(
-    cctx: &mut CompilationContextInner,
-    top_level_scope: Ptr<ast::Block>,
-    debug_types: bool,
-) -> Vec<usize> {
-    let mut sema = Sema::new(cctx, debug_types);
-    let stmts = top_level_scope.stmts;
+pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<usize> {
+    let mut sema = Sema::new(cctx);
     for s in stmts.iter().copied() {
         sema.preload_top_level(s);
     }
@@ -95,7 +87,7 @@ pub fn analyze(
                 if finished {
                     continue;
                 }
-                display_span_in_code(s.full_span(), &cctx.code);
+                display_span_in_code(s.full_span());
             }
             panic!("cycle detected") // TODO: find location of cycle
         }
@@ -104,18 +96,13 @@ pub fn analyze(
     order
 }
 
-impl<'cctx> Sema<'cctx> {
-    fn new(
-        cctx: &'cctx mut CompilationContextInner,
-        #[allow(unused)] debug_types: bool,
-    ) -> Sema<'cctx> {
+impl Sema {
+    pub fn new(cctx: Ptr<CompilationContextInner>) -> Sema {
         Sema {
             symbols: ScopedStack::default(),
             function_stack: vec![],
             defer_stack: ScopedStack::default(),
             cctx,
-            #[cfg(debug_assertions)]
-            debug_types,
         }
     }
 
@@ -131,7 +118,7 @@ impl<'cctx> Sema<'cctx> {
             }
         };
         if let Err(e) = res {
-            self.cctx.error(&e);
+            self.cctx.error2(&e);
         }
     }
 
@@ -140,7 +127,7 @@ impl<'cctx> Sema<'cctx> {
             Ok(_) => Ok(()),
             NotFinished => NotFinished,
             Err(e) => {
-                self.cctx.error(&e);
+                self.cctx.error2(&e);
                 Err(())
             },
         }
@@ -154,13 +141,13 @@ impl<'cctx> Sema<'cctx> {
     ) -> SemaResult<()> {
         let res = self._analyze_inner(expr, ty_hint, is_const);
         #[cfg(debug_assertions)]
-        if self.debug_types {
+        if self.cctx.debug_types {
             let label = match &res {
                 Ok(()) => format!("type: {}", expr.ty.u()),
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(expr.full_span(), &self.cctx.code, label);
+            crate::util::display_span_in_code_with_label(expr.full_span(), label);
         }
         #[cfg(debug_assertions)]
         if res.is_ok() {
@@ -174,10 +161,10 @@ impl<'cctx> Sema<'cctx> {
     fn _analyze_inner(
         &mut self,
         mut expr: Ptr<Ast>,
-        ty_hint: &OPtr<ast::Type>, // reference to handle changing pointers
+        ty_hint: &OPtr<ast::Type>, // reference to handle changing pointers (see crate::tests::function::specialize_return_type)
         is_const: bool,
     ) -> SemaResult<()> {
-        // println!("analyze {:x?}: {:?} {}", expr, expr.kind, expr.to_text());
+        // println!("analyze {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
         let span = expr.span;
 
         if expr.replacement.is_some() {
@@ -211,7 +198,7 @@ impl<'cctx> Sema<'cctx> {
                 {
                     i.span = expr.span;
                     i.ty = Some(p.type_ty);
-                    debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntVal>());
+                    debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntTy>());
                     *expr.cast::<ast::IntTy>().as_mut() = i;
                 } else {
                     let sym = sym?;
@@ -242,7 +229,7 @@ impl<'cctx> Sema<'cctx> {
                             },
                             NotFinished => NotFinished?,
                             Err(err) => {
-                                self.cctx.error(&err);
+                                self.cctx.error2(&err);
                                 s.as_mut().ty = Some(p.never);
                             },
                         }
@@ -359,7 +346,7 @@ impl<'cctx> Sema<'cctx> {
 
                 if lhs.is_none() {
                     debug_assert!(expr.ty.is_none());
-                    let len = elements.len() as i128;
+                    let len = elements.len() as i64;
                     let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
                     let elem_ty = elem_ty.upcast();
                     let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?;
@@ -728,7 +715,7 @@ impl<'cctx> Sema<'cctx> {
                 self.close_scope()?;
                 expr.ty = Some(p.void_ty);
             },
-            AstEnum::Catch { .. } => todo!(),
+            // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { expr: inner, .. } => {
                 self.analyze(*inner, &None, false)?;
                 self.defer_stack.push(*inner);
@@ -762,6 +749,9 @@ impl<'cctx> Sema<'cctx> {
             AstEnum::Continue { .. } => {
                 // check if in loop
                 expr.ty = Some(p.never)
+            },
+            AstEnum::ImportDirective { files_idx, .. } => {
+                todo!("import {:?}", self.cctx.files[*files_idx].path.as_ref());
             },
 
             AstEnum::IntVal { .. } => {
@@ -972,7 +962,7 @@ impl<'cctx> Sema<'cctx> {
             } {
                 Ok(()) => {},
                 NotFinished => NotFinished?,
-                Err(err) => self.cctx.error(&err),
+                Err(err) => self.cctx.error2(&err),
             }
         }
 
@@ -984,7 +974,8 @@ impl<'cctx> Sema<'cctx> {
             .filter(|f| f.init.is_none())
         {
             let field = missing_field.ident.text;
-            self.cctx.error(&err_val(MissingFieldInInitializer { field }, initializer_span));
+            self.cctx
+                .error2(&err_val(MissingFieldInInitializer { field }, initializer_span));
         }
         Ok(())
     }
@@ -1035,17 +1026,17 @@ impl<'cctx> Sema<'cctx> {
             self.var_decl_to_value(decl)?
         };
         #[cfg(debug_assertions)]
-        if self.debug_types {
+        if self.cctx.debug_types {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(decl.ident.span, &self.cctx.code, label);
+            crate::util::display_span_in_code_with_label(decl.ident.span, label);
         }
         let res = match res {
             Err(err) => {
-                self.cctx.error(&err);
+                self.cctx.error2(&err);
                 decl.var_ty = Some(p.never);
                 decl.ty = Some(p.never);
                 decl.init = Some(p.never.upcast());

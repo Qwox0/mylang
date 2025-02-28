@@ -4,23 +4,24 @@
 //! [`Type::Unset`] or [`Type::Unevaluated`]
 
 use crate::{
-    arena_allocator::Arena,
     ast::{
         self, Ast, BinOpKind, Decl, DeclList, DeclMarkerKind, DeclMarkers, Ident, UnaryOpKind,
         UpcastToAst, ast_new,
     },
-    context::{CompilationContextInner, CtxDiagnosticReporter},
-    diagnostic_reporter::DiagnosticReporter,
+    context::CompilationContextInner,
+    diagnostic_reporter::{DiagnosticReporter, cerror},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
-    util::then,
+    source_file::SourceFile,
+    util::{UnwrapDebug, then},
 };
 use core::str;
 use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
+use std::path::PathBuf;
 
 pub mod error;
 pub mod lexer;
@@ -39,34 +40,51 @@ impl Ptr<Ast> {
     }
 }
 
-pub fn parse(cctx: &mut CompilationContextInner) -> OPtr<ast::Block> {
-    let mut parser = Parser::new(cctx);
-    parser.ws0();
-    parser.top_level_scope()
+pub fn parse(
+    cctx: Ptr<CompilationContextInner>,
+    root_file: SourceFile,
+    no_prelude: bool,
+) -> Vec<Ptr<Ast>> {
+    let mut stmts = Vec::new();
+    if !no_prelude {
+        cctx.add_import(PathBuf::from("prelude")).unwrap();
+    }
+    cctx.add_import_from_file(root_file);
+
+    // Note: this idx-based loop is needed because `ctx.semas` might get mutated while the loop is
+    // running.
+    let mut idx = 0;
+    while let Some(file) = cctx.as_mut().files.get_mut(idx) {
+        parse_file_into(file, cctx, &mut stmts);
+
+        idx += 1;
+    }
+    stmts
 }
 
-pub struct Parser<'cctx> {
-    lex: Lexer<'cctx>,
-    // scope: OPtr<ast::Block>,
-    dr: &'cctx mut CtxDiagnosticReporter,
-    alloc: &'cctx Arena,
+pub fn parse_file_into(
+    file: &mut SourceFile,
+    cctx: Ptr<CompilationContextInner>,
+    stmts: &mut Vec<Ptr<Ast>>,
+) {
+    let start_idx = stmts.len();
+    let mut p = Parser { lex: Lexer::new(Ptr::from_ref(file)), cctx };
+    p.ws0().parse_stmts_into(stmts, false);
+    while let Some(t) = p.lex.next() {
+        debug_assert_eq!(t.kind, TokenKind::CloseBrace);
+        cerror!(t.span, "unexpected token");
+        p.ws0().parse_stmts_into(stmts, false);
+    }
+    debug_assert!(p.lex.is_empty());
+    file.stmts = Some(Ptr::from(&stmts[start_idx..]));
 }
 
-impl<'cctx> Parser<'cctx> {
-    fn new(cctx: &'cctx mut CompilationContextInner) -> Parser<'cctx> {
-        Self { lex: Lexer::new(&cctx.code), dr: &mut cctx.diagnostic_reporter, alloc: &cctx.alloc }
-    }
+pub struct Parser {
+    lex: Lexer,
+    cctx: Ptr<CompilationContextInner>,
+}
 
-    fn top_level_scope(&mut self) -> OPtr<ast::Block> {
-        match self.block_inner() {
-            Ok(block) => Some(block),
-            Err(e) => {
-                self.dr.error(&e);
-                None
-            },
-        }
-    }
-
+impl Parser {
     fn expr(&mut self) -> ParseResult<Ptr<Ast>> {
         self.expr_(MIN_PRECEDENCE)
     }
@@ -175,7 +193,7 @@ impl<'cctx> Parser<'cctx> {
                     },
                     TokenKind::Ident => {
                         let text = self.get_text_from_span(t.span);
-                        let func = self.alloc(ast::Ident::new(text, t.span))?.upcast();
+                        let func = expr!(Ident { text }, t.span);
                         self.tok(TokenKind::OpenParenthesis).context("pipe call: expect '('")?;
                         let args = self.scratch_pool_with_first_val(lhs)?;
                         self.call(func, args, Some(0))?.upcast()
@@ -235,8 +253,7 @@ impl<'cctx> Parser<'cctx> {
 
         Ok(match kind {
             TokenKind::Ident => {
-                let i = Ident::new(self.advanced().get_text_from_span(span), span);
-                self.alloc(i)?.upcast()
+                expr!(Ident { text: self.advanced().get_text_from_span(span) })
             },
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub) => {
                 self.var_decl()?.upcast()
@@ -248,7 +265,7 @@ impl<'cctx> Parser<'cctx> {
                 expr!(StructDef { fields }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Union) => {
-                self.advanced().ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
+                self.advanced().ws0().tok(TokenKind::OpenBrace).context("union '{'")?;
                 let fields = self.ws0().var_decl_list(TokenKind::Comma)?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
                 expr!(UnionDef { fields }, span.join(close_b.span))
@@ -390,7 +407,7 @@ impl<'cctx> Parser<'cctx> {
                     return err(InvalidCharLit, span);
                 }
                 //expr!(BCharLit { val: byte })
-                expr!(IntVal { val: byte as i128 })
+                expr!(IntVal { val: byte as i64 })
             },
             TokenKind::StrLit => {
                 let lit = self.advanced().get_text_from_span(span);
@@ -468,7 +485,7 @@ impl<'cctx> Parser<'cctx> {
                     None => expr!(SliceTy { elem_ty, is_mut }, span),
                 }
             },
-            TokenKind::OpenBrace => self.advanced().block(span).context("block")?.upcast(),
+            TokenKind::OpenBrace => self.block()?.upcast(),
             TokenKind::Bang => {
                 let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
                 expr!(UnaryOp { op: UnaryOpKind::Not, expr, is_postfix: false }, span)
@@ -572,7 +589,22 @@ impl<'cctx> Parser<'cctx> {
                 let inner_ty = self.advanced().expr_(PREOP_PRECEDENCE).expect("type after ?");
                 expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
-            TokenKind::Pound => todo!("TokenKind::Pound"),
+            TokenKind::Pound => {
+                let directive_name = self.advanced().ident()?;
+                if &*directive_name.text == "import" {
+                    let Some(path) = self.ws0().expr()?.try_downcast::<ast::StrVal>() else {
+                        panic!("todo")
+                    };
+
+                    let idx =
+                        self.cctx.add_import(PathBuf::from(path.text.as_ref())).map_err(|e| {
+                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref())
+                        })?;
+                    expr!(ImportDirective { path, files_idx: idx })
+                } else {
+                    return err(UnknownDirective, directive_name.span);
+                }
+            },
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
@@ -614,10 +646,12 @@ impl<'cctx> Parser<'cctx> {
     /// parsing starts after the '->'
     fn function_tail(&mut self, params: DeclList, start_span: Span) -> ParseResult<Ptr<ast::Fn>> {
         let expr = self.expr().context("fn return type or body")?;
-        let (ret_ty_expr, body) = match self.lex.next_if_kind(TokenKind::OpenBrace) {
-            Some(brace) => (Some(expr), self.block(brace.span).context("fn body")?.upcast()),
-            None => (None, expr),
-        };
+        let (ret_ty_expr, body) =
+            if self.ws0().lex.peek().is_some_and(|t| t.kind == TokenKind::OpenBrace) {
+                (Some(expr), self.block()?.upcast())
+            } else {
+                (None, expr)
+            };
         self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body: Some(body) }, start_span))
     }
 
@@ -675,55 +709,78 @@ impl<'cctx> Parser<'cctx> {
         self.alloc(expr_!(Call { func, args, pipe_idx }, closing_paren_span))
     }
 
-    /// parses block context and '}', doesn't parse the '{'
-    fn block(&mut self, open_brace_span: Span) -> ParseResult<Ptr<ast::Block>> {
-        let mut res = self.block_inner();
-        match res.as_mut() {
-            Ok(block) => {
-                let closing_brace =
-                    self.tok(TokenKind::CloseBrace).context("expected ';' or '}'")?;
-                block.span = open_brace_span.join(closing_brace.span);
-            },
-            Err(_) => {
-                // skip the remaining block
-                let mut depth: usize = 0;
-                self.lex.advance_while(|t| {
-                    match t.kind {
-                        TokenKind::OpenBrace => depth += 1,
-                        TokenKind::CloseBrace if depth == 0 => return false,
-                        TokenKind::CloseBrace => depth -= 1,
-                        _ => {},
-                    };
-                    true
-                });
-                self.lex.advance();
-            },
-        }
-        res
+    /// expects next token to be '{' and parses until and including the '}'
+    fn block(&mut self) -> ParseResult<Ptr<ast::Block>> {
+        let open_b = self.lex.next().u();
+        debug_assert_eq!(open_b.kind, TokenKind::OpenBrace);
+
+        let mut stmts = Vec::new();
+        let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true);
+
+        let Some(close_b) = self.lex.next() else {
+            cerror!(self.lex.pos_span(), "expected '}'");
+            return Err(().into());
+        };
+        debug_assert_eq!(close_b.kind, TokenKind::CloseBrace);
+
+        let span = open_b.span.join(close_b.span);
+        let stmts = self.alloc_slice(&stmts)?;
+        Ok(self.alloc(ast_new!(Block { span, has_trailing_semicolon, stmts }))?)
     }
 
+    /// Parses the insides of a [`Parser::block`]: Expressions and statements seperated by ';'.
+    ///
+    /// If this returns [`Ok`] next token is [`None`] or a [`TokenKind::CloseBrace`].
+    ///
+    /// This handles errors.
     #[inline]
-    fn block_inner(&mut self) -> ParseResult<Ptr<ast::Block>> {
-        let mut list_pool = ScratchPool::new();
-        //let mut list_pool = Vec::new(); // TODO: compare
+    fn parse_stmts_into(
+        &mut self,
+        stmts: &mut Vec<Ptr<Ast>>,
+        in_block: bool,
+    ) -> HasTrailingSemicolon {
         let mut has_trailing_semicolon = false;
         self.ws0();
         loop {
+            self.lex
+                .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
             if self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
                 break;
             }
-            let expr = self.expr().context("expr in block")?;
-            list_pool.push(expr).map_err(|e| self.wrap_alloc_err(e))?;
-            // list_pool.push(expr);
+            let expr = match self.expr() {
+                Ok(expr) => expr,
+                Err(e) => {
+                    if e.kind != ParseErrorKind::HandledErr {
+                        self.cctx.error2(&e);
+                    }
+                    // skip the remaining block or statement
+                    let mut depth: usize = 0;
+                    self.lex.advance_while(|t| {
+                        match t.kind {
+                            TokenKind::OpenBrace => depth += 1,
+                            TokenKind::CloseBrace | TokenKind::Semicolon if depth == 0 => {
+                                return false;
+                            },
+                            TokenKind::CloseBrace => depth -= 1,
+                            _ => {},
+                        };
+                        true
+                    });
+                    continue;
+                },
+            };
+            stmts.push(expr);
             has_trailing_semicolon = self.ws0().lex.advance_if_kind(TokenKind::Semicolon);
-            if !has_trailing_semicolon && expr.block_expects_trailing_semicolon() {
-                break;
+            let peek = self.lex.peek();
+            if !has_trailing_semicolon
+                && (peek.is_some_and(|t| t.kind != TokenKind::CloseBrace)
+                    || (!in_block && peek.is_none()))
+                && expr.block_expects_trailing_semicolon()
+            {
+                cerror!(expr.full_span().after(), "expected ';'");
             }
-            self.lex
-                .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
         }
-        let stmts = self.clone_slice_from_scratch_pool(list_pool)?;
-        Ok(self.alloc(ast_new!(Block { span: Span::ZERO, has_trailing_semicolon, stmts }))?)
+        has_trailing_semicolon
     }
 
     /// Also returns a `has_trailing_sep` [`bool`].
@@ -892,12 +949,15 @@ impl<'cctx> Parser<'cctx> {
 
     #[inline]
     fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
-        self.alloc.alloc(val).map_err(|e| err_val(AllocErr(e), self.lex.pos_span()))
+        self.cctx
+            .alloc
+            .alloc(val)
+            .map_err(|e| err_val(AllocErr(e), self.lex.pos_span()))
     }
 
     #[inline]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
-        self.alloc.alloc_slice(slice).map_err(|err| self.wrap_alloc_err(err))
+        self.cctx.alloc.alloc_slice(slice).map_err(|err| self.wrap_alloc_err(err))
     }
 
     fn scratch_pool_with_first_val<'bump, T>(
@@ -914,7 +974,7 @@ impl<'cctx> Parser<'cctx> {
         scratch_pool: ScratchPool<T>,
     ) -> ParseResult<Ptr<[T]>> {
         scratch_pool
-            .clone_to_slice_into_arena(&self.alloc)
+            .clone_to_slice_into_arena(&self.cctx.alloc)
             .map_err(|e| self.wrap_alloc_err(e))
     }
 
@@ -1115,3 +1175,5 @@ impl BinOpKind {
         }
     }
 }
+
+type HasTrailingSemicolon = bool;

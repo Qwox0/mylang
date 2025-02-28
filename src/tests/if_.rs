@@ -1,4 +1,4 @@
-use super::jit_run_test;
+use super::{jit_run_test, jit_run_test_raw};
 
 #[test]
 fn if_variants() {
@@ -28,4 +28,13 @@ fn if_expr() {
             assert!(out == expected, "```{code}\n``` -> expected: {expected}; got: {out}");
         }
     }
+}
+
+#[test]
+#[ignore = "not yet implemented"]
+fn todo_fix_parser() {
+    assert_eq!(*jit_run_test_raw::<i32>("test :: -> i32 { if true 10 else 20 }").ok(), 10);
+
+    let code = "test :: -> struct { ok: bool } { if true .(true) else .(false) }";
+    assert_eq!(*jit_run_test_raw::<bool>(code).ok(), true);
 }

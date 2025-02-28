@@ -1,17 +1,19 @@
 use clap::Parser;
 use mylang::{
     cli::{Cli, Command},
-    compiler::{CompileMode, compile2},
+    compiler::{CompileMode, compile},
+    context::CompilationContext,
 };
 
 fn main() -> ! {
     let cli = Cli::parse();
-    let exit_code = match &cli.command {
+    let ctx = CompilationContext::new();
+    let res = match &cli.command {
         Command::Repl {} => todo!("repl"),
         Command::Clean(_) => todo!("clean"),
-        Command::Build(args) => compile2(CompileMode::Build, args),
-        Command::Run(args) => compile2(CompileMode::Run, args),
-        Command::Check(args) => compile2(CompileMode::Check, args),
+        Command::Build(args) => compile(ctx.0, CompileMode::Build, args),
+        Command::Run(args) => compile(ctx.0, CompileMode::Run, args),
+        Command::Check(args) => compile(ctx.0, CompileMode::Check, args),
     };
-    std::process::exit(exit_code)
+    std::process::exit(res.exit_code())
 }

@@ -1,6 +1,10 @@
 use super::ParseErrorKind;
-use crate::parser::parser_helper::ParserInterface;
-use core::{fmt, range::Range};
+use crate::{
+    parser::parser_helper::ParserInterface,
+    ptr::{OPtr, Ptr},
+    source_file::SourceFile,
+};
+use core::{fmt, ops::Range};
 use std::{
     assert_matches::debug_assert_matches,
     mem,
@@ -222,10 +226,6 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn new(kind: TokenKind, span: Range<usize>) -> Self {
-        Self { kind, span: Span::from(span) }
-    }
-
     /*
     fn span(&self, code: &Code) -> Span {
         let mut lexer = Lexer::new(code.offset(self.span_start));
@@ -293,11 +293,13 @@ keywords! {
 }
 
 /// byte range offset for a [`Code`].
-/// TODO: see [`core::range::Range<usize>`]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+
+    /// Every Span containing this pointer seems overkill, but it has to be fine for now.
+    pub file: OPtr<SourceFile>,
 }
 
 impl fmt::Debug for Span {
@@ -307,22 +309,19 @@ impl fmt::Debug for Span {
 }
 
 impl Span {
-    pub const ZERO: Span = Span::new(0, 0);
+    pub const ZERO: Span = Span::new(0..0, None);
 
-    pub const fn new(start: usize, end: usize) -> Span {
-        Span { start, end }
+    pub const fn new(range: Range<usize>, file: OPtr<SourceFile>) -> Span {
+        let Range { start, end } = range;
+        Span { start, end, file }
     }
 
-    pub fn pos(pos: usize) -> Span {
-        Self::new(pos, pos + 1)
+    pub fn pos(pos: usize, file: OPtr<SourceFile>) -> Span {
+        Self::new(pos..pos + 1, file)
     }
 
     pub fn end(&self) -> Span {
-        Span::pos(self.end - 1)
-    }
-
-    pub fn zero_width(pos: usize) -> Span {
-        Span::new(pos, pos)
+        Span::pos(self.end - 1, self.file)
     }
 
     pub fn len(&self) -> usize {
@@ -341,7 +340,8 @@ impl Span {
     /// ```
     /// this function is commutative
     pub fn join(self, other: Span) -> Span {
-        Span::new(self.start.min(other.start), self.end.max(other.end))
+        debug_assert_eq!(self.file, other.file);
+        Span::new(self.start.min(other.start)..self.end.max(other.end), self.file)
     }
 
     pub fn multi_join(spans: impl IntoIterator<Item = Span>) -> Option<Span> {
@@ -352,20 +352,21 @@ impl Span {
     }
 
     pub fn start_pos(self) -> Span {
-        Span::pos(self.start)
+        Span::pos(self.start, self.file)
     }
-}
 
-impl From<Range<usize>> for Span {
-    fn from(bytes: Range<usize>) -> Self {
-        let Range { start, end } = bytes;
-        Span::new(start, end)
+    pub fn after(self) -> Span {
+        Span::pos(self.end, self.file)
+    }
+
+    pub fn range(&self) -> Range<usize> {
+        (self.start..self.end).into()
     }
 }
 
 impl From<Span> for Range<usize> {
     fn from(span: Span) -> Self {
-        (span.start..span.end).into()
+        span.range()
     }
 }
 
@@ -460,29 +461,31 @@ pub fn is_id_continue(c: char) -> bool {
 
 #[derive(Debug, Clone, Copy)]
 //#[derive(Debug, Clone)]
-pub struct Lexer<'c> {
-    pub code: Cursor<'c>,
+pub struct Lexer {
+    pub code: Cursor,
     next_tok: Option<Token>,
+
+    file: Ptr<SourceFile>,
 }
 
-impl<'c> Lexer<'c> {
-    pub fn new(code: &'c Code) -> Lexer<'c> {
-        let code = Cursor::new(code);
-        let mut lex = Self { code, next_tok: None };
+impl Lexer {
+    pub fn new(file: Ptr<SourceFile>) -> Lexer {
+        let code = Cursor::new(file.code);
+        let mut lex = Self { code, file, next_tok: None };
         let first_tok = lex.load_next();
         lex.next_tok = first_tok;
         lex
     }
 
     #[inline]
-    pub fn get_code(&self) -> &'c Code {
-        self.code.code
+    pub fn get_code(&self) -> &Code {
+        &self.code.code
     }
 
     pub fn pos_span(&self) -> Span {
         self.next_tok
             .map(|t| t.span)
-            .unwrap_or_else(|| Span::pos(self.get_code().len()))
+            .unwrap_or_else(|| Span::pos(self.get_code().len(), Some(self.file)))
     }
 
     /*
@@ -642,7 +645,7 @@ impl<'c> Lexer<'c> {
 
             _ => TokenKind::Unknown,
         };
-        Some(Token::new(kind, (start..self.code.pos).into()))
+        Some(Token { kind, span: Span::new(start..self.code.pos, Some(self.file)) })
     }
 
     fn string_literal(&mut self) -> TokenKind {
@@ -766,7 +769,7 @@ impl<'c> Lexer<'c> {
     }
 }
 
-impl<'c> ParserInterface for Lexer<'c> {
+impl ParserInterface for Lexer {
     type Item = Token;
     type PeekedItem = Token;
 
@@ -781,28 +784,18 @@ impl<'c> ParserInterface for Lexer<'c> {
     }
 }
 
-/*
-impl<'c> Iterator for Lexer<'c> {
-    type Item = Token;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next()
-    }
-}
-*/
-
 #[derive(Debug, Clone, Copy)]
-pub struct Cursor<'c> {
-    code: &'c Code,
+pub struct Cursor {
+    code: Ptr<Code>,
     pos: usize,
 }
 
-impl<'c> Cursor<'c> {
-    pub fn new(code: &'c Code) -> Cursor<'c> {
+impl Cursor {
+    pub fn new(code: Ptr<Code>) -> Cursor {
         Cursor { code, pos: 0 }
     }
 
-    pub fn get_rem(self) -> &'c str {
+    pub fn get_rem(&self) -> &str {
         &self.code.0[self.pos..]
     }
 
@@ -834,7 +827,7 @@ impl<'c> Cursor<'c> {
     }
 }
 
-impl<'c> ParserInterface for Cursor<'c> {
+impl ParserInterface for Cursor {
     type Item = char;
     type PeekedItem = char;
 

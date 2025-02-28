@@ -7,7 +7,12 @@
 
 extern crate test;
 
-use crate::{cli::BuildArgs, compiler::compile};
+use crate::{
+    cli::BuildArgs,
+    compiler::{CompileMode, compile_file},
+    context::CompilationContext,
+    tests::test_file_mock,
+};
 use std::path::PathBuf;
 use test::*;
 
@@ -50,18 +55,19 @@ pub defer_test :: -> {
     {
         defer out *= 10;
         out += 1;
-    }; // TODO: no `;` here
+    }
     t1 := out == 20;
     out = 1;
     {
         defer out += 1;
         defer out *= 10;
-    };
+    }
     t2 := out == 11;
     return t1 && t2;
 };";
         let code = code.as_ref();
-        compile(code, crate::compiler::CompileMode::Check, &BuildArgs::bench_args());
+        let ctx = CompilationContext::new();
+        compile_file(ctx.0, test_file_mock(code), CompileMode::Check, &BuildArgs::bench_args());
     })
 }
 
@@ -94,31 +100,32 @@ macro_rules! bench_compilation {
     };
     (@body@ $b:expr; $code:expr; codegen_only) => {
         let code = $code.as_ref();
-        let mut ctx = CompilationContext::new(Ptr::from_ref(code));
-        let top_level_scope = parser::parse(&mut ctx);
+        let ctx = CompilationContext::new();
+        let test_file = $crate::tests::test_file_mock(code);
+        let stmts = $crate::parser::parse(ctx.0, test_file, true);
         assert!(!ctx.do_abort_compilation());
-        let top_level_scope = top_level_scope.unwrap();
 
-        let order = crate::sema::analyze(&mut ctx, top_level_scope, false);
+        let order = $crate::sema::analyze(ctx.0, &stmts);
         assert!(!ctx.do_abort_compilation());
 
         $b.iter(|| {
             let context = Context::create();
             let mut codegen = llvm::Codegen::new(&context, "dev");
-            codegen.compile_all(&top_level_scope.stmts, &order);
+            codegen.compile_all(&stmts, &order);
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {
         let code = $code.as_ref();
+        let test_file = $crate::tests::test_file_mock(code);
         $b.iter(|| {
-            black_box(compile(black_box(code), $mode, &crate::cli::BuildArgs {
+            let ctx = CompilationContext::new();
+            black_box($crate::compiler::compile_file(ctx.0, black_box(test_file), $mode, &crate::cli::BuildArgs {
                 path: PathBuf::new(),
                 optimization_level: 0,
                 target_triple: None,
                 out: crate::cli::OutKind::None,
                 no_prelude: true,
                 print_compile_time: false,
-                debug_tokens: false,
                 debug_ast: false,
                 debug_types: false,
                 debug_typed_ast: false,

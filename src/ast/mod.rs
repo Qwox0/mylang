@@ -1,6 +1,6 @@
 use crate::{
     codegen::llvm::finalize_ty,
-    context::primitives,
+    context::{FilesIndex, primitives},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     type_::{RangeKind, ty_match},
@@ -536,11 +536,13 @@ ast_variants! {
         body: Ptr<Ast>,
     },
 
+    /*
     /// `lhs catch ...`
     Catch {
         lhs: Ptr<Ast>,
         // TODO
     },
+    */
 
     Defer { expr: Ptr<Ast> },
 
@@ -555,14 +557,19 @@ ast_variants! {
     },
     Continue {},
 
+    ImportDirective {
+        path: Ptr<StrVal>,
+        files_idx: FilesIndex,
+    },
+
     ===== Constant Values =====
 
-    IntVal { val: i128 },
+    IntVal { val: i64 },
     FloatVal { val: f64 },
     BoolVal { val: bool },
     CharVal { val: char },
     // BCharLit { val: u8 },
-    StrVal { text: Ptr<str>},
+    StrVal { text: Ptr<str> },
     PtrVal { val: u64 },
 
 
@@ -756,7 +763,7 @@ impl Ptr<Ast> {
         Ptr::from_ref(p).cast::<Ptr<Type>>().as_mut()
     }
 
-    pub fn int<Int: TryFrom<i128>>(self) -> Int
+    pub fn int<Int: TryFrom<i64>>(self) -> Int
     where Int::Error: fmt::Debug {
         let int = self.downcast::<IntVal>().val;
         debug_assert!(Int::try_from(int).is_ok());
@@ -888,11 +895,12 @@ impl Ast {
             | AstEnum::While { condition: l, body, was_piped, .. } => {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
-            AstEnum::Catch { .. } => todo!(),
+            // AstEnum::Catch { .. } => todo!(),
             AstEnum::Return { expr, .. } => match expr {
                 Some(expr) => span.join(expr.full_span()),
                 None => span,
             },
+            AstEnum::ImportDirective { path, .. } => span.join(path.span),
             AstEnum::Fn { body, ret_ty_expr, .. } => {
                 span.join(body.or(*ret_ty_expr).u().full_span())
             },
@@ -1005,14 +1013,6 @@ impl AstEnum {
 }
 
 impl AstKind {
-    #[inline]
-    pub fn can_be_overwritten_with_const_val(self) -> bool {
-        match self {
-            AstKind::Fn => false,
-            _ => true,
-        }
-    }
-
     #[inline]
     pub fn is_struct_kind(self) -> bool {
         matches!(self, AstKind::StructDef | AstKind::SliceTy)

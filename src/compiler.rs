@@ -2,18 +2,15 @@ use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
-    context::CompilationContext,
+    context::CompilationContextInner,
     diagnostic_reporter::DiagnosticReporter,
-    parser::{
-        self,
-        lexer::{Code, Lexer},
-        parser_helper::ParserInterface,
-    },
+    parser::{self},
     ptr::Ptr,
-    sema,
-    util::{self, UnwrapDebug},
+    sema::{self},
+    source_file::SourceFile,
+    util::{UnwrapDebug, unreachable_debug},
 };
-use inkwell::{context::Context, targets::TargetMachine};
+use inkwell::context::Context;
 use std::{
     assert_matches::debug_assert_matches,
     mem::ManuallyDrop,
@@ -36,20 +33,23 @@ pub enum CompileMode {
     Build,
     Run,
 
+    // for tests:
+    TestRun,
+
     // for benchmarks:
     Parse,
     Codegen,
 }
 
-pub fn compile2(mode: CompileMode, args: &BuildArgs) -> i32 {
-    let mut code = String::with_capacity(4096);
-    if !args.no_prelude {
-        let prelude_path = concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang");
-        util::write_file_to_string(prelude_path, &mut code).unwrap();
-    }
-
+pub fn compile(
+    ctx: Ptr<CompilationContextInner>,
+    mode: CompileMode,
+    args: &BuildArgs,
+) -> CompileResult {
     if args.path.is_dir() {
         println!("Compiling project at {:?}", args.path);
+        todo!();
+        /*
         for file in args
             .path
             .read_dir()
@@ -60,44 +60,146 @@ pub fn compile2(mode: CompileMode, args: &BuildArgs) -> i32 {
         {
             util::write_file_to_string(&file, &mut code).unwrap();
         }
-    } else if args.path.is_file() {
-        println!("Compiling file at {:?}", args.path);
-        util::write_file_to_string(&args.path, &mut code).unwrap();
-    } else {
+        */
+    } else if !args.path.is_file() {
         panic!("{:?} is not a dir nor a file", args.path)
     }
-    compile(code.as_ref(), mode, args)
+    println!("Compiling file at {:?}", args.path);
+    let root_file = SourceFile::read(Ptr::from_ref(&args.path), &ctx.alloc).unwrap();
+
+    compile_file(ctx, root_file, mode, args)
 }
 
-pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
-    let mut ctx = CompilationContext::new(Ptr::from_ref(code));
-    let res = compile_ctx(&mut ctx, mode, args);
-    if !res.ok {
-        return 1;
+pub fn compile_file(
+    mut ctx: Ptr<CompilationContextInner>,
+    file: SourceFile,
+    mode: CompileMode,
+    args: &BuildArgs,
+) -> CompileResult {
+    #[cfg(debug_assertions)]
+    {
+        ctx.debug_types = args.debug_types;
     }
-    let Some(out) = res.backend_out else {
-        return 0;
-    };
 
-    debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run);
+    // ##### Parsing #####
 
-    if args.path.is_dir() {
-        todo!()
+    let parse_start = Instant::now();
+    let stmts = parser::parse(ctx, file, args.no_prelude);
+    ctx.compile_time.parser = parse_start.elapsed();
+
+    if ctx.do_abort_compilation() {
+        eprintln!("Parser Error(s) in {:?}", ctx.compile_time.parser);
+        return CompileResult::Err;
+    }
+
+    debug_assert!(ctx.files.iter().all(SourceFile::has_been_parsed));
+
+    fn debug_ast(ctx: &CompilationContextInner) {
+        for file in ctx.files.iter() {
+            println!("# File {:?}", file.path);
+            for s in file.stmts.u().iter() {
+                println!("stmt @ {:x?}", s);
+                s.print_tree();
+            }
+            println!();
+        }
+    }
+
+    if args.debug_ast {
+        println!("### AST Nodes:");
+        debug_ast(&ctx);
+    }
+
+    if mode == CompileMode::Parse {
+        #[cfg(not(test))]
+        ctx.compile_time.print();
+        return CompileResult::Ok;
+    }
+
+    // ##### Sema #####
+
+    let sema_start = Instant::now();
+    let order = sema::analyze(ctx, &stmts);
+    ctx.compile_time.sema = sema_start.elapsed();
+
+    if ctx.do_abort_compilation() {
+        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
+        return CompileResult::Err;
+    }
+
+    if args.debug_typed_ast {
+        println!("\n### Typed AST Nodes:");
+        debug_ast(&ctx);
+    }
+
+    if mode == CompileMode::Check {
+        #[cfg(not(test))]
+        ctx.compile_time.print();
+        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
+        return CompileResult::Ok;
+    }
+
+    // ##### Codegen #####
+
+    let codegen_start = Instant::now();
+    let context = Context::create();
+    let mut codegen = llvm::Codegen::new(&context, "dev");
+    codegen.compile_all(&stmts, &order);
+    let module = codegen.module.take().u();
+    drop(codegen);
+    ctx.compile_time.codegen = codegen_start.elapsed();
+
+    if args.debug_functions {
+        print!("functions:");
+        for a in module.get_functions() {
+            print!("{:?},", a.get_name());
+        }
+        println!("\n");
+    }
+
+    if mode == CompileMode::Codegen {
+        return CompileResult::Ok;
+    }
+
+    // ##### Backend #####
+
+    debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run | CompileMode::TestRun);
+
+    let backend_setup_start = Instant::now();
+    let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
+    ctx.compile_time.backend_setup = backend_setup_start.elapsed();
+
+    if args.debug_llvm_ir_unoptimized {
+        println!("### Unoptimized LLVM IR:");
+        println!("{}\n", module.print_to_string());
+    }
+
+    let backend_start = Instant::now();
+    module.optimize(&target_machine, args.optimization_level).unwrap();
+    ctx.compile_time.optimization = backend_start.elapsed();
+
+    if args.debug_llvm_ir_optimized {
+        println!("### Optimized LLVM IR:");
+        println!("{}\n", module.print_to_string());
+    }
+
+    if mode == CompileMode::TestRun {
+        let module = ManuallyDrop::new(module);
+        let module = module.as_mut_ptr();
+        return CompileResult::ModuleForTesting(BackendModule { context, module });
     }
 
     if args.out == OutKind::None {
         #[cfg(not(test))]
         ctx.compile_time.print();
-        return 0;
+        return CompileResult::Ok;
     }
 
     let mut exe_file_path = args.path.with_file_name("out");
     exe_file_path.push(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
     let write_obj_file_start = Instant::now();
-    out.codegen_module()
-        .compile_to_obj_file(&out.target_machine, &obj_file_path)
-        .unwrap();
+    module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
     ctx.compile_time.writing_obj = write_obj_file_start.elapsed();
 
     if args.out == OutKind::Executable {
@@ -122,124 +224,11 @@ pub fn compile(code: &Code, mode: CompileMode, args: &BuildArgs) -> i32 {
         println!("\nRunning `{}`", exe_file_path.display());
         if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
             println!("{e}");
-            return e.code().unwrap_or(1);
+            return CompileResult::RunErr { err_code: e.code().unwrap_or(1) };
         }
     }
-    0
-}
 
-pub fn compile_ctx(
-    ctx: &mut CompilationContext,
-    mode: CompileMode,
-    args: &BuildArgs,
-) -> CompileResult {
-    if args.debug_tokens {
-        println!("### Tokens:");
-        let mut lex = Lexer::new(ctx.code.as_ref());
-        while let Some(t) = lex.next() {
-            println!("{:?}", t)
-        }
-        println!();
-    }
-
-    let frontend_parse_start = Instant::now();
-    let top_level_scope = parser::parse(ctx);
-    ctx.compile_time.parser = frontend_parse_start.elapsed();
-
-    if ctx.do_abort_compilation() {
-        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
-        return CompileResult::ERR;
-    }
-
-    let top_level_scope = top_level_scope.u();
-
-    if args.debug_ast {
-        println!("### AST Nodes:");
-        for s in top_level_scope.stmts.iter() {
-            println!("stmt @ {:x?}", s);
-            s.print_tree();
-        }
-        println!();
-    }
-
-    if mode == CompileMode::Parse {
-        return CompileResult { ok: true, backend_out: None };
-    }
-
-    // ##### Sema #####
-
-    let sema_start = Instant::now();
-    let order = sema::analyze(ctx, top_level_scope, args.debug_types);
-    ctx.compile_time.sema = sema_start.elapsed();
-
-    if ctx.do_abort_compilation() {
-        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
-        return CompileResult::ERR;
-    }
-
-    if args.debug_typed_ast {
-        println!("\n### Typed AST Nodes:");
-        for s in top_level_scope.stmts.iter() {
-            println!("stmt @ {:x?}", s);
-            s.print_tree();
-        }
-        println!();
-    }
-
-    if mode == CompileMode::Check {
-        #[cfg(not(test))]
-        ctx.compile_time.print();
-        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
-        return CompileResult { ok: true, backend_out: None };
-    }
-
-    // ##### Codegen #####
-
-    let codegen_start = Instant::now();
-    let context = Context::create();
-    let mut codegen = llvm::Codegen::new(&context, "dev");
-    codegen.compile_all(&top_level_scope.stmts, &order);
-    let module = codegen.module.take().u();
-    drop(codegen);
-    ctx.compile_time.codegen = codegen_start.elapsed();
-
-    if args.debug_functions {
-        print!("functions:");
-        for a in module.get_functions() {
-            print!("{:?},", a.get_name());
-        }
-        println!("\n");
-    }
-
-    if mode == CompileMode::Codegen {
-        return CompileResult { ok: true, backend_out: None };
-    }
-
-    // ##### Backend #####
-
-    debug_assert_matches!(mode, CompileMode::Build | CompileMode::Run);
-
-    let backend_setup_start = Instant::now();
-    let target_machine = llvm::Codegen::init_target_machine(args.target_triple.as_deref());
-    ctx.compile_time.backend_setup = backend_setup_start.elapsed();
-
-    if args.debug_llvm_ir_unoptimized {
-        println!("### Unoptimized LLVM IR:");
-        println!("{}\n", module.print_to_string());
-    }
-
-    let backend_start = Instant::now();
-    module.optimize(&target_machine, args.optimization_level).unwrap();
-    ctx.compile_time.optimization = backend_start.elapsed();
-
-    if args.debug_llvm_ir_optimized {
-        println!("### Optimized LLVM IR:");
-        println!("{}\n", module.print_to_string());
-    }
-
-    let module = ManuallyDrop::new(module);
-    let module = module.as_mut_ptr();
-    CompileResult { ok: true, backend_out: Some(BackendOut { context, target_machine, module }) }
+    CompileResult::Ok
 }
 
 #[derive(Default)]
@@ -287,30 +276,39 @@ impl CompileDurations {
     }
 }
 
-pub struct BackendOut {
+pub enum CompileResult {
+    Ok,
+    Err,
+    RunErr { err_code: i32 },
+
+    ModuleForTesting(BackendModule),
+}
+
+impl CompileResult {
+    pub fn exit_code(self) -> i32 {
+        match self {
+            CompileResult::Ok => 0,
+            CompileResult::Err => 1,
+            CompileResult::RunErr { err_code } => err_code,
+            CompileResult::ModuleForTesting(_) => unreachable_debug(),
+        }
+    }
+}
+
+pub struct BackendModule {
     #[allow(unused)]
     context: inkwell::context::Context,
-    target_machine: TargetMachine,
     module: *const inkwell::llvm_sys::LLVMModule,
 }
 
-impl Drop for BackendOut {
+impl Drop for BackendModule {
     fn drop(&mut self) {
         drop(ManuallyDrop::into_inner(self.codegen_module()));
     }
 }
 
-impl BackendOut {
+impl BackendModule {
     pub fn codegen_module<'m>(&'m self) -> ManuallyDrop<inkwell::module::Module<'m>> {
         ManuallyDrop::new(unsafe { inkwell::module::Module::new(self.module as *mut _) })
     }
-}
-
-pub struct CompileResult {
-    pub ok: bool,
-    pub backend_out: Option<BackendOut>,
-}
-
-impl CompileResult {
-    pub const ERR: Self = Self { ok: false, backend_out: None };
 }

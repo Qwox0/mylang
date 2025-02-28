@@ -3,7 +3,6 @@
 #![feature(never_type)]
 #![feature(iter_intersperse)]
 #![feature(new_range_api)]
-#![feature(unsigned_is_multiple_of)]
 #![feature(if_let_guard)]
 #![feature(let_chains)]
 #![feature(try_blocks)]
@@ -26,7 +25,7 @@ pub mod codegen;
 pub mod compiler;
 pub mod context;
 pub mod diagnostic_reporter;
-//pub mod const_dst_enum;
+pub mod source_file;
 pub mod error;
 pub mod literals;
 pub mod parser;

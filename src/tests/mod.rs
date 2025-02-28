@@ -1,13 +1,17 @@
 use crate::{
     cli::{BuildArgs, OutKind},
     codegen::llvm::CodegenModuleExt,
-    compiler::{BackendOut, CompileMode, compile_ctx},
+    compiler::{BackendModule, CompileMode, CompileResult, compile_file},
     context::CompilationContext,
     diagnostic_reporter::SavedDiagnosticMessage,
     parser::lexer::Code,
     ptr::Ptr,
+    source_file::SourceFile,
 };
-use std::{fmt::Display, path::PathBuf, str::FromStr};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 mod alignment;
 mod binop;
@@ -29,7 +33,6 @@ mod todo;
 mod union_;
 mod while_loop;
 
-const DEBUG_TOKENS: bool = false;
 const DEBUG_AST: bool = true;
 const DEBUG_TYPES: bool = false;
 const DEBUG_TYPED_AST: bool = false;
@@ -41,7 +44,7 @@ pub struct JitRunTestResult<RetTy> {
     //compilation_out: BackendOut,
     ret: Option<RetTy>,
     //module: Option<inkwell::module::Module<'static>>,
-    backend_out: Option<BackendOut>,
+    backend_mod: Option<BackendModule>,
 }
 
 impl<RetTy> JitRunTestResult<RetTy> {
@@ -62,11 +65,21 @@ impl<RetTy> JitRunTestResult<RetTy> {
         diag
     }
 
+    pub fn one_err(&self) -> &SavedDiagnosticMessage {
+        let errors = self.err();
+        debug_assert!(errors.len() == 1);
+        &errors[0]
+    }
+
     pub fn module_text(&self) -> Option<String> {
-        self.backend_out
+        self.backend_mod
             .as_ref()
             .map(|o| o.codegen_module().print_to_string().to_string())
     }
+}
+
+pub fn test_file_mock(code: &Code) -> SourceFile {
+    SourceFile::new(Ptr::from_ref(Path::new("test.mylang")), Ptr::from_ref(code))
 }
 
 pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> {
@@ -75,15 +88,15 @@ pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> 
 }
 
 pub fn jit_run_test_raw<'ctx, RetTy>(code: impl AsRef<Code>) -> JitRunTestResult<RetTy> {
-    let mut ctx = CompilationContext::new(Ptr::from_ref(code.as_ref()));
-    let res = compile_ctx(&mut ctx, CompileMode::Build, &BuildArgs {
-        path: PathBuf::from_str("test").unwrap(),
+    let ctx = CompilationContext::new();
+    let test_file = test_file_mock(code.as_ref());
+    let res = compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs {
+        path: PathBuf::default(), // irrelevant
         optimization_level: LLVM_OPTIMIZATION_LEVEL,
         target_triple: None,
         out: OutKind::None,
         no_prelude: true,
         print_compile_time: false,
-        debug_tokens: DEBUG_TOKENS,
         debug_ast: DEBUG_AST,
         debug_types: DEBUG_TYPES,
         debug_typed_ast: DEBUG_TYPED_AST,
@@ -91,12 +104,15 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl AsRef<Code>) -> JitRunTestResult
         debug_llvm_ir_unoptimized: false,
         debug_llvm_ir_optimized: PRINT_LLVM_MODULE,
     });
-    let backend_out = res.backend_out;
-    debug_assert!(!res.ok || backend_out.is_some());
-    let ret = backend_out.as_ref().map(|o| {
-        o.codegen_module()
+    let backend_mod = match res {
+        CompileResult::ModuleForTesting(backend_module) => Some(backend_module),
+        CompileResult::Err => None,
+        CompileResult::Ok | CompileResult::RunErr { .. } => unreachable!(),
+    };
+    let ret = backend_mod.as_ref().map(|m| {
+        m.codegen_module()
             .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
             .unwrap()
     });
-    JitRunTestResult { ret, ctx, backend_out }
+    JitRunTestResult { ret, ctx, backend_mod }
 }

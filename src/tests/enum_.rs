@@ -42,24 +42,25 @@ MySumType :: enum {
 
     let code = format!("{typedef}; test :: -> MySumType.Void;");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:032x}", transmute_unchecked::<_, u128>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 0);
 
     let code = format!("{typedef}; test :: -> MySumType.Int(-13);");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:032x}", transmute_unchecked::<_, u128>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 1);
     assert_eq!(transmute_unchecked::<_, i64>(&out.val), -13);
 
     let code = format!("{typedef}; test :: -> MySumType.Float(-331.5);");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:032x}", transmute_unchecked::<_, u128>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
     println!("got       : {:?}", out);
     let val = transmute_unchecked::<_, f64>(&out.val);
     assert_eq!(out.tag, 2);
     assert_eq!(val, -331.5);
+
     let code = &format!(
         "{typedef};
 test :: -> {{
@@ -68,10 +69,8 @@ test :: -> {{
     return val;
 }}"
     );
-
-    let out = *jit_run_test_raw::<i128>(code).ok();
-    println!("got bits  : {:032x}", out);
-    let out = transmute_unchecked::<_, MySumType>(&out);
+    let out = *jit_run_test_raw::<MySumType>(code).ok();
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 1);
     assert_eq!(transmute_unchecked::<_, i64>(&out.val), -13);

@@ -65,3 +65,28 @@ add :: (l: i64, r: i64) -> l + r;
 test :: -> 123.add(456);";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 123 + 456);
 }
+
+#[test]
+fn use_correct_return_type() {
+    let code = "test :: -> {
+        if false return 1.0;
+        5
+    };";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+
+    let code = "test :: -> {
+        if false return MyStruct.(1);
+        .(5)
+    };
+    MyStruct :: struct { x: i32 };";
+    assert_eq!(*jit_run_test_raw::<i32>(code).ok(), 5);
+}
+
+#[test]
+fn specialize_return_type() {
+    let code = "test :: -> {
+        if false return 1;
+        5.0
+    };";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+}

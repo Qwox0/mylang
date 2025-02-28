@@ -14,10 +14,10 @@ pub enum Command {
     Build(BuildArgs),
     /// Builds and runs the current project
     Run(BuildArgs),
-    /// Opens a REPL
     Check(BuildArgs),
     Clean(BuildArgs),
 
+    /// Opens a REPL
     Repl {},
 }
 
@@ -42,8 +42,6 @@ pub struct BuildArgs {
     #[clap(skip = true)]
     pub print_compile_time: bool,
 
-    #[arg(long, value_enum)]
-    pub debug_tokens: bool,
     #[arg(long)]
     pub debug_ast: bool,
     #[arg(long)]
@@ -79,7 +77,6 @@ impl BuildArgs {
             out: OutKind::None,
             no_prelude: true,
             print_compile_time: false,
-            debug_tokens: false,
             debug_ast: false,
             debug_types: false,
             debug_typed_ast: false,
