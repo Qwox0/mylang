@@ -15,4 +15,4 @@ While collecting ideas for this language, I thought about and developed concepts
 * [Zig](https://github.com/ziglang/zig)
 * [Odin](https://github.com/odin-lang/Odin)
 
-For more details see <./Inspirations.md>
+For more details see [Inspirations](./Inspirations.md).
