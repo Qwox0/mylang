@@ -357,7 +357,7 @@ macro_rules! ast_variants {
         }
 
         impl ConstVal {
-            pub const KINDS: [AstKind; 18] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+            pub const KINDS: [AstKind; 19] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
         }
 
         impl Type {
@@ -428,13 +428,13 @@ ast_variants! {
     /// `expr.as(ty)`
     /// TODO: remove this [`Ast`] when implementing generic method calls.
     Cast {
-        expr: Ptr<Ast>,
+        operand: Ptr<Ast>,
         target_ty: Ptr<Ast>,
     },
     /// `xx input`
     /// source: Jai
     Autocast {
-        expr: Ptr<Ast>,
+        operand: Ptr<Ast>,
     },
 
     /// `<func> ( <expr>, ..., param=<expr>, ... )`
@@ -451,7 +451,7 @@ ast_variants! {
     UnaryOp {
         is_postfix: bool,
         op: UnaryOpKind,
-        expr: Ptr<Ast>,
+        operand: Ptr<Ast>,
     },
     /// `<lhs> op <lhs>`
     /// `      ^^ expr.span`
@@ -544,23 +544,18 @@ ast_variants! {
     },
     */
 
-    Defer { expr: Ptr<Ast> },
+    Defer { stmt: Ptr<Ast> },
 
     /// `return <expr>`
     /// `^^^^^^` expr.span
     Return {
-        expr: OPtr<Ast>,
+        val: OPtr<Ast>,
         parent_fn: OPtr<Fn>,
     },
     Break {
-        expr: OPtr<Ast>,
+        val: OPtr<Ast>,
     },
     Continue {},
-
-    ImportDirective {
-        path: Ptr<StrVal>,
-        files_idx: FilesIndex,
-    },
 
     ===== Constant Values =====
 
@@ -572,6 +567,10 @@ ast_variants! {
     StrVal { text: Ptr<str> },
     PtrVal { val: u64 },
 
+    ImportDirective {
+        path: Ptr<StrVal>,
+        files_idx: FilesIndex,
+    },
 
     ===== Types =====
 
@@ -863,14 +862,16 @@ impl Ast {
             AstEnum::Dot { lhs, has_lhs, rhs, .. } => {
                 lhs.filter(|_| *has_lhs).map(|l| l.full_span()).unwrap_or(span).join(rhs.span)
             },
-            AstEnum::Index { lhs, .. } | AstEnum::Cast { expr: lhs, .. } => {
+            AstEnum::Index { lhs, .. } | AstEnum::Cast { operand: lhs, .. } => {
                 lhs.full_span().join(span)
+            },
+            AstEnum::Autocast { operand, .. } | AstEnum::UnaryOp { operand, .. } => {
+                span.join(operand.full_span())
             },
             AstEnum::Call { func, args, pipe_idx, .. } => match *pipe_idx {
                 Some(i) => args[i].full_span().join(span),
                 None => func.full_span().join(span),
             },
-            AstEnum::UnaryOp { expr, .. } => span.join(expr.full_span()),
             AstEnum::BinOp { lhs, rhs, .. }
             | AstEnum::Assign { lhs, rhs, .. }
             | AstEnum::BinOpAssign { lhs, rhs, .. } => lhs.full_span().join(rhs.full_span()),
@@ -896,8 +897,8 @@ impl Ast {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
             // AstEnum::Catch { .. } => todo!(),
-            AstEnum::Return { expr, .. } => match expr {
-                Some(expr) => span.join(expr.full_span()),
+            AstEnum::Return { val, .. } => match val {
+                Some(val) => span.join(val.full_span()),
                 None => span,
             },
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
@@ -1058,6 +1059,15 @@ impl Decl {
 
     pub fn from_ident(ident: Ptr<Ident>) -> Decl {
         Decl::new(ident, ident.span)
+    }
+}
+
+impl Ptr<Decl> {
+    pub fn const_val(&self) -> Ptr<Ast> {
+        debug_assert!(self.is_const);
+        let cv = self.init.u().rep();
+        debug_assert!(cv.is_const_val());
+        cv
     }
 }
 

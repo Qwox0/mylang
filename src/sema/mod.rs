@@ -203,10 +203,8 @@ impl Sema {
                 } else {
                     let sym = sym?;
                     if sym.is_const {
-                        let cv = sym.init.u().rep();
-                        debug_assert!(cv.is_const_val());
                         debug_assert!(expr.replacement.is_none());
-                        expr.replacement = Some(cv);
+                        expr.replacement = Some(sym.const_val());
                     } else if is_const {
                         if sym.is_extern {
                             todo!("use of extern symbol in const expr")
@@ -374,7 +372,15 @@ impl Sema {
                 assert!(!is_const, "todo: const dot");
                 let lhs_ty = *analyze!(*lhs, None);
                 let lhs = lhs.rep();
-                let t = if lhs_ty == p.type_ty
+                let t = if let Some(m) = lhs.try_downcast::<ast::ImportDirective>()
+                    && let Some(s) = self.cctx.files[m.files_idx].find_symbol(&rhs.text)
+                {
+                    debug_assert_eq!(lhs_ty, p.module);
+                    let Some(ty) = s.var_ty else { return NotFinished };
+                    debug_assert!(expr.replacement.is_none());
+                    expr.replacement = Some(s.const_val());
+                    ty
+                } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
                     && let Some((_, variant)) = enum_ty.variants.find_field(&rhs.text)
                 {
@@ -455,20 +461,21 @@ impl Sema {
                     _ => return err(InvalidArrayIndex { ty: idx.ty.u() }, idx.full_span()),
                 });
             },
-            AstEnum::Cast { expr: lhs, target_ty, .. } => {
+            AstEnum::Cast { operand, target_ty, .. } => {
                 let ty = self.analyze_type(*target_ty)?;
-                analyze!(*lhs, Some(ty));
+                analyze!(*operand, Some(ty));
                 // TODO: check if cast is possible
                 expr.ty = Some(ty);
             },
-            AstEnum::Autocast { expr, .. } => {
+            AstEnum::Autocast { operand, .. } => {
                 if ty_hint.is_some() {
-                    analyze!(*expr, ty_hint);
+                    analyze!(*operand, ty_hint);
                     // TODO: check if cast is possible
                     expr.ty = *ty_hint;
                 } else {
                     return err(SemaErrorKind::CannotInferAutocastTy, expr.full_span());
                 }
+                println!("Autocast ty: {}", expr.ty.u());
             },
             AstEnum::Call { func, args, .. } => {
                 if is_const {
@@ -495,14 +502,15 @@ impl Sema {
                     self.validate_call(&mut [variant], args.iter_mut(), span.end())?;
                     enum_ty.upcast_to_type()
                 } else {
+                    display_span_in_code(func.full_span());
                     panic!("{:#?}", func);
                     return err(CallOfANonFunction, expr.full_span());
                 });
             },
-            AstEnum::UnaryOp { op, expr: inner, .. } => {
+            AstEnum::UnaryOp { op, operand, .. } => {
                 //assert!(!is_const, "todo: PreOp in const");
-                let expr_ty = *analyze!(*inner, None);
-                let const_val = then!(is_const => inner.downcast_const_val());
+                let expr_ty = *analyze!(*operand, None);
+                let const_val = then!(is_const => operand.downcast_const_val());
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
@@ -716,12 +724,12 @@ impl Sema {
                 expr.ty = Some(p.void_ty);
             },
             // AstEnum::Catch { .. } => todo!(),
-            AstEnum::Defer { expr: inner, .. } => {
-                self.analyze(*inner, &None, false)?;
-                self.defer_stack.push(*inner);
+            AstEnum::Defer { stmt, .. } => {
+                self.analyze(*stmt, &None, false)?;
+                self.defer_stack.push(*stmt);
                 expr.ty = Some(p.void_ty);
             },
-            AstEnum::Return { expr: val, parent_fn, .. } => {
+            AstEnum::Return { val, parent_fn, .. } => {
                 let Some(mut func) = self.function_stack.last().copied() else {
                     return err(ReturnNotInAFunction, expr.full_span());
                 };
@@ -739,19 +747,19 @@ impl Sema {
                     val.map(|v| v.full_span()).unwrap_or(span)
                 );
             },
-            AstEnum::Break { expr: inner, .. } => {
-                if inner.is_some() {
+            AstEnum::Break { val, .. } => {
+                if val.is_some() {
                     todo!("break with value")
                 }
-                // check if in loop
+                // TODO: check if in loop
                 expr.ty = Some(p.never)
             },
             AstEnum::Continue { .. } => {
-                // check if in loop
+                // TODO: check if in loop
                 expr.ty = Some(p.never)
             },
-            AstEnum::ImportDirective { files_idx, .. } => {
-                todo!("import {:?}", self.cctx.files[*files_idx].path.as_ref());
+            AstEnum::ImportDirective { .. } => {
+                expr.ty = Some(p.module);
             },
 
             AstEnum::IntVal { .. } => {
@@ -897,7 +905,11 @@ impl Sema {
                 expr.ty = Some(p.type_ty);
             },
         }
-        debug_assert!(expr.ty.is_some());
+        #[cfg(debug_assertions)]
+        if expr.ty.is_none() {
+            crate::util::display_span_in_code_with_label(expr.full_span(), "missing type");
+            debug_assert!(expr.ty.is_some());
+        }
         Ok(())
     }
 

@@ -127,7 +127,7 @@ impl Parser {
                     let close_p =
                         self.ws0().tok(TokenKind::CloseParenthesis).context("expected ')'")?;
                     let span = span.join(close_p.span);
-                    expr!(Cast { expr: lhs, target_ty }, span)
+                    expr!(Cast { operand: lhs, target_ty }, span)
                 } else {
                     expr!(Dot { lhs: Some(lhs), has_lhs: true, rhs }, span)
                 }
@@ -161,7 +161,7 @@ impl Parser {
                 {
                     op = UnaryOpKind::AddrMutOf
                 }
-                expr!(UnaryOp { op, expr: lhs, is_postfix: true }, span)
+                expr!(UnaryOp { op, operand: lhs, is_postfix: true }, span)
             },
             FollowingOperator::BinOp(op) => {
                 let rhs = self.expr_(op.precedence())?;
@@ -345,24 +345,24 @@ impl Parser {
                 expr!(While { condition, body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let expr = self.advanced().expr().opt().context("return expr")?;
-                expr!(Return { expr, parent_fn: None }, span)
+                let val = self.advanced().expr().opt().context("return expr")?;
+                expr!(Return { val, parent_fn: None }, span)
             },
             TokenKind::Keyword(Keyword::Break) => {
-                let expr = self.advanced().expr().opt().context("break expr")?;
-                expr!(Break { expr }, span)
+                let val = self.advanced().expr().opt().context("break expr")?;
+                expr!(Break { val }, span)
             },
             TokenKind::Keyword(Keyword::Continue) => {
                 self.lex.advance();
                 expr!(Continue {}, span)
             },
             TokenKind::Keyword(Keyword::Autocast) => {
-                let expr = self.advanced().expr().context("autocast expr")?;
-                expr!(Autocast { expr }, span)
+                let operand = self.advanced().expr().context("autocast expr")?;
+                expr!(Autocast { operand }, span)
             },
             TokenKind::Keyword(Keyword::Defer) => {
-                let expr = self.advanced().expr().context("defer expr")?;
-                expr!(Defer { expr }, span)
+                let stmt = self.advanced().expr().context("defer expr")?;
+                expr!(Defer { stmt }, span)
             },
             TokenKind::IntLit => {
                 let res = literals::parse_int_lit(&self.advanced().get_text_from_span(span));
@@ -487,13 +487,13 @@ impl Parser {
             },
             TokenKind::OpenBrace => self.block()?.upcast(),
             TokenKind::Bang => {
-                let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
-                expr!(UnaryOp { op: UnaryOpKind::Not, expr, is_postfix: false }, span)
+                let operand = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
+                expr!(UnaryOp { op: UnaryOpKind::Not, operand, is_postfix: false }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
-                let expr = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
-                expr!(UnaryOp { op: UnaryOpKind::Neg, expr, is_postfix: false }, span)
+                let operand = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
+                expr!(UnaryOp { op: UnaryOpKind::Neg, operand, is_postfix: false }, span)
             },
             TokenKind::Arrow => {
                 self.lex.advance();
@@ -510,8 +510,8 @@ impl Parser {
                 let is_mut =
                     self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let op = if is_mut { UnaryOpKind::AddrMutOf } else { UnaryOpKind::AddrOf };
-                let expr = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
-                expr!(UnaryOp { op, expr, is_postfix: false })
+                let operand = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
+                expr!(UnaryOp { op, operand, is_postfix: false })
             },
             TokenKind::Dot => {
                 let rhs = self.advanced().ws0().ident().context("dot rhs")?;

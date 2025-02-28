@@ -115,6 +115,7 @@ pub struct Codegen<'ctx> {
 
     symbols: SymbolTable<Symbol<'ctx>>,
     type_table: HashMap<Ptr<ast::Type>, CodegenType<'ctx>>,
+    fn_table: HashMap<Ptr<ast::Fn>, FunctionValue<'ctx>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
 
     cur_fn: Option<FunctionValue<'ctx>>,
@@ -134,6 +135,7 @@ impl<'ctx> Codegen<'ctx> {
             module: Some(context.create_module(module_name)),
             symbols: SymbolTable::default(),
             type_table: HashMap::new(),
+            fn_table: HashMap::new(),
             defer_stack: ScopedStack::default(),
             cur_fn: None,
             cur_loop: None,
@@ -183,10 +185,13 @@ impl<'ctx> Codegen<'ctx> {
     #[inline]
     fn _compile_expr_inner(
         &mut self,
-        expr: Ptr<Ast>,
+        mut expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResult<Symbol<'ctx>> {
         // println!("compile {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
+
+        expr = expr.rep();
+
         let out_ty = expr.ty.u();
 
         let p = primitives();
@@ -205,13 +210,9 @@ impl<'ctx> Codegen<'ctx> {
 
         match expr.matchable().as_mut() {
             AstEnum::Ident { text, .. } => {
-                if let Some(const_val) = expr.try_downcast_const_val() && const_val.kind != AstKind::Fn {
-                    self.compile_expr(const_val.upcast())
-                } else {
-                    Ok(self.get_symbol(&text))
-                }
+                debug_assert!(!expr.is_const_val(), "constants should have been replaced during sema");
+                Ok(self.get_symbol(&text))
             },
-            AstEnum::Fn { .. } => todo!("todo: runtime fn"),
             // AstEnum::Parenthesis { expr, .. } => self.compile_expr_with_write_target(*expr, write_target) ,
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
                 self.open_scope();
@@ -447,14 +448,13 @@ impl<'ctx> Codegen<'ctx> {
                     _ => unreachable_debug(),
                 }
             },
-            AstEnum::Cast { expr: lhs, target_ty, .. } => {
+            AstEnum::Cast { operand, target_ty, .. } => {
                 debug_assert!(target_ty.rep().is_type());
-                self.compile_cast(*lhs, target_ty.downcast_type())
+                self.compile_cast(*operand, target_ty.downcast_type())
             },
-            AstEnum::Autocast { expr: inner, .. } => self.compile_cast(*inner, out_ty),
+            AstEnum::Autocast { operand, .. } => self.compile_cast(*operand, out_ty),
             AstEnum::Call { func, args, .. } => {
                 if let Some(f) = func.try_downcast::<ast::Fn>() {
-                    debug_assert!(func.kind == AstKind::Ident);
                     debug_assert!(func.replacement.u().kind == AstKind::Fn);
                     // let f = func.downcast::<ast::Fn>();
                     let Symbol::Function { val } = self.compile_expr(*func)? else {
@@ -480,9 +480,9 @@ impl<'ctx> Codegen<'ctx> {
                     unreachable_debug()
                 }
             },
-            AstEnum::UnaryOp { op, expr: inner, .. } => {
-                op.finalize_arg_type(inner.ty.as_mut().u(), out_ty);
-                let sym = try_not_never!(self.compile_expr(*inner)?);
+            AstEnum::UnaryOp { op, operand, .. } => {
+                op.finalize_arg_type(operand.ty.as_mut().u(), out_ty);
+                let sym = try_not_never!(self.compile_expr(*operand)?);
                 match op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => reg(match sym {
                         Symbol::Stack(ptr_value) => ptr_value,
@@ -498,7 +498,7 @@ impl<'ctx> Codegen<'ctx> {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
                     },
                     UnaryOpKind::Not => {
-                        debug_assert_eq!(inner.ty, p.bool);
+                        debug_assert_eq!(operand.ty, p.bool);
                         debug_assert_eq!(out_ty, p.bool);
                         let v = self.sym_as_val(sym, out_ty)?;
                         reg(self.builder.build_not(v.bool_val(), "not")?)
@@ -867,12 +867,12 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(Symbol::Void)
             },
             // AstEnum::Catch { .. } => todo!(),
-            AstEnum::Defer { expr: inner, .. } => {
-                self.defer_stack.push(*inner);
+            AstEnum::Defer { stmt, .. } => {
+                self.defer_stack.push(*stmt);
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
             },
-            AstEnum::Return { expr: val, parent_fn, .. } => {
+            AstEnum::Return { val, parent_fn, .. } => {
                 let f = parent_fn.u();
                 if let Some(val) = val {
                     finalize_ty(val.ty.as_mut().u(), f.ret_ty.u());
@@ -888,8 +888,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Ok(Symbol::Never)
             },
-            AstEnum::Break { expr, .. } => {
-                if expr.is_some() {
+            AstEnum::Break { val, .. } => {
+                if val.is_some() {
                     todo!("break with expr")
                 }
                 let _ = self.compile_multiple_defer_scopes(self.continue_break_depth)?;
@@ -903,7 +903,9 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
             },
-            AstEnum::ImportDirective { .. } => todo!(),
+            AstEnum::ImportDirective { .. } => {
+                Ok(Symbol::Module)
+            }
 
             AstEnum::IntVal { val, .. } => {
                 match expr.ty.matchable().as_ref() {
@@ -960,6 +962,9 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::EnumDef { .. }
             | AstEnum::RangeTy { .. }
             | AstEnum::OptionTy { .. } => todo!("runtime type"),
+            AstEnum::Fn { .. } => {
+                Ok(Symbol::Function { val: *self.fn_table.get(&expr.downcast::<ast::Fn>()).u() })
+            }
         }
     }
 
@@ -1120,6 +1125,11 @@ impl<'ctx> Codegen<'ctx> {
             param.set_name(&f.params[idx].ident.text)
         }
 
+        let prev = self.fn_table.insert(f, fn_val);
+        debug_assert!(
+            prev.is_none(),
+            "called compile_prototype multiple times on the same function"
+        );
         (fn_val, use_sret)
     }
 
@@ -2348,6 +2358,7 @@ enum Symbol<'ctx> {
     Function {
         val: FunctionValue<'ctx>,
     },
+    Module,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

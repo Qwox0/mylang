@@ -105,15 +105,15 @@ impl DebugAst for Ast {
                 lines.write_tree(idx);
                 lines.write("]");
             },
-            AstEnum::Cast { expr: lhs, target_ty, .. } => {
-                lines.write_tree(lhs);
+            AstEnum::Cast { operand, target_ty, .. } => {
+                lines.write_tree(operand);
                 lines.write(".as(");
                 lines.write_tree(target_ty);
                 lines.write(")");
             },
-            AstEnum::Autocast { expr, .. } => {
+            AstEnum::Autocast { operand, .. } => {
                 lines.write("xx ");
-                lines.write_tree(expr);
+                lines.write_tree(operand);
             },
             AstEnum::Call { func, args, pipe_idx, .. } => {
                 if let Some(idx) = *pipe_idx {
@@ -132,7 +132,7 @@ impl DebugAst for Ast {
                 lines.write_many(&args, inner, ",");
                 lines.write(")");
             },
-            AstEnum::UnaryOp { op, expr, is_postfix: false, .. } => {
+            AstEnum::UnaryOp { op, operand, is_postfix: false, .. } => {
                 lines.write(match op {
                     UnaryOpKind::AddrOf => "&",
                     UnaryOpKind::AddrMutOf => "&mut ",
@@ -141,10 +141,10 @@ impl DebugAst for Ast {
                     UnaryOpKind::Neg => "-",
                     UnaryOpKind::Try => unreachable_debug(),
                 });
-                lines.write_tree(expr);
+                lines.write_tree(operand);
             },
-            AstEnum::UnaryOp { op, expr, is_postfix: true, .. } => {
-                lines.write_tree(expr);
+            AstEnum::UnaryOp { op, operand, is_postfix: true, .. } => {
+                lines.write_tree(operand);
                 lines.write(match op {
                     UnaryOpKind::AddrOf => ".&",
                     UnaryOpKind::AddrMutOf => ".&mut",
@@ -247,24 +247,22 @@ impl DebugAst for Ast {
                 lines.write_tree(body);
             },
             // AstEnum::Catch { .. } => todo!(),
-            AstEnum::Defer { expr, .. } => {
+            AstEnum::Defer { stmt, .. } => {
                 lines.write("defer ");
-                lines.write_tree(expr);
+                lines.write_tree(stmt);
             },
-            AstEnum::Return { expr, .. } => {
+            AstEnum::Return { val, .. } => {
                 lines.write("return");
-                if let Some(expr) = expr {
-                    let expr = expr;
+                if let Some(val) = val {
                     lines.write(" ");
-                    lines.write_tree(expr);
+                    lines.write_tree(val);
                 }
             },
-            AstEnum::Break { expr, .. } => {
+            AstEnum::Break { val, .. } => {
                 lines.write("break");
-                if let Some(expr) = expr {
-                    let expr = expr;
+                if let Some(val) = val {
                     lines.write(" ");
-                    lines.write_tree(expr);
+                    lines.write_tree(val);
                 }
             },
             AstEnum::Continue { .. } => lines.write("continue"),

@@ -35,6 +35,7 @@ pub struct Primitives {
     pub float_lit: Ptr<ast::Type>,
     pub method_stub: Ptr<ast::Type>,
     pub enum_variant: Ptr<ast::Type>,
+    pub module: Ptr<ast::Type>,
 
     // Other:
     /// TODO: remove nil
@@ -176,6 +177,7 @@ impl Primitives {
             float_lit: new_primitive_ty!("{float literal}", simple_ty),
             method_stub: new_primitive_ty!("{method stub}", simple_ty),
             enum_variant: new_primitive_ty!("{enum variant}", simple_ty),
+            module: new_primitive_ty!("{module}", simple_ty),
 
             nil: {
                 let decl = new_primitive_decl("nil")?;

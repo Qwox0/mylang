@@ -16,12 +16,12 @@ This list contains language features/syntax and the programming languages that i
 * `.*`: Zig
 * `\\ multiline string literal`: Zig
 * `|>`: F#
-    * First, I wanted to use `|` (Bash), which unfortunately conflicts with bitwise or (Note: Overloading `|` is not possible due to different precedence).
+    * First, I wanted to use `|` (Bash), which unfortunately conflicts with bitwise or (Note: Overloading `|` is not possible due to the difference in precedences).
 * Named Initializer
     * Zig: `.{ ... }`
     * Rust: shorthand for `.{ abc = abc }`
 * Positional Initializer
-    * Jai: use field order (`.{1, 2}`)
+    * Jai: use field order (`.(1, 2)`)
 * `xx` Autocast: Jai
 
 Unimplemented:
