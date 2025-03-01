@@ -9,12 +9,22 @@ pub trait DiagnosticReporter {
 
     fn max_past_severity(&self) -> Option<DiagnosticSeverity>;
 
+    fn error<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+        self.report(DiagnosticSeverity::Error, span, msg)
+    }
+
+    fn warn<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+        self.report(DiagnosticSeverity::Warn, span, msg)
+    }
+
     fn do_abort_compilation(&self) -> bool {
         self.max_past_severity().is_some_and(|sev| sev >= DiagnosticSeverity::Error)
     }
 
     fn report2(&mut self, severity: DiagnosticSeverity, err: &impl SpannedError) {
-        self.report(severity, err.span(), &err.get_text());
+        if !err.was_already_handled() {
+            self.report(severity, err.span(), &err.get_text());
+        }
     }
 
     fn error2(&mut self, err: &impl SpannedError) {
@@ -149,14 +159,10 @@ impl fmt::Display for DiagnosticSeverity {
 
 macro_rules! cerror {
     ($span:expr, $msg:expr $(,)?) => {
-        crate::context::ctx_mut()
-            .diagnostic_reporter
-            .report(crate::diagnostic_reporter::DiagnosticSeverity::Error, $span, $msg)
+        crate::context::ctx_mut().diagnostic_reporter.error($span, $msg)
     };
     ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
-        crate::context::ctx_mut()
-            .diagnostic_reporter
-            .report(crate::diagnostic_reporter::DiagnosticSeverity::Error, $span, &format!($fmt, $($args),*))
+        crate::context::ctx_mut().diagnostic_reporter.error($span, &format!($fmt, $($args),*))
     };
 }
 pub(crate) use cerror;

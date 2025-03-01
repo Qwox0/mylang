@@ -1,6 +1,7 @@
 use crate::{
     codegen::llvm::finalize_ty,
     context::{FilesIndex, primitives},
+    diagnostic_reporter::{DiagnosticReporter, cerror},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     type_::{RangeKind, ty_match},
@@ -739,9 +740,14 @@ impl Ptr<Ast> {
         p.cast()
     }
 
-    pub fn try_downcast_const_val(self) -> OPtr<ConstVal> {
+    /// This reports possible errors
+    pub fn try_get_const_val(self) -> OPtr<ConstVal> {
         let p = self.rep();
-        then!(p.is_const_val() => p.downcast_const_val())
+        let const_val = then!(p.is_const_val() => p.downcast_const_val());
+        if const_val.is_none() {
+            cerror!(self.full_span(), "value not known at compile time");
+        }
+        const_val
     }
 
     #[inline]
@@ -792,6 +798,15 @@ impl Ptr<ConstVal> {
     pub fn try_downcast_type(self) -> OPtr<Type> {
         debug_assert!(self.replacement.is_none());
         then!(self.upcast().has_type_kind() => self.downcast_type())
+    }
+
+    /// Expects `self` to be an [`IntVal`] or a [`FloatVal`].
+    pub fn float_val(self) -> f64 {
+        if let Some(int) = self.try_downcast::<IntVal>() {
+            int.val as f64
+        } else {
+            self.downcast::<FloatVal>().val
+        }
     }
 }
 
@@ -1064,6 +1079,10 @@ impl Decl {
 
 impl Ptr<Decl> {
     pub fn const_val(&self) -> Ptr<Ast> {
+        let never = primitives().never;
+        if self.ty.u() == never {
+            return never.upcast();
+        }
         debug_assert!(self.is_const);
         let cv = self.init.u().rep();
         debug_assert!(cv.is_const_val());

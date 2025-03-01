@@ -269,3 +269,19 @@ fn bench_sema_error(b: &mut test::Bencher) {
 fn todo_fix_pos_initializer_codegen() {
     jit_run_test::<()>("if false { struct { ok: bool }.(true); };").ok();
 }
+
+#[test]
+#[ignore = "not yet implemented"]
+fn fix_panic() {
+    let _err = jit_run_test_raw::<()>("f :: (x: i32) -> {}; test :: -> f(xx i32);").one_err();
+    // TODO: check if err is type missmatch
+    panic!("OK")
+}
+
+#[test]
+#[ignore = "not yet implemented"]
+fn fix_multi_fn_compile() {
+    jit_run_test::<()>("std :: #import \"std\"; println :: std.println;").ok();
+    panic!("OK")
+
+}

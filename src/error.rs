@@ -1,8 +1,8 @@
 #[cfg(not(debug_assertions))]
 use crate::codegen::llvm::CodegenError;
 use crate::{
-    parser::{ParseError, lexer::Span},
-    sema::SemaError,
+    parser::{ParseError, ParseErrorKind, lexer::Span},
+    sema::{SemaError, SemaErrorKind},
     util::panic_debug,
 };
 use std::fmt::Debug;
@@ -61,6 +61,8 @@ pub trait SpannedError: Debug {
     fn span(&self) -> Span;
 
     fn get_text(&self) -> String;
+
+    fn was_already_handled(&self) -> bool;
 }
 
 impl SpannedError for ParseError {
@@ -74,6 +76,10 @@ impl SpannedError for ParseError {
         #[cfg(not(debug_assertions))]
         return format!("{:?}", self.kind);
     }
+
+    fn was_already_handled(&self) -> bool {
+        self.kind == ParseErrorKind::HandledErr
+    }
 }
 
 impl SpannedError for SemaError {
@@ -83,6 +89,10 @@ impl SpannedError for SemaError {
 
     fn get_text(&self) -> String {
         format!("{}", self.kind)
+    }
+
+    fn was_already_handled(&self) -> bool {
+        matches!(self.kind, SemaErrorKind::HandledErr)
     }
 }
 
@@ -100,6 +110,14 @@ impl SpannedError for Error {
             Error::Parsing(e) => e.get_text(),
             Error::Sema(e) => e.get_text(),
             Error::Codegen(e) => format!("{e:?}"),
+        }
+    }
+
+    fn was_already_handled(&self) -> bool {
+        match self {
+            Error::Parsing(e) => e.was_already_handled(),
+            Error::Sema(e) => e.was_already_handled(),
+            Error::Codegen(_) => false,
         }
     }
 }

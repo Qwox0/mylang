@@ -12,6 +12,8 @@ pub c_double :: f64;
 
 // ===== <assert.h> =====
 
+// extern assert: (cond: bool) -> void;
+// extern __assert: (cond: bool) -> void;
 
 // ===== <complex.h> =====
 
@@ -136,6 +138,8 @@ extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *voi
 
 
 // ===== <string.h> =====
+
+extern strlen: (str: *c_char) -> c_size_t;
 
 extern memcpy: (dest: *void, src: *void, len: c_size_t) -> *void;
 extern memset: (ptr: *void, byte: u8, len: c_size_t) -> *void;

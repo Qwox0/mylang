@@ -751,9 +751,7 @@ impl Parser {
             let expr = match self.expr() {
                 Ok(expr) => expr,
                 Err(e) => {
-                    if e.kind != ParseErrorKind::HandledErr {
-                        self.cctx.error2(&e);
-                    }
+                    self.cctx.error2(&e);
                     // skip the remaining block or statement
                     let mut depth: usize = 0;
                     self.lex.advance_while(|t| {

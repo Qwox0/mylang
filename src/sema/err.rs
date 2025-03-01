@@ -89,12 +89,20 @@ pub enum SemaErrorKind {
     CannotReturnFromLoop,
 
     AllocErr(bumpalo::AllocErr),
+
+    HandledErr,
 }
 
 #[derive(Debug, Clone)]
 pub struct SemaError {
     pub kind: SemaErrorKind,
     pub span: Span,
+}
+
+impl From<()> for SemaError {
+    fn from(_: ()) -> Self {
+        SemaError { kind: SemaErrorKind::HandledErr, span: Span::ZERO }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

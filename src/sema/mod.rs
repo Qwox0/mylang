@@ -299,10 +299,9 @@ impl Sema {
                     self.validate_initializer(struct_ty, *values, is_const, span)?;
                     expr.ty = Some(struct_ty)
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
-                    && let Some(pointee) = ptr_ty.pointee.try_downcast_const_val()
-                    && pointee.kind.is_struct_kind()
+                    && let Some(struct_ty) = ptr_ty.pointee.try_downcast_type()
+                    && struct_ty.kind.is_struct_kind()
                 {
-                    let struct_ty = pointee.downcast_type();
                     self.validate_initializer(struct_ty, *values, is_const, span)?;
                     expr.ty = Some(ptr_ty.upcast_to_type())
                 } else {
@@ -593,7 +592,6 @@ impl Sema {
                 });
             },
             AstEnum::BinOp { lhs, op, rhs, .. } => {
-                assert!(!is_const, "todo: BinOp in const");
                 let lhs_ty = *analyze!(*lhs, None);
                 let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
                 let Some(mut common_ty) = common_type(rhs_ty, lhs_ty) else {
@@ -630,6 +628,54 @@ impl Sema {
                         }
                     },
                 });
+                if is_const {
+                    let Some((lhs, rhs)) = lhs.try_get_const_val().zip(rhs.try_get_const_val())
+                    else {
+                        return err(HandledErr, Span::ZERO);
+                    };
+
+                    macro_rules! calc_num_binop {
+                        ($op:tt $(, allow $float_val:ident)?) => {
+                            if common_ty.kind == AstKind::IntTy {
+                                let val = lhs.downcast::<ast::IntVal>().val
+                                    $op rhs.downcast::<ast::IntVal>().val;
+                                Some(self.alloc(ast_new!(IntVal { val, span: expr.full_span() }))?
+                                    .upcast())
+                            } $( else if common_ty.kind == AstKind::FloatTy {
+                                let val = lhs.float_val() $op rhs.float_val();
+                                Some(self.alloc(ast_new!($float_val { val, span: expr.full_span() }))?
+                                    .upcast())
+                            })? else {
+                                None
+                            }
+                        };
+                    }
+
+                    let Some(res) = (match op {
+                        BinOpKind::Mul => calc_num_binop!(*, allow FloatVal),
+                        BinOpKind::Div => calc_num_binop!(/, allow FloatVal),
+                        BinOpKind::Mod => calc_num_binop!(%, allow FloatVal),
+                        BinOpKind::Add => calc_num_binop!(+, allow FloatVal),
+                        BinOpKind::Sub => calc_num_binop!(-, allow FloatVal),
+                        BinOpKind::ShiftL => calc_num_binop!(<<),
+                        BinOpKind::ShiftR => calc_num_binop!(>>),
+                        BinOpKind::BitAnd => calc_num_binop!(&),
+                        BinOpKind::BitXor => calc_num_binop!(^),
+                        BinOpKind::BitOr => calc_num_binop!(|),
+                        BinOpKind::Eq => todo!(),
+                        BinOpKind::Ne => todo!(),
+                        BinOpKind::Lt => todo!(),
+                        BinOpKind::Le => todo!(),
+                        BinOpKind::Gt => todo!(),
+                        BinOpKind::Ge => todo!(),
+                        BinOpKind::And => todo!(),
+                        BinOpKind::Or => todo!(),
+                    }) else {
+                        cerror!(expr.full_span(), "umimplemented compiletime binary operation");
+                        return Err(().into());
+                    };
+                    expr.replacement = Some(res);
+                }
             },
             AstEnum::Range { start, end, is_inclusive, .. } => {
                 let (elem_ty, rkind): (Ptr<ast::Type>, _) = match (start, end) {
@@ -716,7 +762,14 @@ impl Sema {
                     {
                         *elem_ty
                     },
-                    _ => todo!("for over non-array"),
+                    _ => {
+                        cerror!(
+                            source.full_span(),
+                            "cannot iterate over value of type `{}`",
+                            source.ty.u()
+                        );
+                        return Err(().into());
+                    },
                 };
 
                 self.open_scope();
