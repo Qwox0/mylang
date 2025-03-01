@@ -8,18 +8,17 @@ use crate::{
         TypeEnum, UnaryOpKind, UpcastToAst, ast_new, type_new,
     },
     context::{CompilationContextInner, primitives as p},
-    diagnostic_reporter::DiagnosticReporter,
+    diagnostic_reporter::{DiagnosticReporter, cerror, chint},
+    display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
-    symbol_table::SymbolTable2,
+    source_file::SourceFile,
+    symbol_table::{SymbolTable2, linear_search_symbol},
     type_::{RangeKind, common_type, ty_match},
-    util::{
-        UnwrapDebug, display_span_in_code, forget_lifetime_mut, panic_debug, then,
-        unreachable_debug,
-    },
+    util::{UnwrapDebug, forget_lifetime_mut, panic_debug, then, unreachable_debug},
 };
-pub use err::{SemaError, SemaErrorKind, SemaResult};
+pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
 use std::collections::HashSet;
 
@@ -46,21 +45,25 @@ macro_rules! check_and_set_target {
     }};
 }
 
-/// Semantic analyzer
-pub struct Sema {
-    pub symbols: SymbolTable2,
-    function_stack: Vec<Ptr<ast::Fn>>,
-    defer_stack: ScopedStack<Ptr<Ast>>,
-
-    cctx: Ptr<CompilationContextInner>,
-}
-
 pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<usize> {
-    let mut sema = Sema::new(cctx);
-    for s in stmts.iter().copied() {
-        sema.preload_top_level(s);
+    // validate top level stmts
+    for file in cctx.files.iter().copied() {
+        let file_stmts = &stmts[file.stmt_range.u()];
+        for (idx, s) in file_stmts.iter().copied().enumerate() {
+            let Some(decl) = s.try_downcast::<ast::Decl>() else {
+                cerror!(s.full_span(), "unexpected top level expression");
+                continue;
+            };
+            debug_assert!((decl.is_const && decl.init.is_some()) || decl.is_extern);
+            debug_assert!(decl.ty.is_none());
+            if let Some(dup) = linear_search_symbol(&file_stmts[..idx], &decl.ident.text) {
+                cerror!(decl.ident.span, "Duplicate definition in module scope.");
+                chint!(dup.ident.span, "First definition here")
+            }
+        }
     }
 
+    let mut sema = Sema::new(cctx, Ptr::from_ref(stmts));
     let mut finished = vec![false; stmts.len()];
     let mut remaining_count = stmts.len();
     let mut order = Vec::with_capacity(stmts.len());
@@ -68,17 +71,30 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
         let old_remaining_count = remaining_count;
         debug_assert!(stmts.len() == finished.len());
         remaining_count = 0;
-        for (idx, (s, finished)) in stmts.iter().zip(finished.iter_mut()).enumerate() {
-            if *finished {
-                continue;
+        for file in cctx.files.iter().copied() {
+            sema.cur_file = Some(file);
+            debug_assert!(sema.symbols.is_empty());
+            sema.open_scope();
+            let stmt_range = file.stmt_range.u();
+            for (idx, (s, finished)) in
+                stmts[file.stmt_range.u()].iter().zip(&mut finished[stmt_range]).enumerate()
+            {
+                if *finished {
+                    continue;
+                }
+                let res = sema.analyze_top_level(*s);
+                *finished = res != SemaResult::NotFinished;
+                match res {
+                    SemaResult::Ok(_) => order.push(idx + stmt_range.start),
+                    SemaResult::NotFinished => remaining_count += 1,
+                    SemaResult::Err(_) => {},
+                }
             }
-            let res = sema.analyze_top_level(*s);
-            *finished = res != SemaResult::NotFinished;
-            match res {
-                SemaResult::Ok(_) => order.push(idx),
-                SemaResult::NotFinished => remaining_count += 1,
-                SemaResult::Err(_) => {},
-            }
+            debug_assert!(
+                sema.defer_stack.get_cur_scope().is_empty(),
+                "file scope must not contain defer statements"
+            );
+            sema.close_scope().ok().u();
         }
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
@@ -87,7 +103,11 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
                 if finished {
                     continue;
                 }
-                display_span_in_code(s.full_span());
+                let span = s
+                    .try_downcast::<ast::Decl>()
+                    .map(|d| d.ident.span)
+                    .unwrap_or_else(|| s.full_span());
+                display(span).finish();
             }
             panic!("cycle detected") // TODO: find location of cycle
         }
@@ -96,29 +116,27 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     order
 }
 
+/// Semantic analyzer
+pub struct Sema {
+    file_level_symbols: Ptr<[Ptr<Ast>]>,
+    /// doesn't contain file-level symbols
+    pub symbols: SymbolTable2,
+    function_stack: Vec<Ptr<ast::Fn>>,
+    defer_stack: ScopedStack<Ptr<Ast>>,
+
+    cctx: Ptr<CompilationContextInner>,
+    cur_file: OPtr<SourceFile>,
+}
+
 impl Sema {
-    pub fn new(cctx: Ptr<CompilationContextInner>) -> Sema {
+    pub fn new(cctx: Ptr<CompilationContextInner>, file_level_symbols: Ptr<[Ptr<Ast>]>) -> Sema {
         Sema {
+            file_level_symbols,
             symbols: ScopedStack::default(),
             function_stack: vec![],
             defer_stack: ScopedStack::default(),
             cctx,
-        }
-    }
-
-    pub fn preload_top_level(&mut self, s: Ptr<Ast>) {
-        let res = try {
-            let Some(decl) = s.try_downcast::<ast::Decl>() else {
-                err(UnexpectedTopLevelExpr(s), s.full_span())?
-            };
-            debug_assert!((decl.is_const && decl.init.is_some()) || decl.is_extern);
-            debug_assert!(decl.ty.is_none());
-            if self.symbols.insert_no_duplicate(decl).is_err() {
-                err(TopLevelDuplicate, decl.ident.span)?
-            }
-        };
-        if let Err(e) = res {
-            self.cctx.error2(&e);
+            cur_file: None,
         }
     }
 
@@ -147,7 +165,8 @@ impl Sema {
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(expr.full_span(), label);
+
+            display(expr.full_span()).label(&label).finish();
         }
         #[cfg(debug_assertions)]
         if res.is_ok() {
@@ -168,6 +187,7 @@ impl Sema {
         let span = expr.span;
 
         if expr.replacement.is_some() {
+            debug_assert!(expr.ty.is_some());
             // Does this work in general? Is this needed if NotFinished is removed?
             return Ok(());
         }
@@ -369,11 +389,11 @@ impl Sema {
                 expr.ty = Some(arr_ty);
             },
             AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
-                assert!(!is_const, "todo: const dot");
                 let lhs_ty = *analyze!(*lhs, None);
                 let lhs = lhs.rep();
                 let t = if let Some(m) = lhs.try_downcast::<ast::ImportDirective>()
-                    && let Some(s) = self.cctx.files[m.files_idx].find_symbol(&rhs.text)
+                    && let Some(s) =
+                        self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.file_level_symbols)
                 {
                     debug_assert_eq!(lhs_ty, p.module);
                     let Some(ty) = s.var_ty else { return NotFinished };
@@ -402,6 +422,10 @@ impl Sema {
                 } else if lhs_ty.kind == AstKind::SliceTy && &*rhs.text == "len" {
                     p.u64
                 } else {
+                    if rhs.replacement.is_some() {
+                        debug_assert!(expr.ty.is_some());
+                        return Ok(());
+                    }
                     // method-like call:
                     match self.get_symbol(rhs.text, rhs.span) {
                         Ok(s)
@@ -446,6 +470,7 @@ impl Sema {
                 let (elem_ty, is_mut) = match lhs_ty.matchable().as_ref() {
                     TypeEnum::SliceTy { elem_ty, is_mut, .. } => (*elem_ty, *is_mut),
                     TypeEnum::ArrayTy { elem_ty, .. } => (*elem_ty, true),
+                    // _ => cerror!(lhs.full_span(), "cannot index into value of type {}", lhs_ty),
                     _ => return err(CanOnlyIndexArrays, lhs.full_span()),
                 };
                 let elem_ty = elem_ty.downcast_const_val().downcast_type();
@@ -475,7 +500,6 @@ impl Sema {
                 } else {
                     return err(SemaErrorKind::CannotInferAutocastTy, expr.full_span());
                 }
-                println!("Autocast ty: {}", expr.ty.u());
             },
             AstEnum::Call { func, args, .. } => {
                 if is_const {
@@ -502,7 +526,7 @@ impl Sema {
                     self.validate_call(&mut [variant], args.iter_mut(), span.end())?;
                     enum_ty.upcast_to_type()
                 } else {
-                    display_span_in_code(func.full_span());
+                    display(expr.full_span()).finish();
                     panic!("{:#?}", func);
                     return err(CallOfANonFunction, expr.full_span());
                 });
@@ -696,16 +720,19 @@ impl Sema {
                 };
 
                 self.open_scope();
-                let mut iter_var_decl = ast::Decl::from_ident(*iter_var);
-                iter_var_decl.var_ty = Some(elem_ty);
-                // SAFETY: `iter_var_decl` lives until `close_scope` is called so this is fine
-                self.analyze_decl(Ptr::from_ref(&iter_var_decl), false)?;
+                let res: SemaResult<()> = try {
+                    let mut iter_var_decl = ast::Decl::from_ident(*iter_var);
+                    iter_var_decl.var_ty = Some(elem_ty);
+                    // SAFETY: `iter_var_decl` lives until `close_scope` is called so this is fine
+                    self.analyze_decl(Ptr::from_ref(&iter_var_decl), false)?;
 
-                self.analyze(*body, &Some(p.void_ty), is_const)?;
-                if body.ty.u() != p.void_ty && body.ty.u() != p.never {
-                    return err(CannotReturnFromLoop, body.full_span());
-                }
+                    self.analyze(*body, &Some(p.void_ty), is_const)?;
+                    if body.ty.u() != p.void_ty && body.ty.u() != p.never {
+                        return err(CannotReturnFromLoop, body.full_span());
+                    }
+                };
                 self.close_scope()?;
+                res?;
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::While { condition, body, .. } => {
@@ -907,7 +934,7 @@ impl Sema {
         }
         #[cfg(debug_assertions)]
         if expr.ty.is_none() {
-            crate::util::display_span_in_code_with_label(expr.full_span(), "missing type");
+            display(expr.full_span()).label("missing type").finish();
             debug_assert!(expr.ty.is_some());
         }
         Ok(())
@@ -1044,14 +1071,18 @@ impl Sema {
                 NotFinished => "not finished".to_string(),
                 Err(e) => format!("err: {}", e.kind),
             };
-            crate::util::display_span_in_code_with_label(decl.ident.span, label);
+            display(decl.ident.span).label(&label).finish();
         }
         let res = match res {
             Err(err) => {
                 self.cctx.error2(&err);
                 decl.var_ty = Some(p.never);
                 decl.ty = Some(p.never);
-                decl.init = Some(p.never.upcast());
+                /* TODO: make sure the const_val of this decl is also `never`
+                if let Some(init) = decl.init.as_mut() {
+                    init.replacement = Some(p.never.upcast());
+                }
+                */
                 Ok(())
             },
             NotFinished => NotFinished,
@@ -1060,11 +1091,14 @@ impl Sema {
                 Ok(())
             },
         };
+        /*
         let is_top_level = self.function_stack.len() == 0;
         if !is_top_level {
             debug_assert!(!self.symbols.get_cur_scope().contains(&decl));
             self.symbols.push(decl);
         }
+        */
+        self.symbols.push(decl);
         res
     }
 
@@ -1118,7 +1152,12 @@ impl Sema {
 
     #[inline]
     fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<Ptr<ast::Decl>> {
-        match self.symbols.get(&name).or_else(|| self.cctx.global_scope.find_symbol(&name)) {
+        match self
+            .symbols
+            .get(&name)
+            .or_else(|| self.cur_file.u().find_symbol(&name, self.file_level_symbols))
+            .or_else(|| self.cctx.primitives_scope.find_symbol(&name))
+        {
             Some(sym) if sym.var_ty.is_some() => Ok(sym),
             Some(_) => NotFinished,
             None => err(UnknownIdent(name), err_span),

@@ -26,10 +26,6 @@ pub enum SemaErrorKind {
         lhs_ty: Ptr<ast::Type>,
         rhs_ty: Ptr<ast::Type>,
     },
-    #[error("ExpectedNumber (got: {got})")]
-    ExpectedNumber {
-        got: Ptr<ast::Type>,
-    },
     /// rust error:
     /// ```notest
     /// error[E0600]: cannot apply unary operator `!` to type `&'static str`
@@ -50,7 +46,6 @@ pub enum SemaErrorKind {
     },
     CannotInferInitializerTy,
     CannotInferAutocastTy,
-    MultiplePossibleInitializerTy,
     DuplicateInInitializer,
     MissingFieldInInitializer {
         field: Ptr<str>,
@@ -78,14 +73,10 @@ pub enum SemaErrorKind {
     CannotInfer,
     UnionFieldWithDefaultValue,
 
-    TopLevelDuplicate,
     UnexpectedTopLevelExpr(Ptr<Ast>),
 
     NotAConstExpr,
-    AssignToConst,
-    AssignToNotMut,
 
-    NegativeArrayLen,
     MismatchedArrayLen {
         expected: usize,
         got: usize,

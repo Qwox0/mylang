@@ -1,8 +1,4 @@
-use crate::{
-    ast::DeclList,
-    context::primitives,
-    parser::lexer::{Code, Span},
-};
+use crate::{ast::DeclList, context::primitives, parser::lexer::Code};
 use core::fmt;
 use std::{
     hint::unreachable_unchecked,
@@ -68,66 +64,12 @@ pub fn test_round_up_to_nearest_power_of_two() {
     assert_eq!(round_up_to_nearest_power_of_two(9), 16);
 }
 
-pub fn display_span_in_code(span: Span) {
-    display_span_in_code_with_label(span, "")
-}
-
-/// TODO: span behind end of code and code ends in '\n'
-pub fn display_span_in_code_with_label(span: Span, label: impl fmt::Display) {
-    let file = span.file.expect("span has file");
-    let code = file.code.as_ref();
-    let start_offset = code
-        .get(..span.start)
-        .unwrap_or("")
-        .bytes()
-        .rev()
-        .position(|b| b == b'\n')
-        .unwrap_or(span.start);
-    let loc = resolve_file_loc(span.start, code);
-    let line_num = loc.line.to_string();
-    let line_num_padding = " ".repeat(line_num.len());
-    let end_offset = code.get(span.end..).and_then(|l| l.lines().next().map(str::len)).unwrap_or(0);
-    let line = code
-        .get(span.start - start_offset..(span.end + end_offset).min(code.len()))
-        .unwrap()
-        .lines()
-        .intersperse("\\n")
-        .collect::<String>();
-    let linebreaks_in_span = code
-        .get(span.start..span.end)
-        .map(|s| s.lines().count().saturating_sub(1))
-        .unwrap_or(0);
-    let marker_len = span.len().saturating_add(linebreaks_in_span);
-    let offset = " ".repeat(start_offset);
-    eprintln!(
-        "{}--> {}:{}:{}", // ─┬─
-        line_num_padding,
-        file.path.as_ref().display(),
-        line_num,
-        start_offset + 1
-    );
-    eprintln!("{} │", line_num_padding);
-    eprintln!("{} │ {}", line_num, line);
-    eprintln!("{} │ {offset}{} {label}", line_num_padding, "^".repeat(marker_len));
-}
-
-pub fn debug_span_in_code(span: Span, code: &Code) {
-    let line_num = code.0[..=span.start].lines().count();
-    let linecount_in_span = code[span].lines().count();
-    println!("{:?}", &code.0[..span.end]);
-    println!(
-        " {}{} {span:?}",
-        " ".repeat(span.start + line_num.saturating_sub(1)),
-        "^".repeat(span.len() + linecount_in_span.saturating_sub(1))
-    );
-}
-
 #[allow(unused)]
 pub struct FileLoc {
     /// 1-indexed
-    line: usize,
+    pub line: usize,
     /// 1-indexed, char count
-    col: usize,
+    pub col: usize,
 }
 
 pub fn resolve_file_loc(byte_pos: usize, code: &Code) -> FileLoc {

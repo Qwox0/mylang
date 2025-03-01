@@ -1,0 +1,55 @@
+pub fs :: #import "fs.mylang";
+pub env :: #import "env.mylang";
+
+libc :: #import "libc";
+
+panic :: (msg: []u8) -> never {
+    print_str("PANIC: ");
+    println_str(msg);
+    libc.exit(1)
+}
+
+assert :: (cond: bool) -> if !cond do panic("Assertion failed!");
+
+malloc0 :: (size: libc.c_size_t) -> {
+    ptr := libc.malloc(size);
+    libc.memset(ptr, 0, size);
+    ptr
+}
+
+open_file :: (pathname: []u8, mode: []u8) -> *libc.FILE {
+    // currently all string slices are 0 terminated, so this should be fine.
+    file := libc.fopen(pathname.ptr, mode.ptr);
+    if file == nil do panic("No such file or directory");
+    file
+}
+
+read_file_as_string_slice :: (pathname: []u8) -> []u8 {
+    file := open_file(pathname, "rb");
+    defer libc.fclose(file);
+
+    libc.fseek(file, 0, libc.SEEK_END);
+    length := libc.ftell(file).as(u64);
+    if length < 0 do panic("Cannot get file size");
+    libc.fseek(file, 0, libc.SEEK_SET);
+
+    buffer := libc.malloc(length + 1);
+    if buffer == nil do panic("malloc failed");
+
+    libc.fread(buffer, 1, length, file);
+
+    mut slice := []u8.{ ptr = buffer, len = length + 1 };
+    slice[length] = 0;
+    slice
+}
+
+print_str :: (str: []u8) -> void {
+    for idx in 0..str.len {
+        libc.putchar(str[idx]); // handle output == EOF?
+    }
+}
+
+println_str :: (str: []u8) -> void {
+    print_str(str);
+    libc.putchar('\n'); // handle output == EOF?
+}

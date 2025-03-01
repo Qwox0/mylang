@@ -465,7 +465,7 @@ pub struct Lexer {
     pub code: Cursor,
     next_tok: Option<Token>,
 
-    file: Ptr<SourceFile>,
+    pub file: Ptr<SourceFile>,
 }
 
 impl Lexer {

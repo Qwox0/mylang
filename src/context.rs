@@ -4,7 +4,7 @@ use crate::{
     compiler::CompileDurations,
     diagnostic_reporter,
     parser::lexer::Span,
-    ptr::Ptr,
+    ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     source_file::SourceFile,
     util::UnwrapDebug,
@@ -26,11 +26,13 @@ pub struct CompilationContextInner {
     pub compile_time: CompileDurations,
 
     pub primitives: Primitives,
-    pub global_scope: Ptr<ast::Block>,
+    pub primitives_scope: Ptr<ast::Block>,
 
     /// absolute import file path -> index into `files`
     pub imports: HashMap<PathBuf, FilesIndex>,
-    pub files: Vec<SourceFile>,
+    /// This List must contain [`Ptr`]s because it might reallocate while a mutable reference to
+    /// [`SourceFile`] is active.
+    pub files: Vec<Ptr<SourceFile>>,
 
     #[cfg(debug_assertions)]
     pub debug_types: bool,
@@ -75,7 +77,7 @@ impl CompilationContext {
 
         let global_scope =
             ast_new!(Block { span: Span::ZERO, has_trailing_semicolon: false, stmts });
-        let global_scope = alloc.alloc(global_scope).unwrap();
+        let primitives_scope = alloc.alloc(global_scope).unwrap();
 
         let ctx = CompilationContextInner {
             alloc,
@@ -83,7 +85,7 @@ impl CompilationContext {
             compile_time: CompileDurations::default(),
 
             primitives,
-            global_scope,
+            primitives_scope,
 
             imports: HashMap::new(),
             files: Vec::new(),
@@ -102,16 +104,31 @@ impl CompilationContext {
 }
 
 impl Ptr<CompilationContextInner> {
-    pub fn add_import(self, mut path: PathBuf) -> Result<FilesIndex, std::io::Error> {
-        if path == Path::new("prelude") {
+    pub fn add_import(
+        self,
+        path: &str,
+        cur_path: OPtr<Path>,
+    ) -> Result<FilesIndex, std::io::Error> {
+        let path = if path == "prelude" {
             // TODO: use `std::env::current_exe().unwrap().canonicalize()`
-            path = PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"));
+            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"))
+        } else if path == "std" {
+            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/std/mod.mylang"))
+        } else if path == "libc" {
+            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/libc.mylang"))
+        } else {
+            let cur_path = cur_path.u();
+            debug_assert!(cur_path.is_file());
+            let mut full_path = cur_path.parent().u().to_path_buf();
+            full_path.push(path);
+            full_path
         }
-        let path = path.canonicalize()?;
+        .canonicalize()?;
         if let Some(idx) = self.imports.get(&path) {
             return Ok(*idx);
         }
         let file = SourceFile::read(Ptr::from_ref(path.as_path()), &self.alloc)?;
+        let file = self.alloc.alloc(file).unwrap();
         self.as_mut().files.push(file);
         let idx = self.files.len() - 1;
         self.as_mut().imports.insert(path, idx);
@@ -123,6 +140,7 @@ impl Ptr<CompilationContextInner> {
             return *idx;
         }
         let path = file.path.to_path_buf();
+        let file = self.alloc.alloc(file).unwrap();
         self.as_mut().files.push(file);
         let idx = self.files.len() - 1;
         self.as_mut().imports.insert(path, idx);
@@ -145,6 +163,11 @@ macro_rules! impl_diagnostic_reporter_for_ctx {
                 M: std::fmt::Display + ?Sized,
             {
                 self.diagnostic_reporter.report(severity, span, msg)
+            }
+
+            fn hint<M>(&mut self, span: Span, msg: &M)
+            where M: std::fmt::Display + ?Sized {
+                self.diagnostic_reporter.hint(span, msg)
             }
 
             fn max_past_severity(&self) -> Option<crate::diagnostic_reporter::DiagnosticSeverity> {

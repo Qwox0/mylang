@@ -4,14 +4,15 @@ use crate::{
         UnaryOpKind, UpcastToAst,
     },
     context::primitives,
+    display_code::display,
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
     symbol_table::SymbolTable,
     type_::{RangeKind, enum_alignment, ty_match, union_size},
     util::{
-        self, UnwrapDebug, display_span_in_code, forget_lifetime, get_aligned_offset, get_padding,
-        is_simple_enum, panic_debug, unreachable_debug,
+        self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, is_simple_enum,
+        panic_debug, unreachable_debug,
     },
 };
 pub use inkwell::targets::TargetMachine;
@@ -562,7 +563,7 @@ impl<'ctx> Codegen<'ctx> {
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
                         .map(reg_sym),
                     _ => {
-                        display_span_in_code(expr.full_span());
+                        display(expr.full_span()).finish();
                         todo!("binop {op:?} for {}", arg_ty)},
                 }
             },
@@ -1403,7 +1404,7 @@ impl<'ctx> Codegen<'ctx> {
         }
         */
 
-        display_span_in_code(expr.full_span());
+        display(expr.full_span()).finish();
 
         todo!("cast {} to {}", expr_ty, target_ty);
     }

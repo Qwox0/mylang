@@ -6,9 +6,9 @@ use mylang::{
 };
 
 fn main() -> ! {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let ctx = CompilationContext::new();
-    let res = match &cli.command {
+    let res = match &mut cli.command {
         Command::Repl {} => todo!("repl"),
         Command::Clean(_) => todo!("clean"),
         Command::Build(args) => compile(ctx.0, CompileMode::Build, args),

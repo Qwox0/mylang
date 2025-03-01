@@ -1,12 +1,8 @@
 use crate::{
-    arena_allocator::Arena,
-    ast::{self, Ast},
-    parser::lexer::Code,
-    ptr::{OPtr, Ptr},
-    symbol_table::linear_search_symbol,
+    arena_allocator::Arena, ast, parser::lexer::Code, ptr::Ptr, symbol_table::linear_search_symbol,
     util::UnwrapDebug,
 };
-use std::path::Path;
+use std::{ops, path::Path, range::Range};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SourceFile {
@@ -16,14 +12,20 @@ pub struct SourceFile {
     /// This is only [`None`] iff the `code` hasn't been parse yet.
     ///
     /// not owned.
-    pub stmts: OPtr<[Ptr<Ast>]>,
+    pub stmt_range: Option<Range<usize>>,
     //pub root_scope: OPtr<ast::Block>,
 }
 
 impl SourceFile {
     /// The callee has to make sure that the provided combination of `path` and `code` makes sense.
+    #[inline]
     pub fn new(path: Ptr<Path>, code: Ptr<Code>) -> SourceFile {
-        Self { path, code, stmts: None }
+        Self { path, code, stmt_range: None }
+    }
+
+    #[inline]
+    pub fn set_stmt_range(&mut self, stmt_range: ops::Range<usize>) {
+        self.stmt_range = Some(stmt_range.into())
     }
 
     pub fn read(path: Ptr<Path>, alloc: &Arena) -> Result<SourceFile, std::io::Error> {
@@ -33,10 +35,14 @@ impl SourceFile {
     }
 
     pub fn has_been_parsed(&self) -> bool {
-        self.stmts.is_some()
+        self.stmt_range.is_some()
     }
 
-    pub fn find_symbol(self, name: &str) -> Option<Ptr<ast::Decl>> {
-        linear_search_symbol(&self.stmts.u(), name)
+    pub fn find_symbol(
+        self,
+        name: &str,
+        all_stmts: Ptr<[Ptr<ast::Ast>]>,
+    ) -> Option<Ptr<ast::Decl>> {
+        linear_search_symbol(&all_stmts[self.stmt_range.u()], name)
     }
 }

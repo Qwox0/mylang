@@ -44,7 +44,7 @@ pub enum CompileMode {
 pub fn compile(
     ctx: Ptr<CompilationContextInner>,
     mode: CompileMode,
-    args: &BuildArgs,
+    args: &mut BuildArgs,
 ) -> CompileResult {
     if args.path.is_dir() {
         println!("Compiling project at {:?}", args.path);
@@ -65,6 +65,7 @@ pub fn compile(
         panic!("{:?} is not a dir nor a file", args.path)
     }
     println!("Compiling file at {:?}", args.path);
+    args.path = args.path.canonicalize().unwrap();
     let root_file = SourceFile::read(Ptr::from_ref(&args.path), &ctx.alloc).unwrap();
 
     compile_file(ctx, root_file, mode, args)
@@ -92,22 +93,24 @@ pub fn compile_file(
         return CompileResult::Err;
     }
 
-    debug_assert!(ctx.files.iter().all(SourceFile::has_been_parsed));
+    debug_assert!(ctx.files.iter().all(|f| f.has_been_parsed()));
 
-    fn debug_ast(ctx: &CompilationContextInner) {
-        for file in ctx.files.iter() {
-            println!("# File {:?}", file.path);
-            for s in file.stmts.u().iter() {
-                println!("stmt @ {:x?}", s);
-                s.print_tree();
+    macro_rules! debug_ast {
+        () => {
+            for file in ctx.files.iter() {
+                println!("# File {:?}", file.path);
+                for s in stmts[file.stmt_range.u()].iter() {
+                    println!("stmt @ {:x?}", s);
+                    s.print_tree();
+                }
+                println!();
             }
-            println!();
-        }
+        };
     }
 
     if args.debug_ast {
         println!("### AST Nodes:");
-        debug_ast(&ctx);
+        debug_ast!();
     }
 
     if mode == CompileMode::Parse {
@@ -129,7 +132,7 @@ pub fn compile_file(
 
     if args.debug_typed_ast {
         println!("\n### Typed AST Nodes:");
-        debug_ast(&ctx);
+        debug_ast!();
     }
 
     if mode == CompileMode::Check {

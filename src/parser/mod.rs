@@ -21,7 +21,6 @@ use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
-use std::path::PathBuf;
 
 pub mod error;
 pub mod lexer;
@@ -47,14 +46,14 @@ pub fn parse(
 ) -> Vec<Ptr<Ast>> {
     let mut stmts = Vec::new();
     if !no_prelude {
-        cctx.add_import(PathBuf::from("prelude")).unwrap();
+        // cctx.add_import("prelude", None).unwrap();
     }
     cctx.add_import_from_file(root_file);
 
     // Note: this idx-based loop is needed because `ctx.semas` might get mutated while the loop is
     // running.
     let mut idx = 0;
-    while let Some(file) = cctx.as_mut().files.get_mut(idx) {
+    while let Some(file) = cctx.files.get(idx).copied() {
         parse_file_into(file, cctx, &mut stmts);
 
         idx += 1;
@@ -63,12 +62,12 @@ pub fn parse(
 }
 
 pub fn parse_file_into(
-    file: &mut SourceFile,
+    file: Ptr<SourceFile>,
     cctx: Ptr<CompilationContextInner>,
     stmts: &mut Vec<Ptr<Ast>>,
 ) {
     let start_idx = stmts.len();
-    let mut p = Parser { lex: Lexer::new(Ptr::from_ref(file)), cctx };
+    let mut p = Parser { lex: Lexer::new(file), cctx };
     p.ws0().parse_stmts_into(stmts, false);
     while let Some(t) = p.lex.next() {
         debug_assert_eq!(t.kind, TokenKind::CloseBrace);
@@ -76,7 +75,7 @@ pub fn parse_file_into(
         p.ws0().parse_stmts_into(stmts, false);
     }
     debug_assert!(p.lex.is_empty());
-    file.stmts = Some(Ptr::from(&stmts[start_idx..]));
+    file.as_mut().set_stmt_range(start_idx..stmts.len());
 }
 
 pub struct Parser {
@@ -596,8 +595,10 @@ impl Parser {
                         panic!("todo")
                     };
 
-                    let idx =
-                        self.cctx.add_import(PathBuf::from(path.text.as_ref())).map_err(|e| {
+                    let idx = self
+                        .cctx
+                        .add_import(path.text.as_ref(), Some(self.lex.file.path))
+                        .map_err(|e| {
                             cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref())
                         })?;
                     expr!(ImportDirective { path, files_idx: idx })

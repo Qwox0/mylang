@@ -57,6 +57,10 @@ impl<T> ScopedStack<T> {
     pub fn reserve(&mut self, additional: usize) {
         self.values.reserve(additional);
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.len() == 1
+    }
 }
 
 union ScopedStackValue<T> {

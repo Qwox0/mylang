@@ -33,9 +33,9 @@ pub type SymbolTable2 = ScopedStack<Ptr<ast::Decl>>;
 
 impl SymbolTable2 {
     #[inline]
-    pub fn insert_no_duplicate(&mut self, val: Ptr<ast::Decl>) -> Result<(), ()> {
-        if self.get_cur_scope().iter().any(|d| *d.ident.text == *val.ident.text) {
-            Err(())
+    pub fn insert_no_duplicate(&mut self, val: Ptr<ast::Decl>) -> Result<(), Ptr<ast::Decl>> {
+        if let Some(dup) = self.get_cur_scope().iter().find(|d| *d.ident.text == *val.ident.text) {
+            Err(*dup)
         } else {
             self.push(val);
             Ok(())
@@ -58,11 +58,10 @@ impl Ptr<ast::Block> {
 
 #[inline]
 pub fn linear_search_symbol(stmts: &[Ptr<ast::Ast>], name: &str) -> Option<Ptr<ast::Decl>> {
-    // `rev()` because of shadowing
     stmts
         .iter()
         .copied()
-        .rev()
+        .rev() // `rev()` because of shadowing
         .filter_map(|a| a.try_downcast::<ast::Decl>())
         .find(|d| *d.ident.text == *name)
 }
