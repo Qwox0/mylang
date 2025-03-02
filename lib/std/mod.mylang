@@ -53,3 +53,11 @@ println :: (str: []u8) -> void {
     print(str);
     libc.putchar('\n'); // handle output == EOF?
 }
+
+streq :: (str1: []u8, str2: []u8) -> bool {
+    if str1.len != str2.len return false;
+    for idx in 0..str1.len
+        if str1[idx] != str2[idx]
+            return false;
+    true
+}

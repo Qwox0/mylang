@@ -160,7 +160,7 @@ impl Primitives {
             i32: new_primitive_ty!("i32", IntTy { bits: 32, is_signed: true }),
             i64: new_primitive_ty!("i64", IntTy { bits: 64, is_signed: true }),
             i128: new_primitive_ty!("i128", IntTy { bits: 128, is_signed: true }),
-            bool: new_primitive_ty!("bool", simple_ty),
+            bool: new_primitive_ty!("bool", simple_ty), // use `IntTy { bits: 1, is_signed: ̉? }` ?
             char: new_primitive_ty!("char", simple_ty),
             f32: new_primitive_ty!("f32", FloatTy { bits: 32 }),
             f64: new_primitive_ty!("f64", FloatTy { bits: 64 }),

@@ -95,6 +95,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
                 "file scope must not contain defer statements"
             );
             sema.close_scope().ok().u();
+            debug_assert!(sema.symbols.is_empty());
         }
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
@@ -375,16 +376,15 @@ impl Sema {
                 assert!(lhs.is_none(), "todo: array initializer with lhs");
                 let u64_ty = p.u64;
                 let count_ty = *analyze!(*count, Some(u64_ty), true);
-                debug_assert!(count.is_const_val());
                 if count_ty != u64_ty {
                     return err(
                         MismatchedTypes { expected: u64_ty, got: count_ty },
                         count.full_span(),
                     );
                 }
+                let len = count.try_get_const_val()?.upcast();
                 let elem_ty = analyze!(*val, None).upcast();
-                let arr_ty =
-                    self.alloc(type_new!(ArrayTy { len: *count, elem_ty }))?.upcast_to_type();
+                let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?.upcast_to_type();
                 expr.ty = Some(arr_ty);
             },
             AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
@@ -534,6 +534,22 @@ impl Sema {
                 //assert!(!is_const, "todo: PreOp in const");
                 let expr_ty = *analyze!(*operand, None);
                 let const_val = then!(is_const => operand.downcast_const_val());
+
+                macro_rules! simple_unary_op {
+                    ($op:tt $ast_node:ident) => {{
+                        if let Some(const_val) = const_val {
+                            let val = const_val.downcast::<ast::$ast_node>().val;
+                            debug_assert!(expr.replacement.is_none());
+                            // TODO: no allocation
+                            expr.replacement = Some(self.alloc(ast_new!($ast_node {
+                                val: $op val,
+                                span: expr.full_span(),
+                            }))?.upcast());
+                        }
+                        expr_ty
+                    }};
+                }
+
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
@@ -547,46 +563,20 @@ impl Sema {
                         debug_assert!(const_val.is_none(), "todo: const deref");
                         ptr_ty.pointee.downcast_type()
                     },
-                    UnaryOpKind::Not if expr_ty == p.bool => {
-                        if let Some(const_val) = const_val {
-                            let b = const_val.downcast::<ast::BoolVal>().val;
-                            debug_assert!(expr.replacement.is_none());
-                            // TODO: no allocation
-                            expr.replacement = Some(
-                                self.alloc(ast_new!(BoolVal { val: !b, span: Span::ZERO }))?
-                                    .upcast(),
-                            )
-                        }
-                        p.bool
+                    UnaryOpKind::Not if expr_ty == p.bool => simple_unary_op!(!BoolVal),
+                    UnaryOpKind::Not if expr_ty.kind == AstKind::IntTy || expr_ty == p.int_lit => {
+                        simple_unary_op!(!IntVal)
                     },
                     UnaryOpKind::Neg if expr_ty.kind == AstKind::IntTy || expr_ty == p.int_lit => {
-                        if let Some(const_val) = const_val {
-                            let i = const_val.downcast::<ast::IntVal>().val;
-                            debug_assert!(expr.replacement.is_none());
-                            // TODO: no allocation
-                            expr.replacement = Some(
-                                self.alloc(ast_new!(IntVal { val: -i, span: Span::ZERO }))?
-                                    .upcast(),
-                            )
-                        }
-                        expr_ty
+                        simple_unary_op!(-IntVal)
                     },
                     UnaryOpKind::Neg
                         if expr_ty.kind == AstKind::FloatTy || expr_ty == p.float_lit =>
                     {
-                        if let Some(const_val) = const_val {
-                            let f = const_val.downcast::<ast::FloatVal>().val;
-                            debug_assert!(expr.replacement.is_none());
-                            // TODO: no allocation
-                            expr.replacement = Some(
-                                self.alloc(ast_new!(FloatVal { val: -f, span: Span::ZERO }))?
-                                    .upcast(),
-                            )
-                        }
-                        expr_ty
+                        simple_unary_op!(-FloatVal)
                     },
                     UnaryOpKind::Deref | UnaryOpKind::Not | UnaryOpKind::Neg => {
-                        return err(InvalidPreOp { ty: expr_ty, op: *op }, span);
+                        return err(InvalidUnaryOp { ty: expr_ty, op: *op }, span);
                     },
                     UnaryOpKind::Try => todo!("try"),
                 });
@@ -629,7 +619,8 @@ impl Sema {
                     },
                 });
                 if is_const {
-                    let Some((lhs, rhs)) = lhs.try_get_const_val().zip(rhs.try_get_const_val())
+                    let Some((lhs, rhs)) =
+                        lhs.try_get_const_val().ok().zip(rhs.try_get_const_val().ok())
                     else {
                         return err(HandledErr, Span::ZERO);
                     };
@@ -651,7 +642,7 @@ impl Sema {
                         };
                     }
 
-                    let Some(res) = (match op {
+                    let Some(out_val) = (match op {
                         BinOpKind::Mul => calc_num_binop!(*, allow FloatVal),
                         BinOpKind::Div => calc_num_binop!(/, allow FloatVal),
                         BinOpKind::Mod => calc_num_binop!(%, allow FloatVal),
@@ -674,7 +665,8 @@ impl Sema {
                         cerror!(expr.full_span(), "umimplemented compiletime binary operation");
                         return Err(().into());
                     };
-                    expr.replacement = Some(res);
+                    out_val.as_mut().ty = expr.ty;
+                    expr.replacement = Some(out_val);
                 }
             },
             AstEnum::Range { start, end, is_inclusive, .. } => {
@@ -780,8 +772,9 @@ impl Sema {
                     self.analyze_decl(Ptr::from_ref(&iter_var_decl), false)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
-                    if body.ty.u() != p.void_ty && body.ty.u() != p.never {
-                        return err(CannotReturnFromLoop, body.full_span());
+                    if !body.ty.u().matches_void() && body.kind == AstKind::Block {
+                        self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
+                        Err(().into())?;
                     }
                 };
                 self.close_scope()?;
@@ -796,11 +789,15 @@ impl Sema {
                     return err(MismatchedTypes { expected: bool_ty, got }, condition.full_span());
                 }
                 self.open_scope();
-                self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
-                if body.ty.u() != p.void_ty && body.ty.u() != p.never {
-                    return err(CannotReturnFromLoop, body.full_span());
-                }
+                let res: SemaResult<()> = try {
+                    self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
+                    if !body.ty.u().matches_void() && body.kind == AstKind::Block {
+                        self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
+                        Err(().into())?;
+                    }
+                };
                 self.close_scope()?;
+                res?;
                 expr.ty = Some(p.void_ty);
             },
             // AstEnum::Catch { .. } => todo!(),
@@ -878,14 +875,7 @@ impl Sema {
 
                     if let Some(body) = *body {
                         self.analyze(body, ret_ty, false)?;
-                        check_and_set_target!(
-                            body.ty.u(),
-                            ret_ty,
-                            body.try_downcast::<ast::Block>()
-                                .and_then(|b| b.stmts.last().copied())
-                                .unwrap_or(body)
-                                .full_span()
-                        );
+                        check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span());
                         ret_ty.as_mut().u().finalize();
                     } else {
                         panic_debug("this function has already been analyzed as a function type")

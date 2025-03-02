@@ -23,6 +23,7 @@ This list contains language features/syntax and the programming languages that i
 * Positional Initializer
     * Jai: use field order (`.(1, 2)`)
 * `xx` Autocast: Jai
+* `!my_int` bitwise not: Rust
 
 Unimplemented:
 

@@ -34,6 +34,12 @@ pub trait DiagnosticReporter {
     fn warn2(&mut self, err: &impl SpannedError) {
         self.report2(DiagnosticSeverity::Warn, err)
     }
+
+    // some common diagnostics:
+
+    fn error_cannot_yield_from_loop_block(&mut self, span: Span) {
+        self.error(span, "cannot yield a value from a loop block.");
+    }
 }
 
 /// default [`DiagnosticReporter`]. Prints diagnostics to the terminal

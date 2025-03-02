@@ -499,8 +499,8 @@ impl<'ctx> Codegen<'ctx> {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
                     },
                     UnaryOpKind::Not => {
-                        debug_assert_eq!(operand.ty, p.bool);
-                        debug_assert_eq!(out_ty, p.bool);
+                        debug_assert!(operand.ty == p.bool || operand.ty.u().kind == AstKind::IntTy);
+                        debug_assert!(out_ty == p.bool || out_ty.kind == AstKind::IntTy);
                         let v = self.sym_as_val(sym, out_ty)?;
                         reg(self.builder.build_not(v.bool_val(), "not")?)
                     },
@@ -710,6 +710,11 @@ impl<'ctx> Codegen<'ctx> {
                     condition
                 };
 
+                let write_target = write_target.take();
+                if write_target.is_some() {
+                    debug_assert!(else_body.is_some());
+                }
+
                 let mut then_bb = self.context.append_basic_block(func, "then");
                 let mut else_bb = self.context.append_basic_block(func, "else");
                 let merge_bb = self.context.append_basic_block(func, "ifmerge");
@@ -718,7 +723,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 self.builder.position_at_end(then_bb);
                 then_body.ty = Some(out_ty);
-                let then_sym = self.compile_expr(*then_body)?;
+                let then_sym = self.compile_expr_with_write_target(*then_body, write_target)?;
                 let then_val = self.sym_as_val_checked(then_sym, out_ty)?;
                 if then_sym != Symbol::Never {
                     self.builder.build_unconditional_branch(merge_bb)?;
@@ -728,7 +733,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.position_at_end(else_bb);
                 let else_sym = if let Some(else_body) = else_body {
                     else_body.ty = Some(out_ty);
-                    self.compile_expr(*else_body)?
+                    self.compile_expr_with_write_target(*else_body, write_target)?
                 } else {
                     Symbol::Void
                 };
@@ -747,16 +752,20 @@ impl<'ctx> Codegen<'ctx> {
                     return Ok(Symbol::Never);
                 }
 
-                let branch_ty = self.llvm_type(out_ty).basic_ty();
-                let phi = self.builder.build_phi(branch_ty, "ifexpr")?;
-                debug_assert!(then_val.is_some() || else_val.is_some());
-                if let Some(then_val) = then_val {
-                    phi.add_incoming(&[(&then_val.basic_val(), then_bb)]);
+                if let Some(write_target) = write_target{
+                    stack_val(write_target)
+                } else {
+                    let branch_ty = self.llvm_type(out_ty).basic_ty();
+                    let phi = self.builder.build_phi(branch_ty, "ifexpr")?;
+                    debug_assert!(then_val.is_some() || else_val.is_some());
+                    if let Some(then_val) = then_val {
+                        phi.add_incoming(&[(&then_val.basic_val(), then_bb)]);
+                    }
+                    if let Some(else_val) = else_val {
+                        phi.add_incoming(&[(&else_val.basic_val(), else_bb)]);
+                    }
+                    reg(phi)
                 }
-                if let Some(else_val) = else_val {
-                    phi.add_incoming(&[(&else_val.basic_val(), else_bb)]);
-                }
-                reg(phi)
             },
             AstEnum::Match { .. } => todo!(),
             AstEnum::For { source, iter_var, body, .. } => {
@@ -822,7 +831,6 @@ impl<'ctx> Codegen<'ctx> {
                         )?;
                         let iter_var_sym = reg_sym(for_info.idx);
                         self.symbols.insert(iter_var.text, iter_var_sym);
-                        debug_assert!(body.ty.u().matches_void());
                         let out = self.compile_expr(*body)?;
                         self.build_for_end(for_info, out)?
                     },

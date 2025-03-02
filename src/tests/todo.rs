@@ -283,5 +283,15 @@ fn fix_panic() {
 fn fix_multi_fn_compile() {
     jit_run_test::<()>("std :: #import \"std\"; println :: std.println;").ok();
     panic!("OK")
+}
 
+#[test]
+#[ignore = "not yet implemented"]
+fn todo() {
+    let code = "
+MyStruct :: struct { val: i32 };
+for _ in 0..10 {} // currently a ';' is required
+.{ val = 3 }";
+    let out = *jit_run_test::<i32>(code).ok();
+    assert_eq!(out, 3);
 }

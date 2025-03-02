@@ -438,6 +438,7 @@ impl Parser {
                     // (expr)
                     TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
                         first_expr.parenthesis_count += 1;
+                        first_expr.span = span.join(t.span);
                         return Ok(first_expr);
                     },
                     // (expr) -> ...
@@ -478,7 +479,6 @@ impl Parser {
                 self.tok(TokenKind::CloseBracket).context("array ty ']'")?;
                 let is_mut = self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let elem_ty = self.ws0().expr_(PREOP_PRECEDENCE)?;
-                let span = span.join(elem_ty.span);
                 match len {
                     Some(len) => expr!(ArrayTy { len, elem_ty }, span),
                     None => expr!(SliceTy { elem_ty, is_mut }, span),
@@ -1107,6 +1107,7 @@ impl FollowingOperator {
             TokenKind::DotAsterisk => FollowingOperator::PostOp(UnaryOpKind::Deref),
             TokenKind::DotAmpersand => FollowingOperator::PostOp(UnaryOpKind::AddrOf),
             TokenKind::DotOpenParenthesis => FollowingOperator::PositionalInitializer,
+            TokenKind::DotOpenBracket => FollowingOperator::ArrayInitializer,
             TokenKind::DotOpenBrace => FollowingOperator::NamedInitializer,
             TokenKind::Colon => FollowingOperator::TypedDecl,
             TokenKind::ColonColon => FollowingOperator::ConstDecl,

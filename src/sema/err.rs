@@ -34,7 +34,7 @@ pub enum SemaErrorKind {
     /// 70 |         let a = !"";
     ///    |                 ^^^ cannot apply unary operator `!`
     /// ```
-    InvalidPreOp {
+    InvalidUnaryOp {
         ty: Ptr<ast::Type>,
         op: UnaryOpKind,
     },
@@ -86,7 +86,6 @@ pub enum SemaErrorKind {
     InvalidArrayIndex {
         ty: Ptr<ast::Type>,
     },
-    CannotReturnFromLoop,
 
     AllocErr(bumpalo::AllocErr),
 

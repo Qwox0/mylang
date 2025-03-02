@@ -4,6 +4,7 @@ use crate::{
     diagnostic_reporter::{DiagnosticReporter, cerror},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
+    sema,
     type_::{RangeKind, ty_match},
     util::{UnwrapDebug, then},
 };
@@ -740,14 +741,12 @@ impl Ptr<Ast> {
         p.cast()
     }
 
-    /// This reports possible errors
-    pub fn try_get_const_val(self) -> OPtr<ConstVal> {
+    pub fn try_get_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
         let p = self.rep();
-        let const_val = then!(p.is_const_val() => p.downcast_const_val());
-        if const_val.is_none() {
+        then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(|| {
             cerror!(self.full_span(), "value not known at compile time");
-        }
-        const_val
+            ().into()
+        })
     }
 
     #[inline]
@@ -773,6 +772,14 @@ impl Ptr<Ast> {
         let int = self.downcast::<IntVal>().val;
         debug_assert!(Int::try_from(int).is_ok());
         Int::try_from(int).u()
+    }
+
+    /// similar to [`Ast::full_span`] but returns a better span for [`Block`] nodes.
+    pub fn return_val_span(self) -> Span {
+        self.try_downcast::<Block>()
+            .and_then(|b| b.stmts.last().copied())
+            .unwrap_or(self)
+            .full_span()
     }
 }
 
@@ -870,6 +877,9 @@ impl Ast {
     /// Returns a [`Span`] representing the entire expression.
     pub fn full_span(&self) -> Span {
         let span = self.span;
+        if self.parenthesis_count > 0 {
+            return span;
+        }
         match self.matchable().as_ref() {
             AstEnum::PositionalInitializer { lhs, .. } | AstEnum::NamedInitializer { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(span)).unwrap_or(span)
@@ -917,6 +927,16 @@ impl Ast {
                 None => span,
             },
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
+
+            AstEnum::SimpleTy { .. } => todo!(),
+            AstEnum::IntTy { .. } => todo!(),
+            AstEnum::FloatTy { .. } => todo!(),
+            AstEnum::PtrTy { pointee: i, .. }
+            | AstEnum::SliceTy { elem_ty: i, .. }
+            | AstEnum::ArrayTy { elem_ty: i, .. }
+            | AstEnum::OptionTy { inner_ty: i, .. } => self.span.join(i.full_span()),
+            AstEnum::StructDef { .. } | AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => span,
+            AstEnum::RangeTy { .. } => todo!(),
             AstEnum::Fn { body, ret_ty_expr, .. } => {
                 span.join(body.or(*ret_ty_expr).u().full_span())
             },
