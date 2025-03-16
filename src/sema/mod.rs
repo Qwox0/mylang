@@ -5,10 +5,10 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, BinOpKind, Decl, DeclListExt, OptionAstExt, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, type_new,
+        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, iter_field_expr, type_new,
     },
     context::{CompilationContextInner, primitives as p},
-    diagnostic_reporter::{DiagnosticReporter, cerror, chint},
+    diagnostic_reporter::{DiagnosticReporter, cerror, chint, cinfo},
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -56,14 +56,16 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
             };
             debug_assert!((decl.is_const && decl.init.is_some()) || decl.is_extern);
             debug_assert!(decl.ty.is_none());
-            if let Some(dup) = linear_search_symbol(&file_stmts[..idx], &decl.ident.text) {
+            if decl.on_type.is_none()
+                && let Some(dup) = linear_search_symbol(&file_stmts[..idx], &decl.ident.text)
+            {
                 cerror!(decl.ident.span, "Duplicate definition in module scope.");
-                chint!(dup.ident.span, "First definition here")
+                chint!(dup.ident.span, "First definition here");
             }
         }
     }
 
-    let mut sema = Sema::new(cctx, Ptr::from_ref(stmts));
+    let mut sema = Sema::new(cctx, Ptr::from(stmts));
     let mut finished = vec![false; stmts.len()];
     let mut remaining_count = stmts.len();
     let mut order = Vec::with_capacity(stmts.len());
@@ -127,6 +129,10 @@ pub struct Sema {
 
     cctx: Ptr<CompilationContextInner>,
     cur_file: OPtr<SourceFile>,
+
+    /// for debugging
+    #[cfg(debug_assertions)]
+    cur_decl: OPtr<ast::Decl>,
 }
 
 impl Sema {
@@ -138,6 +144,8 @@ impl Sema {
             defer_stack: ScopedStack::default(),
             cctx,
             cur_file: None,
+            #[cfg(debug_assertions)]
+            cur_decl: None,
         }
     }
 
@@ -389,7 +397,6 @@ impl Sema {
             },
             AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
                 let lhs_ty = *analyze!(*lhs, None);
-                let lhs = lhs.rep();
                 let t = if let Some(m) = lhs.try_downcast::<ast::ImportDirective>()
                     && let Some(s) =
                         self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.file_level_symbols)
@@ -403,16 +410,61 @@ impl Sema {
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
                     && let Some((_, variant)) = enum_ty.variants.find_field(&rhs.text)
                 {
+                    // enum variant
                     if variant.var_ty.u() == p.void_ty {
                         enum_ty.upcast_to_type()
                     } else {
                         p.enum_variant
                     }
+                } else if lhs_ty == p.type_ty
+                    && let TypeEnum::StructDef { consts, .. }
+                    | TypeEnum::UnionDef { consts, .. }
+                    | TypeEnum::EnumDef { consts, .. } = lhs.downcast_type().matchable().as_ref()
+                {
+                    // associated consts/methods
+                    let Some((_, field)) = consts.find_field(&rhs.text) else {
+                        cinfo!(rhs.span, "This associated const might be undefined");
+                        // The definition of an associated const might be after it's first use (or
+                        // even in another file).
+                        //
+                        // TODO: better handling of missing fields (currently only cycle detection
+                        // is triggered)
+                        return NotFinished;
+                    };
+                    let Some(ty) = field.var_ty else { return NotFinished };
+                    debug_assert!(field.is_const);
+                    debug_assert!(expr.replacement.is_none());
+                    expr.replacement = Some(field.const_val());
+                    ty
                 } else if let TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } =
-                    lhs_ty.matchable().as_ref()
+                    lhs_ty.flatten_transparent().matchable().as_ref()
                     && let Some((_, field)) = fields.find_field(&rhs.text)
                 {
+                    // field access
                     field.var_ty.u()
+                } else if let TypeEnum::StructDef { consts, .. }
+                | TypeEnum::UnionDef { consts, .. }
+                | TypeEnum::EnumDef { consts, .. } =
+                    lhs_ty.flatten_transparent().matchable().as_ref()
+                    && let Some((_, method)) = consts.find_field(&rhs.text)
+                {
+                    // method access
+                    if method.var_ty == p.fn_val {
+                        debug_assert!(rhs.replacement.is_none());
+                        rhs.replacement = Some(method.const_val());
+                        p.method_stub
+                    } else {
+                        cerror!(
+                            expr.full_span(),
+                            "cannot access a static constant through a value"
+                        );
+                        chint!(
+                            lhs.full_span(),
+                            "consider replacing the value with its type '{}'",
+                            lhs_ty // TODO: only show this hint iff lhs_ty has a name
+                        );
+                        return SemaResult::HandledErr;
+                    }
                 } else if let TypeEnum::SliceTy { elem_ty, is_mut, .. } = *lhs_ty.matchable()
                     && &*rhs.text == "ptr"
                 {
@@ -426,6 +478,8 @@ impl Sema {
                         return Ok(());
                     }
                     // method-like call:
+                    // TODO?: maybe change syntax to `arg~my_fn(...)`. using `.` both for method
+                    //        calls and method-like calls might be confusing
                     match self.get_symbol(rhs.text, rhs.span) {
                         Ok(s)
                             if s.var_ty == p.fn_val
@@ -435,11 +489,11 @@ impl Sema {
                         {
                             debug_assert!(rhs.replacement.is_none());
                             rhs.replacement = Some(f.upcast());
+                            p.method_stub
                         },
                         NotFinished => return NotFinished,
                         _ => return err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span),
-                    };
-                    p.method_stub
+                    }
                 };
                 expr.ty = Some(t);
             },
@@ -525,13 +579,15 @@ impl Sema {
                     self.validate_call(&mut [variant], args.iter_mut(), span.end())?;
                     enum_ty.upcast_to_type()
                 } else {
-                    display(expr.full_span()).finish();
-                    panic!("{:#?}", func);
-                    return err(CallOfANonFunction, expr.full_span());
+                    cerror!(
+                        func.full_span(),
+                        "Cannot call value of type '{}'; expected function",
+                        fn_ty
+                    );
+                    return SemaResult::HandledErr;
                 });
             },
             AstEnum::UnaryOp { op, operand, .. } => {
-                //assert!(!is_const, "todo: PreOp in const");
                 let expr_ty = *analyze!(*operand, None);
                 let const_val = then!(is_const => operand.downcast_const_val());
 
@@ -622,7 +678,7 @@ impl Sema {
                     let Some((lhs, rhs)) =
                         lhs.try_get_const_val().ok().zip(rhs.try_get_const_val().ok())
                     else {
-                        return err(HandledErr, Span::ZERO);
+                        return SemaResult::HandledErr;
                     };
 
                     macro_rules! calc_num_binop {
@@ -663,7 +719,7 @@ impl Sema {
                         BinOpKind::Or => todo!(),
                     }) else {
                         cerror!(expr.full_span(), "umimplemented compiletime binary operation");
-                        return Err(().into());
+                        return SemaResult::HandledErr;
                     };
                     out_val.as_mut().ty = expr.ty;
                     expr.replacement = Some(out_val);
@@ -760,7 +816,7 @@ impl Sema {
                             "cannot iterate over value of type `{}`",
                             source.ty.u()
                         );
-                        return Err(().into());
+                        return SemaResult::HandledErr;
                     },
                 };
 
@@ -774,7 +830,7 @@ impl Sema {
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
                     if !body.ty.u().matches_void() && body.kind == AstKind::Block {
                         self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
-                        Err(().into())?;
+                        return SemaResult::HandledErr;
                     }
                 };
                 self.close_scope()?;
@@ -793,7 +849,7 @@ impl Sema {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
                     if !body.ty.u().matches_void() && body.kind == AstKind::Block {
                         self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
-                        Err(().into())?;
+                        return SemaResult::HandledErr;
                     }
                 };
                 self.close_scope()?;
@@ -922,35 +978,31 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::StructDef { fields, .. } => {
+            AstEnum::StructDef { fields, consts: const_fields, .. } => {
                 let mut field_names = HashSet::new();
-                for field in fields.iter().copied() {
+                for field in iter_field_expr(fields, const_fields) {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
                         return err(DuplicateField, field.ident.span);
                     }
-                    if field.is_const {
-                        todo!("const struct field")
-                    }
-                    let _f = self.var_decl_to_value(field)?;
+                    debug_assert!(!(field.is_const ^ const_fields.contains(&field)));
+                    self.var_decl_to_value(field)?;
                 }
                 //self.struct_stack.last_mut().unwrap_debug().push(ty);
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::UnionDef { fields, .. } => {
+            AstEnum::UnionDef { fields, consts: const_fields, .. } => {
                 let mut field_names = HashSet::new();
-                for field in fields.iter().copied() {
+                for field in iter_field_expr(fields, const_fields) {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
                         return err(DuplicateField, field.ident.span);
                     }
-                    if field.is_const {
-                        todo!("const struct field")
-                    }
+                    debug_assert!(!(field.is_const ^ const_fields.contains(&field)));
                     if let Some(d) = field.init {
                         return err(UnionFieldWithDefaultValue, d.full_span());
                     }
-                    let _f = self.var_decl_to_value(field)?;
+                    self.var_decl_to_value(field)?;
                 }
                 expr.ty = Some(p.type_ty);
             },
@@ -1065,8 +1117,42 @@ impl Sema {
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
     /// declaration. This also doesn't insert into `self.symbols`.
     fn var_decl_to_value(&mut self, decl_ptr: Ptr<ast::Decl>) -> SemaResult<()> {
+        #[cfg(debug_assertions)]
+        let prev_decl = self.cur_decl.replace(decl_ptr);
         let p = p();
         let decl = decl_ptr.as_mut();
+        let is_first_pass = decl.ty.is_none(); // remove this when `NotFinished` is removed
+        if let Some(ty_expr) = decl.on_type
+            && is_first_pass
+        {
+            let ty = self.analyze_type(ty_expr)?;
+            match ty.matchable().as_mut() {
+                TypeEnum::StructDef { fields, consts, .. }
+                | TypeEnum::UnionDef { fields, consts, .. }
+                | TypeEnum::EnumDef { variants: fields, consts, .. } => {
+                    let name = decl.ident.text.as_ref();
+                    if let Some((_, prev)) =
+                        fields.find_field(name).or_else(|| consts.find_field(name))
+                    {
+                        cerror!(
+                            decl_ptr.lhs_span(),
+                            "duplicate definitions of {}",
+                            decl_ptr.display_lhs()
+                        );
+                        chint!(prev.lhs_span(), "previously definition here");
+                        return SemaResult::HandledErr;
+                    }
+                    consts.push(decl_ptr);
+                },
+                _ => {
+                    cerror!(
+                        ty_expr.full_span(),
+                        "cannot define an associated variable on a primitive type"
+                    );
+                    return SemaResult::HandledErr;
+                },
+            }
+        }
         decl.ty = Some(p.void_ty);
         if let Some(t) = decl.var_ty_expr {
             let ty = self.analyze_type(t)?;
@@ -1086,17 +1172,23 @@ impl Sema {
                 decl.ty = Some(p.never);
             }
         }
-        if let Some(init) = decl.init {
+        let res = if let Some(init) = decl.init {
             self.analyze(init, &decl.var_ty, decl.is_const)?;
             check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span());
             decl.var_ty.as_mut().u().finalize();
+            init.as_mut().ty = Some(decl.var_ty.u());
             Ok(())
         } else if decl.var_ty.is_some() {
             debug_assert!(!decl.is_const);
             Ok(())
         } else {
             err(VarDeclNoType, decl_ptr.upcast().full_span())
+        };
+        #[cfg(debug_assertions)]
+        {
+            self.cur_decl = prev_decl;
         }
+        res
     }
 
     fn analyze_decl(&mut self, mut decl: Ptr<ast::Decl>, is_const: bool) -> SemaResult<()> {
@@ -1141,7 +1233,9 @@ impl Sema {
             self.symbols.push(decl);
         }
         */
-        self.symbols.push(decl);
+        if decl.on_type.is_none() {
+            self.symbols.push(decl);
+        }
         res
     }
 
@@ -1176,7 +1270,8 @@ impl Sema {
             if ty == p.never {
                 return Ok(p.never);
             }
-            return err(NotAType, ty_expr.full_span());
+            self.cctx.error_missmatched_type(ty_expr.full_span(), p.type_ty, ty);
+            return SemaResult::HandledErr;
         }
         Ok(ty_expr.downcast_type())
     }
@@ -1188,7 +1283,7 @@ impl Sema {
     ) -> SemaResult<[Ptr<ast::Decl>; 2]> {
         let p = p();
         let elem_ptr_ty = self.alloc(type_new!(PtrTy { pointee: elem_ty.upcast(), is_mut }))?;
-        let mut ptr = self.alloc(Decl::new(p.slice_ptr_field_ident, Span::ZERO))?;
+        let mut ptr = self.alloc(Decl::new(p.slice_ptr_field_ident, None, Span::ZERO))?;
         ptr.var_ty = Some(elem_ptr_ty.upcast_to_type());
         Ok([ptr, p.slice_len_field])
     }
@@ -1198,9 +1293,14 @@ impl Sema {
         match self
             .symbols
             .get(&name)
-            .or_else(|| self.cur_file.u().find_symbol(&name, self.file_level_symbols))
-            .or_else(|| self.cctx.primitives_scope.find_symbol(&name))
-        {
+            .or_else(|| {
+                // println!("get_symbol > try file ({:?})", name.as_ref());
+                self.cur_file.u().find_symbol(&name, self.file_level_symbols)
+            })
+            .or_else(|| {
+                // println!("get_symbol > try primitive ({:?})", name.as_ref());
+                self.cctx.primitives_scope.find_symbol(&name)
+            }) {
             Some(sym) if sym.var_ty.is_some() => Ok(sym),
             Some(_) => NotFinished,
             None => err(UnknownIdent(name), err_span),

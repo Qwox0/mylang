@@ -50,7 +50,6 @@ pub enum SemaErrorKind {
     MissingFieldInInitializer {
         field: Ptr<str>,
     },
-    CallOfANonFunction,
     ReturnNotInAFunction,
     NotAType,
 
@@ -98,10 +97,10 @@ pub struct SemaError {
     pub span: Span,
 }
 
-impl From<()> for SemaError {
-    fn from(_: ()) -> Self {
-        SemaError { kind: SemaErrorKind::HandledErr, span: Span::ZERO }
-    }
+impl SemaError {
+    #[allow(non_upper_case_globals)]
+    pub const HandledErr: SemaError =
+        SemaError { kind: SemaErrorKind::HandledErr, span: Span::ZERO };
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,6 +110,11 @@ pub enum SemaResult<T, E = SemaError> {
     //NotFinished(Option<Type>),
     NotFinished,
     Err(E),
+}
+
+impl<T> SemaResult<T> {
+    #[allow(non_upper_case_globals)]
+    pub const HandledErr: SemaResult<T> = Err(SemaError::HandledErr);
 }
 
 impl<T, E> SemaResult<T, E> {
@@ -168,9 +172,9 @@ impl<T, E> SemaResult<T, E> {
     }
 }
 
-impl<T> Try for SemaResult<T> {
+impl<T, E> Try for SemaResult<T, E> {
     type Output = T;
-    type Residual = SemaResult<!>;
+    type Residual = SemaResult<!, E>;
 
     fn from_output(output: Self::Output) -> Self {
         Ok(output)
@@ -185,20 +189,20 @@ impl<T> Try for SemaResult<T> {
     }
 }
 
-impl<T> FromResidual<SemaResult<!>> for SemaResult<T> {
-    fn from_residual(residual: SemaResult<!>) -> Self {
+impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
+    fn from_residual(residual: SemaResult<!, E>) -> Self {
         match residual {
             Ok(never) => never,
             NotFinished => SemaResult::NotFinished,
-            Err(err) => SemaResult::Err(err),
+            Err(err) => SemaResult::Err(err.into()),
         }
     }
 }
 
-impl<T> FromResidual<Result<Infallible, SemaError>> for SemaResult<T> {
-    fn from_residual(residual: Result<Infallible, SemaError>) -> Self {
+impl<T, E, E2: From<E>> FromResidual<Result<Infallible, E>> for SemaResult<T, E2> {
+    fn from_residual(residual: Result<Infallible, E>) -> Self {
         match residual {
-            Result::Err(err) => Err(err),
+            Result::Err(err) => Err(err.into()),
         }
     }
 }

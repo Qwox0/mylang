@@ -3,6 +3,7 @@ use crate::{
     parser::parser_helper::ParserInterface,
     ptr::{OPtr, Ptr},
     source_file::SourceFile,
+    util::UnwrapDebug,
 };
 use core::{fmt, ops::Range};
 use std::{
@@ -320,6 +321,10 @@ impl Span {
         Self::new(pos..pos + 1, file)
     }
 
+    pub fn start(&self) -> Span {
+        Span::pos(self.start, self.file)
+    }
+
     pub fn end(&self) -> Span {
         Span::pos(self.end - 1, self.file)
     }
@@ -361,6 +366,10 @@ impl Span {
 
     pub fn range(&self) -> Range<usize> {
         (self.start..self.end).into()
+    }
+
+    pub fn get_text(self) -> Ptr<str> {
+        Ptr::from_ref(&self.file.u().code.as_ref()[self])
     }
 }
 

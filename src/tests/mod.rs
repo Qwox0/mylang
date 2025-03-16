@@ -1,19 +1,17 @@
 use crate::{
-    cli::{BuildArgs, OutKind},
+    cli::{BuildArgs, TestArgsOptions},
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_file},
     context::CompilationContext,
-    diagnostic_reporter::SavedDiagnosticMessage,
-    parser::lexer::Code,
+    diagnostic_reporter::{DiagnosticReporter, SavedDiagnosticMessage},
+    parser::lexer::{Code, Span},
     ptr::Ptr,
     source_file::SourceFile,
 };
-use std::{
-    fmt::Display,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Display, path::Path};
 
 mod alignment;
+mod associated_variables;
 mod binop;
 mod call_conv_c;
 mod defer;
@@ -31,16 +29,21 @@ mod string;
 mod struct_;
 mod todo;
 mod union_;
+mod var_decl;
 mod while_loop;
 
-const DEBUG_AST: bool = true;
-const DEBUG_TYPES: bool = false;
-const DEBUG_TYPED_AST: bool = false;
-const LLVM_OPTIMIZATION_LEVEL: u8 = 0;
-const PRINT_LLVM_MODULE: bool = false;
+const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
+    debug_ast: false,
+    debug_types: false,
+    debug_typed_ast: false,
+    llvm_optimization_level: 0,
+    print_llvm_module: true,
+    entry_point: "test",
+};
 
 pub struct JitRunTestResult<RetTy> {
     ctx: CompilationContext,
+    full_code: String,
     //compilation_out: BackendOut,
     ret: Option<RetTy>,
     //module: Option<inkwell::module::Module<'static>>,
@@ -49,10 +52,7 @@ pub struct JitRunTestResult<RetTy> {
 
 impl<RetTy> JitRunTestResult<RetTy> {
     pub fn ok(&self) -> &RetTy {
-        debug_assert_eq!(
-            self.ret.is_some(),
-            self.ctx.diagnostic_reporter.diagnostics.as_slice().is_empty()
-        );
+        debug_assert_eq!(self.ret.is_some(), !self.ctx.diagnostic_reporter.do_abort_compilation());
         self.ret.as_ref().unwrap_or_else(|| panic!("Test failed! Expected no errors"))
     }
 
@@ -87,23 +87,12 @@ pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> 
     jit_run_test_raw(code)
 }
 
-pub fn jit_run_test_raw<'ctx, RetTy>(code: impl AsRef<Code>) -> JitRunTestResult<RetTy> {
+pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<RetTy> {
+    let code = code.to_string();
     let ctx = CompilationContext::new();
     let test_file = test_file_mock(code.as_ref());
-    let res = compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs {
-        path: PathBuf::default(), // irrelevant
-        optimization_level: LLVM_OPTIMIZATION_LEVEL,
-        target_triple: None,
-        out: OutKind::None,
-        no_prelude: true,
-        print_compile_time: false,
-        debug_ast: DEBUG_AST,
-        debug_types: DEBUG_TYPES,
-        debug_typed_ast: DEBUG_TYPED_AST,
-        debug_functions: false,
-        debug_llvm_ir_unoptimized: false,
-        debug_llvm_ir_optimized: PRINT_LLVM_MODULE,
-    });
+    let res =
+        compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
     let backend_mod = match res {
         CompileResult::ModuleForTesting(backend_module) => Some(backend_module),
         CompileResult::Err => None,
@@ -111,8 +100,45 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl AsRef<Code>) -> JitRunTestResult
     };
     let ret = backend_mod.as_ref().map(|m| {
         m.codegen_module()
-            .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
+            .jit_run_fn::<RetTy>(TEST_OPTIONS.entry_point, inkwell::OptimizationLevel::None)
             .unwrap()
     });
-    JitRunTestResult { ret, ctx, backend_mod }
+    JitRunTestResult { ret, ctx, full_code: code, backend_mod }
+}
+
+#[derive(Debug)]
+pub struct TestSpan(Span);
+
+impl TestSpan {
+    pub fn new(start: usize, end: usize) -> TestSpan {
+        TestSpan(Span::new(start..end, None))
+    }
+
+    pub fn with_len(start: usize, len: usize) -> TestSpan {
+        TestSpan::new(start, start + len)
+    }
+
+    pub fn pos(pos: usize) -> TestSpan {
+        TestSpan::new(pos, pos + 1)
+    }
+
+    pub fn of_substr(str: &str, substr: &str) -> Option<TestSpan> {
+        Some(TestSpan::with_len(str.find(substr)?, substr.len()))
+    }
+
+    pub fn start_pos(self) -> TestSpan {
+        TestSpan(self.0.start_pos())
+    }
+}
+
+impl PartialEq<Span> for TestSpan {
+    fn eq(&self, other: &Span) -> bool {
+        self.0.range() == other.range()
+    }
+}
+
+impl PartialEq<TestSpan> for Span {
+    fn eq(&self, other: &TestSpan) -> bool {
+        other == self
+    }
 }

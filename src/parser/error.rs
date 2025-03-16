@@ -42,6 +42,10 @@ pub fn err_val(kind: ParseErrorKind, span: Span) -> ParseError {
     ParseError::new(kind, span)
 }
 
+pub fn handled_err<T>() -> ParseResult<T> {
+    Err(().into())
+}
+
 impl From<()> for ParseError {
     fn from(_: ()) -> Self {
         err_val(ParseErrorKind::HandledErr, Span::ZERO)

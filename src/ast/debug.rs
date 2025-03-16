@@ -118,7 +118,7 @@ impl DebugAst for Ast {
             AstEnum::Call { func, args, pipe_idx, .. } => {
                 if let Some(idx) = *pipe_idx {
                     lines.write_tree(&args[idx]);
-                    lines.write("|");
+                    lines.write("|>");
                 }
                 lines.write_tree(func);
                 lines.write("(");
@@ -174,7 +174,14 @@ impl DebugAst for Ast {
                 lines.write_tree(rhs);
             },
             AstEnum::Decl {
-                is_extern: false, markers, ident, var_ty_expr, init, is_const, ..
+                is_extern: false,
+                markers,
+                ident,
+                on_type,
+                var_ty_expr,
+                init,
+                is_const,
+                ..
             } => {
                 lines.write(&format!(
                     "{}{}{}",
@@ -183,6 +190,10 @@ impl DebugAst for Ast {
                     if markers.is_rec { "rec " } else { "" }
                 ));
 
+                if let Some(ty_expr) = on_type {
+                    lines.write_tree(ty_expr);
+                    lines.write(".");
+                }
                 lines.write_tree(ident);
 
                 if let Some(var_ty) = var_ty_expr {
@@ -208,7 +219,7 @@ impl DebugAst for Ast {
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
                 if *was_piped {
                     lines.write_tree(condition);
-                    lines.write("|if ");
+                    lines.write("|>if ");
                 } else {
                     lines.write("if ");
                     lines.write_tree(condition);
@@ -224,7 +235,7 @@ impl DebugAst for Ast {
             AstEnum::For { source, iter_var, body, was_piped, .. } => {
                 if *was_piped {
                     lines.write_tree(source);
-                    lines.write("|for ");
+                    lines.write("|>for ");
                     lines.write_tree(iter_var);
                 } else {
                     lines.write("for ");
@@ -238,7 +249,7 @@ impl DebugAst for Ast {
             AstEnum::While { condition, body, was_piped, .. } => {
                 if *was_piped {
                     lines.write_tree(condition);
-                    lines.write("|while");
+                    lines.write("|>while");
                 } else {
                     lines.write("while ");
                     lines.write_tree(condition);

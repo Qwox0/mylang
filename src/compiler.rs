@@ -1,9 +1,9 @@
 use crate::{
-    ast::{Ast, debug::DebugAst},
+    ast::{self, Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
     context::CompilationContextInner,
-    diagnostic_reporter::DiagnosticReporter,
+    diagnostic_reporter::{DiagnosticReporter, cerror},
     parser::{self},
     ptr::Ptr,
     sema::{self},
@@ -85,7 +85,7 @@ pub fn compile_file(
     // ##### Parsing #####
 
     let parse_start = Instant::now();
-    let stmts = parser::parse(ctx, file, args.no_prelude);
+    let stmts = parser::parse(ctx, file);
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -114,8 +114,9 @@ pub fn compile_file(
     }
 
     if mode == CompileMode::Parse {
-        #[cfg(not(test))]
-        ctx.compile_time.print();
+        if args.print_compile_time {
+            ctx.compile_time.print();
+        }
         return CompileResult::Ok;
     }
 
@@ -126,7 +127,7 @@ pub fn compile_file(
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {
-        eprintln!("Sema Error in {:?}", ctx.compile_time.sema);
+        eprintln!("Sema Error(s) in {:?}", ctx.compile_time.sema);
         return CompileResult::Err;
     }
 
@@ -136,8 +137,9 @@ pub fn compile_file(
     }
 
     if mode == CompileMode::Check {
-        #[cfg(not(test))]
-        ctx.compile_time.print();
+        if args.print_compile_time {
+            ctx.compile_time.print();
+        }
         // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
         return CompileResult::Ok;
     }
@@ -174,7 +176,7 @@ pub fn compile_file(
 
     if args.debug_llvm_ir_unoptimized {
         println!("### Unoptimized LLVM IR:");
-        println!("{}\n", module.print_to_string());
+        println!("{}\n", module.print_to_string().to_string());
     }
 
     let backend_start = Instant::now();
@@ -183,8 +185,25 @@ pub fn compile_file(
 
     if args.debug_llvm_ir_optimized {
         println!("### Optimized LLVM IR:");
-        println!("{}\n", module.print_to_string());
+        println!("{}\n", module.print_to_string().to_string());
     }
+
+    // ##### Run #####
+
+    let root_file = ctx.files[ctx.root_file_idx.u()];
+    if stmts[root_file.stmt_range.u()]
+        .iter()
+        .filter_map(|a| a.try_downcast::<ast::Decl>())
+        .all(|d| &*d.ident.text != &*args.entry_point)
+    {
+        cerror!(
+            root_file.full_span().start(),
+            "Couldn't find the entry point function '{}' in '{}'",
+            args.entry_point,
+            ctx.path_in_proj(&root_file.path).display()
+        );
+        return CompileResult::Err;
+    };
 
     if mode == CompileMode::TestRun {
         let module = ManuallyDrop::new(module);
@@ -192,9 +211,17 @@ pub fn compile_file(
         return CompileResult::ModuleForTesting(BackendModule { context, module });
     }
 
+    if mode == CompileMode::Run && args.out != OutKind::Executable {
+        ctx.error_without_code("Cannot run program if `--out` is not `exe`");
+        if args.print_compile_time {
+            ctx.compile_time.print();
+        }
+    }
+
     if args.out == OutKind::None {
-        #[cfg(not(test))]
-        ctx.compile_time.print();
+        if args.print_compile_time {
+            ctx.compile_time.print();
+        }
         return CompileResult::Ok;
     }
 
@@ -221,7 +248,9 @@ pub fn compile_file(
         ctx.compile_time.linking = linking_start.elapsed();
     }
 
-    ctx.compile_time.print();
+    if args.print_compile_time {
+        ctx.compile_time.print();
+    }
 
     if args.out == OutKind::Executable && mode == CompileMode::Run {
         println!("\nRunning `{}`", exe_file_path.display());
@@ -279,6 +308,7 @@ impl CompileDurations {
     }
 }
 
+#[derive(Debug)]
 pub enum CompileResult {
     Ok,
     Err,
@@ -296,8 +326,17 @@ impl CompileResult {
             CompileResult::ModuleForTesting(_) => unreachable_debug(),
         }
     }
+
+    pub fn ok(self) -> bool {
+        match self {
+            CompileResult::Ok => true,
+            CompileResult::Err | CompileResult::RunErr { .. } => false,
+            CompileResult::ModuleForTesting(_) => unreachable_debug(),
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct BackendModule {
     #[allow(unused)]
     context: inkwell::context::Context,

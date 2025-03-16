@@ -1,6 +1,6 @@
-use crate::{display_code::display, error::SpannedError, parser::lexer::Span};
+use crate::{ast, display_code::display, error::SpannedError, parser::lexer::Span, ptr::Ptr};
 use core::fmt;
-use std::{cmp::Ordering, fmt::Display};
+use std::{cmp::Ordering, fmt::Display, io::Write};
 
 pub trait DiagnosticReporter {
     fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M);
@@ -13,8 +13,16 @@ pub trait DiagnosticReporter {
         self.report(DiagnosticSeverity::Error, span, msg)
     }
 
+    fn error_without_code<M: Display + ?Sized>(&mut self, msg: &M) {
+        self.error(Span::ZERO, msg)
+    }
+
     fn warn<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
         self.report(DiagnosticSeverity::Warn, span, msg)
+    }
+
+    fn info<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+        self.report(DiagnosticSeverity::Info, span, msg)
     }
 
     fn do_abort_compilation(&self) -> bool {
@@ -40,6 +48,15 @@ pub trait DiagnosticReporter {
     fn error_cannot_yield_from_loop_block(&mut self, span: Span) {
         self.error(span, "cannot yield a value from a loop block.");
     }
+
+    fn error_missmatched_type(
+        &mut self,
+        span: Span,
+        expected: Ptr<ast::Type>,
+        got: Ptr<ast::Type>,
+    ) {
+        self.error(span, &format_args!("expected {expected}; got {got}"));
+    }
 }
 
 /// default [`DiagnosticReporter`]. Prints diagnostics to the terminal
@@ -51,9 +68,12 @@ pub struct DiagnosticPrinter {
 impl DiagnosticReporter for DiagnosticPrinter {
     fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M) {
         self.max_past_severity = self.max_past_severity.max(Some(severity));
-        eprintln!("{severity}: {msg}{COLOR_UNSET}");
-        display(span).color_code(severity.text_color()).finish();
-        println!()
+        let mut stderr = std::io::stderr();
+        writeln!(&mut stderr, "{severity}: {msg}{COLOR_UNSET}").unwrap();
+        if span != Span::ZERO {
+            display(span).color_code(severity.text_color()).finish();
+        }
+        writeln!(&mut stderr).unwrap();
     }
 
     fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
@@ -70,7 +90,7 @@ impl DiagnosticReporter for DiagnosticPrinter {
 }
 
 #[cfg(test)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SavedDiagnosticMessage {
     pub severity: DiagnosticSeverity,
     pub span: crate::parser::lexer::Span,
@@ -83,18 +103,26 @@ pub struct SavedDiagnosticMessage {
 #[derive(Default)]
 #[cfg(test)]
 pub struct DiagnosticCollector {
+    pub printer: DiagnosticPrinter,
     pub diagnostics: Vec<SavedDiagnosticMessage>,
 }
 
 #[cfg(test)]
 impl DiagnosticReporter for DiagnosticCollector {
     fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M) {
-        DiagnosticPrinter::default().report(severity, span, msg);
+        self.printer.report(severity, span, msg);
         let msg = msg.to_string().into_boxed_str();
         self.diagnostics.push(SavedDiagnosticMessage { severity, span, msg })
     }
 
-    fn hint<M: Display + ?Sized>(&mut self, _span: Span, _msg: &M) {}
+    fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+        self.printer.hint(span, msg);
+        self.diagnostics.push(SavedDiagnosticMessage {
+            severity: DiagnosticSeverity::Info,
+            span,
+            msg: msg.to_string().into_boxed_str(),
+        })
+    }
 
     fn max_past_severity(&self) -> Option<DiagnosticSeverity> {
         self.diagnostics.iter().map(|m| m.severity).max()
@@ -110,7 +138,7 @@ pub const COLOR_YELLOW: &str = "\x1b[0;33m";
 pub const COLOR_BOLD_CYAN: &str = "\x1b[1;36m";
 pub const COLOR_CYAN: &str = "\x1b[0;36m";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     /// Internal error
     Fatal,
@@ -124,7 +152,13 @@ pub enum DiagnosticSeverity {
 
 impl PartialOrd for DiagnosticSeverity {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (*self as u8).partial_cmp(&(*other as u8)).map(Ordering::reverse)
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DiagnosticSeverity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (*self as u8).cmp(&(*other as u8)).reverse()
     }
 }
 
@@ -168,17 +202,37 @@ macro_rules! cerror {
         crate::context::ctx_mut().diagnostic_reporter.error($span, $msg)
     };
     ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.error($span, &format!($fmt, $($args),*))
+        crate::context::ctx_mut().diagnostic_reporter.error($span, &format_args!($fmt, $($args),*))
     };
 }
 pub(crate) use cerror;
+
+macro_rules! cwarn {
+    ($span:expr, $msg:expr $(,)?) => {
+        crate::context::ctx_mut().diagnostic_reporter.warn($span, $msg)
+    };
+    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+        crate::context::ctx_mut().diagnostic_reporter.warn($span, &format_args!($fmt, $($args),*))
+    };
+}
+pub(crate) use cwarn;
+
+macro_rules! cinfo {
+    ($span:expr, $msg:expr $(,)?) => {
+        crate::context::ctx_mut().diagnostic_reporter.info($span, $msg)
+    };
+    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+        crate::context::ctx_mut().diagnostic_reporter.info($span, &format_args!($fmt, $($args),*))
+    };
+}
+pub(crate) use cinfo;
 
 macro_rules! chint {
     ($span:expr, $msg:expr $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.hint($span, $msg)
     };
     ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.hint($span, &format!($fmt, $($args),*))
+        crate::context::ctx_mut().diagnostic_reporter.hint($span, &format_args!($fmt, $($args),*))
     };
 }
 pub(crate) use chint;

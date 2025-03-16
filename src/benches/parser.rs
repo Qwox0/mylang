@@ -9,7 +9,7 @@ use test::*;
 #[inline]
 fn bench_parse(code: &str) {
     let ctx = CompilationContext::new();
-    parser::parse(ctx.0, test_file_mock(code.as_ref()), true);
+    parser::parse(ctx.0, test_file_mock(code.as_ref()));
     assert!(!ctx.do_abort_compilation());
     assert!(ctx.diagnostic_reporter.diagnostics.is_empty());
 }

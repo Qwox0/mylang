@@ -33,6 +33,10 @@ pub struct CompilationContextInner {
     /// This List must contain [`Ptr`]s because it might reallocate while a mutable reference to
     /// [`SourceFile`] is active.
     pub files: Vec<Ptr<SourceFile>>,
+    pub root_file_idx: Option<FilesIndex>,
+
+    pub compiler_libs_path: PathBuf,
+    pub project_path: PathBuf,
 
     #[cfg(debug_assertions)]
     pub debug_types: bool,
@@ -79,6 +83,15 @@ impl CompilationContext {
             ast_new!(Block { span: Span::ZERO, has_trailing_semicolon: false, stmts });
         let primitives_scope = alloc.alloc(global_scope).unwrap();
 
+        let compiler_binary_path = std::env::current_exe().unwrap();
+
+        // TODO: copy `lib/` to be next to the binary
+        let mut compiler_libs_path = compiler_binary_path.parent().unwrap();
+        while compiler_libs_path.file_name().unwrap() != "mylang" {
+            compiler_libs_path = compiler_libs_path.parent().unwrap();
+        }
+        let compiler_libs_path = compiler_libs_path.join("lib");
+
         let ctx = CompilationContextInner {
             alloc,
             diagnostic_reporter: CtxDiagnosticReporter::default(),
@@ -89,6 +102,10 @@ impl CompilationContext {
 
             imports: HashMap::new(),
             files: Vec::new(),
+            root_file_idx: None,
+
+            compiler_libs_path,
+            project_path: PathBuf::new(),
 
             #[cfg(debug_assertions)]
             debug_types: false,
@@ -109,19 +126,16 @@ impl Ptr<CompilationContextInner> {
         path: &str,
         cur_path: OPtr<Path>,
     ) -> Result<FilesIndex, std::io::Error> {
-        let path = if path == "prelude" {
-            // TODO: use `std::env::current_exe().unwrap().canonicalize()`
-            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"))
-        } else if path == "std" {
-            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/std/mod.mylang"))
+        //  if path == "prelude" {
+        //     PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"))
+        let path = if path == "std" {
+            self.compiler_libs_path.join("std/mod.mylang")
         } else if path == "libc" {
-            PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/libc.mylang"))
+            self.compiler_libs_path.join("libc.mylang")
         } else {
             let cur_path = cur_path.u();
             debug_assert!(cur_path.is_file());
-            let mut full_path = cur_path.parent().u().to_path_buf();
-            full_path.push(path);
-            full_path
+            cur_path.parent().u().join(path)
         }
         .canonicalize()?;
         if let Some(idx) = self.imports.get(&path) {
@@ -145,6 +159,10 @@ impl Ptr<CompilationContextInner> {
         let idx = self.files.len() - 1;
         self.as_mut().imports.insert(path, idx);
         idx
+    }
+
+    pub fn path_in_proj(self, path: &Path) -> &Path {
+        path.strip_prefix(&self.project_path).unwrap_or(path)
     }
 }
 

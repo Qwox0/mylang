@@ -1,5 +1,9 @@
 use crate::{
-    arena_allocator::Arena, ast, parser::lexer::Code, ptr::Ptr, symbol_table::linear_search_symbol,
+    arena_allocator::Arena,
+    ast,
+    parser::lexer::{Code, Span},
+    ptr::Ptr,
+    symbol_table::linear_search_symbol,
     util::UnwrapDebug,
 };
 use std::{ops, path::Path, range::Range};
@@ -44,5 +48,11 @@ impl SourceFile {
         all_stmts: Ptr<[Ptr<ast::Ast>]>,
     ) -> Option<Ptr<ast::Decl>> {
         linear_search_symbol(&all_stmts[self.stmt_range.u()], name)
+    }
+}
+
+impl Ptr<SourceFile> {
+    pub fn full_span(self) -> Span {
+        Span::new(0..self.code.len(), Some(self))
     }
 }

@@ -13,7 +13,6 @@ use crate::{
     context::CompilationContext,
     tests::test_file_mock,
 };
-use std::path::PathBuf;
 use test::*;
 
 mod aoc2024;
@@ -67,7 +66,12 @@ pub defer_test :: -> {
 };";
         let code = code.as_ref();
         let ctx = CompilationContext::new();
-        compile_file(ctx.0, test_file_mock(code), CompileMode::Check, &BuildArgs::bench_args());
+        compile_file(
+            ctx.0,
+            test_file_mock(code),
+            CompileMode::Check,
+            &BuildArgs::comp_bench_args(),
+        );
     })
 }
 
@@ -102,7 +106,7 @@ macro_rules! bench_compilation {
         let code = $code.as_ref();
         let ctx = CompilationContext::new();
         let test_file = $crate::tests::test_file_mock(code);
-        let stmts = $crate::parser::parse(ctx.0, test_file, true);
+        let stmts = $crate::parser::parse(ctx.0, test_file);
         assert!(!ctx.do_abort_compilation());
 
         let order = $crate::sema::analyze(ctx.0, &stmts);
@@ -119,20 +123,7 @@ macro_rules! bench_compilation {
         let test_file = $crate::tests::test_file_mock(code);
         $b.iter(|| {
             let ctx = CompilationContext::new();
-            black_box($crate::compiler::compile_file(ctx.0, black_box(test_file), $mode, &crate::cli::BuildArgs {
-                path: PathBuf::new(),
-                optimization_level: 0,
-                target_triple: None,
-                out: crate::cli::OutKind::None,
-                no_prelude: true,
-                print_compile_time: false,
-                debug_ast: false,
-                debug_types: false,
-                debug_typed_ast: false,
-                debug_functions: false,
-                debug_llvm_ir_unoptimized: false,
-                debug_llvm_ir_optimized: false,
-            }));
+            black_box($crate::compiler::compile_file(ctx.0, black_box(test_file), $mode, &crate::cli::BuildArgs::comp_bench_args()));
         });
     };
 }

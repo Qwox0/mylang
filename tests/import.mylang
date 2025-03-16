@@ -1,0 +1,28 @@
+std :: #import "std";
+import2 :: #import "./import2.mylang";
+add :: #import("./import2.mylang").add;
+
+main :: -> {
+    res := #import("./import2.mylang").add(1, 2);
+    std.assert(res == 3);
+
+    res := import2.add(4, 6);
+    std.assert(res == 10);
+
+    res := add(res, 23);
+    std.assert(res == 33);
+
+    import3 :: #import "./import.mylang";
+
+    res := import3.add(res, 12);
+    std.assert(res == 45);
+
+    // currently only affects following calls.
+    // TODO?: change this to affect the entire current scope (also to previous calls)?
+    add :: #import("./import2.mylang").sub;
+
+    res := add(res, 5);
+    std.assert(res == 40);
+
+    0
+}

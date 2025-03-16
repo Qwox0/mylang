@@ -189,7 +189,8 @@ impl Primitives {
             slice_len_field,
             untyped_slice_struct_def: {
                 let def = ast_new!(StructDef {
-                    fields: alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?
+                    fields: alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?,
+                    consts: Vec::new(),
                 });
                 init_ty(def.upcast_to_type());
                 def

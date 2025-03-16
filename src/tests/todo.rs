@@ -133,7 +133,7 @@ fn parse_weird_var_decl() {
 fn parse_err_missing_if_body() {
     let ctx = CompilationContext::new();
     let test_file = test_file_mock("if a .A".as_ref());
-    parser::parse(ctx.0, test_file, true);
+    parser::parse(ctx.0, test_file);
     assert_eq!(ctx.diagnostic_reporter.diagnostics.len(), 1);
     let err = &ctx.diagnostic_reporter.diagnostics[0];
     assert!(err.msg.starts_with("NoInput"));

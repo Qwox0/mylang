@@ -63,5 +63,6 @@ pub fn linear_search_symbol(stmts: &[Ptr<ast::Ast>], name: &str) -> Option<Ptr<a
         .copied()
         .rev() // `rev()` because of shadowing
         .filter_map(|a| a.try_downcast::<ast::Decl>())
+        .filter(|d| d.on_type.is_none())
         .find(|d| *d.ident.text == *name)
 }

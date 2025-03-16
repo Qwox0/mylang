@@ -217,3 +217,10 @@ macro_rules! then {
     };
 }
 pub(crate) use then;
+
+pub fn path_parent_n(mut path: &Path, n: usize) -> Option<&Path> {
+    for _ in 0..n {
+        path = path.parent()?
+    }
+    Some(path)
+}

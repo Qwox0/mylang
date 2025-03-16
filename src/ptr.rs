@@ -93,7 +93,7 @@ impl<T: ?Sized> Ptr<T> {
 
     pub fn from_ref(r: &T) -> Ptr<T> {
         let p = Ptr(NonNull::from_ref(r));
-        debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr might be invalid");
+        debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr ({p:p}) might be invalid");
         p
     }
 
@@ -139,7 +139,7 @@ impl<T: ?Sized + std::fmt::Display> std::fmt::Display for Ptr<T> {
     }
 }
 
-const DEFAULT_PTR_DEBUG_DEPTH: usize = 7;
+const DEFAULT_PTR_DEBUG_DEPTH: u16 = 7;
 
 impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for Ptr<T> {
     #[inline]

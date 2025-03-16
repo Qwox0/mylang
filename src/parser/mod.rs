@@ -39,16 +39,11 @@ impl Ptr<Ast> {
     }
 }
 
-pub fn parse(
-    cctx: Ptr<CompilationContextInner>,
-    root_file: SourceFile,
-    no_prelude: bool,
-) -> Vec<Ptr<Ast>> {
+pub fn parse(cctx: Ptr<CompilationContextInner>, root_file: SourceFile) -> Vec<Ptr<Ast>> {
     let mut stmts = Vec::new();
-    if !no_prelude {
-        // cctx.add_import("prelude", None).unwrap();
-    }
-    cctx.add_import_from_file(root_file);
+    // cctx.add_import("prelude", None).unwrap();
+    cctx.as_mut().root_file_idx = Some(cctx.add_import_from_file(root_file));
+    cctx.as_mut().project_path = root_file.path.parent().unwrap().to_path_buf();
 
     // Note: this idx-based loop is needed because `ctx.semas` might get mutated while the loop is
     // running.
@@ -210,14 +205,13 @@ impl Parser {
                 expr!(BinOpAssign { lhs, op, rhs }, span)
             },
             FollowingOperator::VarDecl => {
-                let ident = lhs.try_to_ident().context("var decl ident")?;
-                let mut d = ast::Decl::from_ident(ident);
+                let mut d = ast::Decl::from_lhs(lhs)?;
                 d.init = Some(self.expr().context(":= init")?);
+                d.is_const = false;
                 expr!(d)
             },
             FollowingOperator::ConstDecl => {
-                let ident = lhs.try_to_ident().context("const decl ident")?;
-                let mut d = ast::Decl::from_ident(ident);
+                let mut d = ast::Decl::from_lhs(lhs)?;
                 d.init = Some(self.expr().context(":: init")?);
                 d.is_const = true;
                 expr!(d)
@@ -259,19 +253,20 @@ impl Parser {
             },
             TokenKind::Keyword(Keyword::Struct) => {
                 self.advanced().ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
-                let fields = self.ws0().var_decl_list(TokenKind::Comma)?;
+                let (fields, consts) = self.ws0().struct_body()?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
-                expr!(StructDef { fields }, span.join(close_b.span))
+                expr!(StructDef { fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Union) => {
                 self.advanced().ws0().tok(TokenKind::OpenBrace).context("union '{'")?;
-                let fields = self.ws0().var_decl_list(TokenKind::Comma)?;
+                let (fields, consts) = self.ws0().struct_body()?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
-                expr!(UnionDef { fields }, span.join(close_b.span))
+                expr!(UnionDef { fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Enum) => {
                 self.advanced().ws0().tok(TokenKind::OpenBrace).context("enum '{'")?;
                 let mut variants = ScratchPool::new();
+                let consts = Vec::new();
                 loop {
                     if self.ws0().peek_tok()?.is_invalid_start() {
                         break;
@@ -283,7 +278,7 @@ impl Parser {
                         self.ws0().tok(TokenKind::CloseParenthesis)?;
                         ty_expr
                     });
-                    let mut decl = self.alloc(ast::Decl::new(variant_ident, span))?;
+                    let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
                     decl.var_ty_expr = ty;
                     variants.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
                     if !self.ws0().lex.advance_if_kind(TokenKind::Comma) {
@@ -292,7 +287,7 @@ impl Parser {
                 }
                 let variants = self.clone_slice_from_scratch_pool(variants)?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
-                expr!(EnumDef { variants }, span.join(close_b.span))
+                expr!(EnumDef { variants, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::Extern) => {
@@ -464,7 +459,7 @@ impl Parser {
                         let params = ScratchPool::new_with_first_val(first_decl)
                             .map_err(|e| self.wrap_alloc_err(e))?;
                         let params = self
-                            .var_decl_list_with_start_list(TokenKind::Comma, params)
+                            .var_decl_list(TokenKind::Comma, params)
                             .context("function parameter list")?;
                         self.ws0().tok(TokenKind::CloseParenthesis).context("')'")?;
                         self.ws0().tok(TokenKind::Arrow).context("'->'")?;
@@ -591,7 +586,7 @@ impl Parser {
             TokenKind::Pound => {
                 let directive_name = self.advanced().ident()?;
                 if &*directive_name.text == "import" {
-                    let Some(path) = self.ws0().expr()?.try_downcast::<ast::StrVal>() else {
+                    let Some(path) = self.ws0().value()?.try_downcast::<ast::StrVal>() else {
                         panic!("todo")
                     };
 
@@ -599,7 +594,7 @@ impl Parser {
                         .cctx
                         .add_import(path.text.as_ref(), Some(self.lex.file.path))
                         .map_err(|e| {
-                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref())
+                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref());
                         })?;
                     expr!(ImportDirective { path, files_idx: idx })
                 } else {
@@ -720,7 +715,7 @@ impl Parser {
 
         let Some(close_b) = self.lex.next() else {
             cerror!(self.lex.pos_span(), "expected '}'");
-            return Err(().into());
+            return handled_err();
         };
         debug_assert_eq!(close_b.kind, TokenKind::CloseBrace);
 
@@ -803,11 +798,7 @@ impl Parser {
 
     /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
     /// allows a trailing `sep`.
-    fn var_decl_list(&mut self, sep: TokenKind) -> ParseResult<DeclList> {
-        self.var_decl_list_with_start_list(sep, ScratchPool::new())
-    }
-
-    fn var_decl_list_with_start_list(
+    fn var_decl_list(
         &mut self,
         sep: TokenKind,
         mut list: ScratchPool<Ptr<ast::Decl>>,
@@ -821,6 +812,26 @@ impl Parser {
             self.ws0();
         }
         self.clone_slice_from_scratch_pool(list)
+    }
+
+    fn struct_body(&mut self) -> ParseResult<(DeclList, Vec<Ptr<Decl>>)> {
+        let mut fields = ScratchPool::new();
+        let mut const_fields = Vec::new();
+        loop {
+            let Some(decl) = self.var_decl().opt().context("var_decl")? else { break };
+            if decl.is_const {
+                const_fields.push(decl);
+            } else {
+                fields.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
+            }
+            if !self.ws0().lex.advance_if(|t| {
+                t.kind == TokenKind::Semicolon || (!decl.is_const && t.kind == TokenKind::Comma)
+            }) {
+                break;
+            }
+            self.ws0();
+        }
+        Ok((self.clone_slice_from_scratch_pool(fields)?, const_fields))
     }
 
     fn var_decl(&mut self) -> ParseResult<Ptr<ast::Decl>> {

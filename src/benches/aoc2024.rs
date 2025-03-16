@@ -6,7 +6,6 @@ use crate::{
     diagnostic_reporter::DiagnosticReporter,
 };
 use inkwell::context::Context;
-use std::path::PathBuf;
 use test::*;
 
 bench_compilation! { aoc2024_day01_1parse: "../../../aoc2024/day01.mylang", CompileMode::Parse }

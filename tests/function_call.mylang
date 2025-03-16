@@ -1,0 +1,73 @@
+std :: #import "std";
+libc :: #import "libc";
+printf :: libc.printf;
+
+MyNum :: struct {
+    val: i64,
+}
+
+add :: (n: MyNum, other: i64) -> MyNum.(n.val + other);
+
+weird_add :: (n: MyNum, other: i64) -> {
+    std.println("called function");
+    add(n, other)
+}
+
+MyNum.weird_add :: (n: MyNum, other: i64) -> {
+    std.println("called method");
+    MyNum.(n.val + 10 * other)
+}
+
+main :: -> {
+    mut n := MyNum.(0);
+
+    // normal call
+    n = weird_add(n, 2);
+    std.assert(n.val == 2);
+
+    // method-like call
+    n = n.add(3); // change syntax to `n~add(3)`?
+    std.assert(n.val == 5);
+
+    // pipe first argument into function
+    n = n |> weird_add(2);
+    std.assert(n.val == 7);
+
+    // chain pipes
+    n = n |> weird_add(5) |> weird_add(1);
+    std.assert(n.val == 13);
+
+    n = MyNum.(0);
+
+    // method call
+    n = n.weird_add(2);
+    std.assert(n.val == 20);
+
+    // method call (long)
+    n = MyNum.weird_add(n, 1);
+    std.assert(n.val == 30);
+
+    /* TODO
+    // pipe into method
+    res1 := n |> MyNum.weird_add(5);
+    res2 := n |> .weird_add(5);
+    std.assert(res1.val == 15);
+    std.assert(res2.val == 15);
+    */
+
+    // pass-by-value vs pass-by-reference
+    MyNum.mut_add :: (n: *mut MyNum, rhs: i64) -> {
+        n.*.val += rhs;
+    }
+
+    x := MyNum.(5);
+    y := x.weird_add(10);
+    std.assert(x.val == 5);
+    std.assert(y.val == 105);
+
+    mut x := MyNum.(5);
+    x.&mut.mut_add(100);
+    std.assert(x.val == 105);
+
+    0
+}

@@ -4,6 +4,7 @@ use crate::{
         UnaryOpKind, UpcastToAst,
     },
     context::primitives,
+    diagnostic_reporter::{DiagnosticReporter, cwarn},
     display_code::display,
     literals::replace_escape_chars,
     ptr::Ptr,
@@ -38,7 +39,7 @@ use inkwell::{
         IntValue, PhiValue, PointerValue, StructValue,
     },
 };
-use std::{collections::HashMap, marker::PhantomData, path::Path};
+use std::{borrow::Cow, collections::HashMap, marker::PhantomData, path::Path};
 
 pub mod jit;
 
@@ -121,7 +122,6 @@ pub struct Codegen<'ctx> {
 
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_loop: Option<Loop<'ctx>>,
-    cur_var_name: Option<Ptr<str>>,
     sret_ptr: Option<PointerValue<'ctx>>,
 
     return_depth: usize,
@@ -140,7 +140,6 @@ impl<'ctx> Codegen<'ctx> {
             defer_stack: ScopedStack::default(),
             cur_fn: None,
             cur_loop: None,
-            cur_var_name: None,
             sret_ptr: None,
             return_depth: 0,
             continue_break_depth: 0,
@@ -211,7 +210,10 @@ impl<'ctx> Codegen<'ctx> {
 
         match expr.matchable().as_mut() {
             AstEnum::Ident { text, .. } => {
-                debug_assert!(!expr.is_const_val(), "constants should have been replaced during sema");
+                debug_assert!(
+                    !expr.is_const_val(),
+                    "constants should have been replaced during sema"
+                );
                 Ok(self.get_symbol(&text))
             },
             // AstEnum::Parenthesis { expr, .. } => self.compile_expr_with_write_target(*expr, write_target) ,
@@ -259,7 +261,6 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_positional_initializer_body(struct_ty, ptr, s_def.fields, args)?;
                     reg(ptr)
                 } else {
-                    todo!();
                     unreachable_debug()
                 }
             },
@@ -456,18 +457,19 @@ impl<'ctx> Codegen<'ctx> {
             AstEnum::Autocast { operand, .. } => self.compile_cast(*operand, out_ty),
             AstEnum::Call { func, args, .. } => {
                 if let Some(f) = func.try_downcast::<ast::Fn>() {
-                    debug_assert!(func.replacement.u().kind == AstKind::Fn);
-                    // let f = func.downcast::<ast::Fn>();
-                    let Symbol::Function { val } = self.compile_expr(*func)? else {
-                        unreachable_debug()
+                    let val = if func.kind == AstKind::Fn {
+                        let Symbol::Function { val } = self.compile_expr(*func)? else {
+                            unreachable_debug()
+                        };
+                        val
+                    } else {
+                        *self.fn_table.get(&f).u()
                     };
                     self.compile_call(f, val, args.iter().copied(), write_target.take())
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
-                    let f = dot.rhs.upcast().downcast::<ast::Fn>();
-                    let Symbol::Function { val } = self.get_symbol(&dot.rhs.text) else {
-                        unreachable_debug()
-                    };
+                    let f = dot.rhs.rep().downcast::<ast::Fn>();
+                    let val = *self.fn_table.get(&f).u();
                     let args = std::iter::once(dot.lhs.u()).chain(args.iter().copied());
                     self.compile_call(f, val, args, write_target.take())
                 } else if func.ty == p.enum_variant {
@@ -499,7 +501,9 @@ impl<'ctx> Codegen<'ctx> {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
                     },
                     UnaryOpKind::Not => {
-                        debug_assert!(operand.ty == p.bool || operand.ty.u().kind == AstKind::IntTy);
+                        debug_assert!(
+                            operand.ty == p.bool || operand.ty.u().kind == AstKind::IntTy
+                        );
                         debug_assert!(out_ty == p.bool || out_ty.kind == AstKind::IntTy);
                         let v = self.sym_as_val(sym, out_ty)?;
                         reg(self.builder.build_not(v.bool_val(), "not")?)
@@ -564,7 +568,8 @@ impl<'ctx> Codegen<'ctx> {
                         .map(reg_sym),
                     _ => {
                         display(expr.full_span()).finish();
-                        todo!("binop {op:?} for {}", arg_ty)},
+                        todo!("binop {op:?} for {}", arg_ty)
+                    },
                 }
             },
             AstEnum::Range { start, end, .. } => {
@@ -631,55 +636,72 @@ impl<'ctx> Codegen<'ctx> {
                 self.build_store(stack_var, binop_res.basic_val(), arg_ty.alignment())?;
                 Ok(Symbol::Void)
             },
-            AstEnum::Decl { markers, ident, var_ty, init, is_const, is_extern, .. } => {
-                let prev_var_name = self.cur_var_name.replace(ident.text);
+            AstEnum::Decl {
+                markers, ident, on_type, var_ty, init, is_const, is_extern, ..
+            } => {
                 let var_ty = var_ty.u();
                 if let Some(init) = init {
                     init.ty = Some(var_ty);
                 }
 
-                const ENABLE_NON_MUT_TO_REG: bool = false;
-
-                let sym = if var_ty == p.fn_val {
-                    debug_assert!(*is_const);
-                    let f = init.u().downcast::<ast::Fn>();
-                    if !*is_extern {
-                        self.compile_fn(&ident.text, f)?
-                    } else {
-                        Symbol::Function { val: self.compile_prototype(&ident.text, f).0 }
+                if *is_const {
+                    if var_ty == p.fn_val {
+                        let f = init.u().downcast::<ast::Fn>();
+                        if init.u().kind != AstKind::Fn {
+                            // don't need to compile an alias again
+                            debug_assert!(self.fn_table.contains_key(&f));
+                        } else {
+                            let name = match on_type {
+                                Some(ty) => {
+                                    let ty = ty.downcast_type();
+                                    Cow::Owned(format!("{}.{}", ty, &*ident.text)) // TODO: use correct type name
+                                },
+                                None => Cow::Borrowed(ident.text.as_ref()),
+                            };
+                            if *is_extern {
+                                self.compile_prototype(name.as_ref(), f);
+                            } else {
+                                self.compile_fn(name.as_ref(), f)?;
+                            }
+                        }
+                    } else if var_ty == p.type_ty {
+                        self.llvm_type(init.u().downcast_type());
                     }
-                } else if var_ty == p.type_ty {
-                    debug_assert!(*is_const);
-                    self.llvm_type(init.u().downcast_type());
-                    Symbol::Type
-                } else if *is_extern {
-                    let ty = self.llvm_type(var_ty).basic_ty();
-                    let val = self.module().add_global(ty, None, &ident.text);
-                    Symbol::Global { val }
-                } else if *is_const {
-                    let init = init.u().rep();
-                    debug_assert!(init.is_const_val());
-                    self.compile_expr(init)?
-                } else if ENABLE_NON_MUT_TO_REG
-                    && let Some(init) = init
-                    && !markers.is_mut
-                {
-                    try_not_never!(self.compile_expr(*init)?)
+
+                    // compile time values are inlined during sema. We don't have to add those to
+                    // the symbol table.
                 } else {
-                    let stack_ty = self.llvm_type(var_ty).basic_ty();
-                    let stack_ptr = self.build_alloca(stack_ty, &ident.text, var_ty)?;
-                    if let Some(init) = init {
-                        finalize_ty(init.ty.as_mut().u(), var_ty);
-                        let _init = try_not_never!(
-                            self.compile_expr_with_write_target(*init, Some(stack_ptr))?
-                        );
-                    }
-                    Symbol::Stack(stack_ptr)
-                };
+                    debug_assert_ne!(var_ty, p.fn_val);
+                    debug_assert_ne!(var_ty, p.type_ty);
+                    debug_assert_ne!(expr.kind, AstKind::Fn);
+                    debug_assert_ne!(expr.rep().kind, AstKind::Fn);
+                    debug_assert!(on_type.is_none());
 
-                debug_assert!(!markers.is_mut || matches!(sym, Symbol::Stack(_)));
-                self.symbols.insert(ident.text, sym);
-                self.cur_var_name = prev_var_name;
+                    const ENABLE_NON_MUT_TO_REG: bool = false;
+
+                    let sym = if *is_extern {
+                        let ty = self.llvm_type(var_ty).basic_ty();
+                        let val = self.module().add_global(ty, None, &ident.text);
+                        Symbol::Global { val }
+                    } else if ENABLE_NON_MUT_TO_REG
+                        && let Some(init) = init
+                        && !markers.is_mut
+                    {
+                        try_not_never!(self.compile_expr(*init)?)
+                    } else {
+                        let stack_ty = self.llvm_type(var_ty).basic_ty();
+                        let stack_ptr = self.build_alloca(stack_ty, &ident.text, var_ty)?;
+                        if let Some(init) = init {
+                            finalize_ty(init.ty.as_mut().u(), var_ty);
+                            let _init = try_not_never!(
+                                self.compile_expr_with_write_target(*init, Some(stack_ptr))?
+                            );
+                        }
+                        Symbol::Stack(stack_ptr)
+                    };
+
+                    self.symbols.insert(ident.text, sym);
+                }
 
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
@@ -752,7 +774,7 @@ impl<'ctx> Codegen<'ctx> {
                     return Ok(Symbol::Never);
                 }
 
-                if let Some(write_target) = write_target{
+                if let Some(write_target) = write_target {
                     stack_val(write_target)
                 } else {
                     let branch_ty = self.llvm_type(out_ty).basic_ty();
@@ -912,24 +934,20 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
             },
-            AstEnum::ImportDirective { .. } => {
-                Ok(Symbol::Module)
-            }
+            AstEnum::ImportDirective { .. } => Ok(Symbol::Module),
 
-            AstEnum::IntVal { val, .. } => {
-                match expr.ty.matchable().as_ref() {
-                    TypeEnum::IntTy { bits, is_signed, .. } => {
-                        reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
-                    },
-                    TypeEnum::FloatTy { bits, .. } => {
-                        let float = *val as f64;
-                        if float as i64 != *val {
-                            panic!("literal precision loss")
-                        }
-                        reg(self.float_type(*bits).const_float(float))
-                    },
-                    _ => unreachable_debug(),
-                }
+            AstEnum::IntVal { val, .. } => match expr.ty.matchable().as_ref() {
+                TypeEnum::IntTy { bits, is_signed, .. } => {
+                    reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
+                },
+                TypeEnum::FloatTy { bits, .. } => {
+                    let float = *val as f64;
+                    if float as i64 != *val {
+                        panic!("literal precision loss")
+                    }
+                    reg(self.float_type(*bits).const_float(float))
+                },
+                _ => unreachable_debug(),
             },
             AstEnum::FloatVal { val, .. } => {
                 let float_ty = expr.ty.downcast::<ast::FloatTy>();
@@ -965,7 +983,6 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::PtrTy { .. }
             | AstEnum::SliceTy { .. }
             | AstEnum::ArrayTy { .. }
-            //| AstEnum::FunctionTy { .. }
             | AstEnum::StructDef { .. }
             | AstEnum::UnionDef { .. }
             | AstEnum::EnumDef { .. }
@@ -973,7 +990,7 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::OptionTy { .. } => todo!("runtime type"),
             AstEnum::Fn { .. } => {
                 Ok(Symbol::Function { val: *self.fn_table.get(&expr.downcast::<ast::Fn>()).u() })
-            }
+            },
         }
     }
 
@@ -1075,7 +1092,7 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    fn compile_fn(&mut self, name: &str, f: Ptr<ast::Fn>) -> CodegenResult<Symbol<'ctx>> {
+    fn compile_fn(&mut self, name: &str, f: Ptr<ast::Fn>) -> CodegenResult<FunctionValue<'ctx>> {
         let prev_bb = self.builder.get_insert_block();
 
         let (fn_val, use_sret) = self.compile_prototype(name, f);
@@ -1095,10 +1112,14 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(prev_bb);
         }
 
-        Ok(Symbol::Function { val })
+        Ok(val)
     }
 
     fn compile_prototype(&mut self, name: &str, f: Ptr<ast::Fn>) -> (FunctionValue<'ctx>, bool) {
+        debug_assert!(
+            self.fn_table.get(&f).is_none(),
+            "called compile_prototype multiple times on the same function ('{name}')"
+        );
         let ptr_type = BasicMetadataTypeEnum::from(self.ptr_type());
         let ret_type = self.ret_type(f.ret_ty.u());
         let use_sret = ret_type == RetType::SRetParam;
@@ -1135,10 +1156,7 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         let prev = self.fn_table.insert(f, fn_val);
-        debug_assert!(
-            prev.is_none(),
-            "called compile_prototype multiple times on the same function"
-        );
+        debug_assert!(prev.is_none());
         (fn_val, use_sret)
     }
 
@@ -2357,7 +2375,6 @@ enum Symbol<'ctx> {
     Void,
     /// This Symbol means that no more instructions can be added the the current BasicBlock
     Never,
-    Type,
     Stack(PointerValue<'ctx>),
     //Register(AnyValueEnum<'ctx>),
     Register(CodegenValue<'ctx>),

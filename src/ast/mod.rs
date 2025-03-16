@@ -6,7 +6,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     sema,
     type_::{RangeKind, ty_match},
-    util::{UnwrapDebug, then},
+    util::{UnwrapDebug, panic_debug, then},
 };
 use core::fmt;
 
@@ -127,6 +127,7 @@ macro_rules! inherit_ast {
         }
     };
 }
+use debug::DebugAst;
 pub(crate) use inherit_ast;
 
 inherit_ast! {
@@ -493,6 +494,9 @@ ast_variants! {
         is_extern: bool,
         markers: DeclMarkers,
         ident: Ptr<Ident>,
+        /// `MyStruct.abc :: /* ... */;`
+        /// `^^^^^^^^`
+        on_type: OPtr<Ast>,
         var_ty_expr: OPtr<Ast>,
         var_ty: OPtr<Type>,
         /// also used for default value in fn params, struct fields, ...
@@ -607,11 +611,21 @@ ast_variants! {
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    StructDef { fields: DeclList },
+    // TODO?: change this to use [`Block`]
+    StructDef {
+        fields: DeclList,
+        consts: Vec<Ptr<Decl>>,
+    },
     /// `union { a: int, b: String, c: (u8, u32) }`
-    UnionDef { fields: DeclList },
+    UnionDef {
+        fields: DeclList,
+        consts: Vec<Ptr<Decl>>,
+    },
     /// `enum { A, B(i64) }`
-    EnumDef { variants: DeclList },
+    EnumDef {
+        variants: DeclList,
+        consts: Vec<Ptr<Decl>>,
+    },
 
     RangeTy {
         elem_ty: Ptr<Type>,
@@ -645,8 +659,13 @@ inherit_ast! {
     struct Type {}
 }
 
-pub trait UpcastToAst {
+pub trait UpcastToAst: Sized {
     fn upcast(self) -> Ptr<Ast>;
+
+    /// resolve possible replacements of this expression
+    fn rep(self) -> Ptr<Ast> {
+        self.upcast().rep()
+    }
 }
 
 macro_rules! impl_UpcastToAst {
@@ -702,7 +721,7 @@ impl Ptr<Ast> {
         self.kind.is_type_kind()
     }
 
-    /// resolve all replacements
+    /// resolve possible replacements of this expression
     pub fn rep(self) -> Ptr<Ast> {
         let mut active = self;
         while let Some(replacement) = active.replacement {
@@ -745,7 +764,7 @@ impl Ptr<Ast> {
         let p = self.rep();
         then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(|| {
             cerror!(self.full_span(), "value not known at compile time");
-            ().into()
+            sema::SemaError::HandledErr
         })
     }
 
@@ -840,6 +859,27 @@ impl Ptr<Type> {
     pub fn try_downcast_ref<V: TypeVariant>(&mut self) -> Option<&mut Ptr<V>> {
         debug_assert!(self.replacement.is_none());
         then!(self.kind == V::KIND => self.downcast_ref())
+    }
+
+    /// Some types (like pointers) are transparent and allow field/method access on its inner type.
+    pub fn flatten_transparent(mut self) -> Ptr<Type> {
+        loop {
+            match self.matchable().as_ref() {
+                TypeEnum::SimpleTy { .. }
+                | TypeEnum::IntTy { .. }
+                | TypeEnum::FloatTy { .. }
+                | TypeEnum::ArrayTy { .. }
+                | TypeEnum::StructDef { .. }
+                | TypeEnum::UnionDef { .. }
+                | TypeEnum::EnumDef { .. }
+                | TypeEnum::RangeTy { .. }
+                | TypeEnum::OptionTy { .. }
+                | TypeEnum::Fn { .. } => break self,
+                TypeEnum::PtrTy { pointee: inner, .. }
+                | TypeEnum::SliceTy { elem_ty: inner, .. } => self = inner.downcast_type(),
+                TypeEnum::Unset => panic_debug("invalid type"),
+            }
+        }
     }
 }
 
@@ -1079,13 +1119,14 @@ impl Dot {
 }
 
 impl Decl {
-    pub const fn new(ident: Ptr<Ident>, span: Span) -> Decl {
+    pub const fn new(ident: Ptr<Ident>, associated_type_expr: OPtr<Ast>, span: Span) -> Decl {
         ast_new!(Decl {
             span,
             is_const: false,
             is_extern: false,
             markers: DeclMarkers::default(),
             ident,
+            on_type: associated_type_expr,
             var_ty_expr: None,
             var_ty: None,
             init: None,
@@ -1093,7 +1134,26 @@ impl Decl {
     }
 
     pub fn from_ident(ident: Ptr<Ident>) -> Decl {
-        Decl::new(ident, ident.span)
+        Decl::new(ident, None, ident.span)
+    }
+
+    /// `MyStruct.ABC : u8 : /* ... */`
+    /// `^^^^^^^^^^^^ lhs`
+    pub fn from_lhs(lhs: Ptr<Ast>) -> Result<Decl, ()> {
+        match lhs.kind {
+            AstKind::Ident => Ok(Decl::from_ident(lhs.downcast::<Ident>())),
+            AstKind::Dot => {
+                let dot = lhs.downcast::<Dot>();
+                match dot.lhs {
+                    Some(ty_expr) => Ok(Decl::new(dot.rhs, Some(ty_expr), lhs.full_span())),
+                    None => Err(cerror!(
+                        dot.span,
+                        "A member declaration requires an associated type name"
+                    )),
+                }
+            },
+            _ => Err(cerror!(lhs.full_span(), "expected variable name")),
+        }
     }
 }
 
@@ -1107,6 +1167,29 @@ impl Ptr<Decl> {
         let cv = self.init.u().rep();
         debug_assert!(cv.is_const_val());
         cv
+    }
+
+    pub fn lhs_span(self) -> Span {
+        let name_span = self.ident.span;
+        self.on_type.map(|t| t.full_span().join(name_span)).unwrap_or(name_span)
+    }
+
+    pub fn display_lhs(self) -> impl std::fmt::Display {
+        struct DeclLhsDisplay {
+            on_type: OPtr<Ast>,
+            ident: Ptr<Ident>,
+        }
+
+        impl std::fmt::Display for DeclLhsDisplay {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                if let Some(ty) = self.on_type {
+                    write!(f, "{}.", ty.to_text())?;
+                }
+                write!(f, "{}", self.ident.text.as_ref())
+            }
+        }
+
+        DeclLhsDisplay { on_type: self.on_type, ident: self.ident }
     }
 }
 
@@ -1323,4 +1406,14 @@ impl DeclListExt for [Ptr<Decl>] {
     fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_ {
         self.iter().map(|decl| decl.var_ty.u())
     }
+}
+
+pub fn iter_field_expr<'a>(
+    fields: &'a [Ptr<Decl>],
+    const_fields: &'a [Ptr<Decl>],
+) -> impl Iterator<Item = Ptr<Decl>> + 'a {
+    fields
+        .iter()
+        .copied()
+        .chain(const_fields.iter().copied().take_while(|f| f.on_type.is_none()))
 }

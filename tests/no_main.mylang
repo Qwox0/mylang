@@ -1,0 +1,5 @@
+std :: #import "std";
+
+not_main :: -> {
+    std.println("Hello World");
+}
