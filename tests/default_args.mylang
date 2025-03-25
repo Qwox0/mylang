@@ -1,0 +1,19 @@
+std :: #import "std";
+libc :: #import "libc";
+printf :: libc.printf;
+
+increment :: (n: *mut i64, by := 1) -> n.* += by;
+
+main :: -> {
+    mut my_num := 5;
+
+    increment(&mut my_num);
+    printf("increment(&mut my_num):    %d\n".ptr, my_num);
+    std.assert(my_num == 6);
+
+    increment(&mut my_num, 4);
+    printf("increment(&mut my_num, 4): %d\n".ptr, my_num);
+    std.assert(my_num == 10);
+
+    0
+}

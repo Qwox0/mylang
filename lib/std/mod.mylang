@@ -1,5 +1,7 @@
-pub fs :: #import "fs.mylang";
 pub env :: #import "env.mylang";
+pub fmt :: #import "fmt.mylang";
+pub fs :: #import "fs.mylang";
+pub str :: #import "str.mylang";
 
 libc :: #import "libc";
 
@@ -9,7 +11,7 @@ panic :: (msg: []u8) -> never {
     libc.exit(1)
 }
 
-assert :: (cond: bool) -> if !cond do panic("Assertion failed!");
+assert :: (cond: bool, msg := "") -> if !cond do panic(str.concat("Assertion failed! ", msg));
 
 malloc0 :: (size: libc.c_size_t) -> {
     ptr := libc.malloc(size);
@@ -24,6 +26,7 @@ open_file :: (pathname: []u8, mode: []u8) -> *libc.FILE {
     file
 }
 
+/// The `ptr` on the returned slice must be `free`d by the caller.
 read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     file := open_file(pathname, "rb");
     defer libc.fclose(file);
@@ -33,14 +36,9 @@ read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     if length < 0 do panic("Cannot get file size");
     libc.fseek(file, 0, libc.SEEK_SET);
 
-    buffer := libc.malloc(length + 1);
-    if buffer == nil do panic("malloc failed");
-
-    libc.fread(buffer, 1, length, file);
-
-    mut slice := []u8.{ ptr = buffer, len = length + 1 };
-    slice[length] = 0;
-    slice
+    s := str.malloc_str(length);
+    libc.fread(s.ptr, 1, length, file);
+    s
 }
 
 print :: (str: []u8) -> void {
@@ -52,12 +50,4 @@ print :: (str: []u8) -> void {
 println :: (str: []u8) -> void {
     print(str);
     libc.putchar('\n'); // handle output == EOF?
-}
-
-streq :: (str1: []u8, str2: []u8) -> bool {
-    if str1.len != str2.len return false;
-    for idx in 0..str1.len
-        if str1[idx] != str2[idx]
-            return false;
-    true
 }

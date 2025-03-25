@@ -3,59 +3,75 @@ use core::fmt;
 use std::{cmp::Ordering, fmt::Display, io::Write};
 
 pub trait DiagnosticReporter {
+    #[track_caller]
     fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M);
 
+    #[track_caller]
     fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M);
 
     fn max_past_severity(&self) -> Option<DiagnosticSeverity>;
 
+    #[track_caller]
     fn error<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
         self.report(DiagnosticSeverity::Error, span, msg)
     }
 
+    #[track_caller]
     fn error_without_code<M: Display + ?Sized>(&mut self, msg: &M) {
         self.error(Span::ZERO, msg)
     }
 
+    #[track_caller]
     fn warn<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
         self.report(DiagnosticSeverity::Warn, span, msg)
     }
 
+    #[track_caller]
     fn info<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
         self.report(DiagnosticSeverity::Info, span, msg)
     }
 
     fn do_abort_compilation(&self) -> bool {
-        self.max_past_severity().is_some_and(|sev| sev >= DiagnosticSeverity::Error)
+        self.max_past_severity().is_some_and(DiagnosticSeverity::aborts_compilation)
     }
 
+    #[track_caller]
     fn report2(&mut self, severity: DiagnosticSeverity, err: &impl SpannedError) {
         if !err.was_already_handled() {
             self.report(severity, err.span(), &err.get_text());
         }
     }
 
+    #[track_caller]
     fn error2(&mut self, err: &impl SpannedError) {
         self.report2(DiagnosticSeverity::Error, err)
     }
 
+    #[track_caller]
     fn warn2(&mut self, err: &impl SpannedError) {
         self.report2(DiagnosticSeverity::Warn, err)
     }
 
     // some common diagnostics:
 
+    #[track_caller]
     fn error_cannot_yield_from_loop_block(&mut self, span: Span) {
         self.error(span, "cannot yield a value from a loop block.");
     }
 
-    fn error_missmatched_type(
+    #[track_caller]
+    fn error_mismatched_types(
         &mut self,
         span: Span,
         expected: Ptr<ast::Type>,
         got: Ptr<ast::Type>,
     ) {
         self.error(span, &format_args!("expected {expected}; got {got}"));
+    }
+
+    #[track_caller]
+    fn error_duplicate_named_arg(&mut self, arg_name: Ptr<ast::Ident>) {
+        cerror!(arg_name.span, "Parameter '{}' specified multiple times", &arg_name.text);
     }
 }
 
@@ -69,7 +85,12 @@ impl DiagnosticReporter for DiagnosticPrinter {
     fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M) {
         self.max_past_severity = self.max_past_severity.max(Some(severity));
         let mut stderr = std::io::stderr();
-        writeln!(&mut stderr, "{severity}: {msg}{COLOR_UNSET}").unwrap();
+        write!(&mut stderr, "{severity}: {msg}").unwrap();
+        #[cfg(debug_assertions)]
+        {
+            write!(&mut stderr, " (reported @ '{}')", std::panic::Location::caller()).unwrap();
+        }
+        writeln!(&mut stderr, "{COLOR_UNSET}").unwrap();
         if span != Span::ZERO {
             display(span).color_code(severity.text_color()).finish();
         }
@@ -163,6 +184,10 @@ impl Ord for DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
+    pub fn aborts_compilation(self) -> bool {
+        self >= DiagnosticSeverity::Error
+    }
+
     pub fn label_color(self) -> &'static str {
         match self {
             DiagnosticSeverity::Fatal => COLOR_BOLD_RED_INV,
@@ -207,6 +232,7 @@ macro_rules! cerror {
 }
 pub(crate) use cerror;
 
+#[allow(unused)]
 macro_rules! cwarn {
     ($span:expr, $msg:expr $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.warn($span, $msg)
@@ -215,6 +241,7 @@ macro_rules! cwarn {
         crate::context::ctx_mut().diagnostic_reporter.warn($span, &format_args!($fmt, $($args),*))
     };
 }
+#[allow(unused)]
 pub(crate) use cwarn;
 
 macro_rules! cinfo {

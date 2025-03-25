@@ -1,8 +1,7 @@
 use crate::{
     context::CompilationContext,
-    diagnostic_reporter::DiagnosticSeverity,
-    parser::{self, lexer::Span},
-    tests::{jit_run_test, jit_run_test_raw, test_file_mock},
+    parser,
+    tests::{TestSpan, jit_run_test, jit_run_test_raw, test_compile_err_raw, test_file_mock},
 };
 
 #[test]
@@ -19,32 +18,18 @@ pub test :: (mut x := 1) { // TODO: test this (better error)
 
 #[test]
 fn good_error_message2() {
-    let code = "test :: -> A; A :: 1 ";
-    let res = jit_run_test_raw::<()>(code);
-    let err = res.one_err();
-    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
-    debug_assert_eq!(err.msg.as_ref(), "expected ';'");
-    debug_assert_eq!(err.span.range(), Span::pos(code.len() - 1, None).range());
-    drop(res);
+    test_compile_err_raw("test :: -> A; A :: 1 ", "expected ';'", |code| {
+        TestSpan::pos(code.len() - 1)
+    });
 
-    let code = "test :: -> { 1 ";
-    let res = jit_run_test_raw::<()>(code);
-    let err = res.one_err();
-    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
-    debug_assert_eq!(err.msg.as_ref(), "expected '}'");
-    debug_assert_eq!(err.span.range(), Span::pos(code.len(), None).range());
-    drop(res);
+    test_compile_err_raw("test :: -> { 1 ", "expected '}'", |code| TestSpan::pos(code.len()));
 
     let code = "
 test :: -> {
     MyStruct :: struct { x: i64 };
     MyStruct.{ x = 5 }
 ";
-    let res = jit_run_test_raw::<()>(code);
-    let err = res.one_err();
-    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
-    debug_assert_eq!(err.msg.as_ref(), "expected '}'");
-    debug_assert_eq!(err.span.range(), Span::pos(code.len(), None).range());
+    test_compile_err_raw(code, "expected '}'", |code| TestSpan::pos(code.len()));
 }
 
 /*
@@ -123,13 +108,6 @@ fn sret_no_memcpy() {
 }
 
 #[test]
-#[ignore = "unfinished test"]
-fn parse_weird_var_decl() {
-    jit_run_test::<()>("a : i32 : b : 2;").ok();
-    panic!("OK")
-}
-
-#[test]
 fn parse_err_missing_if_body() {
     let ctx = CompilationContext::new();
     let test_file = test_file_mock("if a .A".as_ref());
@@ -172,12 +150,6 @@ fn fix_precedence_range() {
     //jit_run_test!("for x in 0.. do break;" ).ok();
     //jit_run_test!("if 1 == 0.. do {};" ).ok();
     jit_run_test::<()>("if true do 0.. else 1..;").ok();
-}
-
-#[test]
-#[ignore = "unfinished test"]
-fn prevent_too_many_pos_init_args() {
-    jit_run_test::<()>("T :: struct {}; T.(1);").err();
 }
 
 #[test]

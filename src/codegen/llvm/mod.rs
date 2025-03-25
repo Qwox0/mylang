@@ -1,10 +1,9 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, OptionTypeExt, TypeEnum,
-        UnaryOpKind, UpcastToAst,
+        UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::primitives,
-    diagnostic_reporter::{DiagnosticReporter, cwarn},
     display_code::display,
     literals::replace_escape_chars,
     ptr::Ptr,
@@ -1011,11 +1010,30 @@ impl<'ctx> Codegen<'ctx> {
             let llvm_ty = self.llvm_type(ret_ty).basic_ty();
             Some(self.build_alloca(llvm_ty, "out", ret_ty)?)
         };
-        let mut args = args.into_iter();
-        let arg_values = f.params.as_ref().iter().map(|param| {
-            let arg = args.next().or(param.init).u();
+        let has_sret = sret_arg.is_some() as usize;
+        let args_count = f.params.len() + has_sret;
+        let mut arg_values = Vec::with_capacity(args_count);
+        unsafe { arg_values.set_len(args_count) };
+        #[cfg(debug_assertions)]
+        let mut arg_values_was_initialized = vec![false; arg_values.len()];
+
+        macro_rules! set_arg_val {
+            ($idx:expr, $val:expr) => {
+                arg_values[$idx] = $val;
+                #[cfg(debug_assertions)]
+                {
+                    arg_values_was_initialized[$idx] = true;
+                }
+            };
+        }
+
+        if let Some(sret_arg) = sret_arg {
+            set_arg_val!(0, BasicMetadataValueEnum::from(sret_arg));
+        }
+
+        for_each_call_arg(f.params, args, |arg, param, mut p_idx| {
             let sym = self.compile_expr(arg)?;
-            if param.var_ty.u().pass_arg_as_ptr() {
+            let val = if param.var_ty.u().pass_arg_as_ptr() {
                 let ptr = match sym {
                     Symbol::Stack(ptr) => ptr,
                     Symbol::Register(val) => {
@@ -1028,19 +1046,18 @@ impl<'ctx> Codegen<'ctx> {
                     Symbol::Global { val } => val.as_pointer_value(),
                     _ => unreachable_debug(),
                 };
-                Ok(BasicMetadataValueEnum::from(ptr))
+                BasicMetadataValueEnum::from(ptr)
             } else {
-                Ok(self.sym_as_val(sym, param.var_ty.u())?.basic_metadata_val())
-            }
-        });
-        let args = sret_arg
-            .map(BasicMetadataValueEnum::from)
-            .map(Ok)
-            .into_iter()
-            .chain(arg_values)
-            .collect::<CodegenResult<Vec<_>>>()?;
-        debug_assert_eq!(args.len() as u32, fn_val.count_params());
-        let ret = self.builder.build_call(fn_val, &args, "call")?;
+                self.sym_as_val(sym, param.var_ty.u())?.basic_metadata_val()
+            };
+            p_idx += has_sret;
+            set_arg_val!(p_idx, val);
+            Ok(())
+        })?;
+        debug_assert_eq!(arg_values.len() as u32, fn_val.count_params());
+        #[cfg(debug_assertions)]
+        debug_assert!(arg_values_was_initialized.iter().all(|b| *b));
+        let ret = self.builder.build_call(fn_val, &arg_values, "call")?;
         if let Some(write_target) = write_target.take() {
             let ret = CodegenValue::new(ret.as_value_ref()).basic_val();
             self.build_store(write_target, ret, ret_ty.alignment())?;
@@ -1223,17 +1240,21 @@ impl<'ctx> Codegen<'ctx> {
         fields: Ptr<[Ptr<ast::Decl>]>,
         args: &[Ptr<Ast>],
     ) -> CodegenResult<Symbol<'ctx>> {
-        for (f_idx, field_def) in fields.iter().enumerate() {
-            let field_ptr = self.builder.build_struct_gep(
-                struct_ty,
-                struct_ptr,
-                f_idx as u32,
-                &field_def.ident.text,
-            )?;
-            let init = if let Some(init) = args.get(f_idx) { *init } else { field_def.init.u() };
-            finalize_ty(init.as_mut().ty.as_mut().u(), field_def.var_ty.u());
-            let _ = self.compile_expr_with_write_target(init, Some(field_ptr))?;
-        }
+        for_each_call_arg(
+            fields,
+            args.iter().copied(),
+            |val: Ptr<Ast>, field_def: Ptr<ast::Decl>, f_idx: usize| {
+                let field_ptr = self.builder.build_struct_gep(
+                    struct_ty,
+                    struct_ptr,
+                    f_idx as u32,
+                    &field_def.ident.text,
+                )?;
+                finalize_ty(val.as_mut().ty.as_mut().u(), field_def.var_ty.u());
+                self.compile_expr_with_write_target(val, Some(field_ptr))?;
+                CodegenResult::Ok(())
+            },
+        )?;
         stack_val(struct_ptr)
     }
 
@@ -1318,9 +1339,11 @@ impl<'ctx> Codegen<'ctx> {
         if let Some(i_ty) = expr_ty.try_downcast::<ast::IntTy>() {
             let int = self.sym_as_val(sym, expr_ty)?.int_val();
             let target = self.llvm_type(target_ty);
-            return if let Some(target_i_ty) = target_ty.try_downcast::<ast::IntTy>() {
+            return if target_ty.kind == AstKind::IntTy {
                 let rhs_ty = target.int_ty();
-                let is_signed = target_i_ty.is_signed;
+                // The documentation of `build_int_cast_sign_flag` is wrong. The signedness of the
+                // source type, not the target type, is relevant.
+                let is_signed = i_ty.is_signed;
                 reg(self.builder.build_int_cast_sign_flag(int, rhs_ty, is_signed, "")?)
             } else if target_ty.kind == AstKind::FloatTy {
                 let float_ty = target.float_ty();
@@ -2689,4 +2712,42 @@ struct ForInfo<'ctx> {
 pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) {
     debug_assert!(ty_match(*ty, out_ty));
     *ty = out_ty;
+}
+
+/// `f: (value: Ptr<Ast>, param_def: Ptr<ast::Decl>, param_idx: usize) -> CodegenResult<()>`
+pub fn for_each_call_arg<'ctx>(
+    params: Ptr<[Ptr<ast::Decl>]>,
+    args: impl IntoIterator<Item = Ptr<Ast>>,
+    mut f: impl FnMut(Ptr<Ast>, Ptr<ast::Decl>, usize) -> CodegenResult<()>,
+) -> CodegenResult<()> {
+    let mut args = args.into_iter().peekable();
+
+    // positional args
+    let mut pos_idx = 0;
+    while args.peek().is_some_and(is_pos_arg) {
+        let pos_arg = args.next().u();
+        let param_def = *params.get(pos_idx).u();
+        f(pos_arg, param_def, pos_idx)?;
+        pos_idx += 1;
+    }
+
+    // named args
+    let remaining_params = &params[pos_idx..];
+    let mut was_set = vec![false; remaining_params.len()];
+    for named_arg in args {
+        let named_arg = named_arg.downcast::<ast::Assign>();
+        let arg_name = named_arg.lhs.downcast::<ast::Ident>();
+        let (rem_param_idx, param_def) = remaining_params.find_field(&arg_name.text).u();
+        debug_assert!(!was_set[rem_param_idx]);
+        was_set[rem_param_idx] = true;
+        f(named_arg.rhs, param_def, pos_idx + rem_param_idx)?
+    }
+
+    // default args
+    for ((rem_idx, missing_param), was_set) in remaining_params.iter().enumerate().zip(was_set) {
+        if !was_set {
+            f(missing_param.init.u(), *missing_param, pos_idx + rem_idx)?
+        }
+    }
+    Ok(())
 }

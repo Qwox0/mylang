@@ -11,13 +11,15 @@ fn test_file(file_path: &str) {
     let ctx = CompilationContext::new();
     let mut args = BuildArgs {
         path: file_path.into(),
+        debug_ast: false,
         print_compile_time: false,
-        //debug_llvm_ir_unoptimized: true,
+        debug_llvm_ir_unoptimized: true,
         ..BuildArgs::default()
     };
     let res = mylang::compiler::compile(Ptr::from_ref(&ctx), CompileMode::Run, &mut args);
-    //assert!(res.ok());
-    assert!(matches!(res, CompileResult::Ok))
+    if !matches!(res, CompileResult::Ok) {
+        panic!("Compilation of '{file_path}' failed!")
+    }
 }
 
 macro_rules! file_test {
@@ -31,6 +33,8 @@ macro_rules! file_test {
 
 file_test! { import }
 file_test! { function_call }
+file_test! { default_args }
+file_test! { named_call_args }
 
 #[test]
 fn error_no_main() {

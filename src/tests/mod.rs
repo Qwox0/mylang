@@ -3,7 +3,7 @@ use crate::{
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_file},
     context::CompilationContext,
-    diagnostic_reporter::{DiagnosticReporter, SavedDiagnosticMessage},
+    diagnostic_reporter::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
     parser::lexer::{Code, Span},
     ptr::Ptr,
     source_file::SourceFile,
@@ -11,6 +11,7 @@ use crate::{
 use std::{fmt::Display, path::Path};
 
 mod alignment;
+mod args;
 mod associated_variables;
 mod binop;
 mod call_conv_c;
@@ -33,11 +34,11 @@ mod var_decl;
 mod while_loop;
 
 const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
-    debug_ast: false,
+    debug_ast: true,
     debug_types: false,
     debug_typed_ast: false,
     llvm_optimization_level: 0,
-    print_llvm_module: true,
+    print_llvm_module: false,
     entry_point: "test",
 };
 
@@ -67,7 +68,7 @@ impl<RetTy> JitRunTestResult<RetTy> {
 
     pub fn one_err(&self) -> &SavedDiagnosticMessage {
         let errors = self.err();
-        debug_assert!(errors.len() == 1);
+        debug_assert!(errors.iter().filter(|e| e.severity.aborts_compilation()).count() == 1);
         &errors[0]
     }
 
@@ -106,6 +107,37 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<Re
     JitRunTestResult { ret, ctx, full_code: code, backend_mod }
 }
 
+#[allow(unused)]
+pub fn test_compile_err(
+    code: impl Display,
+    expected_msg_start: &str,
+    expected_span: impl FnOnce(&str) -> TestSpan,
+) {
+    let code = format!("test :: -> {{ {code} }};");
+    test_compile_err_raw(code, expected_msg_start, expected_span)
+}
+
+pub fn test_compile_err_raw(
+    code: impl ToString,
+    expected_msg_start: &str,
+    expected_span: impl FnOnce(&str) -> TestSpan,
+) {
+    let code = code.to_string();
+    let ctx = CompilationContext::new();
+    let test_file = test_file_mock(code.as_ref());
+    compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
+    let res = JitRunTestResult::<()> { ret: None, ctx, full_code: code, backend_mod: None };
+    let err = res.one_err();
+    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
+    debug_assert!(
+        err.msg.starts_with(expected_msg_start),
+        "{:?} doesn't start with {:?}",
+        err.msg,
+        expected_msg_start
+    );
+    debug_assert_eq!(err.span, expected_span(&res.full_code));
+}
+
 #[derive(Debug)]
 pub struct TestSpan(Span);
 
@@ -122,12 +154,16 @@ impl TestSpan {
         TestSpan::new(pos, pos + 1)
     }
 
-    pub fn of_substr(str: &str, substr: &str) -> Option<TestSpan> {
-        Some(TestSpan::with_len(str.find(substr)?, substr.len()))
+    pub fn of_substr(str: &str, substr: &str) -> TestSpan {
+        TestSpan::with_len(str.find(substr).unwrap(), substr.len())
     }
 
-    pub fn start_pos(self) -> TestSpan {
+    pub fn start(self) -> TestSpan {
         TestSpan(self.0.start_pos())
+    }
+
+    pub fn end(self) -> TestSpan {
+        TestSpan(self.0.end())
     }
 }
 

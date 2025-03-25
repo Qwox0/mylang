@@ -5,9 +5,10 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, BinOpKind, Decl, DeclListExt, OptionAstExt, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, iter_field_expr, type_new,
+        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr, type_new,
     },
-    context::{CompilationContextInner, primitives as p},
+    cli::BuildArgs,
+    context::{CompilationContextInner, ctx_mut, primitives as p},
     diagnostic_reporter::{DiagnosticReporter, cerror, chint, cinfo},
     display_code::display,
     parser::lexer::Span,
@@ -36,7 +37,10 @@ macro_rules! check_and_set_target {
         let common_ty = if let Some(target_ty) = target_ty {
             match common_type(ty, *target_ty) {
                 Some(t) => t,
-                None => return err(MismatchedTypes { expected: *target_ty, got: ty }, $err_span),
+                None => {
+                    ctx_mut().error_mismatched_types($err_span, *target_ty, ty);
+                    return SemaResult::HandledErr;
+                },
             }
         } else {
             ty
@@ -117,6 +121,36 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     }
 
     order
+}
+
+/// TODO: add support for libs (without main fn)
+pub fn validate_main(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>], args: &BuildArgs) {
+    let root_file = cctx.files[cctx.root_file_idx.u()];
+    let mut decl_iter = stmts[root_file.stmt_range.u()]
+        .iter()
+        .filter_map(|a| a.try_downcast::<ast::Decl>());
+    let Some(main) = decl_iter.find(|d| &*d.ident.text == &*args.entry_point) else {
+        cerror!(
+            root_file.full_span().start(),
+            "Couldn't find the entry point function '{}' in '{}'",
+            args.entry_point,
+            cctx.path_in_proj(&root_file.path).display()
+        );
+        return;
+    };
+    debug_assert!(decl_iter.all(|d| &*d.ident.text != &*args.entry_point));
+    if main.var_ty == p().never {
+        return;
+    }
+    if main.var_ty != p().fn_val {
+        cerror!(main.ident.span, "Expected the entry point to be a function");
+        return;
+    }
+    let main_fn = main.init.u().downcast::<ast::Fn>();
+    if !main_fn.ret_ty.u().matches_int() && args.entry_point != "test" {
+        cerror!(main.ident.span, "Currently the entry point function has to return an integer");
+        return;
+    }
 }
 
 /// Semantic analyzer
@@ -280,14 +314,14 @@ impl Sema {
                 } else {
                     return err(CannotInferInitializerTy, expr.full_span());
                 };
-                if let Some(mut s) = lhs.try_downcast::<ast::StructDef>() {
+                if let Some(s) = lhs.try_downcast::<ast::StructDef>() {
                     // allow slices?
-                    self.validate_call(&mut s.fields, args.iter_mut(), span.end())?;
+                    self.validate_call(&s.fields, args, span.end())?;
                     expr.ty = Some(s.upcast_to_type())
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
-                    && let Some(mut s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
+                    && let Some(s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
                 {
-                    self.validate_call(&mut s.fields, args.iter_mut(), span.end())?;
+                    self.validate_call(&s.fields, args, span.end())?;
                     expr.ty = Some(ptr_ty.upcast_to_type())
                 } else {
                     return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
@@ -359,10 +393,8 @@ impl Sema {
                 for elem in elem_iter {
                     let ty = *analyze!(*elem, Some(elem_ty));
                     let Some(common_ty) = common_type(ty, elem_ty) else {
-                        return err(
-                            MismatchedTypes { expected: elem_ty, got: ty },
-                            elem.full_span(),
-                        );
+                        self.cctx.error_mismatched_types(elem.full_span(), elem_ty, ty);
+                        return SemaResult::HandledErr;
                     };
                     elem_ty = common_ty;
                 }
@@ -383,13 +415,8 @@ impl Sema {
                 assert!(!is_const, "todo: const array");
                 assert!(lhs.is_none(), "todo: array initializer with lhs");
                 let u64_ty = p.u64;
-                let count_ty = *analyze!(*count, Some(u64_ty), true);
-                if count_ty != u64_ty {
-                    return err(
-                        MismatchedTypes { expected: u64_ty, got: count_ty },
-                        count.full_span(),
-                    );
-                }
+                analyze!(*count, Some(u64_ty), true);
+                self.ty_match(*count, u64_ty)?;
                 let len = count.try_get_const_val()?.upcast();
                 let elem_ty = analyze!(*val, None).upcast();
                 let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?.upcast_to_type();
@@ -453,6 +480,8 @@ impl Sema {
                         debug_assert!(rhs.replacement.is_none());
                         rhs.replacement = Some(method.const_val());
                         p.method_stub
+                    } else if method.var_ty == p.never {
+                        p.never
                     } else {
                         cerror!(
                             expr.full_span(),
@@ -562,21 +591,21 @@ impl Sema {
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
                 expr.ty = Some(if let Some(fn_ty) = func.try_downcast::<ast::Fn>().as_mut() {
-                    let params = &mut fn_ty.params;
-                    self.validate_call(params, args.iter_mut(), span.end())?;
+                    self.validate_call(&fn_ty.params, args, span.end())?;
                     fn_ty.ret_ty.u()
                 } else if fn_ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>().as_mut();
-                    debug_assert_eq!(dot.rhs.upcast().rep().kind, AstKind::Fn);
                     let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
-                    let args = std::iter::once(dot.lhs.as_mut().u()).chain(args.iter_mut());
-                    self.validate_call(&mut fn_ty.as_mut().params, args, span.end())?;
+                    let args = std::iter::once(dot.lhs.u())
+                        .chain(args.iter().copied())
+                        .collect::<Vec<_>>(); // TODO: bench no allocation
+                    self.validate_call(&fn_ty.as_ref().params, &args, span.end())?;
                     fn_ty.ret_ty.u()
                 } else if fn_ty == p.enum_variant {
                     let Some(dot) = func.try_downcast::<ast::Dot>() else { unreachable_debug() };
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(&dot.rhs.text).u().1;
-                    self.validate_call(&mut [variant], args.iter_mut(), span.end())?;
+                    self.validate_call(&[variant], args, span.end())?;
                     enum_ty.upcast_to_type()
                 } else {
                     cerror!(
@@ -753,10 +782,8 @@ impl Sema {
             AstEnum::Assign { lhs, rhs, .. } => {
                 assert!(!is_const, "todo: Assign in const");
                 let lhs_ty = *analyze!(*lhs, None);
-                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
-                if !ty_match(lhs_ty, rhs_ty) {
-                    return err(MismatchedTypes { expected: lhs_ty, got: rhs_ty }, rhs.full_span());
-                }
+                analyze!(*rhs, Some(lhs_ty));
+                self.ty_match(*rhs, lhs_ty)?;
                 // todo: check if binop can be applied to type
                 expr.ty = Some(p.void_ty);
             },
@@ -775,21 +802,20 @@ impl Sema {
             AstEnum::If { condition, then_body, else_body, .. } => {
                 assert!(!is_const, "todo: if in const");
                 let bool_ty = p.bool;
-                let cond_ty = *analyze!(*condition, Some(bool_ty));
-                if cond_ty != bool_ty {
-                    let span = condition.full_span();
-                    return err(MismatchedTypes { expected: bool_ty, got: cond_ty }, span);
-                }
+                analyze!(*condition, Some(bool_ty));
+                self.ty_match(*condition, bool_ty)?;
+
                 self.analyze(*then_body, &None, is_const)?;
                 let then_ty = then_body.ty.u();
                 expr.ty = if let Some(else_body) = *else_body {
                     self.analyze(else_body, &Some(then_ty), is_const)?;
                     let else_ty = else_body.ty.u();
                     let Some(common_ty) = common_type(then_ty, else_ty) else {
-                        return err(
-                            IncompatibleBranches { expected: then_ty, got: else_ty },
+                        cerror!(
                             else_body.full_span(),
+                            "'then' and 'else' branches have incompatible types"
                         );
+                        return SemaResult::HandledErr;
                     };
                     Some(common_ty)
                 } else if then_body.ty == Some(p.void_ty) || then_body.ty == Some(p.never) {
@@ -840,10 +866,8 @@ impl Sema {
             AstEnum::While { condition, body, .. } => {
                 let bool_ty = p.bool;
                 analyze!(*condition, Some(bool_ty));
-                if condition.ty.u() != bool_ty {
-                    let got = condition.ty.u();
-                    return err(MismatchedTypes { expected: bool_ty, got }, condition.full_span());
-                }
+                self.ty_match(*condition, bool_ty)?;
+
                 self.open_scope();
                 let res: SemaResult<()> = try {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
@@ -969,10 +993,8 @@ impl Sema {
             AstEnum::ArrayTy { len, elem_ty, .. } => {
                 self.analyze_type(*elem_ty)?;
                 let u64_ty = p.u64;
-                let len_ty = *analyze!(*len, Some(u64_ty), true);
-                if !ty_match(len_ty, u64_ty) {
-                    return err(MismatchedTypes { expected: u64_ty, got: len_ty }, len.span);
-                }
+                analyze!(*len, Some(u64_ty), true);
+                self.ty_match(*len, u64_ty)?;
                 if !len.rep().is_const_val() {
                     return err(NotAConstExpr, len.full_span());
                 }
@@ -1044,7 +1066,8 @@ impl Sema {
         self.analyze(expr, &Some(expected_ty), is_const)?;
         let expr_ty = expr.ty.u();
         let Some(common_ty) = common_type(expr_ty, expected_ty) else {
-            return err(MismatchedTypes { expected: expected_ty, got: expr_ty }, expr.full_span());
+            self.cctx.error_mismatched_types(expr.full_span(), expected_ty, expr_ty);
+            return SemaResult::HandledErr;
         };
         expr.as_mut().ty = Some(common_ty);
         Ok(())
@@ -1242,22 +1265,83 @@ impl Sema {
     /// works for function calls and call initializers
     /// ...(arg1, ..., argX, paramX1=argX1, ... paramN=argN)
     /// paramN1, ... -> default values
-    fn validate_call<'i>(
+    fn validate_call(
         &mut self,
-        params: &mut [Ptr<ast::Decl>],
-        args: impl IntoIterator<Item = &'i mut Ptr<Ast>>,
+        params: &[Ptr<ast::Decl>],
+        args: &[Ptr<ast::Ast>],
         close_p_span: Span,
     ) -> SemaResult<()> {
-        let mut args = args.into_iter();
-        // TODO: check for duplicate named arguments
-        for p in params.iter_mut() {
-            let Some(arg) = args.next() else {
-                if p.init.is_some() {
-                    continue;
-                }
-                return err(MissingArg, close_p_span);
+        // positional args
+        let mut pos_idx = 0;
+        while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
+            let Some(&param) = params.get(pos_idx) else {
+                let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
+                cerror!(
+                    pos_arg.full_span(),
+                    "Got {pos_arg_count} positional arguments, but expected at most {} arguments",
+                    params.len(),
+                );
+                return SemaResult::HandledErr;
             };
-            self.analyze_and_finalize_with_known_type(*arg, p.var_ty.u(), false)?;
+            self.analyze_and_finalize_with_known_type(pos_arg, param.var_ty.u(), false)?;
+
+            pos_idx += 1;
+        }
+
+        // named args
+        let remaining_args = &args[pos_idx..];
+        let remaining_params = &params[pos_idx..];
+        let mut was_set = vec![false; remaining_params.len()];
+        for &arg in remaining_args {
+            let Some(named_arg) = arg.try_downcast::<ast::Assign>() else {
+                cerror!(
+                    arg.full_span(),
+                    "Cannot specify a positional argument after named arguments"
+                );
+                return SemaResult::HandledErr;
+            };
+            let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
+                cerror!(named_arg.lhs.full_span(), "Expected a parameter name");
+                return SemaResult::HandledErr;
+            };
+            let Some((param_idx, param)) = remaining_params.find_field(&arg_name.text) else {
+                if let Some((idx, _)) = params[..pos_idx].find_field(&arg_name.text) {
+                    self.cctx.error_duplicate_named_arg(arg_name);
+                    chint!(
+                        args[idx].full_span(),
+                        "The parameter has already been set by this positional argument"
+                    )
+                } else {
+                    cerror!(arg_name.span, "Unknown parameter")
+                }
+                return SemaResult::HandledErr;
+            };
+            if was_set[param_idx] {
+                self.cctx.error_duplicate_named_arg(arg_name);
+                chint!(remaining_args[param_idx].full_span(), "set here already");
+                return SemaResult::HandledErr;
+            } else {
+                was_set[param_idx] = true;
+            }
+            self.analyze_and_finalize_with_known_type(named_arg.rhs, param.var_ty.u(), false)?;
+        }
+
+        // missing args
+        let mut missing_params = remaining_params
+            .iter()
+            .zip(was_set)
+            .filter(|(p, was_set)| !was_set && p.init.is_none())
+            .map(|(p, _)| p.ident.text.as_ref());
+        if let Some(first) = missing_params.next() {
+            let missing_params_list =
+                missing_params.fold(format!("'{first}'"), |acc, p| acc + ", '" + p + "'");
+            cerror!(
+                close_p_span,
+                "Missing argument{} for parameters {}",
+                if missing_params_list.contains(",") { "s" } else { "" },
+                missing_params_list
+            );
+            return SemaResult::HandledErr;
         }
         Ok(())
     }
@@ -1270,10 +1354,20 @@ impl Sema {
             if ty == p.never {
                 return Ok(p.never);
             }
-            self.cctx.error_missmatched_type(ty_expr.full_span(), p.type_ty, ty);
+            self.cctx.error_mismatched_types(ty_expr.full_span(), p.type_ty, ty);
             return SemaResult::HandledErr;
         }
         Ok(ty_expr.downcast_type())
+    }
+
+    fn ty_match(&mut self, expr: Ptr<Ast>, expected_ty: Ptr<ast::Type>) -> SemaResult<()> {
+        let got_ty = expr.ty.u();
+        if ty_match(got_ty, expected_ty) {
+            Ok(())
+        } else {
+            self.cctx.error_mismatched_types(expr.full_span(), expected_ty, got_ty);
+            SemaResult::HandledErr
+        }
     }
 
     pub fn slice_fields(

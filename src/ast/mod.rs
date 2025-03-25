@@ -1417,3 +1417,7 @@ pub fn iter_field_expr<'a>(
         .copied()
         .chain(const_fields.iter().copied().take_while(|f| f.on_type.is_none()))
 }
+
+pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {
+    a.kind != AstKind::Assign || a.parenthesis_count > 0
+}

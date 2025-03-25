@@ -166,34 +166,47 @@ impl Parser {
                 expr!(Range { start: Some(lhs), end, is_inclusive }, span)
             },
             FollowingOperator::Pipe => {
-                let t = self.ws0().next_tok()?;
+                let t = self.ws0().peek_tok()?;
                 match t.kind {
                     TokenKind::Keyword(Keyword::If) => {
-                        self.if_after_cond(lhs, span, true).context("| if")?.upcast()
+                        self.advanced().if_after_cond(lhs, span, true).context("| if")?.upcast()
                     },
                     TokenKind::Keyword(Keyword::Match) => {
-                        todo!("| match")
+                        todo!("|> match")
                     },
                     TokenKind::Keyword(Keyword::For) => {
-                        let iter_var = self.ws0().ident().context("for iteration variable")?;
+                        let iter_var =
+                            self.advanced().ws0().ident().context("for iteration variable")?;
                         self.ws0().opt_do();
                         let body = self.ws0().expr().context("for body")?;
                         expr!(For { source: lhs, iter_var, body, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
-                        self.ws0().opt_do();
+                        self.advanced().ws0().opt_do();
                         let body = self.expr().context("while body")?;
                         expr!(While { condition: lhs, body, was_piped: true }, t.span)
                     },
-                    TokenKind::Ident => {
-                        let text = self.get_text_from_span(t.span);
-                        let func = expr!(Ident { text }, t.span);
+                    _ => {
+                        let func = self.expr_(PIPE_TARGET_PRECEDENCE)?;
+                        let mut args = ScratchPool::new();
+                        if let Some(dot) = func.try_downcast::<ast::Dot>()
+                            && dot.lhs.is_none()
+                        {
+                            // For simplicity the following two cases are handled differently:
+                            // `x |> XType.func(...)` is converted to `XType.func(x, ...)`
+                            // `x |>      .func(...)` is converted to `x.func(...)`
+                            // Problem: `func` might not be a method but a function
+                            //     => the second syntax is converted to a method-like call
+                            //     => omitting the type might produce different code
+                            dot.as_mut().lhs = Some(lhs);
+                        } else {
+                            args.push(lhs).map_err(|e| self.wrap_alloc_err(e))?;
+                        }
                         self.tok(TokenKind::OpenParenthesis).context("pipe call: expect '('")?;
-                        let args = self.scratch_pool_with_first_val(lhs)?;
                         self.call(func, args, Some(0))?.upcast()
                     },
-                    _ => ParseError::unexpected_token(t)
-                        .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
+                    // _ => ParseError::unexpected_token(t)
+                    //     .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
                 }
             },
             FollowingOperator::Assign => {
@@ -1137,11 +1150,11 @@ impl FollowingOperator {
 
     fn precedence(&self) -> u8 {
         match self {
-            FollowingOperator::Dot
-            | FollowingOperator::Call
+            FollowingOperator::Dot => DOT_PRECEDENCE,
+            FollowingOperator::Call
             | FollowingOperator::Index
             | FollowingOperator::PostOp(_)
-            | FollowingOperator::SingleArgNoParenFn => 22,
+            | FollowingOperator::SingleArgNoParenFn => POSTOP_PRECEDENCE,
             FollowingOperator::PositionalInitializer
             | FollowingOperator::NamedInitializer
             | FollowingOperator::ArrayInitializer => 20,
@@ -1160,6 +1173,10 @@ const MIN_PRECEDENCE: u8 = 0;
 const IF_PRECEDENCE: u8 = 1;
 /// also for `*ty`, `[]ty`, `?ty`
 const PREOP_PRECEDENCE: u8 = 21;
+const POSTOP_PRECEDENCE: u8 = 22;
+/// must be higher than [`POSTOP_PRECEDENCE`] and lower than [`DOT_PRECEDENCE`] to parse `... |> A.func(...)` correctly
+const PIPE_TARGET_PRECEDENCE: u8 = 23;
+const DOT_PRECEDENCE: u8 = 24;
 const RANGE_PRECEDENCE: u8 = 10;
 /// `a: ty = init`
 /// `   ^^`

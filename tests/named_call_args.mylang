@@ -1,0 +1,40 @@
+std :: #import "std";
+libc :: #import "libc";
+printf :: libc.printf;
+
+format_numbers :: (a: i64, b := 2, c: u8, d: i32 = -3) ->
+    std.fmt.format("a: %d; b: %d; c: %d; d: %d", a, b, xx c, xx d);
+
+MyNumbers :: struct { a: i8, b: u16 = !0, c := 123, d: i32 }
+MyNumbers.format :: (n: MyNumbers) -> format_numbers(xx n.a, xx n.b, xx n.c, n.d)
+
+main :: -> {
+    res := format_numbers(10, 20, c=30, d=40);
+    std.println(res);
+    std.assert(std.str.eq(res, "a: 10; b: 20; c: 30; d: 40"));
+
+    res := format_numbers(a=3, b=4, c=5);
+    std.println(res);
+    std.assert(std.str.eq(res, "a: 3; b: 4; c: 5; d: -3"));
+
+    // named args are not affected by their order
+    res := format_numbers(d=-10, b=8, c=6, a=4);
+    std.println(res);
+    std.assert(std.str.eq(res, "a: 4; b: 8; c: 6; d: -10"));
+
+    //format_numbers(d=1, 5); // ERROR: named args must be specified after all positional args
+
+    // The named arg syntax can be used to access the default value of fields (such as `b`) which
+    // are followed by required fields.
+    res := format_numbers(1, c=10);
+    std.println(res);
+    std.assert(std.str.eq(res, "a: 1; b: 2; c: 10; d: -3"));
+
+    // named args also work in Positional Initializers / Call Initializers
+    my_numbers := MyNumbers.(3, d=0);
+    res := my_numbers.format();
+    std.println(res);
+    std.assert(std.str.eq(res, "a: 3; b: 65535; c: 123; d: 0"));
+
+    0
+}

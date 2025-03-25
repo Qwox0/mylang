@@ -1,9 +1,9 @@
 use crate::{
-    ast::{self, Ast, debug::DebugAst},
+    ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
     context::CompilationContextInner,
-    diagnostic_reporter::{DiagnosticReporter, cerror},
+    diagnostic_reporter::DiagnosticReporter,
     parser::{self},
     ptr::Ptr,
     sema::{self},
@@ -124,6 +124,7 @@ pub fn compile_file(
 
     let sema_start = Instant::now();
     let order = sema::analyze(ctx, &stmts);
+    sema::validate_main(ctx, &stmts, args);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -189,21 +190,6 @@ pub fn compile_file(
     }
 
     // ##### Run #####
-
-    let root_file = ctx.files[ctx.root_file_idx.u()];
-    if stmts[root_file.stmt_range.u()]
-        .iter()
-        .filter_map(|a| a.try_downcast::<ast::Decl>())
-        .all(|d| &*d.ident.text != &*args.entry_point)
-    {
-        cerror!(
-            root_file.full_span().start(),
-            "Couldn't find the entry point function '{}' in '{}'",
-            args.entry_point,
-            ctx.path_in_proj(&root_file.path).display()
-        );
-        return CompileResult::Err;
-    };
 
     if mode == CompileMode::TestRun {
         let module = ManuallyDrop::new(module);

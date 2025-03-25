@@ -16,11 +16,6 @@ pub enum SemaErrorKind {
     /// TODO: maybe infer the type from the usage
     VarDeclNoType,
 
-    #[error("MismatchedTypes (expected: {expected}, got: {got})")]
-    MismatchedTypes {
-        expected: Ptr<ast::Type>,
-        got: Ptr<ast::Type>,
-    },
     #[error("MismatchedTypesBinOp (lhs: {lhs_ty}, rhs: {rhs_ty})")]
     MismatchedTypesBinOp {
         lhs_ty: Ptr<ast::Type>,
@@ -55,11 +50,6 @@ pub enum SemaErrorKind {
 
     MissingArg,
     MissingElseBranch,
-    #[error("IncompatibleBranches (expected: {expected}, got: {got})")]
-    IncompatibleBranches {
-        expected: Ptr<ast::Type>,
-        got: Ptr<ast::Type>,
-    },
 
     #[error("unknown ident `{}`", &**_0)]
     UnknownIdent(Ptr<str>),

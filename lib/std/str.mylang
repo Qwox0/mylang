@@ -1,0 +1,28 @@
+//! # String operations
+
+std :: #import "std";
+libc :: #import "libc";
+
+pub malloc_str :: (len: u64) -> []u8 {
+    buffer := std.malloc0(len + 1); // adds a trailing 0 byte for C compatibility.
+    if buffer == nil do std.panic("failed to malloc string buffer");
+    return .{ ptr = buffer, len };
+}
+
+/// The `ptr` on the returned slice must be `free`d by the caller.
+pub concat :: (str1: []u8, str2: []u8) -> {
+    out := malloc_str(str1.len + str2.len);
+    libc.memcpy(out.ptr, str1.ptr, str1.len);
+    libc.memcpy(out[str1.len..].ptr, str2.ptr, str2.len);
+    out
+}
+
+pub eq :: (str1: []u8, str2: []u8) -> bool {
+    if str1.len != str2.len return false;
+    for idx in 0..str1.len
+        if str1[idx] != str2[idx]
+            return false;
+    true
+}
+
+pub is_null_terminated :: (str: []u8) -> str[str.len] == 0;

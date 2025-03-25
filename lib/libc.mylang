@@ -88,8 +88,14 @@ extern stdin: *FILE;
 extern stdout: *FILE;
 extern stderr: *FILE;
 
-/// currently only works for one int (use %l in `fmt`)
-extern printf: (fmt: *c_char, x: c_long) -> c_int;
+// HACK: use params with default values instead of varargs.
+
+extern printf: (                                fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern fprintf: (stream: *FILE,                 fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern dprintf: (fd: c_int,                     fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern sprintf: (str: *c_char,                  fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern snprintf: (str: *c_char, size: c_size_t, fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern asprintf: (out_str: *mut *c_char,        fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
 
 /// writes a character to stdout
 //extern putchar: (ch: c_int) -> c_int;

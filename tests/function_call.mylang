@@ -47,13 +47,11 @@ main :: -> {
     n = MyNum.weird_add(n, 1);
     std.assert(n.val == 30);
 
-    /* TODO
     // pipe into method
     res1 := n |> MyNum.weird_add(5);
     res2 := n |> .weird_add(5);
-    std.assert(res1.val == 15);
-    std.assert(res2.val == 15);
-    */
+    std.assert(res1.val == 80);
+    std.assert(res2.val == 80);
 
     // pass-by-value vs pass-by-reference
     MyNum.mut_add :: (n: *mut MyNum, rhs: i64) -> {

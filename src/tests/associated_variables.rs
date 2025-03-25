@@ -74,12 +74,12 @@ test :: -> {
     let res = jit_run_test::<()>(code);
     let err = res.err();
     assert_eq!(err[0].severity, DiagnosticSeverity::Error);
-    let expected_err_span = TestSpan::of_substr(&res.full_code, "a.NUM").unwrap();
+    let expected_err_span = TestSpan::of_substr(&res.full_code, "a.NUM");
     assert_eq!(err[0].span, expected_err_span);
     assert_eq!(err[0].msg.as_ref(), "cannot access a static constant through a value");
 
     assert_eq!(err[1].severity, DiagnosticSeverity::Info);
-    assert_eq!(err[1].span, expected_err_span.start_pos());
+    assert_eq!(err[1].span, expected_err_span.start());
     assert_eq!(err[1].msg.as_ref(), "consider replacing the value with its type 'MyStruct'"); // not implemented
 }
 
