@@ -4,12 +4,13 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, BinOpKind, Decl, DeclListExt, OptionAstExt, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr, type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, Decl, DeclListExt, OptionAstExt,
+        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr,
+        type_new,
     },
     cli::BuildArgs,
     context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostic_reporter::{DiagnosticReporter, cerror, chint, cinfo},
+    diagnostic_reporter::{DiagnosticReporter, cerror, chint, cinfo, cwarn},
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -254,7 +255,7 @@ impl Sema {
         }
 
         match expr.matchable().as_mut() {
-            AstEnum::Ident { text, .. } => {
+            AstEnum::Ident { text, decl, .. } => {
                 let sym = self.get_symbol(*text, expr.span);
                 if sym.is_err()
                     && let Some(mut i) = self.try_custom_bitwith_int_type(*text)
@@ -263,8 +264,10 @@ impl Sema {
                     i.ty = Some(p.type_ty);
                     debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntTy>());
                     *expr.cast::<ast::IntTy>().as_mut() = i;
+                    // decl is not set. Is this a problem?
                 } else {
                     let sym = sym?;
+                    *decl = Some(sym);
                     if sym.is_const {
                         debug_assert!(expr.replacement.is_none());
                         expr.replacement = Some(sym.const_val());
@@ -546,26 +549,40 @@ impl Sema {
                     p.enum_variant
                 });
             },
-            AstEnum::Index { lhs, idx, .. } => {
+            AstEnum::Index { mut_access, lhs, idx, .. } => {
                 assert!(!is_const, "todo: const index");
                 let lhs_ty = analyze!(*lhs, None);
-                let (elem_ty, is_mut) = match lhs_ty.matchable().as_ref() {
-                    TypeEnum::SliceTy { elem_ty, is_mut, .. } => (*elem_ty, *is_mut),
-                    TypeEnum::ArrayTy { elem_ty, .. } => (*elem_ty, true),
-                    // _ => cerror!(lhs.full_span(), "cannot index into value of type {}", lhs_ty),
-                    _ => return err(CanOnlyIndexArrays, lhs.full_span()),
+                let (TypeEnum::SliceTy { elem_ty, .. } | TypeEnum::ArrayTy { elem_ty, .. }) =
+                    lhs_ty.matchable().as_ref()
+                else {
+                    cerror!(lhs.full_span(), "cannot index into value of type {}", lhs_ty);
+                    return SemaResult::HandledErr;
                 };
-                let elem_ty = elem_ty.downcast_const_val().downcast_type();
-                analyze!(*idx, None).finalize();
-                expr.ty = Some(match idx.ty.matchable().as_ref() {
-                    TypeEnum::IntTy { .. } => elem_ty,
+                let elem_ty = elem_ty.downcast_type();
+                let idx_ty = analyze!(*idx, None).finalize();
+
+                expr.ty = Some(match idx_ty.matchable().as_ref() {
                     TypeEnum::RangeTy { elem_ty: i, rkind, .. }
                         if i.matches_int() || *rkind == RangeKind::Full =>
                     {
+                        self.validate_addr_of(*mut_access, *lhs, expr)?;
                         let elem_ty = elem_ty.upcast();
-                        self.alloc(type_new!(SliceTy { elem_ty, is_mut }))?.upcast_to_type()
+                        self.alloc(type_new!(SliceTy { elem_ty, is_mut: *mut_access }))?
+                            .upcast_to_type()
                     },
-                    _ => return err(InvalidArrayIndex { ty: idx.ty.u() }, idx.full_span()),
+                    _ if *mut_access => {
+                        cerror!(
+                            expr.span,
+                            "The `mut` marker can only be used when slicing, not when indexing"
+                        );
+                        chint!(expr.span, "to reference the value mutably, use `.&mut` instead");
+                        return SemaResult::HandledErr;
+                    },
+                    TypeEnum::IntTy { .. } => elem_ty,
+                    _ => {
+                        cerror!(idx.full_span(), "Cannot index into array with `{idx_ty}`");
+                        return SemaResult::HandledErr;
+                    },
                 });
             },
             AstEnum::Cast { operand, target_ty, .. } => {
@@ -638,6 +655,7 @@ impl Sema {
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
+                        self.validate_addr_of(is_mut, *operand, expr)?;
                         let pointee = expr_ty.upcast();
                         debug_assert!(const_val.is_none(), "todo: const addr of");
                         self.alloc(type_new!(PtrTy { pointee, is_mut }))?.upcast_to_type()
@@ -660,8 +678,16 @@ impl Sema {
                     {
                         simple_unary_op!(-FloatVal)
                     },
-                    UnaryOpKind::Deref | UnaryOpKind::Not | UnaryOpKind::Neg => {
-                        return err(InvalidUnaryOp { ty: expr_ty, op: *op }, span);
+                    UnaryOpKind::Deref => {
+                        cerror!(expr.full_span(), "Cannot dereference value of type `{expr_ty}`",);
+                        return SemaResult::HandledErr;
+                    },
+                    UnaryOpKind::Not | UnaryOpKind::Neg => {
+                        cerror!(
+                            expr.full_span(),
+                            "Cannot apply unary operator `{op}` to value of type `{expr_ty}`"
+                        );
+                        return SemaResult::HandledErr;
                     },
                     UnaryOpKind::Try => todo!("try"),
                 });
@@ -783,18 +809,32 @@ impl Sema {
                 assert!(!is_const, "todo: Assign in const");
                 let lhs_ty = *analyze!(*lhs, None);
                 analyze!(*rhs, Some(lhs_ty));
-                self.ty_match(*rhs, lhs_ty)?;
                 // todo: check if binop can be applied to type
+                self.ty_match(*rhs, lhs_ty)?;
+                self.validate_lvalue(*lhs, expr)?;
                 expr.ty = Some(p.void_ty);
             },
-            AstEnum::BinOpAssign { lhs, rhs, .. } => {
+            AstEnum::BinOpAssign { lhs, rhs, op, .. } => {
                 assert!(!is_const, "todo: BinOpAssign in const");
                 let lhs_ty = *analyze!(*lhs, None);
                 let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
-                if !ty_match(lhs_ty, rhs_ty) {
-                    return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, rhs.full_span());
+                if let Some(ptr_ty) = lhs_ty.try_downcast::<ast::PtrTy>() {
+                    cerror!(
+                        lhs.full_span(),
+                        "Cannot apply binary operatator `{}` to pointer type `{lhs_ty}`",
+                        op.to_binop_assign_text()
+                    );
+                    if ty_match(rhs_ty, ptr_ty.pointee.downcast_type()) {
+                        chint!(
+                            lhs.full_span(),
+                            "Consider dereferencing the pointer first", // TODO: code example
+                        )
+                    }
+                    return SemaResult::HandledErr;
                 }
-                // todo: check if binop can be applied to type
+                // TODO: check if binop can be applied to type
+                self.ty_match(*rhs, lhs_ty)?;
+                self.validate_lvalue(*lhs, expr)?;
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::Decl { .. } => self.analyze_decl(expr.downcast::<ast::Decl>(), is_const)?,
@@ -1065,11 +1105,12 @@ impl Sema {
     ) -> SemaResult<()> {
         self.analyze(expr, &Some(expected_ty), is_const)?;
         let expr_ty = expr.ty.u();
-        let Some(common_ty) = common_type(expr_ty, expected_ty) else {
+        if !ty_match(expr_ty, expected_ty) {
             self.cctx.error_mismatched_types(expr.full_span(), expected_ty, expr_ty);
             return SemaResult::HandledErr;
-        };
-        expr.as_mut().ty = Some(common_ty);
+        }
+        debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
+        expr.as_mut().ty = Some(expected_ty);
         Ok(())
     }
 
@@ -1094,7 +1135,7 @@ impl Sema {
         let fields = match struct_ty.matchable().as_ref() {
             TypeEnum::StructDef { fields, .. } => &**fields,
             TypeEnum::SliceTy { elem_ty, is_mut, .. } => {
-                &self.slice_fields(elem_ty.downcast_const_val().downcast_type(), *is_mut)?
+                &self.slice_fields(elem_ty.downcast_type(), *is_mut)?
             },
             _ => unreachable_debug(),
         };
@@ -1346,6 +1387,173 @@ impl Sema {
         Ok(())
     }
 
+    fn resolve_mutated_value(&self, mut expr: Ptr<Ast>) -> MutatedValue {
+        use MutatedValue::*;
+        loop {
+            match expr.matchable2() {
+                AstMatch::Ident(ident) => return Var(ident),
+                AstMatch::Dot(dot) => {
+                    debug_assert_ne!(dot.lhs.u().ty.u().kind, AstKind::PtrTy); // autodereferencing is not implemented
+                    expr = dot.lhs.u();
+                },
+                AstMatch::Index(index) => {
+                    debug_assert_ne!(index.lhs.ty.u().kind, AstKind::PtrTy); // autodereferencing is not implemented
+                    if index.lhs.ty == p().never {
+                        return None;
+                    } else if index.lhs.ty.u().kind == AstKind::SliceTy {
+                        return Slice(index.lhs);
+                    } else {
+                        expr = index.lhs;
+                    }
+                },
+                AstMatch::UnaryOp(op) if op.op == UnaryOpKind::Deref => {
+                    if op.operand.ty == p().never {
+                        return None;
+                    }
+                    return Ptr(op.operand);
+                },
+                _ => return None,
+            }
+        }
+    }
+
+    fn validate_lvalue(&self, lvalue: Ptr<Ast>, full_expr: Ptr<Ast>) -> SemaResult<()> {
+        match lvalue.matchable2() {
+            AstMatch::Ident(_) | AstMatch::Dot(_) | AstMatch::Index(_) => {},
+            AstMatch::UnaryOp(op) if op.op == UnaryOpKind::Deref => {},
+            _ => {
+                cerror!(
+                    lvalue.full_span(),
+                    "Cannot assign a value to an expression of kind '{:?}'",
+                    lvalue.kind
+                );
+                return SemaResult::HandledErr;
+            },
+        }
+        if !self.cctx.do_mut_checks {
+            return Ok(());
+        }
+        match self.resolve_mutated_value(lvalue) {
+            MutatedValue::Var(ident) => {
+                let Some(decl) = ident.decl else {
+                    cwarn!(ident.span, "INTERNAL: This ident doesn't have a declaration");
+                    return Ok(());
+                };
+                if decl.markers.is_mut {
+                    return Ok(());
+                }
+                let var_name = decl.ident.text.as_ref();
+                // let is_direct_assignment = lvalue == ident; // TODO: change error messages?
+                if decl.is_const {
+                    cerror!(full_expr.full_span(), "Cannot assign to constant '{var_name}'");
+                } else {
+                    cerror!(
+                        full_expr.full_span(),
+                        "Cannot assign to immutable variable '{var_name}'",
+                    );
+                    chint!(decl.ident.span, "consider making '{var_name}' mutable");
+                }
+                SemaResult::HandledErr
+            },
+            MutatedValue::Ptr(ptr) => {
+                let ptr_ty = ptr.ty.downcast::<ast::PtrTy>();
+                if ptr_ty.is_mut {
+                    return Ok(());
+                }
+                cerror!(
+                    full_expr.full_span(),
+                    "Cannot modify the value behind an immutable pointer"
+                );
+                chint!(
+                    ptr.full_span(),
+                    "The pointer type `{}` is not `mut`",
+                    ptr_ty.upcast_to_type()
+                );
+                SemaResult::HandledErr
+            },
+            MutatedValue::Slice(slice) => {
+                let slice_ty = slice.ty.downcast::<ast::SliceTy>();
+                if slice_ty.is_mut {
+                    return Ok(());
+                }
+                cerror!(full_expr.full_span(), "Cannot modify the elements of an immutable slice");
+                chint!(
+                    slice.full_span(),
+                    "The slice type `{}` is not `mut`",
+                    slice_ty.upcast_to_type()
+                );
+                SemaResult::HandledErr
+            },
+            MutatedValue::None => Ok(()),
+        }
+    }
+
+    // also used for slicing
+    fn validate_addr_of(
+        &self,
+        is_mut_addr_of: bool,
+        operand: Ptr<Ast>,
+        full_expr: Ptr<Ast>,
+    ) -> SemaResult<()> {
+        if !self.cctx.do_mut_checks || !is_mut_addr_of {
+            return Ok(());
+        }
+        match self.resolve_mutated_value(operand) {
+            MutatedValue::Var(ident) => {
+                let Some(decl) = ident.decl else {
+                    cwarn!(ident.span, "INTERNAL: This ident doesn't have a declaration");
+                    return Ok(());
+                };
+                if decl.markers.is_mut {
+                    return Ok(());
+                }
+                if decl.is_const {
+                    cwarn!(
+                        full_expr.full_span(),
+                        "The mutable pointer will reference a local copy of `{}`, not the \
+                         constant itself",
+                        &*ident.text
+                    );
+                    Ok(())
+                } else {
+                    cerror!(ident.span, "Cannot mutably reference `{}`", &*ident.text);
+                    chint!(decl.ident.span, "because `{}` is not marked as `mut`", &*ident.text);
+                    SemaResult::HandledErr
+                }
+            },
+            MutatedValue::Ptr(ptr) => {
+                let ptr_ty = ptr.ty.downcast::<ast::PtrTy>();
+                if ptr_ty.is_mut {
+                    return Ok(());
+                }
+                cerror!(
+                    full_expr.full_span(),
+                    "Cannot modify the value behind an immutable pointer"
+                );
+                chint!(
+                    ptr.full_span(),
+                    "The pointer type `{}` is not `mut`",
+                    ptr_ty.upcast_to_type()
+                );
+                SemaResult::HandledErr
+            },
+            MutatedValue::Slice(slice) => {
+                let slice_ty = slice.ty.downcast::<ast::SliceTy>();
+                if slice_ty.is_mut {
+                    return Ok(());
+                }
+                cerror!(full_expr.full_span(), "Cannot modify the elements of the immutable slice",);
+                chint!(
+                    slice.full_span(),
+                    "The slice type `{}` is not `mut`",
+                    slice_ty.upcast_to_type()
+                );
+                SemaResult::HandledErr
+            },
+            MutatedValue::None => Ok(()),
+        }
+    }
+
     fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
         self.analyze(ty_expr, &Some(p.type_ty), true)?;
@@ -1443,4 +1651,22 @@ pub fn err<T>(kind: SemaErrorKind, span: Span) -> SemaResult<T> {
 #[inline]
 pub fn err_val(kind: SemaErrorKind, span: Span) -> SemaError {
     SemaError { kind, span }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MutatedValue {
+    Var(Ptr<ast::Ident>),
+    Ptr(Ptr<ast::Ast>),
+    Slice(Ptr<ast::Ast>),
+    None,
+}
+
+impl MutatedValue {
+    pub fn try_get_var(self) -> OPtr<ast::Ident> {
+        match self {
+            MutatedValue::Var(ptr) => Some(ptr),
+            MutatedValue::Ptr(ptr) | MutatedValue::Slice(ptr) => ptr.try_downcast::<ast::Ident>(),
+            MutatedValue::None => None,
+        }
+    }
 }

@@ -7,7 +7,7 @@ fn transmute_with_union_same_size() {
     let code = format!(
         "
 mut ok := true;
-union_val: union {{ int: i32, float: f32 }};
+mut union_val: union {{ int: i32, float: f32 }};
 union_val.int = {int};
 ok &&= union_val.int == {int};
 ok &&= union_val.float == {float};

@@ -95,7 +95,7 @@ extern fprintf: (stream: *FILE,                 fmt: *c_char, a := 0, b := 0, c 
 extern dprintf: (fd: c_int,                     fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
 extern sprintf: (str: *c_char,                  fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
 extern snprintf: (str: *c_char, size: c_size_t, fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern asprintf: (out_str: *mut *c_char,        fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+extern asprintf: (out_str: *mut ?*c_char,       fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
 
 /// writes a character to stdout
 //extern putchar: (ch: c_int) -> c_int;
@@ -124,12 +124,12 @@ pub SEEK_SET : c_int : 0;
 pub SEEK_CUR : c_int : 1;
 pub SEEK_END : c_int : 2;
 
-extern fread: (data: *void, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t;
+extern fread: (data: *any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t;
 
 // ===== <stdlib.h> =====
 
-extern malloc: (size: c_size_t) -> ?*void;
-extern free: (ptr: *void) -> void;
+extern malloc: (size: c_size_t) -> ?*any;
+extern free: (ptr: *any) -> void;
 
 extern exit: (status: c_int) -> never;
 
@@ -138,7 +138,7 @@ extern atoi: (string: *c_char) -> c_int;
 extern atol: (string: *c_char) -> c_long;
 
 /// <https://www.gnu.org/software/libc/manual/html_node/Array-Sort-Function.html>
-extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *void, r: *void) -> c_int) -> void;
+extern qsort: (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *any) -> c_int) -> void;
 
 // ===== <stdnoreturn.h> =====
 
@@ -147,8 +147,8 @@ extern qsort: (array: *void, count: c_size_t, size: c_size_t, compare: *(l: *voi
 
 extern strlen: (str: *c_char) -> c_size_t;
 
-extern memcpy: (dest: *void, src: *void, len: c_size_t) -> *void;
-extern memset: (ptr: *void, byte: u8, len: c_size_t) -> *void;
+extern memcpy: (dest: *any, src: *any, len: c_size_t) -> *any;
+extern memset: (ptr: *any, byte: u8, len: c_size_t) -> *any;
 
 // ===== <tgmath.h> =====
 

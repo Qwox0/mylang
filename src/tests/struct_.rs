@@ -5,7 +5,7 @@ use crate::tests::jit_run_test_raw;
 fn set_field_value() {
     let code = "
 MyStruct :: struct { a: i64 };
-a: MyStruct;
+mut a: MyStruct;
 a.a = 123;
 a.a == 123";
     assert!(jit_run_test::<bool>(code).ok(), "```{code}\n``` -> expected `true`");

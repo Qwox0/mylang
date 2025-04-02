@@ -67,7 +67,7 @@ test:: -> { mut x: i64 = 0; inner(x.&mut); x }";
 fn defer_in_nested_functions() {
     let code = "
 test :: -> {
-    inner_x := 0;
+    mut inner_x := 0;
     inner_x := &mut inner_x;
     defer inner_x.* += 10;
     mut x := 0;
@@ -84,7 +84,7 @@ test :: -> {
 
     let code = "
 test :: -> {
-    inner_x := 0;
+    mut inner_x := 0;
     inner_x := &mut inner_x;
     defer inner_x.* += 10;
     mut x := 0;

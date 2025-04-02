@@ -1,7 +1,8 @@
 use crate::{
     context::CompilationContext,
     parser,
-    tests::{TestSpan, jit_run_test, jit_run_test_raw, test_compile_err_raw, test_file_mock},
+    tests::{jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw, test_file_mock, TestSpan},
+    util::IteratorExt,
 };
 
 #[test]
@@ -35,7 +36,7 @@ test :: -> {
 /*
 #[test]
 fn good_error_message2_2() {
-    let msg = res.err();
+    let msg = res.diagnostics();
     println!("{:?}", msg );
     /*
     jit_run_test_raw("
@@ -155,7 +156,7 @@ fn fix_precedence_range() {
 #[test]
 fn good_error_message3() {
     let res = jit_run_test::<()>("A :: enum { B }; x := 1; A.B.(1);");
-    let errors = res.err();
+    let errors = res.diagnostics();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].span.range(), 38..41);
 }
@@ -166,7 +167,7 @@ fn good_error_message4() {
     let start = code.find(".B.(1)").unwrap();
     let range = start..start + 2;
     let res = jit_run_test_raw::<()>(code);
-    let errors = res.err();
+    let errors = res.diagnostics();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].span.range(), range);
 }
@@ -178,7 +179,7 @@ fn good_error_cannot_apply_initializer_to_type() {
     let start = code.find("A.(1)").unwrap();
     let range = start..start + 1;
     let res = jit_run_test_raw::<()>(code);
-    let errors = res.err();
+    let errors = res.diagnostics();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].span.range(), range);
     assert!(!errors[0].msg.contains("of type `type`"))
@@ -187,7 +188,7 @@ fn good_error_cannot_apply_initializer_to_type() {
 #[test]
 #[ignore = "unfinished test"]
 fn test_display_span1() {
-    jit_run_test_raw::<()>("test :: ->").err();
+    jit_run_test_raw::<()>("test :: ->").errors().expect_one();
 }
 
 #[test]
@@ -195,7 +196,7 @@ fn test_display_span1() {
 fn test_display_span2() {
     let code = "test :: ->
 ";
-    jit_run_test_raw::<()>(code).err();
+    jit_run_test_raw::<()>(code).errors().expect_one();
 }
 
 #[test]
@@ -230,7 +231,7 @@ extern crate test;
 fn bench_sema_error(b: &mut test::Bencher) {
     b.iter(|| {
         let res = jit_run_test::<()>(test::black_box("A :: enum { B }; x := 1; A.B.(1);"));
-        let errors = res.err();
+        let errors = res.diagnostics();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].span.range(), 38..41);
     });
@@ -245,7 +246,9 @@ fn todo_fix_pos_initializer_codegen() {
 #[test]
 #[ignore = "not yet implemented"]
 fn fix_panic() {
-    let _err = jit_run_test_raw::<()>("f :: (x: i32) -> {}; test :: -> f(xx i32);").one_err();
+    let _err = jit_run_test_raw::<()>("f :: (x: i32) -> {}; test :: -> f(xx i32);")
+        .errors()
+        .expect_one();
     // TODO: check if err is type missmatch
     panic!("OK")
 }
@@ -257,13 +260,38 @@ fn fix_multi_fn_compile() {
     panic!("OK")
 }
 
+/// solution 1: keep this error
+/// solution 2: add special case for statements ([`crate::ast::Ast::block_expects_trailing_semicolon`] == false)
+///     parse `for ... {}.{ val = 3 }` as `for ... {};.{ val = 3 }`
 #[test]
 #[ignore = "not yet implemented"]
-fn todo() {
+fn parse_for_block() {
     let code = "
 MyStruct :: struct { val: i32 };
 for _ in 0..10 {} // currently a ';' is required
 .{ val = 3 }";
     let out = *jit_run_test::<i32>(code).ok();
     assert_eq!(out, 3);
+}
+
+#[test]
+#[ignore = "not yet implemented"]
+fn array_constant() {
+    let out = *jit_run_test::<[i64; 5]>("MY_NUMBERS :: .[1,2,3,4,5]; MY_NUMBERS").ok();
+    debug_assert_eq!(out, [1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn validate_lvalue() {
+    test_compile_err("1 = 2", "Cannot assign a value to an expression of kind 'IntVal'", |code| {
+        TestSpan::of_substr(code, "1")
+    });
+    jit_run_test::<()>("f :: -> struct {x:i32}.(5); f().x = 2").ok();
+}
+
+#[test]
+#[ignore = "not yet implemented"]
+fn fix_postop_addrof_int_lit() {
+    let ptr = *jit_run_test::<*const i64>("1.&").ok();
+    assert!(!ptr.is_null());
 }

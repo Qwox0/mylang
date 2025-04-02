@@ -474,7 +474,7 @@ impl<'ctx> Codegen<'ctx> {
                 } else if func.ty == p.enum_variant {
                     let dot = func.downcast::<ast::Dot>();
                     let enum_ty = out_ty.downcast::<ast::EnumDef>();
-                    debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty);
+                    debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty.upcast_to_type());
                     let idx = enum_ty.variants.find_field(&dot.rhs.text).u().0;
                     debug_assert!(args.len() <= 1);
                     self.compile_enum_val(enum_ty, idx, args.get(0).copied(), write_target.take())
@@ -486,16 +486,9 @@ impl<'ctx> Codegen<'ctx> {
                 op.finalize_arg_type(operand.ty.as_mut().u(), out_ty);
                 let sym = try_not_never!(self.compile_expr(*operand)?);
                 match op {
-                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => reg(match sym {
-                        Symbol::Stack(ptr_value) => ptr_value,
-                        Symbol::Register(val) => {
-                            #[cfg(debug_assertions)]
-                            println!("WARN: doing stack allocation for AddrOf register");
-                            self.build_stack_alloc_as_ptr(val.basic_val(), out_ty)?
-                        },
-                        Symbol::Function { val, .. } => val.as_global_value().as_pointer_value(),
-                        _ => todo!(),
-                    }),
+                    UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                        reg(self.build_ptr_to_sym(sym, out_ty)?)
+                    },
                     UnaryOpKind::Deref => {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
                     },
@@ -590,9 +583,8 @@ impl<'ctx> Codegen<'ctx> {
             &mut AstEnum::Assign { lhs, rhs, .. } => {
                 //debug_assert_eq!(lhs.ty, rhs.ty);
                 debug_assert!(ty_match(lhs.ty.u(), rhs.ty.u()));
-                let Symbol::Stack(stack_ptr) = self.compile_expr(lhs)? else {
-                    unreachable_debug()
-                };
+                let lhs_sym = self.compile_expr(lhs)?;
+                let stack_ptr = self.build_ptr_to_sym(lhs_sym, lhs.ty.u())?;
                 let _ = self.compile_expr_with_write_target(rhs, Some(stack_ptr))?;
                 Ok(Symbol::Void)
             },
@@ -963,7 +955,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             // AstEnum::BCharLit { val, .. } => reg(self.int_type(8).const_int(*val as u64, false)),
             AstEnum::StrVal { text, .. } => {
-                debug_assert!(expr.ty == p.str_slice_ty);
+                debug_assert!(expr.ty.u().matches_str());
                 let value = replace_escape_chars(&text);
                 let ptr = self.builder.build_global_string_ptr(&value, "")?;
                 let len = self.int_type(64).const_int(value.len() as u64, false);
@@ -1099,7 +1091,7 @@ impl<'ctx> Codegen<'ctx> {
             // set data
             if let Some(data) = data {
                 let data_ptr = self.builder.build_struct_gep(enum_ty, enum_ptr, 1, "enum_data")?;
-                debug_assert_eq!(data.ty.upcast(), enum_def.variants[variant_idx].var_ty.u());
+                debug_assert_eq!(data.ty, enum_def.variants[variant_idx].var_ty.u());
                 let _ = self.compile_expr_with_write_target(data, Some(data_ptr))?;
             }
 
@@ -1204,7 +1196,7 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     if param_def.markers.is_mut {
                         self.position_builder_at_start(func.get_first_basic_block().u());
-                        Symbol::Stack(self.build_stack_alloc_as_ptr(param.basic_val(), param_ty)?)
+                        Symbol::Stack(self.build_alloca_value(param.basic_val(), param_ty)?)
                     } else {
                         Symbol::Register(param)
                     }
@@ -1481,6 +1473,35 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(prev);
         }
         Ok(ptr)
+    }
+
+    fn build_alloca_value(
+        &self,
+        val: impl BasicValue<'ctx>,
+        ty: Ptr<ast::Type>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let val = val.as_basic_value_enum();
+        let alloca = self.build_alloca(val.get_type(), "", ty).u();
+        self.build_store(alloca, val, ty.alignment())?;
+        Ok(alloca)
+    }
+
+    fn build_ptr_to_sym(
+        &self,
+        sym: Symbol<'ctx>,
+        ty: Ptr<ast::Type>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        Ok(match sym {
+            Symbol::Stack(ptr_value) => ptr_value,
+            Symbol::Register(val) => {
+                #[cfg(debug_assertions)]
+                println!("INFO: doing stack allocation for register value: {val:?}");
+                self.build_alloca_value(val.basic_val(), ty)?
+            },
+            Symbol::Function { val, .. } => val.as_global_value().as_pointer_value(),
+            Symbol::Global { val } => val.as_pointer_value(),
+            Symbol::Void | Symbol::Never | Symbol::Module => unreachable_debug(),
+        })
     }
 
     fn build_store(
@@ -2324,17 +2345,6 @@ impl<'ctx> Codegen<'ctx> {
             Some(first_instr) => self.builder.position_before(&first_instr),
             None => self.builder.position_at_end(entry),
         }
-    }
-
-    fn build_stack_alloc_as_ptr(
-        &self,
-        v: impl BasicValue<'ctx>,
-        ty: Ptr<ast::Type>,
-    ) -> CodegenResult<PointerValue<'ctx>> {
-        let v = v.as_basic_value_enum();
-        let alloca = self.build_alloca(v.get_type(), "", ty).u();
-        self.build_store(alloca, v, ty.alignment())?;
-        Ok(alloca)
     }
 
     #[inline]

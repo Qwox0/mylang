@@ -1,6 +1,6 @@
 use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
-    context::primitives,
+    context::{ctx, primitives},
     ptr::{OPtr, Ptr},
     util::{
         Layout, UnwrapDebug, aligned_add, round_up_to_nearest_power_of_two, unreachable_debug,
@@ -31,6 +31,8 @@ impl CommonTypeSelection {
     }
 }
 
+// Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
+//    Can this (or something similar) even happen?
 fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonTypeSelection {
     use CommonTypeSelection::*;
     let p = primitives();
@@ -87,11 +89,9 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     debug_assert!(!swap_inputs);
 
-    #[allow(unused)]
     if let Some(lhs) = lhs.try_downcast::<ast::PtrTy>() {
         let lhs_pointee = lhs.pointee.downcast_type();
         if let Some(rhs) = rhs.try_downcast::<ast::PtrTy>() {
-            return Lhs; // TODO: remove this
             return common_type_impl(lhs_pointee, rhs.pointee.downcast_type());
         }
         return Mismatch;
@@ -161,7 +161,9 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return true;
     }
 
-    if expected == p.never {
+    if got == p.never || expected == p.any {
+        return true;
+    } else if expected == p.never || got == p.any {
         return false;
     }
 
@@ -198,7 +200,9 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     if let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() {
         let got_pointee = got_ptr.pointee.downcast_type();
         if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
-            return true; // TODO: remove this
+            if ctx().do_mut_checks && expected_ptr.is_mut && !got_ptr.is_mut {
+                return false;
+            }
             return ty_match(got_pointee, expected_ptr.pointee.downcast_type());
         }
         return false;
@@ -231,8 +235,8 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         };
     }
 
-    if let Some(got_fn) = got.try_downcast::<ast::Fn>() {
-        if let Some(expected_fn) = expected.try_downcast::<ast::Fn>()
+    if let Some(expected_fn) = expected.try_downcast::<ast::Fn>() {
+        if let Some(got_fn) = got.try_downcast::<ast::Fn>()
             && got_fn.params.len() == expected_fn.params.len()
             && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
             && got_fn
@@ -243,6 +247,8 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
                 .all(|(g, e)| ty_match(g, e))
         {
             return true;
+        } else if got == p.fn_val {
+            return true; // TODO: better checks here
         }
         return false;
     }
@@ -267,9 +273,39 @@ impl Ptr<ast::Type> {
         self == p.void_ty || self == p.never
     }
 
+    pub fn matches_ptr(self) -> bool {
+        self.kind == AstKind::PtrTy || self == primitives().never
+    }
+
+    pub fn matches_str(self) -> bool {
+        let p = primitives();
+        self == p.str_slice_ty
+            || self
+                .try_downcast::<ast::SliceTy>()
+                .is_some_and(|slice| slice.elem_ty.downcast_type() == p.u8)
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { is_finalized, .. } => *is_finalized,
+            TypeEnum::IntTy { .. }
+            | TypeEnum::FloatTy { .. }
+            | TypeEnum::StructDef { .. }
+            | TypeEnum::UnionDef { .. }
+            | TypeEnum::EnumDef { .. } => true,
+            TypeEnum::PtrTy { pointee: t, .. }
+            | TypeEnum::SliceTy { elem_ty: t, .. }
+            | TypeEnum::ArrayTy { elem_ty: t, .. }
+            | TypeEnum::OptionTy { inner_ty: t, .. } => t.downcast_type().is_finalized(),
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
+            TypeEnum::Fn { .. } => true,
+            TypeEnum::Unset => unreachable_debug(),
+        }
+    }
+
     /// This might mutate values behind [`Ptr`]s in `self`.
     /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self) -> Ptr<ast::Type> {
         let p = primitives();
         debug_assert!(self.ty == p.type_ty || self.kind == AstKind::Fn);
         match self.matchable().as_mut() {
@@ -292,12 +328,16 @@ impl Ptr<ast::Type> {
                 let ty = t.rep_mut().downcast_type_ref();
                 ty.finalize();
             },
-            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.finalize(),
+            TypeEnum::RangeTy { elem_ty, .. } => {
+                elem_ty.finalize();
+            },
             TypeEnum::Fn { .. } => {
                 //todo!()
             },
             TypeEnum::Unset => unreachable_debug(),
         }
+        debug_assert!(self.is_finalized());
+        *self
     }
 
     /// size of stack allocation in bytes

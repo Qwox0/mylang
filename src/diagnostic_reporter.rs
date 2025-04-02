@@ -223,42 +223,28 @@ impl fmt::Display for DiagnosticSeverity {
 }
 
 macro_rules! cerror {
-    ($span:expr, $msg:expr $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.error($span, $msg)
-    };
-    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.error($span, &format_args!($fmt, $($args),*))
     };
 }
 pub(crate) use cerror;
 
-#[allow(unused)]
 macro_rules! cwarn {
-    ($span:expr, $msg:expr $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.warn($span, $msg)
-    };
-    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.warn($span, &format_args!($fmt, $($args),*))
     };
 }
-#[allow(unused)]
 pub(crate) use cwarn;
 
 macro_rules! cinfo {
-    ($span:expr, $msg:expr $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.info($span, $msg)
-    };
-    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.info($span, &format_args!($fmt, $($args),*))
     };
 }
 pub(crate) use cinfo;
 
 macro_rules! chint {
-    ($span:expr, $msg:expr $(,)?) => {
-        crate::context::ctx_mut().diagnostic_reporter.hint($span, $msg)
-    };
-    ($span:expr, $fmt:literal, $( $args:expr ),* $(,)?) => {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::context::ctx_mut().diagnostic_reporter.hint($span, &format_args!($fmt, $($args),*))
     };
 }

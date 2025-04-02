@@ -124,10 +124,10 @@ impl<T> Ptr<T> {
     }
 }
 
-impl<T, U> PartialEq<Ptr<U>> for Ptr<T> {
+impl<T> PartialEq<Ptr<T>> for Ptr<T> {
     #[inline]
-    fn eq(&self, other: &Ptr<U>) -> bool {
-        std::ptr::eq(self.raw(), other.raw() as *const T)
+    fn eq(&self, other: &Ptr<T>) -> bool {
+        std::ptr::eq(self.raw(), other.raw())
     }
 }
 
@@ -195,9 +195,9 @@ impl<T: ?Sized> OPtrExt<T> for OPtr<T> {
     }
 }
 
-impl<T, U> PartialEq<Ptr<U>> for OPtr<T> {
+impl<T> PartialEq<Ptr<T>> for OPtr<T> {
     #[inline]
-    fn eq(&self, other: &Ptr<U>) -> bool {
+    fn eq(&self, other: &Ptr<T>) -> bool {
         match *self {
             Some(p) => p == *other,
             None => false,
@@ -205,8 +205,8 @@ impl<T, U> PartialEq<Ptr<U>> for OPtr<T> {
     }
 }
 
-impl<T, U> PartialEq<OPtr<U>> for Ptr<T> {
-    fn eq(&self, other: &OPtr<U>) -> bool {
+impl<T> PartialEq<OPtr<T>> for Ptr<T> {
+    fn eq(&self, other: &OPtr<T>) -> bool {
         other == self
     }
 }

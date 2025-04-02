@@ -99,11 +99,14 @@ impl DebugAst for Ast {
                 lines.write(".");
                 lines.write_tree(rhs);
             },
-            AstEnum::Index { lhs, idx, .. } => {
+            AstEnum::Index { mut_access, lhs, idx, .. } => {
                 lines.write_tree(lhs);
                 lines.write("[");
                 lines.write_tree(idx);
                 lines.write("]");
+                if *mut_access {
+                    lines.write("mut");
+                }
             },
             AstEnum::Cast { operand, target_ty, .. } => {
                 lines.write_tree(operand);

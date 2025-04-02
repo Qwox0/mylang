@@ -1,5 +1,5 @@
 use crate::{
-    ast::{self, Ast, UnaryOpKind},
+    ast::{self, Ast},
     parser::lexer::Span,
     ptr::Ptr,
 };
@@ -20,18 +20,6 @@ pub enum SemaErrorKind {
     MismatchedTypesBinOp {
         lhs_ty: Ptr<ast::Type>,
         rhs_ty: Ptr<ast::Type>,
-    },
-    /// rust error:
-    /// ```notest
-    /// error[E0600]: cannot apply unary operator `!` to type `&'static str`
-    ///   --> src/sema/mod.rs:70:17
-    ///    |
-    /// 70 |         let a = !"";
-    ///    |                 ^^^ cannot apply unary operator `!`
-    /// ```
-    InvalidUnaryOp {
-        ty: Ptr<ast::Type>,
-        op: UnaryOpKind,
     },
     DuplicateEnumVariant,
     DuplicateField,
@@ -69,11 +57,6 @@ pub enum SemaErrorKind {
     MismatchedArrayLen {
         expected: usize,
         got: usize,
-    },
-    CanOnlyIndexArrays,
-    #[error("cannot index into array with {}", ty)]
-    InvalidArrayIndex {
-        ty: Ptr<ast::Type>,
     },
 
     AllocErr(bumpalo::AllocErr),

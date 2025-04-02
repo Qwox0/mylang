@@ -1,10 +1,3 @@
-//! ```
-//! test benches::parser::bench_parse1                 ... bench:       1,593.98 ns/iter (+/- 176.31)
-//! test benches::parser::bench_parse2                 ... bench:       2,182.07 ns/iter (+/- 167.26)
-//! test benches::parser::bench_parse3                 ... bench:       2,649.51 ns/iter (+/- 129.28)
-//! test benches::parser::bench_parse4                 ... bench:       3,291.12 ns/iter (+/- 326.39)
-//! ```
-
 extern crate test;
 
 use crate::{

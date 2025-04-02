@@ -7,8 +7,9 @@ use crate::{
     parser::lexer::{Code, Span},
     ptr::Ptr,
     source_file::SourceFile,
+    util::IteratorExt,
 };
-use std::{fmt::Display, path::Path};
+use std::{fmt::Display, iter::FusedIterator, path::Path};
 
 mod alignment;
 mod args;
@@ -20,8 +21,10 @@ mod enum_;
 mod for_loop;
 mod function;
 mod if_;
+mod index;
 mod initializer;
 mod logic_binop;
+mod mut_checks;
 mod parse_array;
 mod parse_function;
 mod ptr;
@@ -57,19 +60,20 @@ impl<RetTy> JitRunTestResult<RetTy> {
         self.ret.as_ref().unwrap_or_else(|| panic!("Test failed! Expected no errors"))
     }
 
-    pub fn err(&self) -> &[SavedDiagnosticMessage] {
-        let diag = self.ctx.diagnostic_reporter.diagnostics.as_slice();
-        debug_assert_eq!(self.ret.is_some(), diag.is_empty());
+    pub fn diagnostics(&self) -> &[SavedDiagnosticMessage] {
+        self.ctx.diagnostic_reporter.diagnostics.as_slice()
+    }
+
+    pub fn errors(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
+        let diag = self.diagnostics();
         if self.ret.is_some() {
             panic!("Test failed! Expected compiler error, but compilation succeded.")
         }
-        diag
+        diag.iter().filter(|e| e.severity.aborts_compilation())
     }
 
-    pub fn one_err(&self) -> &SavedDiagnosticMessage {
-        let errors = self.err();
-        debug_assert!(errors.iter().filter(|e| e.severity.aborts_compilation()).count() == 1);
-        &errors[0]
+    pub fn warnings(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
+        self.diagnostics().iter().filter(|e| e.severity == DiagnosticSeverity::Warn)
     }
 
     pub fn module_text(&self) -> Option<String> {
@@ -107,7 +111,6 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<Re
     JitRunTestResult { ret, ctx, full_code: code, backend_mod }
 }
 
-#[allow(unused)]
 pub fn test_compile_err(
     code: impl Display,
     expected_msg_start: &str,
@@ -127,7 +130,10 @@ pub fn test_compile_err_raw(
     let test_file = test_file_mock(code.as_ref());
     compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
     let res = JitRunTestResult::<()> { ret: None, ctx, full_code: code, backend_mod: None };
-    let err = res.one_err();
+    let err = res
+        .errors()
+        .one()
+        .unwrap_or_else(|e| panic!("Test failed! Compiler didn't emit exactly one error ({e:?})"));
     debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
     debug_assert!(
         err.msg.starts_with(expected_msg_start),
@@ -155,11 +161,33 @@ impl TestSpan {
     }
 
     pub fn of_substr(str: &str, substr: &str) -> TestSpan {
-        TestSpan::with_len(str.find(substr).unwrap(), substr.len())
+        TestSpan::of_nth_substr(str, 0, substr)
+    }
+
+    pub fn of_nth_substr(str: &str, mut n: usize, substr: &str) -> TestSpan {
+        let mut pos = 0;
+        loop {
+            let str = &str[pos..];
+            pos += str.find(substr).unwrap_or_else(|| {
+                panic!("The input text should have at least {} occurrences of {substr:?}", n + 1);
+            });
+            if n == 0 {
+                break;
+            }
+            n -= 1;
+            pos += 1;
+        }
+        TestSpan::with_len(pos, substr.len())
     }
 
     pub fn start(self) -> TestSpan {
         TestSpan(self.0.start_pos())
+    }
+
+    pub fn start_with_len(self, len: usize) -> TestSpan {
+        let mut span = self.0.start_pos();
+        span.end = span.start + len;
+        TestSpan(span)
     }
 
     pub fn end(self) -> TestSpan {

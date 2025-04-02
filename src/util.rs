@@ -3,6 +3,7 @@ use core::fmt;
 use std::{
     hint::unreachable_unchecked,
     io::{self, Read},
+    iter::FusedIterator,
     path::Path,
 };
 
@@ -223,4 +224,31 @@ pub fn path_parent_n(mut path: &Path, n: usize) -> Option<&Path> {
         path = path.parent()?
     }
     Some(path)
+}
+
+#[derive(Debug)]
+pub enum IteratorOneError {
+    NoItems,
+    TooManyItems,
+}
+
+pub trait IteratorExt: Iterator + Sized {
+    fn one(self) -> Result<Self::Item, IteratorOneError>
+    where Self: FusedIterator;
+
+    /// Expects the iterator to have exactly one item.
+    fn expect_one(self) -> Self::Item
+    where Self: FusedIterator {
+        self.one().unwrap_or_else(|e| {
+            panic!("Expected the iterator to have exactly one item ({e:?})");
+        })
+    }
+}
+
+impl<I: FusedIterator> IteratorExt for I {
+    fn one(mut self) -> Result<Self::Item, IteratorOneError>
+    where Self: FusedIterator {
+        let Some(item) = self.next() else { return Err(IteratorOneError::NoItems) };
+        Ok(item)
+    }
 }

@@ -308,6 +308,22 @@ macro_rules! ast_variants {
             },)+
         }
 
+        pub enum AstMatch {
+            $($name(Ptr<$name>),)+
+            $($c_name(Ptr<$c_name>),)+
+            $($t_name(Ptr<$t_name>),)+
+        }
+
+        impl AstMatch {
+            fn match_(ast: Ptr<Ast>) -> AstMatch {
+                match ast.kind {
+                    $(AstKind::$name => AstMatch::$name(ast.flat_downcast::<$name>()),)+
+                    $(AstKind::$c_name => AstMatch::$c_name(ast.flat_downcast::<$c_name>()),)+
+                    $(AstKind::$t_name => AstMatch::$t_name(ast.flat_downcast::<$t_name>()),)+
+                }
+            }
+        }
+
         #[derive(Debug)]
         #[repr(u8)]
         pub enum ConstValEnum {
@@ -372,6 +388,7 @@ macro_rules! ast_variants {
 ast_variants! {
     Ident {
         text: Ptr<str>,
+        decl: OPtr<Decl>,
     },
 
     /// `{ <stmt>* }`
@@ -421,9 +438,10 @@ ast_variants! {
         lhs: OPtr<Ast>,
         rhs: Ptr<Ident>,
     },
-    /// `<lhs> [ <idx> ]`
-    /// `              ^` expr.span
+    /// `<lhs> [ <idx> ]`, `<lhs> [ <idx> ]mut`
+    /// `              ^` expr.span `      ^^^` expr.span
     Index {
+        mut_access: bool,
         lhs: Ptr<Ast>,
         idx: Ptr<Ast>,
     },
@@ -582,6 +600,7 @@ ast_variants! {
 
     /// `void`, `never`, `bool`, `type`
     SimpleTy {
+        is_finalized: bool,
         decl: Ptr<Decl>,
     },
     IntTy {
@@ -743,14 +762,21 @@ impl Ptr<Ast> {
     }
 
     pub fn downcast<V: AstVariant>(self) -> Ptr<V> {
-        let p = self.rep();
-        debug_assert_eq!(p.kind, V::KIND);
-        p.cast()
+        self.rep().flat_downcast()
+    }
+
+    pub fn flat_downcast<V: AstVariant>(self) -> Ptr<V> {
+        debug_assert_eq!(self.kind, V::KIND);
+        self.cast()
     }
 
     pub fn try_downcast<V: AstVariant>(self) -> OPtr<V> {
-        let p = self.rep();
-        then!(p.kind == V::KIND => p.downcast())
+        self.rep().try_flat_downcast()
+    }
+
+    /// [`Self::try_downcast`] but doesn't resolve replacements first.
+    pub fn try_flat_downcast<V: AstVariant>(self) -> OPtr<V> {
+        then!(self.kind == V::KIND => self.flat_downcast())
     }
 
     /// downcast to a [`ConstVal`]
@@ -888,6 +914,12 @@ impl Ast {
     #[inline]
     pub fn matchable(&self) -> Ptr<AstEnum> {
         Ptr::<Ast>::from_ref(self).cast::<AstEnum>()
+    }
+
+    /// doesn't handle `replacements`
+    #[inline]
+    pub fn matchable2(&self) -> AstMatch {
+        AstMatch::match_(Ptr::<Ast>::from_ref(self))
     }
 
     pub(crate) fn block_expects_trailing_semicolon(&self) -> bool {
@@ -1108,7 +1140,7 @@ impl AstKind {
 impl Ident {
     #[inline]
     pub const fn new(text: Ptr<str>, span: Span) -> Ident {
-        ast_new!(Ident { span, text /* decl: None */ })
+        ast_new!(Ident { span, text, decl: None })
     }
 }
 
@@ -1325,7 +1357,10 @@ pub enum UnaryOpKind {
     AddrOf,
     /// `&mut <expr>`, `<expr>.&mut`
     AddrMutOf,
-    /// `* <expr>`, `<expr>.*`
+    /// `<expr>.*`
+    ///
+    /// `* <expr>` is currently not implemented because it is very similar to [`PtrTy`] and makes
+    /// parsing annoying
     Deref,
     /// `! <expr>`
     Not,
@@ -1363,6 +1398,23 @@ impl UnaryOpKind {
             },
             UnaryOpKind::Try => todo!(),
         }
+    }
+
+    pub fn to_text(self) -> &'static str {
+        match self {
+            UnaryOpKind::AddrOf => "&",
+            UnaryOpKind::AddrMutOf => "&mut",
+            UnaryOpKind::Deref => ".*",
+            UnaryOpKind::Not => "!",
+            UnaryOpKind::Neg => "-",
+            UnaryOpKind::Try => "?",
+        }
+    }
+}
+
+impl fmt::Display for UnaryOpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_text())
     }
 }
 

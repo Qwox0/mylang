@@ -5,9 +5,8 @@ libc :: #import "libc";
 /// currently this uses the same syntax as `libc.printf`.
 format :: (fmt: []u8, a := 0, b := 0, c := 0, d := 0, e := 0) -> []u8 {
     std.assert(std.str.is_null_terminated(fmt), "expected null-terminated string");
-    // TODO: mut checks
-    ptr := nil;
-    len := libc.asprintf(&ptr, fmt.ptr, a, b, c, d, e);
+    mut ptr: ?*libc.c_char = nil;
+    len := libc.asprintf(&mut ptr, fmt.ptr, a, b, c, d, e);
     if len == -1 std.panic("`format` failed");
     std.assert(len >= 0);
     return .{ ptr, len = xx len };

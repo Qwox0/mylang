@@ -9,7 +9,7 @@ use crate::{
         UpcastToAst, ast_new,
     },
     context::CompilationContextInner,
-    diagnostic_reporter::{DiagnosticReporter, cerror},
+    diagnostic_reporter::{DiagnosticReporter, cerror, chint},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -130,7 +130,8 @@ impl Parser {
             FollowingOperator::Index => {
                 let idx = self.expr()?;
                 let close = self.tok(TokenKind::CloseBracket)?;
-                expr!(Index { lhs, idx }, close.span)
+                let mut_t = self.ws0().lex.next_if_kind(TokenKind::Keyword(Keyword::Mut));
+                expr!(Index { mut_access: mut_t.is_some(), lhs, idx }, mut_t.unwrap_or(close).span)
             },
             FollowingOperator::PositionalInitializer => {
                 let (args, close_p_span) = self.parse_call(ScratchPool::new())?;
@@ -150,10 +151,12 @@ impl Parser {
                 self.function_tail(params, span)?.upcast()
             },
             FollowingOperator::PostOp(mut op) => {
+                let mut span = span;
                 if op == UnaryOpKind::AddrOf
-                    && self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut))
+                    && let Some(t) = self.ws0().lex.next_if_kind(TokenKind::Keyword(Keyword::Mut))
                 {
-                    op = UnaryOpKind::AddrMutOf
+                    op = UnaryOpKind::AddrMutOf;
+                    span = span.join(t.span);
                 }
                 expr!(UnaryOp { op, operand: lhs, is_postfix: true }, span)
             },
@@ -259,7 +262,7 @@ impl Parser {
 
         Ok(match kind {
             TokenKind::Ident => {
-                expr!(Ident { text: self.advanced().get_text_from_span(span) })
+                expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None })
             },
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub) => {
                 self.var_decl()?.upcast()
@@ -484,7 +487,19 @@ impl Parser {
             },
             TokenKind::OpenBracket => {
                 let len = self.advanced().ws0().expr().opt().context("array type count")?;
-                self.tok(TokenKind::CloseBracket).context("array ty ']'")?;
+                self.tok(TokenKind::CloseBracket).context("array ty ']'").map_err(|e| {
+                    if matches!(e.kind, UnexpectedToken(TokenKind::Comma)) {
+                        cerror!(e.span, "expected ']'");
+                        chint!(
+                            span.join(e.span),
+                            "if you wanted to create an array value, consider using an array \
+                             initializer `.[...]` instead"
+                        );
+                        err_val(HandledErr, e.span)
+                    } else {
+                        e
+                    }
+                })?;
                 let is_mut = self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let elem_ty = self.ws0().expr_(PREOP_PRECEDENCE)?;
                 match len {
@@ -727,7 +742,7 @@ impl Parser {
         let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true);
 
         let Some(close_b) = self.lex.next() else {
-            cerror!(self.lex.pos_span(), "expected '}'");
+            cerror!(self.lex.pos_span(), "expected '}}'");
             return handled_err();
         };
         debug_assert_eq!(close_b.kind, TokenKind::CloseBrace);

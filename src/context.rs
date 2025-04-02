@@ -38,6 +38,9 @@ pub struct CompilationContextInner {
     pub compiler_libs_path: PathBuf,
     pub project_path: PathBuf,
 
+    /// TODO: implement `#mut_checks(.Enabled)`, `#mut_checks(.Disabled)`
+    pub do_mut_checks: bool,
+
     #[cfg(debug_assertions)]
     pub debug_types: bool,
 }
@@ -106,6 +109,8 @@ impl CompilationContext {
 
             compiler_libs_path,
             project_path: PathBuf::new(),
+
+            do_mut_checks: true,
 
             #[cfg(debug_assertions)]
             debug_types: false,
