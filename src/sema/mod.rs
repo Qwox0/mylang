@@ -16,9 +16,9 @@ use crate::{
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     source_file::SourceFile,
-    symbol_table::{SymbolTable2, linear_search_symbol},
+    symbol_table::{SemaSymbolTable, linear_search_symbol},
     type_::{RangeKind, common_type, ty_match},
-    util::{UnwrapDebug, forget_lifetime_mut, panic_debug, then, unreachable_debug},
+    util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
@@ -101,7 +101,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
                 sema.defer_stack.get_cur_scope().is_empty(),
                 "file scope must not contain defer statements"
             );
-            sema.close_scope().ok().u();
+            sema.close_scope();
             debug_assert!(sema.symbols.is_empty());
         }
         // println!("finished statements: {:?}", finished);
@@ -158,7 +158,7 @@ pub fn validate_main(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>], arg
 pub struct Sema {
     file_level_symbols: Ptr<[Ptr<Ast>]>,
     /// doesn't contain file-level symbols
-    pub symbols: SymbolTable2,
+    pub symbols: SemaSymbolTable,
     function_stack: Vec<Ptr<ast::Fn>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
 
@@ -299,7 +299,7 @@ impl Sema {
                         }
                     }
                 };
-                self.close_scope()?;
+                self.close_scope();
                 res?;
                 let last_ty = stmts.last().map(|s| s.ty.u()).unwrap_or(p.void_ty);
                 expr.ty = Some(if !*has_trailing_semicolon || last_ty == p.never {
@@ -360,7 +360,7 @@ impl Sema {
                 }
                 let lhs = lhs.or_else(|| ty_hint.upcast().filter(|t| t.kind == AstKind::ArrayTy));
 
-                let mut elem_iter = elements.iter();
+                let mut elem_iter = elements.iter().copied();
 
                 let mut elem_ty = if let Some(lhs) = lhs {
                     let arr_ty = if let Some(arr_ty) = lhs.try_downcast::<ast::ArrayTy>() {
@@ -388,13 +388,13 @@ impl Sema {
                         expr.ty = Some(p.empty_array_ty.upcast_to_type()); // `.[]`
                         return Ok(());
                     };
-                    *analyze!(*elem, None)
+                    *analyze!(elem, None)
                 };
                 #[cfg(debug_assertions)]
                 let orig_elem_ty = elem_ty;
 
                 for elem in elem_iter {
-                    let ty = *analyze!(*elem, Some(elem_ty));
+                    let ty = *analyze!(elem, Some(elem_ty));
                     let Some(common_ty) = common_type(ty, elem_ty) else {
                         self.cctx.error_mismatched_types(elem.full_span(), elem_ty, ty);
                         return SemaResult::HandledErr;
@@ -899,7 +899,7 @@ impl Sema {
                         return SemaResult::HandledErr;
                     }
                 };
-                self.close_scope()?;
+                self.close_scope();
                 res?;
                 expr.ty = Some(p.void_ty);
             },
@@ -916,7 +916,7 @@ impl Sema {
                         return SemaResult::HandledErr;
                     }
                 };
-                self.close_scope()?;
+                self.close_scope();
                 res?;
                 expr.ty = Some(p.void_ty);
             },
@@ -1001,7 +1001,7 @@ impl Sema {
                         panic_debug("this function has already been analyzed as a function type")
                     }
                 };
-                self.close_scope()?;
+                self.close_scope();
                 self.function_stack.pop();
                 res?;
                 debug_assert!(ret_ty.is_some());
@@ -1286,6 +1286,7 @@ impl Sema {
             },
             NotFinished => NotFinished,
             Ok(()) => {
+                decl.ident.decl = Some(decl);
                 decl.ty = Some(p.void_ty);
                 Ok(())
             },
@@ -1616,22 +1617,11 @@ impl Sema {
         self.defer_stack.open_scope();
     }
 
-    fn close_scope(&mut self) -> SemaResult<()> {
-        let res = self.analyze_defer_exprs();
+    fn close_scope(&mut self) {
         self.symbols.close_scope();
         //self.struct_stack.pop();
         //self.enum_stack.pop();
         self.defer_stack.close_scope();
-        res
-    }
-
-    #[inline]
-    fn analyze_defer_exprs(&mut self) -> SemaResult<()> {
-        let exprs = unsafe { forget_lifetime_mut(self.defer_stack.get_cur_scope_mut()) };
-        for expr in exprs.iter().rev() {
-            self.analyze(*expr, &None, false)?;
-        }
-        Ok(())
     }
 
     #[inline]

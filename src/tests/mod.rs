@@ -37,7 +37,7 @@ mod var_decl;
 mod while_loop;
 
 const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
-    debug_ast: true,
+    debug_ast: false,
     debug_types: false,
     debug_typed_ast: false,
     llvm_optimization_level: 0,

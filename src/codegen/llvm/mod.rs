@@ -8,7 +8,7 @@ use crate::{
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
-    symbol_table::SymbolTable,
+    symbol_table::CodegenSymbolTable,
     type_::{RangeKind, enum_alignment, ty_match, union_size},
     util::{
         self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, is_simple_enum,
@@ -114,7 +114,7 @@ pub struct Codegen<'ctx> {
     pub builder: Builder<'ctx>,
     pub module: Option<Module<'ctx>>,
 
-    symbols: SymbolTable<Symbol<'ctx>>,
+    symbols: CodegenSymbolTable<Symbol<'ctx>>,
     type_table: HashMap<Ptr<ast::Type>, CodegenType<'ctx>>,
     fn_table: HashMap<Ptr<ast::Fn>, FunctionValue<'ctx>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
@@ -133,7 +133,7 @@ impl<'ctx> Codegen<'ctx> {
             context,
             builder: context.create_builder(),
             module: Some(context.create_module(module_name)),
-            symbols: SymbolTable::default(),
+            symbols: CodegenSymbolTable::default(),
             type_table: HashMap::new(),
             fn_table: HashMap::new(),
             defer_stack: ScopedStack::default(),
@@ -208,12 +208,12 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         match expr.matchable().as_mut() {
-            AstEnum::Ident { text, .. } => {
+            AstEnum::Ident { decl, .. } => {
                 debug_assert!(
                     !expr.is_const_val(),
                     "constants should have been replaced during sema"
                 );
-                Ok(self.get_symbol(&text))
+                Ok(self.get_symbol(decl.u()))
             },
             // AstEnum::Parenthesis { expr, .. } => self.compile_expr_with_write_target(*expr, write_target) ,
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
@@ -691,7 +691,7 @@ impl<'ctx> Codegen<'ctx> {
                         Symbol::Stack(stack_ptr)
                     };
 
-                    self.symbols.insert(ident.text, sym);
+                    self.symbols.push((ident.decl.u(), sym));
                 }
 
                 debug_assert!(out_ty.matches_void());
@@ -801,7 +801,7 @@ impl<'ctx> Codegen<'ctx> {
                                 idx_ty.const_zero(),
                                 for_info.idx_int,
                             ])?);
-                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
                         debug_assert!(body.ty.u().matches_void());
                         let out = self.compile_expr(*body)?;
                         self.build_for_end(for_info, out)?
@@ -815,7 +815,7 @@ impl<'ctx> Codegen<'ctx> {
                         let elem_ty = self.llvm_type(elem_ty.downcast_type()).basic_ty();
                         let iter_var_sym =
                             Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
-                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
                         debug_assert!(body.ty.u().matches_void());
                         let out = self.compile_expr(*body)?;
                         self.build_for_end(for_info, out)?
@@ -843,7 +843,7 @@ impl<'ctx> Codegen<'ctx> {
                             rkind.is_inclusive(),
                         )?;
                         let iter_var_sym = reg_sym(for_info.idx);
-                        self.symbols.insert(iter_var.text, iter_var_sym);
+                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
                         let out = self.compile_expr(*body)?;
                         self.build_for_end(for_info, out)?
                     },
@@ -1201,7 +1201,7 @@ impl<'ctx> Codegen<'ctx> {
                         Symbol::Register(param)
                     }
                 };
-                self.symbols.insert(param_def.ident.text, s);
+                self.symbols.push((*param_def, s));
             }
 
             f.body.u().as_mut().ty = Some(f.ret_ty.u());
@@ -1272,7 +1272,7 @@ impl<'ctx> Codegen<'ctx> {
                 },
                 None => {
                     let var_ty = field_def.var_ty.u();
-                    let sym = self.get_symbol(&f.text);
+                    let sym = self.get_symbol(f.decl.u());
                     let val = self.sym_as_val(sym, var_ty)?.basic_val();
                     self.build_store(field_ptr, val, var_ty.alignment())?;
                 },
@@ -2270,8 +2270,8 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     #[inline]
-    fn get_symbol(&self, name: &str) -> Symbol<'ctx> {
-        *self.symbols.get(name).u()
+    fn get_symbol(&self, decl: Ptr<ast::Decl>) -> Symbol<'ctx> {
+        *self.symbols.get(decl).u()
     }
 
     pub fn init_target_machine(target_triple: Option<&str>) -> TargetMachine {

@@ -121,17 +121,6 @@ fn parse_err_missing_if_body() {
 
 #[test]
 #[ignore = "unfinished test"]
-fn fix_shadowing_for_defer() {
-    let code = "
-mut a := 10;
-defer a += 1;
-mut a := 3; // this `mut` is only needed because this test fails.
-a";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
-}
-
-#[test]
-#[ignore = "unfinished test"]
 #[allow(unused)]
 fn fix_precedence_range() {
     let a = 1..{

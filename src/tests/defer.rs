@@ -1,4 +1,4 @@
-use crate::tests::jit_run_test_raw;
+use crate::tests::{jit_run_test, jit_run_test_raw};
 
 #[test]
 fn defer_reverse_order() {
@@ -160,4 +160,14 @@ test :: -> {
     return a;
 }";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 0);
+}
+
+#[test]
+fn dont_reference_variables_after_defer() {
+    let code = "
+mut a := 10;
+defer a = 0;
+mut a := 3;
+a";
+    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
 }
