@@ -1,7 +1,7 @@
 extern crate test;
 
 use crate::{
-    context::CompilationContext, diagnostic_reporter::DiagnosticReporter, parser,
+    context::CompilationContext, diagnostics::DiagnosticReporter, parser,
     tests::test_file_mock,
 };
 use test::*;

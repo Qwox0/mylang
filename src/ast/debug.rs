@@ -284,6 +284,9 @@ impl DebugAst for Ast {
                 lines.write("#import ");
                 lines.write_tree(path);
             },
+            AstEnum::SimpleDirective { span, .. } => {
+                lines.write(span.get_text().as_ref());
+            },
 
             AstEnum::IntVal { val, .. } => lines.write(&val.to_string()),
             AstEnum::FloatVal { val, .. } => lines.write(&val.to_string()),

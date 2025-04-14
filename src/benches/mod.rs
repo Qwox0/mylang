@@ -96,6 +96,7 @@ macro_rules! bench_compilation {
         bench_compilation! { @body@ $b; code; $($rem)* }
     };
     (@body@ $b:expr; $code:expr; codegen_only) => {
+        use crate::diagnostics::DiagnosticReporter;
         let code = $code.as_ref();
         let ctx = CompilationContext::new();
         let test_file = $crate::tests::test_file_mock(code);

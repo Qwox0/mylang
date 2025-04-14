@@ -1,0 +1,18 @@
+std :: #import "std";
+
+_ :: #add_library_search_path "./out";
+mylib :: #library "mylib";
+
+// TODO: explicitly specify `mylib`
+// Note: the prototypes cannot be verified by the compiler // => TODO: bindgen for c header files
+extern hello: () -> void;
+extern add: (l: i32, r: i32) -> i32;
+
+main :: -> {
+    hello();
+
+    sum := add(10, 20);
+    std.assert(sum == 30);
+
+    0
+}

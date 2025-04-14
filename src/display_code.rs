@@ -1,4 +1,4 @@
-use crate::{diagnostic_reporter::COLOR_UNSET, parser::lexer::Span, util::resolve_file_loc};
+use crate::{diagnostics::COLOR_UNSET, parser::lexer::Span, util::resolve_file_loc};
 use std::io::{self, stderr};
 
 pub fn display<'l>(span: Span) -> DisplayCodeBuilder<'l> {
@@ -86,7 +86,7 @@ impl<'l> DisplayCodeBuilder<'l> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        diagnostic_reporter::{COLOR_RED, COLOR_UNSET},
+        diagnostics::{COLOR_RED, COLOR_UNSET},
         display_code::display,
         parser::lexer::Span,
         ptr::Ptr,

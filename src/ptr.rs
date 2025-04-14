@@ -1,4 +1,5 @@
 use std::{
+    hash::Hash,
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -100,6 +101,11 @@ impl<T: ?Sized> Ptr<T> {
     pub fn drop_in_place(self) {
         unsafe { self.0.drop_in_place() }
     }
+
+    pub fn as_hash_key(self) -> HashKeyPtr<T>
+    where T: Hash + Eq {
+        HashKeyPtr(self)
+    }
 }
 
 impl<T> Ptr<[T]> {
@@ -124,14 +130,14 @@ impl<T> Ptr<T> {
     }
 }
 
-impl<T> PartialEq<Ptr<T>> for Ptr<T> {
+impl<T: ?Sized> PartialEq<Ptr<T>> for Ptr<T> {
     #[inline]
     fn eq(&self, other: &Ptr<T>) -> bool {
         std::ptr::eq(self.raw(), other.raw())
     }
 }
 
-impl<T> Eq for Ptr<T> {}
+impl<T: ?Sized> Eq for Ptr<T> {}
 
 impl<T: ?Sized + std::fmt::Display> std::fmt::Display for Ptr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -208,5 +214,22 @@ impl<T> PartialEq<Ptr<T>> for OPtr<T> {
 impl<T> PartialEq<OPtr<T>> for Ptr<T> {
     fn eq(&self, other: &OPtr<T>) -> bool {
         other == self
+    }
+}
+
+/// Wrapper around [`Ptr`] which calls the correct [`Hash::hash`] and [`PartialEq::eq`]
+/// implementations.
+pub struct HashKeyPtr<T: Hash + Eq + ?Sized>(pub Ptr<T>);
+
+impl<T: Hash + Eq + ?Sized> PartialEq for HashKeyPtr<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ref() == other.0.as_ref()
+    }
+}
+impl<T: Hash + Eq + ?Sized> Eq for HashKeyPtr<T> {}
+
+impl<T: Hash + Eq + ?Sized> Hash for HashKeyPtr<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.as_ref().hash(state);
     }
 }

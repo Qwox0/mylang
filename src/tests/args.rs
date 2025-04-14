@@ -55,7 +55,7 @@ fn missing_args() {
     test_compile_err_for_call_and_pos_initializer(
         "a: i32, b: i32, c: i32",
         "b=5",
-        "Missing arguments for parameters 'a', 'c'",
+        "Missing arguments for parameters `a: i32`, `c: i32`",
         |code| TestSpan::of_substr(code, "(b=5)").end(),
     );
 }

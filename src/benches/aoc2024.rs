@@ -3,7 +3,6 @@ extern crate test;
 use super::bench_compilation;
 use crate::{
     codegen::llvm, compiler::CompileMode, context::CompilationContext,
-    diagnostic_reporter::DiagnosticReporter,
 };
 use inkwell::context::Context;
 use test::*;

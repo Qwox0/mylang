@@ -1,5 +1,5 @@
 use super::jit_run_test;
-use crate::{diagnostic_reporter::DiagnosticSeverity, tests::TestSpan, util::IteratorExt};
+use crate::{diagnostics::DiagnosticSeverity, tests::TestSpan, util::IteratorExt};
 
 #[test]
 fn error_invalid_lhs() {

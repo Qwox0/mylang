@@ -8,8 +8,8 @@ use crate::{
         self, Ast, BinOpKind, Decl, DeclList, DeclMarkerKind, DeclMarkers, Ident, UnaryOpKind,
         UpcastToAst, ast_new,
     },
-    context::CompilationContextInner,
-    diagnostic_reporter::{DiagnosticReporter, cerror, chint},
+    context::{CompilationContextInner, primitives},
+    diagnostics::{DiagnosticReporter, cerror, chint},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -29,6 +29,27 @@ pub mod parser_helper;
 macro_rules! expr_ {
     ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
         ast_new!($kind { span: $span, $($field $(:$val)?),* })
+    };
+}
+
+/// This won't consume the token matching `$until_pat`
+macro_rules! skip_tokens_until {
+    (
+        $p:expr,until =
+        $until_pat:pat,scope_open =
+        $open_scope_pat:pat,scope_close =
+        $close_scope_pat:pat $(,)?
+    ) => {
+        let mut depth: usize = 0;
+        $p.lex.advance_while(|t| {
+            match t.kind {
+                $open_scope_pat => depth += 1,
+                $until_pat if depth == 0 => return false,
+                $close_scope_pat => depth -= 1,
+                _ => {},
+            };
+            true
+        });
     };
 }
 
@@ -294,8 +315,13 @@ impl Parser {
                         self.ws0().tok(TokenKind::CloseParenthesis)?;
                         ty_expr
                     });
+                    let variant_index = then!(
+                        self.ws0().lex.advance_if_kind(TokenKind::Eq)
+                        => self.expr().context("variant index")?
+                    );
                     let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
                     decl.var_ty_expr = ty;
+                    decl.init = variant_index;
                     variants.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
                     if !self.ws0().lex.advance_if_kind(TokenKind::Comma) {
                         break;
@@ -303,7 +329,10 @@ impl Parser {
                 }
                 let variants = self.clone_slice_from_scratch_pool(variants)?;
                 let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
-                expr!(EnumDef { variants, consts }, span.join(close_b.span))
+                expr!(
+                    EnumDef { variants, consts, is_simple_enum: false, tag_ty: None },
+                    span.join(close_b.span)
+                )
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::Extern) => {
@@ -495,7 +524,7 @@ impl Parser {
                             "if you wanted to create an array value, consider using an array \
                              initializer `.[...]` instead"
                         );
-                        err_val(HandledErr, e.span)
+                        ParseError::handled_err()
                     } else {
                         e
                     }
@@ -612,12 +641,24 @@ impl Parser {
                 expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
             TokenKind::Pound => {
-                let directive_name = self.advanced().ident()?;
-                if &*directive_name.text == "import" {
-                    let Some(path) = self.ws0().value()?.try_downcast::<ast::StrVal>() else {
-                        panic!("todo")
-                    };
+                let directive = self.advanced().ident()?;
+                let directive_name = directive.text.as_ref();
 
+                let mut parse_str_lit_arg = || {
+                    let arg = self.ws0().value()?;
+                    arg.try_downcast::<ast::StrVal>().ok_or_else(|| {
+                        cerror!(
+                            arg.full_span(),
+                            "The #{directive_name} directive expects a path as a string literal"
+                        );
+                        ParseError::handled_err()
+                    })
+                };
+
+                let p = primitives();
+
+                if directive_name == "import" {
+                    let path = parse_str_lit_arg()?;
                     let idx = self
                         .cctx
                         .add_import(path.text.as_ref(), Some(self.lex.file.path))
@@ -625,8 +666,18 @@ impl Parser {
                             cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref());
                         })?;
                     expr!(ImportDirective { path, files_idx: idx })
+                } else if directive_name == "library" {
+                    let str_lit = parse_str_lit_arg()?;
+                    self.cctx.add_library(str_lit)?;
+                    // TODO: return `{library}` object
+                    expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
+                } else if directive_name == "add_library_search_path" {
+                    let str_lit = parse_str_lit_arg()?;
+                    self.cctx.add_library_search_path(str_lit.text)?;
+                    expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else {
-                    return err(UnknownDirective, directive_name.span);
+                    cerror!(directive.span, "Unknown compiler directive");
+                    return handled_err();
                 }
             },
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -708,16 +759,12 @@ impl Parser {
             (args, closing_paren_span)
         };
         if res.is_err() {
-            let mut depth: usize = 0;
-            self.lex.advance_while(|t| {
-                match t.kind {
-                    TokenKind::OpenParenthesis => depth += 1,
-                    TokenKind::CloseParenthesis if depth == 0 => return false,
-                    TokenKind::CloseParenthesis => depth -= 1,
-                    _ => {},
-                };
-                true
-            });
+            skip_tokens_until!(
+                self,
+                until = TokenKind::CloseParenthesis,
+                scope_open = TokenKind::OpenParenthesis,
+                scope_close = TokenKind::CloseParenthesis,
+            );
             self.lex.advance();
         }
         res
@@ -775,19 +822,12 @@ impl Parser {
                 Ok(expr) => expr,
                 Err(e) => {
                     self.cctx.error2(&e);
-                    // skip the remaining block or statement
-                    let mut depth: usize = 0;
-                    self.lex.advance_while(|t| {
-                        match t.kind {
-                            TokenKind::OpenBrace => depth += 1,
-                            TokenKind::CloseBrace | TokenKind::Semicolon if depth == 0 => {
-                                return false;
-                            },
-                            TokenKind::CloseBrace => depth -= 1,
-                            _ => {},
-                        };
-                        true
-                    });
+                    skip_tokens_until!(
+                        self,
+                        until = TokenKind::CloseBrace | TokenKind::Semicolon,
+                        scope_open = TokenKind::OpenBrace,
+                        scope_close = TokenKind::CloseBrace,
+                    );
                     continue;
                 },
             };

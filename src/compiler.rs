@@ -3,7 +3,7 @@ use crate::{
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
     context::CompilationContextInner,
-    diagnostic_reporter::DiagnosticReporter,
+    diagnostics::DiagnosticReporter,
     parser::{self},
     ptr::Ptr,
     sema::{self},
@@ -14,6 +14,7 @@ use inkwell::context::Context;
 use std::{
     assert_matches::debug_assert_matches,
     mem::ManuallyDrop,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -64,10 +65,17 @@ pub fn compile(
     } else if !args.path.is_file() {
         panic!("{:?} is not a dir nor a file", args.path)
     }
-    println!("Compiling file at {:?}", args.path);
-    args.path = args.path.canonicalize().unwrap();
-    let root_file = SourceFile::read(Ptr::from_ref(&args.path), &ctx.alloc).unwrap();
+    let proj_path = args.path.parent().unwrap();
+    let entry_file = args.path.file_name().unwrap();
+    print!("Compiling file {:?}", entry_file);
+    if proj_path != Path::new("") {
+        print!(" in project {:?}", proj_path);
+        std::env::set_current_dir(proj_path).unwrap();
+    }
+    println!("");
 
+    let entry_file = Path::new(entry_file);
+    let root_file = SourceFile::read(Ptr::from_ref(entry_file), &ctx.alloc).unwrap();
     compile_file(ctx, root_file, mode, args)
 }
 
@@ -189,7 +197,7 @@ pub fn compile_file(
         println!("{}\n", module.print_to_string().to_string());
     }
 
-    // ##### Run #####
+    // ##### Linking #####
 
     if mode == CompileMode::TestRun {
         let module = ManuallyDrop::new(module);
@@ -199,9 +207,7 @@ pub fn compile_file(
 
     if mode == CompileMode::Run && args.out != OutKind::Executable {
         ctx.error_without_code("Cannot run program if `--out` is not `exe`");
-        if args.print_compile_time {
-            ctx.compile_time.print();
-        }
+        return CompileResult::Err;
     }
 
     if args.out == OutKind::None {
@@ -211,8 +217,7 @@ pub fn compile_file(
         return CompileResult::Ok;
     }
 
-    let mut exe_file_path = args.path.with_file_name("out");
-    exe_file_path.push(args.path.file_stem().unwrap());
+    let exe_file_path = Path::new("out").join(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
     let write_obj_file_start = Instant::now();
     module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
@@ -220,15 +225,33 @@ pub fn compile_file(
 
     if args.out == OutKind::Executable {
         let linking_start = std::time::Instant::now();
-        let err = std::process::Command::new("gcc")
-            .arg(obj_file_path.as_os_str())
-            .arg("-o")
+        let mut cmd = std::process::Command::new("ld.lld");
+        cmd.arg("-o")
             .arg(exe_file_path.as_os_str())
-            .arg("-lm")
-            .status()
-            .unwrap();
+            .arg("-pie") // "position independent executable"; Note: pointers also look different: 0xceea530 -> 0x56213d9cd530
+            .arg("-dynamic-linker=/lib64/ld-linux-x86-64.so.2");
+        for lib in ctx.library_search_paths.iter() {
+            cmd.arg("-rpath").arg(lib.0.as_ref());
+        }
+        cmd.arg("/usr/lib/x86_64-linux-gnu/Scrt1.o")
+            .arg(obj_file_path.as_os_str())
+            .args(ctx.library_search_paths.iter().map(|s| format!("-L{}", s.0.as_ref())))
+            .args(ctx.libraries.iter().map(|s| format!("-l{}", s.0.as_ref())))
+            .arg("-L/lib/x86_64-linux-gnu")
+            .arg("-lc")
+            .arg("-lm");
+        if args.debug_linker_args {
+            println!("### Linker Cmd");
+            print!("{}", cmd.get_program().display());
+            for args in cmd.get_args() {
+                print!(" {}", args.display());
+            }
+            print!("\n\n");
+        }
+        let err = cmd.status().unwrap();
         if !err.success() {
-            println!("linking with gcc failed: {:?}", err);
+            println!("linking failed: {:?}", err);
+            return CompileResult::Err;
         }
 
         ctx.compile_time.linking = linking_start.elapsed();
@@ -237,6 +260,8 @@ pub fn compile_file(
     if args.print_compile_time {
         ctx.compile_time.print();
     }
+
+    // ##### Executing #####
 
     if args.out == OutKind::Executable && mode == CompileMode::Run {
         println!("\nRunning `{}`", exe_file_path.display());
@@ -287,7 +312,7 @@ impl CompileDurations {
         if self.linking.is_zero() {
             return;
         }
-        println!("  Linking with gcc:      {:?}", self.linking);
+        println!("  Linking:               {:?}", self.linking);
 
         let total = frontend_total + backend_total + self.linking;
         println!("  Total:                 {:?}", total);

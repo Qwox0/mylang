@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, OptionTypeExt, TypeEnum,
-        UnaryOpKind, UpcastToAst, is_pos_arg,
+        self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, EnumDef, OptionTypeExt,
+        TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::primitives,
     display_code::display,
@@ -9,10 +9,10 @@ use crate::{
     ptr::Ptr,
     scoped_stack::ScopedStack,
     symbol_table::CodegenSymbolTable,
-    type_::{RangeKind, enum_alignment, ty_match, union_size},
+    type_::{RangeKind, enum_alignment, struct_size, ty_match, union_size},
     util::{
-        self, UnwrapDebug, forget_lifetime, get_aligned_offset, get_padding, is_simple_enum,
-        panic_debug, unreachable_debug,
+        self, UnwrapDebug, forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment,
+        unreachable_debug,
     },
 };
 pub use inkwell::targets::TargetMachine;
@@ -129,7 +129,7 @@ pub struct Codegen<'ctx> {
 
 impl<'ctx> Codegen<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Codegen<'ctx> {
-        Codegen {
+        let mut c = Codegen {
             context,
             builder: context.create_builder(),
             module: Some(context.create_module(module_name)),
@@ -142,7 +142,12 @@ impl<'ctx> Codegen<'ctx> {
             sret_ptr: None,
             return_depth: 0,
             continue_break_depth: 0,
-        }
+        };
+
+        // needed for string slice literals
+        c.llvm_type(primitives().untyped_slice_struct_def.upcast_to_type());
+
+        c
     }
 
     pub fn compile_top_level(&mut self, stmt: Ptr<Ast>) {
@@ -207,6 +212,31 @@ impl<'ctx> Codegen<'ctx> {
             };
         }
 
+        macro_rules! compile_initializer {
+            ($lhs:expr, $values:expr, $compile_fn:ident) => {{
+                let lhs = $lhs;
+                let values = $values;
+                if out_ty.kind.is_struct_kind() {
+                    let s_def = out_ty.downcast_struct_def();
+                    let s_ty = s_def.upcast_to_type();
+                    let struct_ty = self.llvm_type(s_ty).struct_ty();
+                    let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
+                    self.$compile_fn(struct_ty, ptr, s_def.fields, values)?;
+                    stack_val(ptr)
+                } else if let Some(ptr) = out_ty.try_downcast::<ast::PtrTy>() {
+                    let lhs = lhs.u();
+                    debug_assert_eq!(lhs.ty, out_ty);
+                    let s_def = ptr.pointee.downcast::<ast::StructDef>();
+                    let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
+                    let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
+                    self.$compile_fn(struct_ty, ptr, s_def.fields, values)?;
+                    reg(ptr)
+                } else {
+                    unreachable_debug()
+                }
+            }};
+        }
+
         match expr.matchable().as_mut() {
             AstEnum::Ident { decl, .. } => {
                 debug_assert!(
@@ -240,52 +270,10 @@ impl<'ctx> Codegen<'ctx> {
                 res
             },
             AstEnum::PositionalInitializer { lhs, args, .. } => {
-                if out_ty.kind.is_struct_kind() {
-                    let s_def = match out_ty.kind {
-                        AstKind::StructDef => out_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => p.untyped_slice_struct_def,
-                        _ => unreachable_debug(),
-                    };
-                    let s_ty = s_def.upcast_to_type();
-                    let struct_ty = self.llvm_type(s_ty).struct_ty();
-                    let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
-                    self.compile_positional_initializer_body(struct_ty, ptr, s_def.fields, args)?;
-                    stack_val(ptr)
-                } else if let Some(ptr) = out_ty.try_downcast::<ast::PtrTy>() {
-                    let lhs = lhs.u();
-                    debug_assert_eq!(lhs.ty, out_ty);
-                    let s_def = ptr.pointee.downcast::<ast::StructDef>();
-                    let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
-                    let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
-                    self.compile_positional_initializer_body(struct_ty, ptr, s_def.fields, args)?;
-                    reg(ptr)
-                } else {
-                    unreachable_debug()
-                }
+                compile_initializer!(lhs, args, compile_positional_initializer_body)
             },
             AstEnum::NamedInitializer { lhs, fields: values, .. } => {
-                if out_ty.kind.is_struct_kind() {
-                    let s_def = match out_ty.kind {
-                        AstKind::StructDef => out_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => p.untyped_slice_struct_def,
-                        _ => unreachable_debug(),
-                    };
-                    let s_ty = s_def.upcast_to_type();
-                    let struct_ty = self.llvm_type(s_ty).struct_ty();
-                    let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
-                    self.compile_named_initializer_body(struct_ty, ptr, s_def.fields, values)?;
-                    stack_val(ptr)
-                } else if let Some(ptr_ty) = out_ty.try_downcast::<ast::PtrTy>() {
-                    let lhs = lhs.u();
-                    debug_assert_eq!(lhs.ty, out_ty);
-                    let s_def = ptr_ty.pointee.downcast::<ast::StructDef>();
-                    let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
-                    let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
-                    self.compile_named_initializer_body(struct_ty, ptr, s_def.fields, values)?;
-                    reg(ptr)
-                } else {
-                    unreachable_debug()
-                }
+                compile_initializer!(lhs, values, compile_named_initializer_body)
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
                 debug_assert!(lhs.is_none(), "todo");
@@ -314,9 +302,11 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
                 debug_assert!(lhs.is_none(), "todo");
-                let elem_ty = val.ty.u();
+                let out_arr_ty = out_ty.downcast::<ast::ArrayTy>();
+                let elem_ty = finalize_ty(val.ty.as_mut().u(), out_arr_ty.elem_ty.downcast_type());
                 let elem_cty = self.llvm_type(elem_ty).basic_ty();
-                let len = count.int();
+                let len: u32 = count.int();
+                debug_assert_eq!(len, out_arr_ty.len.int());
                 let arr_ty = elem_cty.array_type(len);
                 let arr_ptr = write_target_or!(self.build_alloca(arr_ty, "arr", out_ty)?);
                 let elem_val = try_compile_expr_as_val!(self, *val);
@@ -354,11 +344,7 @@ impl<'ctx> Codegen<'ctx> {
                     let (tag, _) = enum_def.variants.find_field(&rhs.text).u();
                     self.compile_enum_val(enum_def, tag, None, write_target.take())
                 } else if lhs_ty.kind == AstKind::StructDef || lhs_ty.kind == AstKind::SliceTy {
-                    let s_def = match lhs_ty.kind {
-                        AstKind::StructDef => lhs_ty.downcast::<ast::StructDef>(),
-                        AstKind::SliceTy => p.untyped_slice_struct_def,
-                        _ => unreachable_debug(),
-                    };
+                    let s_def = lhs_ty.downcast_struct_def();
                     let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty();
                     let struct_sym = try_not_never!(self.compile_expr(lhs)?);
                     let (field_idx, _) = s_def.fields.find_field(&rhs.text).u();
@@ -527,16 +513,14 @@ impl<'ctx> Codegen<'ctx> {
 
                 let rhs_sym = try_not_never!(self.compile_expr(*rhs)?);
                 if let Some(e) = arg_ty.try_downcast::<ast::EnumDef>()
-                    && is_simple_enum(e.variants)
+                    && e.is_simple_enum
                     && matches!(op, BinOpKind::Eq | BinOpKind::Ne)
                 {
-                    let enum_ty = self.llvm_type(arg_ty);
-                    let tag_ty = enum_ty.struct_ty().get_field_type_at_index(0).u();
+                    debug_assert!(is_simple_enum(e.variants));
+                    let tag_ty = self.enum_tag_type(e).as_basic_type_enum();
                     let tag_align = enum_alignment(e.variants);
-                    let lhs = self.build_struct_access(enum_ty.struct_ty(), lhs_sym, 0, "")?;
-                    let lhs = self.sym_as_val_with_llvm_ty(lhs, tag_ty, tag_align)?.int_val();
-                    let rhs = self.build_struct_access(enum_ty.struct_ty(), rhs_sym, 0, "")?;
-                    let rhs = self.sym_as_val_with_llvm_ty(rhs, tag_ty, tag_align)?.int_val();
+                    let lhs = self.sym_as_val_with_llvm_ty(lhs_sym, tag_ty, tag_align)?.int_val();
+                    let rhs = self.sym_as_val_with_llvm_ty(rhs_sym, tag_ty, tag_align)?.int_val();
                     return self.build_int_binop(lhs, rhs, false, op).map(reg_sym);
                 }
 
@@ -680,8 +664,7 @@ impl<'ctx> Codegen<'ctx> {
                     {
                         try_not_never!(self.compile_expr(*init)?)
                     } else {
-                        let stack_ty = self.llvm_type(var_ty).basic_ty();
-                        let stack_ptr = self.build_alloca(stack_ty, &ident.text, var_ty)?;
+                        let stack_ptr = self.build_alloca2(var_ty, &ident.text)?;
                         if let Some(init) = init {
                             finalize_ty(init.ty.as_mut().u(), var_ty);
                             let _init = try_not_never!(
@@ -925,20 +908,24 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Ok(Symbol::Never)
             },
-            AstEnum::ImportDirective { .. } => Ok(Symbol::Module),
+            AstEnum::ImportDirective { .. } | AstEnum::SimpleDirective { .. } => {
+                panic_debug("directives should have been resolved during sema")
+            },
 
-            AstEnum::IntVal { val, .. } => match expr.ty.matchable().as_ref() {
-                TypeEnum::IntTy { bits, is_signed, .. } => {
-                    reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
-                },
-                TypeEnum::FloatTy { bits, .. } => {
-                    let float = *val as f64;
-                    if float as i64 != *val {
-                        panic!("literal precision loss")
-                    }
-                    reg(self.float_type(*bits).const_float(float))
-                },
-                _ => unreachable_debug(),
+            AstEnum::IntVal { val, .. } => {
+                match expr.ty.as_mut().u().finalize().matchable().as_ref() {
+                    TypeEnum::IntTy { bits, is_signed, .. } => {
+                        reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
+                    },
+                    TypeEnum::FloatTy { bits, .. } => {
+                        let float = *val as f64;
+                        if float as i64 != *val {
+                            panic!("literal precision loss")
+                        }
+                        reg(self.float_type(*bits).const_float(float))
+                    },
+                    _ => unreachable_debug(),
+                }
             },
             AstEnum::FloatVal { val, .. } => {
                 let float_ty = expr.ty.downcast::<ast::FloatTy>();
@@ -993,17 +980,30 @@ impl<'ctx> Codegen<'ctx> {
         mut write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResult<Symbol<'ctx>> {
         let ret_ty = f.ret_ty.u();
-        let use_sret = self.ret_type(ret_ty) == RetType::SRetParam;
-        let sret_arg = if !use_sret {
-            None
-        } else if let Some(write_target) = write_target.take() {
+        let ret_c_ffi_ty = self.c_ffi_type(ret_ty);
+        let use_sret = ret_c_ffi_ty == CFfiType::ByPtr;
+
+        let ret_val_ptr = if let Some(write_target) = write_target.take() {
             Some(write_target)
+        } else if !use_sret && !ret_ty.is_aggregate() {
+            None
         } else {
-            let llvm_ty = self.llvm_type(ret_ty).basic_ty();
-            Some(self.build_alloca(llvm_ty, "out", ret_ty)?)
+            Some(self.build_alloca2(ret_ty, "call")?)
         };
-        let has_sret = sret_arg.is_some() as usize;
-        let args_count = f.params.len() + has_sret;
+
+        let mut arg_types = Vec::with_capacity(f.params.len());
+        let mut arg_offsets = Vec::with_capacity(f.params.len());
+        {
+            let mut cur_arg_offset = use_sret as usize;
+            for p in f.params.iter() {
+                let c_ffi_ty = self.c_ffi_type(p.var_ty.u());
+                arg_types.push(c_ffi_ty);
+                arg_offsets.push(cur_arg_offset);
+                cur_arg_offset += c_ffi_ty.as_param_count()
+            }
+        }
+
+        let args_count = fn_val.count_params() as usize;
         let mut arg_values = Vec::with_capacity(args_count);
         unsafe { arg_values.set_len(args_count) };
         #[cfg(debug_assertions)]
@@ -1019,50 +1019,59 @@ impl<'ctx> Codegen<'ctx> {
             };
         }
 
-        if let Some(sret_arg) = sret_arg {
-            set_arg_val!(0, BasicMetadataValueEnum::from(sret_arg));
+        if use_sret {
+            set_arg_val!(0, ret_val_ptr.u().into());
         }
 
-        for_each_call_arg(f.params, args, |arg, param, mut p_idx| {
+        for_each_call_arg(f.params, args, |arg, param, p_idx| {
             let sym = self.compile_expr(arg)?;
-            let val = if param.var_ty.u().pass_arg_as_ptr() {
-                let ptr = match sym {
-                    Symbol::Stack(ptr) => ptr,
-                    Symbol::Register(val) => {
-                        let llvm_ty = self.llvm_type(param.var_ty.u()).basic_ty();
-                        let ptr =
-                            self.build_alloca(llvm_ty, &param.ident.text, param.var_ty.u())?;
-                        self.build_store(ptr, val.basic_val(), param.var_ty.u().alignment())?;
-                        ptr
-                    },
-                    Symbol::Global { val } => val.as_pointer_value(),
-                    _ => unreachable_debug(),
-                };
-                BasicMetadataValueEnum::from(ptr)
-            } else {
-                self.sym_as_val(sym, param.var_ty.u())?.basic_metadata_val()
-            };
-            p_idx += has_sret;
-            set_arg_val!(p_idx, val);
+            let arg_ty = arg_types.get(p_idx).u();
+            let arg_offset = *arg_offsets.get(p_idx).u();
+
+            match arg_ty {
+                CFfiType::Zst => {},
+                CFfiType::Simple(simple_ty) => {
+                    let val = self.sym_as_val_with_llvm_ty(
+                        sym,
+                        *simple_ty,
+                        param.var_ty.u().alignment(),
+                    )?;
+                    set_arg_val!(arg_offset, val.basic_metadata_val());
+                },
+                CFfiType::Simple2(two_params) => {
+                    let ffi_struct = self.struct_type_inner(two_params, None, false);
+                    let field_align = param.var_ty.u().alignment();
+                    for (f_idx, f_ty) in two_params.iter().enumerate() {
+                        let f_sym = self.build_struct_access(ffi_struct, sym, f_idx as u32, "")?;
+                        let f_val = self.sym_as_val_with_llvm_ty(f_sym, *f_ty, field_align)?;
+                        set_arg_val!(arg_offset + f_idx, f_val.basic_metadata_val());
+                    }
+                },
+                CFfiType::ByPtr => {
+                    set_arg_val!(arg_offset, self.build_ptr_to_sym(sym, param.var_ty.u())?.into());
+                },
+            }
             Ok(())
         })?;
-        debug_assert_eq!(arg_values.len() as u32, fn_val.count_params());
+        debug_assert_eq!(arg_values.len(), args_count);
         #[cfg(debug_assertions)]
         debug_assert!(arg_values_was_initialized.iter().all(|b| *b));
+
         let ret = self.builder.build_call(fn_val, &arg_values, "call")?;
-        if let Some(write_target) = write_target.take() {
-            let ret = CodegenValue::new(ret.as_value_ref()).basic_val();
-            self.build_store(write_target, ret, ret_ty.alignment())?;
-        }
         let p = primitives();
         if ret_ty == p.never {
             self.builder.build_unreachable()?;
             Ok(Symbol::Never)
         } else if ret_ty == p.void_ty {
             Ok(Symbol::Void)
-        } else if use_sret {
-            stack_val(sret_arg.u())
+        } else if let Some(ret_val_ptr) = ret_val_ptr {
+            if !use_sret {
+                let ret = CodegenValue::new(ret.as_value_ref()).basic_val();
+                self.build_store(ret_val_ptr, ret, ret_ty.alignment())?;
+            }
+            stack_val(ret_val_ptr)
         } else {
+            debug_assert!(!use_sret);
             reg(ret)
         }
     }
@@ -1075,7 +1084,7 @@ impl<'ctx> Codegen<'ctx> {
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResult<Symbol<'ctx>> {
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
-        let tag_ty = self.enum_tag_type(enum_def.variants);
+        let tag_ty = self.enum_tag_type(enum_def);
         let tag_val = tag_ty.const_int(variant_idx as u64, false);
         if write_target.is_some() || data.is_some() {
             let enum_ptr = if let Some(ptr) = write_target {
@@ -1097,7 +1106,7 @@ impl<'ctx> Codegen<'ctx> {
 
             stack_val(enum_ptr)
         } else {
-            reg(self.builder.build_insert_value(enum_ty.get_poison(), tag_val, 0, "")?)
+            reg(tag_val)
         }
     }
 
@@ -1129,22 +1138,31 @@ impl<'ctx> Codegen<'ctx> {
             self.fn_table.get(&f).is_none(),
             "called compile_prototype multiple times on the same function ('{name}')"
         );
-        let ptr_type = BasicMetadataTypeEnum::from(self.ptr_type());
-        let ret_type = self.ret_type(f.ret_ty.u());
-        let use_sret = ret_type == RetType::SRetParam;
-        let mut param_types = if use_sret { vec![ptr_type] } else { Vec::new() };
-        f.params
-            .iter()
-            .map(|d| {
-                let var_ty = d.var_ty.u();
-                if var_ty.pass_arg_as_ptr() {
-                    ptr_type
-                } else {
-                    self.llvm_type(var_ty).basic_metadata_ty()
-                }
-            })
-            .collect_into(&mut param_types);
-        let fn_type = match ret_type.into_basic() {
+        let ptr_type = self.ptr_type().into();
+        let ret_type = self.c_ffi_type(f.ret_ty.u());
+        let use_sret = ret_type == CFfiType::ByPtr;
+
+        // capacity: A struct param might be flattened into at most two params
+        let mut param_types = Vec::with_capacity(f.params.len() * 2 + use_sret as usize);
+        if use_sret {
+            param_types.push(ptr_type);
+        }
+
+        for p in f.params.iter() {
+            let var_ty = p.var_ty.u();
+            match self.c_ffi_type(var_ty) {
+                CFfiType::Zst => {},
+                CFfiType::Simple(simple) => param_types.push(simple.into()),
+                CFfiType::Simple2(two_params) => {
+                    for p in two_params {
+                        param_types.push(p.into());
+                    }
+                },
+                CFfiType::ByPtr => param_types.push(ptr_type),
+            }
+        }
+
+        let fn_type = match ret_type.into_basic(self) {
             Some(ret_type) => ret_type.fn_type(&param_types, false),
             None => self.context.void_type().fn_type(&param_types, false),
         };
@@ -1160,8 +1178,24 @@ impl<'ctx> Codegen<'ctx> {
             params_iter.next().u().set_name("sret");
         }
 
-        for (idx, param) in params_iter.enumerate() {
-            param.set_name(&f.params[idx].ident.text)
+        #[cfg(debug_assertions)]
+        {
+            for p in f.params.iter() {
+                match self.c_ffi_type(p.var_ty.u()) {
+                    CFfiType::Zst => {},
+                    CFfiType::Simple(_) | CFfiType::ByPtr => {
+                        params_iter.next().u().set_name(p.ident.text.as_ref());
+                    },
+                    CFfiType::Simple2(_) => {
+                        for f_idx in 0..2 {
+                            params_iter
+                                .next()
+                                .u()
+                                .set_name(&format!("{}.{f_idx}", p.ident.text.as_ref()));
+                        }
+                    },
+                }
+            }
         }
 
         let prev = self.fn_table.insert(f, fn_val);
@@ -1186,20 +1220,39 @@ impl<'ctx> Codegen<'ctx> {
         let res = try {
             self.symbols.reserve(f.params.len());
 
-            for (param, param_def) in
-                func.get_param_iter().skip(use_sret as usize).zip(f.params.iter())
-            {
-                let param = CodegenValue::new(param.as_value_ref());
+            let mut param_val_iter = func.get_param_iter().skip(use_sret as usize);
+            for param_def in f.params.iter() {
                 let param_ty = param_def.var_ty.u();
-                let s = if param_ty.pass_arg_as_ptr() {
-                    Symbol::Stack(param.ptr_val())
-                } else {
-                    if param_def.markers.is_mut {
-                        self.position_builder_at_start(func.get_first_basic_block().u());
-                        Symbol::Stack(self.build_alloca_value(param.basic_val(), param_ty)?)
-                    } else {
-                        Symbol::Register(param)
-                    }
+                let s = match self.c_ffi_type(param_ty) {
+                    CFfiType::Zst => {
+                        debug_assert_ne!(param_def.var_ty, primitives().never);
+                        continue;
+                    },
+                    CFfiType::Simple(simple_ty) => {
+                        let param = param_val_iter.next().u();
+                        debug_assert_eq!(param.get_type(), simple_ty);
+                        let param = CodegenValue::new(param.as_value_ref());
+                        if param_def.markers.is_mut || param_ty.is_aggregate() {
+                            self.position_builder_at_start(func.get_first_basic_block().u());
+                            Symbol::Stack(self.build_alloca_value(param.basic_val(), param_ty)?)
+                        } else {
+                            Symbol::Register(param)
+                        }
+                    },
+                    CFfiType::Simple2(two_params) => {
+                        let ffi_struct = self.struct_type_inner(&two_params, None, false);
+                        let param_align = param_ty.alignment();
+                        let ptr = self.build_alloca2(param_ty, param_def.ident.text.as_ref())?;
+                        for f_idx in 0..2 {
+                            let f_ptr =
+                                self.builder.build_struct_gep(ffi_struct, ptr, f_idx, "")?;
+                            self.build_store(f_ptr, param_val_iter.next().u(), param_align)?;
+                        }
+                        Symbol::Stack(ptr)
+                    },
+                    CFfiType::ByPtr => {
+                        Symbol::Stack(param_val_iter.next().u().into_pointer_value())
+                    },
                 };
                 self.symbols.push((*param_def, s));
             }
@@ -1300,8 +1353,8 @@ impl<'ctx> Codegen<'ctx> {
         target_ty: Ptr<ast::Type>,
     ) -> CodegenResult<Symbol<'ctx>> {
         let p = primitives();
-        let expr_ty = expr.ty.u();
         let sym = self.compile_expr(expr)?;
+        let expr_ty = expr.ty.u();
 
         if expr_ty == target_ty {
             return Ok(sym);
@@ -1344,6 +1397,8 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     self.builder.build_unsigned_int_to_float(int, float_ty, "")?
                 })
+            } else if target_ty.kind == AstKind::PtrTy {
+                reg(self.builder.build_int_to_ptr(int, self.ptr_type(), "")?)
             } else {
                 unreachable_debug()
             };
@@ -1430,20 +1485,15 @@ impl<'ctx> Codegen<'ctx> {
             },
         */
 
-        /*
-
-            (e @ TypeEnum::EnumDef { variants, .. }, i @ TypeEnum::IntTy { .. })
-                if is_simple_enum(variants) =>
-            {
-                let lhs = self.sym_as_val(sym, &e)?.struct_val();
-                let tag = self.builder.build_extract_value(lhs, 0, "")?.into_int_value();
-                let rhs_ty = self.llvm_type(&i).int_ty();
-                reg(self.builder.build_int_cast_sign_flag(tag, rhs_ty, false, "")?)
-            },
-
-            (l, t) => panic!("cannot cast {l} to {t}"),
+        if let Some(e) = expr_ty.try_downcast::<ast::EnumDef>()
+            && e.is_simple_enum
+            && target_ty.kind == AstKind::IntTy
+        {
+            let lhs = self.sym_as_val(sym, expr_ty)?.struct_val();
+            let tag = self.builder.build_extract_value(lhs, 0, "")?.into_int_value();
+            let rhs_ty = self.llvm_type(target_ty).int_ty();
+            return reg(self.builder.build_int_cast_sign_flag(tag, rhs_ty, false, "")?);
         }
-        */
 
         display(expr.full_span()).finish();
 
@@ -1475,6 +1525,15 @@ impl<'ctx> Codegen<'ctx> {
         Ok(ptr)
     }
 
+    fn build_alloca2(
+        &mut self,
+        ty: Ptr<ast::Type>,
+        name: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let llvm_ty = self.llvm_type(ty).basic_ty();
+        self.build_alloca(llvm_ty, name, ty)
+    }
+
     fn build_alloca_value(
         &self,
         val: impl BasicValue<'ctx>,
@@ -1500,7 +1559,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             Symbol::Function { val, .. } => val.as_global_value().as_pointer_value(),
             Symbol::Global { val } => val.as_pointer_value(),
-            Symbol::Void | Symbol::Never | Symbol::Module => unreachable_debug(),
+            Symbol::Void | Symbol::Never => unreachable_debug(),
         })
     }
 
@@ -1532,10 +1591,10 @@ impl<'ctx> Codegen<'ctx> {
         ret_sym: Symbol<'ctx>,
         ret_ty: Ptr<ast::Type>,
     ) -> CodegenResult<Symbol<'ctx>> {
-        let ret = match (ret_sym, self.ret_type(ret_ty)) {
+        let ret = match (ret_sym, self.c_ffi_type(ret_ty).flatten_simple2(self)) {
             (Symbol::Never, _) => return Ok(Symbol::Never),
-            (_, RetType::Zst) => None,
-            (Symbol::Stack(ptr), RetType::SRetParam) => {
+            (_, CFfiType::Zst) => None,
+            (Symbol::Stack(ptr), CFfiType::ByPtr) => {
                 let sret_ptr = self.sret_ptr.u();
                 let alignment = ret_ty.alignment() as u32;
                 self.builder.build_memcpy(
@@ -1547,22 +1606,21 @@ impl<'ctx> Codegen<'ctx> {
                 )?;
                 None
             },
-            (Symbol::Register(val), RetType::SRetParam) => {
+            (Symbol::Register(val), CFfiType::ByPtr) => {
                 let sret_ptr = self.sret_ptr.u();
                 self.build_store(sret_ptr, val.basic_val(), ret_ty.alignment())?;
                 None
             },
-            (Symbol::Stack(ptr), RetType::Basic(ty)) => {
-                Some(self.build_load(ty, ptr, "", ret_ty.alignment())?)
+            (Symbol::Stack(ptr), CFfiType::Simple(ty)) => {
+                Some(self.build_load(ty, ptr, "ret", ret_ty.alignment())?)
             },
-            (Symbol::Register(val), RetType::Basic(llvm_ty)) if ret_ty.is_aggregate() => {
-                // Note: llvm_ty and ret_ty might be different.
-                // TODO: improve this
+            (Symbol::Register(val), CFfiType::Simple(llvm_ty)) if ret_ty.is_aggregate() => {
                 let ret = self.build_alloca(llvm_ty, "ret", ret_ty)?;
                 self.build_store(ret, val.basic_val(), ret_ty.alignment())?;
                 Some(self.builder.build_load(llvm_ty, ret, "ret")?)
             },
-            (Symbol::Register(val), RetType::Basic(_)) => Some(val.basic_val()),
+            (Symbol::Register(val), CFfiType::Simple(_)) => Some(val.basic_val()),
+            (_, CFfiType::Simple2(_)) => unreachable_debug(), // see `flatten_simple2`
             _ => panic_debug("unexpected symbol"),
         };
         match ret {
@@ -1963,19 +2021,30 @@ impl<'ctx> Codegen<'ctx> {
         self.struct_type_inner(fields, name, false)
     }
 
-    fn new_enum_type(&mut self, variants: DeclList, name: Option<Ptr<str>>) -> StructType<'ctx> {
-        let mut fields = Vec::with_capacity(2);
-        fields.push(self.enum_tag_type(variants).as_basic_type_enum());
-        if !is_simple_enum(variants) {
-            fields.push(self.new_union_type(variants, None).as_basic_type_enum());
+    fn new_enum_type(
+        &mut self,
+        enum_def: Ptr<ast::EnumDef>,
+        name: Option<Ptr<str>>,
+    ) -> BasicTypeEnum<'ctx> {
+        let EnumDef { variants, is_simple_enum, .. } = *enum_def;
+        debug_assert_eq!(is_simple_enum, util::is_simple_enum(variants));
+        let tag_int_ty = self.enum_tag_type(enum_def);
+        if enum_def.is_simple_enum {
+            tag_int_ty.into()
+        } else {
+            let data_ty = self.new_union_type(variants, None).as_basic_type_enum();
+            self.struct_type_inner(&[tag_int_ty.into(), data_ty], name, false).into()
         }
-        self.struct_type_inner(&fields, name, false)
     }
 
     #[inline]
-    fn enum_tag_type(&mut self, variants: DeclList) -> IntType<'ctx> {
-        let variant_bits = util::variant_count_to_tag_size_bits(variants.len());
-        self.int_type(variant_bits)
+    fn enum_tag_type(&mut self, enum_def: Ptr<ast::EnumDef>) -> IntType<'ctx> {
+        let tag_bits = enum_def.tag_ty.u().bits;
+        debug_assert_eq!(
+            tag_bits,
+            util::variant_count_to_tag_size_bytes(enum_def.variants.len()) * 8
+        );
+        self.int_type(tag_bits)
     }
 
     #[inline]
@@ -2045,7 +2114,7 @@ impl<'ctx> Codegen<'ctx> {
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } => t!(self.new_struct_type(*fields, None)),
             TypeEnum::UnionDef { fields, .. } => t!(self.new_union_type(*fields, None)),
-            TypeEnum::EnumDef { variants, .. } => t!(self.new_enum_type(*variants, None)),
+            TypeEnum::EnumDef { .. } => t!(self.new_enum_type(ty.downcast(), None)),
             TypeEnum::RangeTy { .. } => t!(self.range_type(ty.downcast())),
             TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
                 self.llvm_type(t.downcast_type())
@@ -2077,53 +2146,34 @@ impl<'ctx> Codegen<'ctx> {
         llvm_ty
     }
 
-    /// I gave up trying to implement the C calling convention.
-    ///
-    /// [`None`] means void
+    /// The C calling convention is way to complicated thus this is definitely not cross-platform.
     ///
     /// See <https://discourse.llvm.org/t/questions-about-c-calling-conventions/72414>
     /// TODO: See <https://mcyoung.xyz/2024/04/17/calling-convention/>
-    fn ret_type(&mut self, ty: Ptr<ast::Type>) -> RetType<'ctx> {
+    fn c_ffi_type(&mut self, ty: Ptr<ast::Type>) -> CFfiType<'ctx> {
+        if let Some(struct_ty) = ty.try_downcast_struct_def() {
+            return self.c_ffi_struct(struct_ty.fields);
+        } else if let Some(enum_ty) = ty.try_downcast::<ast::EnumDef>()
+            && enum_ty.is_simple_enum
+        {
+            return CFfiType::Simple(self.int_type(enum_ty.tag_ty.u().bits).into());
+        }
         let size = ty.size();
         match ty.matchable().as_ref() {
-            _ if size == 0 => RetType::Zst,
-            _ if size > 16 => RetType::SRetParam,
-            //ty if ty.is_aggregate() => RetType::SRetParam,
-            TypeEnum::StructDef { fields, .. } => {
-                self.ret_type_for_struct(fields.iter_types(), size)
-            },
-            TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => RetType::Basic(
+            _ if size == 0 => CFfiType::Zst,
+            _ if size > 16 => CFfiType::ByPtr,
+            TypeEnum::ArrayTy { .. } => CFfiType::ByPtr,
+            TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => CFfiType::Simple(
                 self.context
                     .struct_type(&[self.int_type(size as u32 * 8).as_basic_type_enum()], false)
                     .as_basic_type_enum(),
             ),
-            /*
-            TypeEnum::UnionDef { .. } => {
-                RetType::Basic(self.int_type(size as u32 * 8).as_basic_type_enum())
-            },
-            TypeEnum::EnumDef { variants, .. } => {
-                /*
-                let fields = [
-                    TypeEnum::IntTy {
-                        bits: util::variant_count_to_tag_size_bits(variants.len()),
-                        is_signed: false,
-                    },
-                    TypeEnum::UnionDef { fields: *variants, .. },
-                ];
-                self.ret_type_for_struct(fields.into_iter(), size)
-                */
-                RetType::Basic(self.int_type(size as u32 * 8).as_basic_type_enum())
-            },
-            */
-            _ => RetType::Basic(self.llvm_type(ty).basic_ty()),
+            TypeEnum::StructDef { .. } => unreachable_debug(),
+            _ => CFfiType::Simple(self.llvm_type(ty).basic_ty()),
         }
     }
 
-    fn ret_type_for_struct<'a>(
-        &mut self,
-        field_types: impl DoubleEndedIterator<Item = Ptr<ast::Type>>,
-        size: usize,
-    ) -> RetType<'ctx> {
+    fn c_ffi_struct(&mut self, fields: Ptr<[Ptr<ast::Decl>]>) -> CFfiType<'ctx> {
         #[derive(Debug, PartialEq)]
         enum PrevState {
             None,
@@ -2132,43 +2182,55 @@ impl<'ctx> Codegen<'ctx> {
             FloatFloat,
         }
 
-        let mut new_fields = Vec::with_capacity(size);
+        let mut new_fields = [None; 2];
+        macro_rules! add_field {
+            ($f:expr) => {{
+                if new_fields[1].is_some() {
+                    return CFfiType::ByPtr;
+                }
+                new_fields[new_fields[0].is_some() as usize] = Some($f);
+            }};
+        }
+
         let mut prev_state = PrevState::None;
         let mut prev_bytes: u32 = 0;
+
+        debug_assert_eq!(
+            std::mem::size_of::<[Option<BasicTypeEnum<'_>>; 2]>(),
+            std::mem::size_of::<[BasicTypeEnum<'_>; 2]>()
+        );
 
         macro_rules! push_prev_state_to_new_fields {
             () => {
                 match prev_state {
                     PrevState::None => {},
-                    PrevState::Int => new_fields.push(
-                        self.context.custom_width_int_type(prev_bytes << 3).as_basic_type_enum(),
+                    PrevState::Int => add_field!(
+                        self.context.custom_width_int_type(prev_bytes << 3).as_basic_type_enum()
                     ),
-                    PrevState::Float => {
-                        new_fields.push(self.context.f32_type().as_basic_type_enum())
-                    },
+                    PrevState::Float => add_field!(self.context.f32_type().as_basic_type_enum()),
                     PrevState::FloatFloat => {
-                        new_fields.push(self.context.f32_type().vec_type(2).as_basic_type_enum())
+                        add_field!(self.context.f32_type().vec_type(2).as_basic_type_enum())
                     },
                 }
             };
         }
 
-        for f in field_types {
-            if f.size() == 0 {
+        for f in fields.iter_types() {
+            let f_size = f.size() as u32;
+            if f_size == 0 {
                 continue;
             }
 
-            if get_aligned_offset!(prev_bytes, f.alignment() as u32) >= 8 {
+            let f_align = f.alignment() as u32;
+            prev_bytes = round_up_to_alignment!(prev_bytes, f_align);
+            if prev_bytes >= 8 {
                 // finished the first 8 bytes
                 push_prev_state_to_new_fields!();
                 prev_state = PrevState::None;
                 prev_bytes = 0;
             }
 
-            let padding = get_padding!(prev_bytes, f.alignment() as u32);
-            prev_bytes += padding;
-
-            macro_rules! handle_int {
+            macro_rules! handle_normal_field {
                 ($bits:expr) => {{
                     prev_state = PrevState::Int;
                     prev_bytes += $bits.div_ceil(8);
@@ -2184,11 +2246,11 @@ impl<'ctx> Codegen<'ctx> {
                         unreachable_debug()
                     }
                 },
-                TypeEnum::IntTy { bits, .. } => handle_int!(bits),
+                TypeEnum::IntTy { bits, .. } => handle_normal_field!(bits),
                 TypeEnum::FloatTy { bits: 64, .. } => {
                     debug_assert_eq!(prev_state, PrevState::None);
                     debug_assert_eq!(prev_bytes, 0);
-                    new_fields.push(self.context.f64_type().as_basic_type_enum());
+                    add_field!(self.context.f64_type().as_basic_type_enum());
                 },
                 TypeEnum::FloatTy { bits: 32, .. } => {
                     prev_bytes += 4;
@@ -2203,23 +2265,44 @@ impl<'ctx> Codegen<'ctx> {
                 TypeEnum::PtrTy { .. } => {
                     debug_assert_eq!(prev_state, PrevState::None);
                     debug_assert_eq!(prev_bytes, 0);
-                    new_fields.push(self.llvm_type(f).basic_ty()) // `handle_int!(f.size() as u32 * 8),` // also works, but clang uses `ptr`
+                    add_field!(self.ptr_type().into());
                 },
                 TypeEnum::SliceTy { .. }
                 | TypeEnum::ArrayTy { .. }
                 | TypeEnum::StructDef { .. }
                 | TypeEnum::UnionDef { .. }
-                | TypeEnum::EnumDef { .. } => handle_int!(f.size() as u32 * 8),
-                _ => todo!("{f:#?}"),
-                //_ => unreachable_debug(),
-                //_ => new_fields.push(self.llvm_type(f).basic_ty()),
+                | TypeEnum::EnumDef { .. }
+                | TypeEnum::RangeTy { .. }
+                | TypeEnum::OptionTy { .. } => {
+                    // TODO: flatten struct:
+                    // i32, struct {a:f32}, i64 -> i64, i64
+                    // struct {a:f32}, i64 -> f32, i64
+                    // []any -> ptr, i64
+
+                    let i64_count = f_size >> 3; // f_size / 8
+                    let rem_size = f_size & 0b111; // f_size % 8
+                    for _ in 0..i64_count {
+                        add_field!(self.context.i64_type().as_basic_type_enum())
+                    }
+                    if rem_size > 0 {
+                        handle_normal_field!(rem_size * 8);
+                    }
+                },
+                TypeEnum::Fn { .. } => todo!(),
+                TypeEnum::Unset => unreachable_debug(),
             }
         }
 
         // finished the last 8 bytes
         push_prev_state_to_new_fields!();
 
-        RetType::Basic(self.struct_type_inner(&new_fields, None, false).as_basic_type_enum())
+        debug_assert!(struct_size(fields) <= 16);
+
+        match new_fields {
+            [None, _] => CFfiType::Zst,
+            [Some(f), None] => CFfiType::Simple(f),
+            [Some(a), Some(b)] => CFfiType::Simple2([a, b]),
+        }
     }
 
     fn sym_as_val(
@@ -2245,7 +2328,10 @@ impl<'ctx> Codegen<'ctx> {
             Symbol::Stack(ptr) => {
                 CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?.as_value_ref())
             },
-            Symbol::Register(val) => val,
+            Symbol::Register(val) => {
+                debug_assert_eq!(val.basic_val().get_type(), llvm_ty);
+                val
+            },
             Symbol::Global { val } => {
                 let val = self.build_load(llvm_ty, val.as_pointer_value(), "", alignment)?;
                 CodegenValue::new(val.as_value_ref())
@@ -2348,7 +2434,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     #[inline]
-    fn module(&self) -> &Module<'ctx> {
+    pub fn module(&self) -> &Module<'ctx> {
         self.module.as_ref().u()
     }
 }
@@ -2417,7 +2503,6 @@ enum Symbol<'ctx> {
     Function {
         val: FunctionValue<'ctx>,
     },
-    Module,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2441,23 +2526,6 @@ impl<'ctx> CodegenValue<'ctx> {
 
         CodegenValue { val, _marker: PhantomData }
     }
-
-    // /// for zero sized types: `self.val == null`
-    // pub fn new_zst(ty: Type) -> CodegenValue<'ctx> {
-    //     debug_assert!(ty.u().matches_void());
-    //     CodegenValue::new(std::ptr::null_mut(), ty)
-    // }
-
-    // pub fn try_new_zst(ty: Type) -> Option<CodegenValue<'ctx>> {
-    //     match ty {
-    //         TypeEnum::Void | TypeEnum::Never => Some(CodegenValue::new_zst(ty)),
-    //         _ => None,
-    //     }
-    // }
-
-    // pub fn as_type(&self) -> CodegenType {
-    //     CodegenTypeEnum::new(unsafe { LLVMTypeOf(self.val) }, self.ty)
-    // }
 
     pub fn int_val(&self) -> IntValue<'ctx> {
         debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_int_value());
@@ -2485,27 +2553,23 @@ impl<'ctx> CodegenValue<'ctx> {
     }
 
     pub fn basic_val(&self) -> BasicValueEnum<'ctx> {
-        debug_assert!(BasicValueEnum::try_from(unsafe { AnyValueEnum::new(self.val) }).is_ok());
+        debug_assert!(BasicValueEnum::try_from(self.any_val()).is_ok());
         unsafe { BasicValueEnum::new(self.val) }
     }
 
     pub fn basic_metadata_val(&self) -> BasicMetadataValueEnum<'ctx> {
-        // For some reason `function_value.as_global_value().as_pointer_value().as_any_value_enum().is_pointer_value()` is `false`
-        match self.any_val() {
-            AnyValueEnum::FunctionValue(function_value) => BasicMetadataValueEnum::PointerValue(
-                function_value.as_global_value().as_pointer_value(),
-            ),
-            v => BasicMetadataValueEnum::try_from(v).u(),
-        }
+        BasicMetadataValueEnum::try_from(self.any_val()).u()
     }
 
     pub fn any_val(&self) -> AnyValueEnum<'ctx> {
-        unsafe { AnyValueEnum::new(self.val) }
+        match unsafe { AnyValueEnum::new(self.val) } {
+            AnyValueEnum::FunctionValue(f) => {
+                // For some reason `f.as_global_value().as_pointer_value().as_any_value_enum().is_pointer_value()` is `false`
+                AnyValueEnum::PointerValue(f.as_global_value().as_pointer_value())
+            },
+            v => v,
+        }
     }
-
-    // pub fn is_never(&self) -> bool {
-    //     self.ty == TypeEnum::Never
-    // }
 }
 
 unsafe impl<'ctx> AsValueRef for CodegenValue<'ctx> {
@@ -2605,106 +2669,48 @@ pub struct Loop<'ctx> {
     end_bb: BasicBlock<'ctx>,
 }
 
-#[allow(unused)]
-mod return_strategy {
-    use super::Codegen;
-    use inkwell::{
-        attributes::Attribute,
-        context::Context,
-        types::{BasicType, BasicTypeEnum},
-    };
-
-    /// x86_64 clang: for 8 byte >= size
-    /// rust 1.81: for 16 byte >= size
-    /// ```llvm
-    /// %struct.S = type { [6 x i8] }
-    ///
-    /// define dso_local i48 @test() {
-    /// entry:
-    ///   %retval = alloca %struct.S, align 1
-    ///   %coerce.dive.coerce = alloca i48, align 8
-    ///   %x = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
-    ///   %arrayidx = getelementptr inbounds [6 x i8], ptr %x, i64 0, i64 5
-    ///   store i8 69, ptr %arrayidx, align 1
-    ///   %coerce.dive = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
-    ///   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %coerce.dive.coerce, ptr align 1 %coerce.dive, i64 6, i1 false)
-    ///   %0 = load i48, ptr %coerce.dive.coerce, align 8
-    ///   ret i48 %0
-    /// }
-    ///
-    /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
-    /// ```
-    pub fn one_int<'ctx>(c: &mut Codegen<'ctx>, bytes: usize) -> BasicTypeEnum<'ctx> {
-        debug_assert!(bytes <= 8);
-        c.context.custom_width_int_type(bytes as u32 * 8).as_basic_type_enum()
-    }
-
-    /// x86_64 clang: for 16 byte >= size > 8 byte
-    /// ```llvm
-    /// %struct.S = type { [14 x i8] }
-    ///
-    /// define dso_local { i64, i48 } @test() {
-    /// entry:
-    ///   %retval = alloca %struct.S, align 1
-    ///   %coerce.dive.coerce = alloca { i64, i48 }, align 8
-    ///   %x = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
-    ///   %arrayidx = getelementptr inbounds [14 x i8], ptr %x, i64 0, i64 5
-    ///   store i8 69, ptr %arrayidx, align 1
-    ///   %coerce.dive = getelementptr inbounds nuw %struct.S, ptr %retval, i32 0, i32 0
-    ///   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %coerce.dive.coerce, ptr align 1 %coerce.dive, i64 14, i1 false)
-    ///   %0 = load { i64, i48 }, ptr %coerce.dive.coerce, align 8
-    ///   ret { i64, i48 } %0
-    /// }
-    ///
-    /// declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
-    /// ```
-    pub fn two_int<'ctx>(c: &mut Codegen<'ctx>, bytes: usize) -> BasicTypeEnum<'ctx> {
-        debug_assert!(bytes > 8 && bytes <= 16);
-        let ty_i64 = c.context.i64_type().as_basic_type_enum();
-        let remaining_bits = (bytes as u32 - 8) * 8;
-        let ty2 = c.context.custom_width_int_type(remaining_bits).as_basic_type_enum();
-        c.context.struct_type(&[ty_i64, ty2], false).as_basic_type_enum()
-    }
-
-    /// x86_64 clang: for size > 16 byte
-    /// rust 1.81: for size > 8 byte
-    /// ```llvm
-    /// %struct.S = type { [17 x i8] }
-    ///
-    /// define dso_local void @test(ptr dead_on_unwind noalias writable sret(%struct.S) align 1 %agg.result) {
-    /// entry:
-    ///   %x = getelementptr inbounds nuw %struct.S, ptr %agg.result, i32 0, i32 0
-    ///   %arrayidx = getelementptr inbounds [17 x i8], ptr %x, i64 0, i64 5
-    ///   store i8 69, ptr %arrayidx, align 1
-    ///   ret void
-    /// }
-    /// ```
-    pub fn ret_param() -> ! {
-        let context: Context = todo!();
-        let type_ref = todo!();
-        context.create_type_attribute(Attribute::get_named_enum_kind_id("sret"), type_ref);
-        todo!()
-    }
-}
-
 fn set_alignment(val: impl AsValueRef, alignment: usize) {
     unsafe { InstructionValue::new(val.as_value_ref()) }
         .set_alignment(alignment as u32)
         .u()
 }
 
-#[derive(Debug, PartialEq)]
-enum RetType<'ctx> {
-    Basic(BasicTypeEnum<'ctx>),
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CFfiType<'ctx> {
     Zst,
-    SRetParam,
+    /// never the [`BasicTypeEnum::StructType`] variant. struct with size <= 8 Bytes will be converted to an int or a float
+    Simple(BasicTypeEnum<'ctx>),
+    /// never a struct type. struct with 8 < size <= 16 Bytes will be converted to ints or floats
+    Simple2([BasicTypeEnum<'ctx>; 2]),
+    ByPtr,
 }
 
-impl<'ctx> RetType<'ctx> {
-    fn into_basic(self) -> Option<BasicTypeEnum<'ctx>> {
+impl<'ctx> CFfiType<'ctx> {
+    fn into_basic(self, codegen: &Codegen<'ctx>) -> Option<BasicTypeEnum<'ctx>> {
         match self {
-            RetType::Basic(basic_type_enum) => Some(basic_type_enum),
-            RetType::Zst | RetType::SRetParam => None,
+            CFfiType::Zst | CFfiType::ByPtr => None,
+            CFfiType::Simple(basic_type_enum) => Some(basic_type_enum),
+            CFfiType::Simple2(fields) => {
+                Some(codegen.struct_type_inner(&fields, None, false).as_basic_type_enum())
+            },
+        }
+    }
+
+    /// converts [`CFfiType::Simple2`] into [`CFfiType::Simple`]
+    fn flatten_simple2(self, codegen: &Codegen<'ctx>) -> Self {
+        match self {
+            CFfiType::Zst | CFfiType::Simple(_) | CFfiType::ByPtr => self,
+            CFfiType::Simple2(fields) => CFfiType::Simple(
+                codegen.struct_type_inner(&fields, None, false).as_basic_type_enum(),
+            ),
+        }
+    }
+
+    fn as_param_count(&self) -> usize {
+        match self {
+            CFfiType::Zst => 0,
+            CFfiType::Simple(_) | CFfiType::ByPtr => 1,
+            CFfiType::Simple2(_) => 2,
         }
     }
 }
@@ -2719,9 +2725,10 @@ struct ForInfo<'ctx> {
     outer_loop: Option<Loop<'ctx>>,
 }
 
-pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) {
+pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> Ptr<ast::Type> {
     debug_assert!(ty_match(*ty, out_ty));
     *ty = out_ty;
+    *ty
 }
 
 /// `f: (value: Ptr<Ast>, param_def: Ptr<ast::Decl>, param_idx: usize) -> CodegenResult<()>`

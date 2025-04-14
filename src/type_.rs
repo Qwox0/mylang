@@ -219,7 +219,7 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
 
     if let Some(got_arr) = got.try_downcast::<ast::ArrayTy>() {
         return match expected.try_downcast::<ast::ArrayTy>() {
-            Some(expected_arr) if got_arr.len.int::<u64>() == got_arr.len.int::<u64>() => {
+            Some(expected_arr) if got_arr.len.int::<u64>() == expected_arr.len.int::<u64>() => {
                 ty_match(got_arr.elem_ty.downcast_type(), expected_arr.elem_ty.downcast_type())
             },
             _ => false,
@@ -360,13 +360,11 @@ impl Ptr<ast::Type> {
                 elem_ty.downcast_type().size() * len.int::<usize>()
             },
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => {
-                fields.iter_types().map(Ptr::layout).fold(0, aligned_add)
-            },
+            TypeEnum::StructDef { fields, .. } => struct_size(*fields),
             TypeEnum::UnionDef { fields, .. } => union_size(*fields),
             TypeEnum::EnumDef { variants, .. } => aligned_add(
                 variant_count_to_tag_size_bytes(variants.len()) as usize,
-                Layout::new(union_size(*variants), union_alignment(*variants)),
+                Layout::new(union_size(*variants), struct_alignment(*variants)),
             ),
             TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
             TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
@@ -395,10 +393,9 @@ impl Ptr<ast::Type> {
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } => 8,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().alignment(),
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => {
-                fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
+            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
+                struct_alignment(*fields)
             },
-            TypeEnum::UnionDef { fields, .. } => union_alignment(*fields),
             TypeEnum::EnumDef { variants, .. } => enum_alignment(*variants),
             TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
@@ -427,26 +424,6 @@ impl Ptr<ast::Type> {
             TypeEnum::EnumDef { .. } => todo!(),
             TypeEnum::RangeTy { .. } => todo!(),
             TypeEnum::OptionTy { .. } => false,
-            TypeEnum::Fn { .. } => todo!(),
-            TypeEnum::Unset => unreachable_debug(),
-        }
-    }
-
-    pub fn pass_arg_as_ptr(self) -> bool {
-        match self.matchable().as_ref() {
-            TypeEnum::SimpleTy { .. } => {
-                let p = primitives();
-                self == p.void_ty || self == p.never
-            },
-            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
-            TypeEnum::SliceTy { .. } => false,
-            TypeEnum::ArrayTy { .. } => todo!(),
-            //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { .. } | TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => {
-                true
-            },
-            TypeEnum::RangeTy { .. } => todo!(),
-            TypeEnum::OptionTy { .. } => todo!(),
             TypeEnum::Fn { .. } => todo!(),
             TypeEnum::Unset => unreachable_debug(),
         }
@@ -482,18 +459,23 @@ pub fn int_alignment(bits: u32) -> usize {
 }
 
 #[inline]
+pub fn struct_size(fields: DeclList) -> usize {
+    fields.iter_types().map(Ptr::layout).fold(0, aligned_add)
+}
+
+#[inline]
+pub fn struct_alignment(fields: DeclList) -> usize {
+    fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
+}
+
+#[inline]
 pub fn union_size(fields: DeclList) -> usize {
     fields.iter_types().map(Ptr::size).max().unwrap_or(0)
 }
 
 #[inline]
-pub fn union_alignment(fields: DeclList) -> usize {
-    fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
-}
-
-#[inline]
 pub fn enum_alignment(variants: DeclList) -> usize {
-    int_alignment(variant_count_to_tag_size_bits(variants.len())).max(union_alignment(variants))
+    int_alignment(variant_count_to_tag_size_bits(variants.len())).max(struct_alignment(variants))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

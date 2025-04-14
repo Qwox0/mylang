@@ -1,7 +1,10 @@
 use crate::{
     context::CompilationContext,
     parser,
-    tests::{jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw, test_file_mock, TestSpan},
+    tests::{
+        TestSpan, jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw,
+        test_file_mock,
+    },
     util::IteratorExt,
 };
 

@@ -10,7 +10,7 @@ use crate::{
     },
     cli::BuildArgs,
     context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostic_reporter::{DiagnosticReporter, cerror, chint, cinfo, cwarn},
+    diagnostics::{DiagnosticReporter, cerror, chint, cinfo, cwarn},
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -18,11 +18,11 @@ use crate::{
     source_file::SourceFile,
     symbol_table::{SemaSymbolTable, linear_search_symbol},
     type_::{RangeKind, common_type, ty_match},
-    util::{UnwrapDebug, panic_debug, then, unreachable_debug},
+    util::{self, UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Write};
 
 mod err;
 pub mod primitives;
@@ -59,7 +59,11 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
                 cerror!(s.full_span(), "unexpected top level expression");
                 continue;
             };
-            debug_assert!((decl.is_const && decl.init.is_some()) || decl.is_extern);
+            debug_assert!(!decl.is_const || decl.init.is_some());
+            if decl.init.is_none() && !decl.is_extern {
+                cerror!(decl.ident.span, "Global variables are currently not supported");
+                continue;
+            }
             debug_assert!(decl.ty.is_none());
             if decl.on_type.is_none()
                 && let Some(dup) = linear_search_symbol(&file_stmts[..idx], &decl.ident.text)
@@ -406,11 +410,11 @@ impl Sema {
                 debug_assert!(lhs.is_none() || elem_ty == orig_elem_ty);
 
                 if lhs.is_none() {
-                    debug_assert!(expr.ty.is_none());
                     let len = elements.len() as i64;
                     let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
                     let elem_ty = elem_ty.upcast();
                     let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?;
+                    debug_assert!(expr.ty.is_none());
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
             },
@@ -427,11 +431,11 @@ impl Sema {
             },
             AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
                 let lhs_ty = *analyze!(*lhs, None);
-                let t = if let Some(m) = lhs.try_downcast::<ast::ImportDirective>()
+                let t = if lhs_ty == p.module
+                    && let m = lhs.downcast::<ast::ImportDirective>()
                     && let Some(s) =
                         self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.file_level_symbols)
                 {
-                    debug_assert_eq!(lhs_ty, p.module);
                     let Some(ty) = s.var_ty else { return NotFinished };
                     debug_assert!(expr.replacement.is_none());
                     expr.replacement = Some(s.const_val());
@@ -958,6 +962,9 @@ impl Sema {
             AstEnum::ImportDirective { .. } => {
                 expr.ty = Some(p.module);
             },
+            AstEnum::SimpleDirective { ret_ty, .. } => {
+                expr.ty = Some(*ret_ty);
+            },
 
             AstEnum::IntVal { .. } => {
                 let ty = ty_hint
@@ -1068,17 +1075,57 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::EnumDef { variants, .. } => {
+            AstEnum::EnumDef { variants, is_simple_enum, tag_ty, .. } => {
                 let mut variant_names = HashSet::new();
+                let int_repr_ty = match util::variant_count_to_tag_size_bits(variants.len()) {
+                    0 => p.u0,
+                    ..=8 => p.u8,
+                    ..=16 => p.u16,
+                    ..=32 => p.u32,
+                    ..=64 => p.u64,
+                    ..=128 => p.u128,
+                    bits => {
+                        cerror!(
+                            expr.span,
+                            "enums which can't be represented by an `u128` are currently not \
+                             supported. This enum would require {bits} bits."
+                        );
+                        return SemaResult::HandledErr;
+                    },
+                };
+                *tag_ty = Some(int_repr_ty.downcast::<ast::IntTy>());
+
+                let mut used_indices = Vec::with_capacity(variants.len());
+                let mut order_idx = 0;
+                *is_simple_enum = true;
                 for variant in variants.iter_mut() {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
                     if is_duplicate {
                         return err(DuplicateEnumVariant, variant.ident.span);
                     }
-                    if variant.var_ty.is_none() {
-                        variant.var_ty = Some(p.void_ty);
+                    if variant.var_ty_expr.is_none() {
+                        variant.var_ty_expr = Some(p.void_ty.upcast());
                     }
+
+                    let variant_idx = variant.init.take();
                     let _ = self.var_decl_to_value(*variant)?;
+                    variant.init = variant_idx;
+                    if variant.var_ty != p.void_ty {
+                        *is_simple_enum = false;
+                    }
+                    order_idx = if let Some(variant_idx) = variant_idx {
+                        self.analyze(variant_idx, &Some(int_repr_ty), true)?;
+                        variant_idx.int()
+                    } else {
+                        order_idx + 1
+                    };
+
+                    // TODO: improve this
+                    if used_indices.contains(&order_idx) {
+                        cerror!(variant.ident.span, "Duplicate enum variant index");
+                        return SemaResult::HandledErr;
+                    }
+                    used_indices.push(order_idx);
                 }
                 //self.enum_stack.last_mut().unwrap_debug().push(ty);
                 expr.ty = Some(p.type_ty);
@@ -1335,13 +1382,14 @@ impl Sema {
         let remaining_params = &params[pos_idx..];
         let mut was_set = vec![false; remaining_params.len()];
         for &arg in remaining_args {
-            let Some(named_arg) = arg.try_downcast::<ast::Assign>() else {
+            if is_pos_arg(&arg) {
                 cerror!(
                     arg.full_span(),
                     "Cannot specify a positional argument after named arguments"
                 );
                 return SemaResult::HandledErr;
-            };
+            }
+            let named_arg = arg.downcast::<ast::Assign>();
             let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
                 cerror!(named_arg.lhs.full_span(), "Expected a parameter name");
                 return SemaResult::HandledErr;
@@ -1371,18 +1419,24 @@ impl Sema {
         // missing args
         let mut missing_params = remaining_params
             .iter()
+            .copied()
             .zip(was_set)
             .filter(|(p, was_set)| !was_set && p.init.is_none())
-            .map(|(p, _)| p.ident.text.as_ref());
+            .map(|(p, _)| p);
         if let Some(first) = missing_params.next() {
-            let missing_params_list =
-                missing_params.fold(format!("'{first}'"), |acc, p| acc + ", '" + p + "'");
+            fn format_param(mut buf: String, p: Ptr<ast::Decl>) -> String {
+                write!(&mut buf, "`{}: {}`", p.ident.text.as_ref(), p.var_ty.u()).unwrap();
+                buf
+            }
+            let missing_params_list = missing_params
+                .fold(format_param(String::new(), first), |acc, p| format_param(acc + ", ", p));
             cerror!(
                 close_p_span,
-                "Missing argument{} for parameters {}",
+                "Missing argument{0} for parameter{0} {1}",
                 if missing_params_list.contains(",") { "s" } else { "" },
                 missing_params_list
             );
+            chint!(first.upcast().full_span(), "parameter defined here");
             return SemaResult::HandledErr;
         }
         Ok(())

@@ -1,99 +1,16 @@
 use crate::{
     codegen::llvm::finalize_ty,
     context::{FilesIndex, primitives},
-    diagnostic_reporter::{DiagnosticReporter, cerror},
+    diagnostics::cerror,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema,
     type_::{RangeKind, ty_match},
-    util::{UnwrapDebug, panic_debug, then},
+    util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 use core::fmt;
 
 pub mod debug;
-
-/*
-macro_rules! ast_variants2 {
-    ($($(#[$attr:meta])* $name:ident : $base:ident {
-        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
-    }),+ $(,)?) => {
-        $(ast_variants2! {
-            _ $base => $(#[$attr])* $name {
-                $($(#[$field_attr])* $field : $ty),*
-            }
-        })+
-
-        /// [`Ast`] as a rust enum which can be used with pattern matching
-        ///
-        /// This works because `#[repr]` forces the tag to be the first field <https://doc.rust-lang.org/reference/items/enumerations.html#pointer-casting>
-        ///
-        #[derive(Debug)]
-        #[repr(u8)]
-        pub enum AstEnum {
-            $($name {
-                ty: OPtr<Type>,
-                span: Span,
-                parenthesis_count: u8,
-                $($field : $ty),*
-            },)+
-        }
-    };
-    (_ Ast => $(#[$attr:meta])* $name:ident {
-        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
-    }) => {
-        #[derive(Debug)]
-        $(#[$attr])*
-        #[repr(C)]
-        pub struct $name {
-            pub kind: AstKind,
-            pub ty: OPtr<$crate::ast::Type>,
-            pub span: Span,
-            pub parenthesis_count: u8,
-            $(
-                $(#[$field_attr])*
-                pub $field : $ty
-            ),*
-        }
-
-        impl HasAstKind for $name {
-            #[inline]
-            fn get_kind(&self) -> AstKind { self.kind }
-        }
-    };
-    (_ ConstVal => $(#[$attr:meta])* $name:ident {
-        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
-    }) => {
-        ast_variants2! {
-            _ Ast => $(#[$attr])* $name {
-                // more_fields: u64,
-                $($(#[$field_attr])* $field : $ty),*
-            }
-        }
-    };
-    (_ Type => $(#[$attr:meta])* $name:ident {
-        $($(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
-    }) => {
-        ast_variants2! {
-            _ ConstVal => $(#[$attr])* $name {
-                // more_fields2: u64,
-                $($(#[$field_attr])* $field : $ty),*
-            }
-        }
-    };
-}
-
-mod new {
-    use super::{AstKind, HasAstKind, OPtr, Ptr, Span};
-
-    ast_variants2! {
-        Ast : Ast {},
-        ConstVal : ConstVal {},
-        Type : Type {},
-    }
-}
-*/
-
-// --------------
 
 // don't forget to change `AstEnum`, `ConstValEnum`, `TypeEnum`
 macro_rules! inherit_ast {
@@ -376,7 +293,7 @@ macro_rules! ast_variants {
         }
 
         impl ConstVal {
-            pub const KINDS: [AstKind; 19] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+            pub const KINDS: [AstKind; 20] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
         }
 
         impl Type {
@@ -417,7 +334,7 @@ ast_variants! {
     /// `*T` -> `*T`
     NamedInitializer {
         lhs: OPtr<Ast>,
-        fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SOA
+        fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SoA
     },
     /// `alloc(MyArray).[<expr>, <expr>, ..., <expr>,]`
     ArrayInitializer {
@@ -595,6 +512,9 @@ ast_variants! {
         path: Ptr<StrVal>,
         files_idx: FilesIndex,
     },
+    SimpleDirective {
+        ret_ty: Ptr<Type>,
+    },
 
     ===== Types =====
 
@@ -642,8 +562,11 @@ ast_variants! {
     },
     /// `enum { A, B(i64) }`
     EnumDef {
+        /// simple enum == no associated data
+        is_simple_enum: bool,
         variants: DeclList,
         consts: Vec<Ptr<Decl>>,
+        tag_ty: OPtr<IntTy>,
     },
 
     RangeTy {
@@ -885,6 +808,19 @@ impl Ptr<Type> {
     pub fn try_downcast_ref<V: TypeVariant>(&mut self) -> Option<&mut Ptr<V>> {
         debug_assert!(self.replacement.is_none());
         then!(self.kind == V::KIND => self.downcast_ref())
+    }
+
+    pub fn downcast_struct_def(self) -> Ptr<StructDef> {
+        match self.kind {
+            AstKind::StructDef => self.downcast::<StructDef>(),
+            AstKind::SliceTy => primitives().untyped_slice_struct_def,
+            _ => unreachable_debug(),
+        }
+    }
+
+    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
+        debug_assert!(self.replacement.is_none());
+        then!(matches!(self.kind, AstKind::StructDef | AstKind::SliceTy) => self.downcast_struct_def())
     }
 
     /// Some types (like pointers) are transparent and allow field/method access on its inner type.

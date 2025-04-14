@@ -3,7 +3,7 @@ use crate::{
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_file},
     context::CompilationContext,
-    diagnostic_reporter::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
+    diagnostics::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
     parser::lexer::{Code, Span},
     ptr::Ptr,
     source_file::SourceFile,

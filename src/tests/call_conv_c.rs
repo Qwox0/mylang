@@ -12,7 +12,7 @@
 //! { i32, f32 } -> i64
 //! { f32, i32 } -> i64
 
-use crate::tests::jit_run_test;
+use crate::tests::{jit_run_test, jit_run_test_raw};
 
 macro_rules! test_struct_return {
     ($test_name:ident : { $($field:ident : $ty:ty = $val:expr),* $(,)? }) => {
@@ -144,4 +144,67 @@ fn return_nested_struct() {
 
     let code = "struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}";
     assert_eq!(*jit_run_test::<Struct>(code).ok(), Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
+}
+
+#[test]
+fn struct_with_array_param_pass_through_to_another_call() {
+    let code = "
+MyNum :: struct { val: [2]i32 }
+add :: (n: MyNum, other: i64) -> MyNum.(.[n.val[0] + xx other, n.val[1]]);
+pass_through :: (n: MyNum, other: i64) -> add(n, other);
+test :: -> pass_through(.(.[1,2]), 2);";
+    let out = *jit_run_test_raw::<[i32; 2]>(code).ok();
+    assert_eq!(out, [3, 2]);
+}
+
+#[test]
+fn call_by_value_struct_with_many_small_fields() {
+    let code = "
+MyStruct :: struct { a: i8, b: i8, c: [6]i8, x: u32 }
+take_struct :: (s: MyStruct) -> s.x
+test :: -> take_struct(.(0, 10, .[1; 6], 99));";
+    let out = *jit_run_test_raw::<u32>(code).ok();
+    assert_eq!(out, 99);
+}
+
+#[test]
+#[ignore = "unimplemented"]
+fn call_by_value_i128() {
+    let code = "
+take_i128 :: (i: i128) -> i.as(i32);
+test :: -> take_i128(-10);";
+    let res = jit_run_test_raw::<i32>(code);
+    assert_eq!(*res.ok(), -10);
+    let param_name_prefix = if cfg!(debug_assertions) { "i." } else { "" };
+    assert!(res.module_text().unwrap().contains(&format!(
+        "define i32 @take_i128(i64 %{param_name_prefix}0, i64 %{param_name_prefix}1)"
+    )));
+}
+
+#[test]
+fn call_by_value_array() {
+    // arrays are a special case for some reason.
+    let code = "
+take_array :: (arr: [3]i32) -> arr[1];
+test :: -> take_array(.[1,-2, 0]);";
+    let res = jit_run_test_raw::<i32>(code);
+    assert_eq!(*res.ok(), -2);
+    let param_name = if cfg!(debug_assertions) { "arr" } else { "0" };
+    assert!(
+        res.module_text()
+            .unwrap()
+            .contains(&format!("define i32 @take_array(ptr %{param_name})"))
+    );
+    drop(res);
+
+    let code = "
+Arr :: struct { arr: [3]i32 }
+take_array :: (arr: Arr) -> arr.arr[1];
+test :: -> take_array(.(.[1,-2, 0]));";
+    let res = jit_run_test_raw::<i32>(code);
+    assert_eq!(*res.ok(), -2);
+    let param_name_prefix = if cfg!(debug_assertions) { "arr." } else { "" };
+    assert!(res.module_text().unwrap().contains(&format!(
+        "define i32 @take_array(i64 %{param_name_prefix}0, i32 %{param_name_prefix}1)",
+    )));
 }

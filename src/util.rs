@@ -7,28 +7,18 @@ use std::{
     path::Path,
 };
 
-/// Calculates the padding bytes needed to align `offset` at `alignment`.
-///
-/// <https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding>
-macro_rules! get_padding {
-    ($offset:expr, $alignment:expr) => {
-        $offset.wrapping_neg() & ($alignment - 1)
-    };
-}
-pub(crate) use get_padding;
-
 /// Adds the needed padding bytes to `offset` to align `offset` at `alignment`.
 ///
 /// equivalent to `offset + get_padding(offset, alignment)`
 ///
 /// <https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding>
-macro_rules! get_aligned_offset {
+macro_rules! round_up_to_alignment {
     ($offset:expr, $alignment:expr) => {{
         let alignment = $alignment;
         ($offset + (alignment - 1)) & alignment.wrapping_neg()
     }};
 }
-pub(crate) use get_aligned_offset;
+pub(crate) use round_up_to_alignment;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
@@ -45,7 +35,7 @@ impl Layout {
 
 #[inline]
 pub fn aligned_add(offset: usize, ty_layout: Layout) -> usize {
-    get_aligned_offset!(offset, ty_layout.align) + ty_layout.size
+    round_up_to_alignment!(offset, ty_layout.align) + ty_layout.size
 }
 
 /// <https://jameshfisher.com/2018/03/30/round-up-power-2/>

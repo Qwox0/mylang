@@ -20,7 +20,6 @@ pub enum ParseErrorKind {
     InvalidBCharLit,
     RangeInclusiveWithoutEnd,
     DuplicateDeclMarker(DeclMarkerKind),
-    UnknownDirective,
     AllocErr(bumpalo::AllocErr),
 
     HandledErr,
@@ -43,12 +42,12 @@ pub fn err_val(kind: ParseErrorKind, span: Span) -> ParseError {
 }
 
 pub fn handled_err<T>() -> ParseResult<T> {
-    Err(().into())
+    Err(ParseError::handled_err())
 }
 
 impl From<()> for ParseError {
     fn from(_: ()) -> Self {
-        err_val(ParseErrorKind::HandledErr, Span::ZERO)
+        ParseError::handled_err()
     }
 }
 
@@ -70,6 +69,10 @@ impl ParseError {
             #[cfg(debug_assertions)]
             context: anyhow::Error::msg("ERROR"),
         }
+    }
+
+    pub fn handled_err() -> ParseError {
+        ParseError::new(ParseErrorKind::HandledErr, Span::ZERO)
     }
 
     pub fn unexpected_token<T>(t: Token) -> Result<T, ParseError> {

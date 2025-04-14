@@ -2,23 +2,23 @@ use crate::{
     arena_allocator::Arena,
     ast::{self, ast_new},
     compiler::CompileDurations,
-    diagnostic_reporter,
+    diagnostics,
     parser::lexer::Span,
-    ptr::{OPtr, Ptr},
+    ptr::{HashKeyPtr, OPtr, Ptr},
     sema::primitives::Primitives,
     source_file::SourceFile,
     util::UnwrapDebug,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
 
 #[cfg(not(test))]
-pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticPrinter;
+pub type CtxDiagnosticReporter = diagnostics::DiagnosticPrinter;
 #[cfg(test)]
-pub type CtxDiagnosticReporter = diagnostic_reporter::DiagnosticCollector;
+pub type CtxDiagnosticReporter = diagnostics::DiagnosticCollector;
 
 pub struct CompilationContextInner {
     pub alloc: Arena,
@@ -34,6 +34,9 @@ pub struct CompilationContextInner {
     /// [`SourceFile`] is active.
     pub files: Vec<Ptr<SourceFile>>,
     pub root_file_idx: Option<FilesIndex>,
+
+    pub libraries: HashSet<HashKeyPtr<str>>,
+    pub library_search_paths: HashSet<HashKeyPtr<str>>,
 
     pub compiler_libs_path: PathBuf,
     pub project_path: PathBuf,
@@ -107,6 +110,9 @@ impl CompilationContext {
             files: Vec::new(),
             root_file_idx: None,
 
+            libraries: HashSet::new(),
+            library_search_paths: HashSet::new(),
+
             compiler_libs_path,
             project_path: PathBuf::new(),
 
@@ -166,6 +172,17 @@ impl Ptr<CompilationContextInner> {
         idx
     }
 
+    pub fn add_library(self, str_lit: Ptr<ast::StrVal>) -> Result<(), ()> {
+        let name = str_lit.text;
+        self.as_mut().libraries.insert(name.as_hash_key());
+        Ok(())
+    }
+
+    pub fn add_library_search_path(self, path: Ptr<str>) -> Result<(), ()> {
+        self.as_mut().library_search_paths.insert(path.as_hash_key());
+        Ok(())
+    }
+
     pub fn path_in_proj(self, path: &Path) -> &Path {
         path.strip_prefix(&self.project_path).unwrap_or(path)
     }
@@ -176,10 +193,10 @@ static mut CTX: Option<CompilationContextInner> = None;
 
 macro_rules! impl_diagnostic_reporter_for_ctx {
     ($ty:ty) => {
-        impl crate::diagnostic_reporter::DiagnosticReporter for $ty {
+        impl crate::diagnostics::DiagnosticReporter for $ty {
             fn report<M>(
                 &mut self,
-                severity: crate::diagnostic_reporter::DiagnosticSeverity,
+                severity: crate::diagnostics::DiagnosticSeverity,
                 span: Span,
                 msg: &M,
             ) where
@@ -193,7 +210,7 @@ macro_rules! impl_diagnostic_reporter_for_ctx {
                 self.diagnostic_reporter.hint(span, msg)
             }
 
-            fn max_past_severity(&self) -> Option<crate::diagnostic_reporter::DiagnosticSeverity> {
+            fn max_past_severity(&self) -> Option<crate::diagnostics::DiagnosticSeverity> {
                 self.diagnostic_reporter.max_past_severity()
             }
         }

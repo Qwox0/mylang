@@ -1,6 +1,6 @@
 use super::jit_run_test;
 use crate::{
-    diagnostic_reporter::DiagnosticSeverity,
+    diagnostics::DiagnosticSeverity,
     tests::{TestSpan, jit_run_test_raw},
     util::IteratorExt,
 };
@@ -10,10 +10,10 @@ fn struct_method() {
     let code = "
 MyStruct :: struct { val: i64 };
 MyStruct.new :: -> MyStruct.(0);
-MyStruct.inc :: (mut self: MyStruct) -> self.val += 1;
+MyStruct.inc :: (self: *mut MyStruct) -> self.*.val += 1;
 test :: -> {
     mut a := MyStruct.new();
-    a.inc();
+    a.&mut.inc();
     a.val
 }";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 1);

@@ -55,6 +55,8 @@ pub struct BuildArgs {
     pub debug_llvm_ir_unoptimized: bool,
     #[arg(long)]
     pub debug_llvm_ir_optimized: bool,
+    #[arg(long)]
+    pub debug_linker_args: bool,
 }
 
 impl Default for BuildArgs {
@@ -99,13 +101,14 @@ impl BuildArgs {
             target_triple: None,
             out: OutKind::None,
             print_compile_time: false,
+            entry_point: opt.entry_point.to_string(),
             debug_ast: opt.debug_ast,
             debug_types: opt.debug_types,
             debug_typed_ast: opt.debug_typed_ast,
             debug_functions: false,
             debug_llvm_ir_unoptimized: false,
             debug_llvm_ir_optimized: opt.print_llvm_module,
-            entry_point: opt.entry_point.to_string(),
+            debug_linker_args: false,
         }
     }
 }
