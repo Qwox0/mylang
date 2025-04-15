@@ -192,8 +192,8 @@ impl Parser {
             FollowingOperator::Pipe => {
                 let t = self.ws0().peek_tok()?;
                 match t.kind {
-                    TokenKind::Keyword(Keyword::If) => {
-                        self.advanced().if_after_cond(lhs, span, true).context("| if")?.upcast()
+                    TokenKind::Keyword(Keyword::If | Keyword::Then) => {
+                        self.advanced().if_after_cond(lhs, span, true).context("|> if")?.upcast()
                     },
                     TokenKind::Keyword(Keyword::Match) => {
                         todo!("|> match")
@@ -736,7 +736,9 @@ impl Parser {
         start_span: Span,
         was_piped: bool,
     ) -> ParseResult<Ptr<ast::If>> {
-        self.ws0().opt_do();
+        #[allow(unused_must_use)] // token is optional
+        self.ws0()
+            .tok_where(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Then | Keyword::Do)));
         let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
         let else_body = self
             .ws0()
@@ -1170,12 +1172,20 @@ impl FollowingOperator {
             TokenKind::Percent => FollowingOperator::BinOp(BinOpKind::Mod),
             TokenKind::PercentEq => FollowingOperator::BinOpAssign(BinOpKind::Mod),
             TokenKind::Ampersand => FollowingOperator::BinOp(BinOpKind::BitAnd),
-            TokenKind::AmpersandAmpersand => FollowingOperator::BinOp(BinOpKind::And),
-            TokenKind::AmpersandAmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::And),
+            TokenKind::AmpersandAmpersand | TokenKind::Keyword(Keyword::And) => {
+                FollowingOperator::BinOp(BinOpKind::And)
+            },
+            TokenKind::AmpersandAmpersandEq | TokenKind::Keyword(Keyword::AndEq) => {
+                FollowingOperator::BinOpAssign(BinOpKind::And)
+            },
             TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
             TokenKind::Pipe => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
-            TokenKind::PipePipe => FollowingOperator::BinOp(BinOpKind::Or),
-            TokenKind::PipePipeEq => FollowingOperator::BinOpAssign(BinOpKind::Or),
+            TokenKind::PipePipe | TokenKind::Keyword(Keyword::Or) => {
+                FollowingOperator::BinOp(BinOpKind::Or)
+            },
+            TokenKind::PipePipeEq | TokenKind::Keyword(Keyword::OrEq) => {
+                FollowingOperator::BinOpAssign(BinOpKind::Or)
+            },
             TokenKind::PipeEq => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
             TokenKind::PipeGt => FollowingOperator::Pipe,
             TokenKind::Caret => FollowingOperator::BinOp(BinOpKind::BitXor),

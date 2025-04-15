@@ -3,45 +3,31 @@ use core::fmt;
 
 #[test]
 fn test_and() {
-    for a in [false, true] {
-        for b in [false, true] {
-            let code = format!("{a} && {b}");
-            let out = *jit_run_test::<bool>(&code).ok();
-            let expected = a && b;
-            assert_eq!(out, expected)
+    for op in ["&&", "and"] {
+        for a in [false, true] {
+            for b in [false, true] {
+                let code = format!("{a} {op} {b}");
+                let out = *jit_run_test::<bool>(&code).ok();
+                let expected = a && b;
+                assert_eq!(out, expected);
+            }
         }
     }
 }
 
 #[test]
 fn test_or() {
-    for a in [false, true] {
-        for b in [false, true] {
-            let code = format!("{a} || {b}");
-            let out = *jit_run_test::<bool>(&code).ok();
-            let expected = a || b;
-            assert_eq!(out, expected)
+    for op in ["||", "or"] {
+        for a in [false, true] {
+            for b in [false, true] {
+                let code = format!("{a} {op} {b}");
+                let out = *jit_run_test::<bool>(&code).ok();
+                let expected = a || b;
+                assert_eq!(out, expected);
+            }
         }
     }
 }
-
-/*
-#[test]
-fn test_type_missmatch() {
-    for op in Op::VARIANTS {
-        let out = jit_run_test::<bool>(format!("true {op} {{}}")).unwrap_err().sema();
-        assert!(matches!(out.kind, SemaErrorKind::MismatchedTypesBinOp {
-            lhs_ty: Type::Bool,
-            rhs_ty: Type::Void
-        }));
-        let out = jit_run_test::<bool>(format!("{{}} {op} true")).unwrap_err().sema();
-        assert!(matches!(out.kind, SemaErrorKind::MismatchedTypesBinOp {
-            lhs_ty: Type::Void,
-            rhs_ty: Type::Bool
-        }));
-    }
-}
-*/
 
 #[test]
 fn test_short_circuit() {
@@ -59,7 +45,7 @@ fn test_short_circuit() {
             );
             let out = *jit_run_test::<bool>(code).ok();
             let expected = match op {
-                Op::And => {
+                Op::And | Op::AndWord => {
                     let mut tmp = 0;
                     let _ = a && {
                         tmp = 1;
@@ -67,7 +53,7 @@ fn test_short_circuit() {
                     };
                     tmp == 0
                 },
-                Op::Or => {
+                Op::Or | Op::OrWord => {
                     let mut tmp = 0;
                     let _ = a || {
                         tmp = 1;
@@ -83,18 +69,22 @@ fn test_short_circuit() {
 
 enum Op {
     And,
+    AndWord,
     Or,
+    OrWord,
 }
 
 impl Op {
-    pub const VARIANTS: [Op; 2] = [Op::And, Op::Or];
+    pub const VARIANTS: [Op; 4] = [Op::And, Op::AndWord, Op::Or, Op::OrWord];
 }
 
 impl fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::And => write!(f, "&&"),
+            Op::AndWord => write!(f, "and"),
             Op::Or => write!(f, "||"),
+            Op::OrWord => write!(f, "or"),
         }
     }
 }
