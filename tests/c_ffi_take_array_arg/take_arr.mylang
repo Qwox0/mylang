@@ -1,0 +1,10 @@
+std :: #import "std";
+libc :: #import "libc";
+
+pub take_arr :: (arr: [4]u8) -> {
+    std.print("got array: [");
+    for x in arr {
+        libc.printf("%d,".ptr, xx x);
+    }
+    std.println("]");
+}

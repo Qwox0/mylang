@@ -13,6 +13,7 @@ use std::{fmt::Display, iter::FusedIterator, path::Path};
 
 mod alignment;
 mod args;
+mod array;
 mod associated_variables;
 mod binop;
 mod call_conv_c;
@@ -25,7 +26,6 @@ mod index;
 mod initializer;
 mod logic_binop;
 mod mut_checks;
-mod parse_array;
 mod parse_function;
 mod ptr;
 mod slice;

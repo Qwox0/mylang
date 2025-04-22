@@ -86,6 +86,15 @@ macro_rules! try_not_never {
     }};
 }
 
+macro_rules! sym_cf {
+    ($sym:expr) => {{
+        match $sym {
+            Symbol::Never => return Ok(ControlFlow::Break),
+            s => s,
+        }
+    }};
+}
+
 /// Returns [`Symbol::Never`] if it occurs
 macro_rules! try_compile_expr_as_val {
     ($codegen:ident, $expr:expr) => {{
@@ -216,8 +225,7 @@ impl<'ctx> Codegen<'ctx> {
             ($lhs:expr, $values:expr, $compile_fn:ident) => {{
                 let lhs = $lhs;
                 let values = $values;
-                if out_ty.kind.is_struct_kind() {
-                    let s_def = out_ty.downcast_struct_def();
+                if let Some(s_def) = out_ty.try_downcast_struct_def() {
                     let s_ty = s_def.upcast_to_type();
                     let struct_ty = self.llvm_type(s_ty).struct_ty();
                     let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
@@ -276,63 +284,62 @@ impl<'ctx> Codegen<'ctx> {
                 compile_initializer!(lhs, values, compile_named_initializer_body)
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
-                debug_assert!(lhs.is_none(), "todo");
-                let arr_ty = out_ty.downcast::<ast::ArrayTy>();
-                let elem_ty = arr_ty.elem_ty.downcast_type();
-                let elem_cty = self.llvm_type(elem_ty);
-                let len = elements.len();
-                debug_assert_eq!(len, arr_ty.len.int());
-                debug_assert!(u32::try_from(len).is_ok());
-                let arr_ty = elem_cty.basic_ty().array_type(len as u32);
-                let arr_ptr = write_target_or!(self.build_alloca(arr_ty, "arr", out_ty)?);
-                let idx_ty = self.context.i64_type();
-                for (idx, elem) in elements.iter_mut().enumerate() {
-                    finalize_ty(elem.ty.as_mut().u(), elem_ty);
-                    let elem_ptr = unsafe {
-                        self.builder.build_in_bounds_gep(
-                            arr_ty,
-                            arr_ptr,
-                            &[idx_ty.const_zero(), idx_ty.const_int(idx as u64, false)],
-                            "",
-                        )
-                    }?;
-                    let _ = self.compile_expr_with_write_target(*elem, Some(elem_ptr))?;
+                if let Some(arr_ty) = out_ty.try_downcast::<ast::ArrayTy>() {
+                    let arr_llvm_ty = self.llvm_type(arr_ty.upcast_to_type()).arr_ty();
+                    let ptr = write_target_or!(self.build_alloca(
+                        arr_llvm_ty,
+                        "array",
+                        arr_ty.upcast_to_type()
+                    )?);
+                    Ok(self
+                        .compile_array_initializer_body(arr_ty, arr_llvm_ty, ptr, elements)?
+                        .as_sym(|| Symbol::Stack(ptr)))
+                } else if let Some(ptr_ty) = out_ty.try_downcast::<ast::PtrTy>() {
+                    let lhs = lhs.u();
+                    debug_assert_eq!(lhs.ty, out_ty);
+                    let arr_ty = ptr_ty.pointee.downcast::<ast::ArrayTy>();
+                    let arr_llvm_ty = self.llvm_type(arr_ty.upcast_to_type()).arr_ty();
+                    let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
+                    Ok(self
+                        .compile_array_initializer_body(arr_ty, arr_llvm_ty, ptr, elements)?
+                        .as_sym(|| reg_sym(ptr)))
+                } else {
+                    unreachable_debug()
                 }
-                stack_val(arr_ptr)
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
-                debug_assert!(lhs.is_none(), "todo");
-                let out_arr_ty = out_ty.downcast::<ast::ArrayTy>();
-                let elem_ty = finalize_ty(val.ty.as_mut().u(), out_arr_ty.elem_ty.downcast_type());
-                let elem_cty = self.llvm_type(elem_ty).basic_ty();
-                let len: u32 = count.int();
-                debug_assert_eq!(len, out_arr_ty.len.int());
-                let arr_ty = elem_cty.array_type(len);
-                let arr_ptr = write_target_or!(self.build_alloca(arr_ty, "arr", out_ty)?);
-                let elem_val = try_compile_expr_as_val!(self, *val);
-
-                let idx_ty = self.context.i64_type();
-                let for_info = self.build_for(
-                    idx_ty,
-                    false,
-                    idx_ty.const_zero(),
-                    idx_ty.const_int(len as u64, false),
-                    false,
-                )?;
-
-                let elem_ptr = unsafe {
-                    self.builder.build_in_bounds_gep(
+                if let Some(arr_ty) = out_ty.try_downcast::<ast::ArrayTy>() {
+                    let arr_llvm_ty = self.llvm_type(arr_ty.upcast_to_type()).arr_ty();
+                    let ptr = write_target_or!(self.build_alloca(
+                        arr_llvm_ty,
+                        "array",
+                        arr_ty.upcast_to_type()
+                    )?);
+                    try_not_never!(self.compile_array_initializer_short_body(
                         arr_ty,
-                        arr_ptr,
-                        &[idx_ty.const_zero(), for_info.idx_int],
-                        "",
-                    )
-                }?;
-                self.build_store(elem_ptr, elem_val.basic_val(), elem_ty.alignment())?;
-
-                self.build_for_end(for_info, Symbol::Void)?;
-
-                stack_val(arr_ptr)
+                        arr_llvm_ty,
+                        ptr,
+                        *val,
+                        *count,
+                    )?);
+                    stack_val(ptr)
+                } else if let Some(ptr_ty) = out_ty.try_downcast::<ast::PtrTy>() {
+                    let lhs = lhs.u();
+                    debug_assert_eq!(lhs.ty, out_ty);
+                    let arr_ty = ptr_ty.pointee.downcast::<ast::ArrayTy>();
+                    let arr_llvm_ty = self.llvm_type(arr_ty.upcast_to_type()).arr_ty();
+                    let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
+                    try_not_never!(self.compile_array_initializer_short_body(
+                        arr_ty,
+                        arr_llvm_ty,
+                        ptr,
+                        *val,
+                        *count,
+                    )?);
+                    reg(ptr)
+                } else {
+                    unreachable_debug()
+                }
             },
             AstEnum::Dot { lhs, rhs, .. } => {
                 let lhs = lhs.u();
@@ -882,12 +889,12 @@ impl<'ctx> Codegen<'ctx> {
                 if let Some(val) = val {
                     finalize_ty(val.ty.as_mut().u(), f.ret_ty.u());
                     let sym = self.compile_expr(*val)?;
-                    if self.compile_multiple_defer_scopes(self.return_depth)? {
+                    if self.compile_multiple_defer_scopes(self.return_depth)?.do_continue() {
                         self.build_return(sym, val.ty.u())?;
                     }
                 } else {
                     debug_assert_eq!(f.ret_ty, p.void_ty);
-                    if self.compile_multiple_defer_scopes(self.return_depth)? {
+                    if self.compile_multiple_defer_scopes(self.return_depth)?.do_continue() {
                         self.builder.build_return(None)?;
                     }
                 }
@@ -1345,6 +1352,57 @@ impl<'ctx> Codegen<'ctx> {
             let _ = self.compile_expr_with_write_target(field.init.u(), Some(field_ptr))?;
         }
         Ok(())
+    }
+
+    fn compile_array_initializer_body(
+        &mut self,
+        arr_ty: Ptr<ast::ArrayTy>,
+        arr_llvm_ty: ArrayType<'ctx>,
+        arr_ptr: PointerValue<'ctx>,
+        elements: &mut [Ptr<Ast>],
+    ) -> CodegenResult<ControlFlow> {
+        let elem_ty = arr_ty.elem_ty.downcast_type();
+        debug_assert_eq!(elements.len(), arr_ty.len.int());
+        let idx_ty = self.context.i64_type();
+        for (idx, elem) in elements.iter_mut().enumerate() {
+            finalize_ty(elem.ty.as_mut().u(), elem_ty);
+            let idx = idx_ty.const_int(idx as u64, false);
+            let elem_ptr = self.build_gep(arr_llvm_ty, arr_ptr, &[idx_ty.const_zero(), idx])?;
+            sym_cf!(self.compile_expr_with_write_target(*elem, Some(elem_ptr))?);
+        }
+        Ok(ControlFlow::Continue)
+    }
+
+    fn compile_array_initializer_short_body(
+        &mut self,
+        arr_ty: Ptr<ast::ArrayTy>,
+        arr_llvm_ty: ArrayType<'ctx>,
+        arr_ptr: PointerValue<'ctx>,
+        val: Ptr<ast::Ast>,
+        count: Ptr<ast::Ast>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        // nocheckin: change back to CodegenResult<()>
+        let elem_ty = finalize_ty(val.as_mut().ty.as_mut().u(), arr_ty.elem_ty.downcast_type());
+        let elem_val = try_compile_expr_as_val!(self, val);
+
+        let len: u32 = count.int();
+        debug_assert_eq!(len, arr_ty.len.int());
+
+        let idx_ty = self.context.i64_type();
+        let for_info = self.build_for(
+            idx_ty,
+            false,
+            idx_ty.const_zero(),
+            idx_ty.const_int(len as u64, false),
+            false,
+        )?;
+
+        let elem_ptr =
+            self.build_gep(arr_llvm_ty, arr_ptr, &[idx_ty.const_zero(), for_info.idx_int])?;
+        self.build_store(elem_ptr, elem_val.basic_val(), elem_ty.alignment())?;
+
+        self.build_for_end(for_info, Symbol::Void)?;
+        Ok(Symbol::Void)
     }
 
     fn compile_cast(
@@ -2390,7 +2448,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn close_scope(&mut self, do_compile_defer: bool) -> CodegenResult<()> {
-        if do_compile_defer && !self.compile_defer_exprs()? {
+        if do_compile_defer && !self.compile_defer_exprs()?.do_continue() {
             todo!()
         }
         self.symbols.close_scope();
@@ -2402,28 +2460,22 @@ impl<'ctx> Codegen<'ctx> {
 
     /// the [`bool`] in the return type describes whether compilation can continue or not
     #[inline]
-    fn compile_defer_exprs(&mut self) -> CodegenResult<bool> {
+    fn compile_defer_exprs(&mut self) -> CodegenResult<ControlFlow> {
         let exprs = unsafe { forget_lifetime(self.defer_stack.get_cur_scope()) };
         for expr in exprs.iter().rev() {
-            let s = self.compile_expr(*expr)?;
-            if s == Symbol::Never {
-                return Ok(false);
-            }
+            let _sym = sym_cf!(self.compile_expr(*expr)?);
         }
-        Ok(true)
+        Ok(ControlFlow::Continue)
     }
 
-    fn compile_multiple_defer_scopes(&mut self, depth: usize) -> CodegenResult<bool> {
+    fn compile_multiple_defer_scopes(&mut self, depth: usize) -> CodegenResult<ControlFlow> {
         let defer_stack = unsafe { forget_lifetime(&self.defer_stack) };
         for scope in defer_stack.iter_scopes().take(depth) {
             for expr in scope.iter().rev() {
-                let s = self.compile_expr(*expr)?;
-                if s == Symbol::Never {
-                    return Ok(false);
-                }
+                let _sym = sym_cf!(self.compile_expr(*expr)?);
             }
         }
-        Ok(true)
+        Ok(ControlFlow::Continue)
     }
 
     fn position_builder_at_start(&self, entry: BasicBlock<'ctx>) {
@@ -2503,6 +2555,29 @@ enum Symbol<'ctx> {
     Function {
         val: FunctionValue<'ctx>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+#[must_use]
+enum ControlFlow {
+    Continue,
+    Break,
+}
+
+impl ControlFlow {
+    pub fn do_continue(self) -> bool {
+        match self {
+            ControlFlow::Continue => true,
+            ControlFlow::Break => false,
+        }
+    }
+
+    pub fn as_sym<'ctx>(self, continue_sym: impl FnOnce() -> Symbol<'ctx>) -> Symbol<'ctx> {
+        match self {
+            ControlFlow::Continue => continue_sym(),
+            ControlFlow::Break => Symbol::Never,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

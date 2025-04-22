@@ -786,9 +786,10 @@ impl Ptr<ConstVal> {
 }
 
 impl Ptr<Type> {
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
         debug_assert!(self.replacement.is_none());
-        debug_assert_eq!(self.kind, V::KIND);
+        debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
         debug_assert!(self.upcast().has_type_kind());
         self.cast()
     }
@@ -820,7 +821,7 @@ impl Ptr<Type> {
 
     pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
         debug_assert!(self.replacement.is_none());
-        then!(matches!(self.kind, AstKind::StructDef | AstKind::SliceTy) => self.downcast_struct_def())
+        then!(self.kind.is_struct_kind() => self.downcast_struct_def())
     }
 
     /// Some types (like pointers) are transparent and allow field/method access on its inner type.
@@ -889,7 +890,10 @@ impl Ast {
             return span;
         }
         match self.matchable().as_ref() {
-            AstEnum::PositionalInitializer { lhs, .. } | AstEnum::NamedInitializer { lhs, .. } => {
+            AstEnum::PositionalInitializer { lhs, .. }
+            | AstEnum::NamedInitializer { lhs, .. }
+            | AstEnum::ArrayInitializer { lhs, .. }
+            | AstEnum::ArrayInitializerShort { lhs, .. } => {
                 lhs.map(|e| e.full_span().join(span)).unwrap_or(span)
             },
             AstEnum::Dot { lhs, has_lhs, rhs, .. } => {

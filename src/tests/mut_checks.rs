@@ -34,12 +34,12 @@ fn nested_ptr_slice() {
     assert_eq!(*jit_run_test::<[i64; 3]>(get_code("mut", "mut", "mut")).ok(), [1, 5, 3]);
     test_compile_err(
         get_code("", "", ""),
-        "Cannot modify the value behind an immutable pointer",
+        "Cannot mutate the value behind an immutable pointer",
         |code| TestSpan::of_substr(code, "ptr.* = 5"),
     );
     test_compile_err(
         get_code("", "", "mut"),
-        "Cannot modify the elements of the immutable slice",
+        "Cannot mutate the elements of an immutable slice",
         |code| TestSpan::of_substr(code, "arr[1..][0].&mut"),
     );
     test_compile_err(get_code("", "mut", "mut"), "Cannot mutably reference `arr`", |code| {
@@ -72,7 +72,7 @@ num"
     let out = *jit_run_test::<i64>(get_code("mut")).ok();
     assert_eq!(out, 5);
 
-    test_compile_err(get_code(""), "expected *mut i64; got *i64", |code| {
+    test_compile_err(get_code(""), "mismatched types: expected *mut i64; got *i64", |code| {
         TestSpan::of_substr(code, "num.&")
     });
 }
@@ -102,7 +102,7 @@ fn check_lvalue_mutability() {
 
     let get_code = |mut_marker| format!("mut x := 5; ptr := &{mut_marker} x; ptr.* *= 2; x");
     assert_eq!(*jit_run_test::<i64>(get_code("mut")).ok(), 10);
-    test_compile_err(get_code(""), "Cannot modify the value behind an immutable pointer", |code| {
+    test_compile_err(get_code(""), "Cannot mutate the value behind an immutable pointer", |code| {
         TestSpan::of_substr(code, "ptr.* *= 2")
     });
 
@@ -111,7 +111,7 @@ fn check_lvalue_mutability() {
         format!("mut arr := .[1,2,3]; slice := arr[1..]{mut_marker}; slice[0] = 5; arr")
     };
     assert_eq!(*jit_run_test::<[i64; 3]>(get_code("mut")).ok(), [1, 5, 3]);
-    test_compile_err(get_code(""), "Cannot modify the elements of an immutable slice", |code| {
+    test_compile_err(get_code(""), "Cannot mutate the elements of an immutable slice", |code| {
         TestSpan::of_substr(code, "slice[0] = 5")
     });
 }

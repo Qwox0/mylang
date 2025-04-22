@@ -164,7 +164,7 @@ impl Parser {
                 let span = span.join(close_b_span);
                 expr!(NamedInitializer { lhs: Some(lhs), fields }, span)
             },
-            FollowingOperator::ArrayInitializer => todo!("ArrayInitializer"),
+            FollowingOperator::ArrayInitializer => self.parse_array_initializer(Some(lhs), span)?,
             FollowingOperator::SingleArgNoParenFn => {
                 let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
                 let param = self.alloc(ast::Decl::from_ident(lhs))?;
@@ -591,50 +591,7 @@ impl Parser {
                 let span = span.join(close_b_span);
                 expr!(NamedInitializer { lhs: None, fields }, span)
             },
-            TokenKind::DotOpenBracket => {
-                macro_rules! new_arr_init {
-                    ($elements:expr, $span:expr) => {
-                        expr!(ArrayInitializer { lhs: None, elements: $elements }, $span)
-                    };
-                }
-
-                let Some(first_expr) =
-                    self.advanced().ws0().expr().opt().context("first expr in .[...]")?
-                else {
-                    // `.[]`
-                    let close_b = self.tok(TokenKind::CloseBracket)?;
-                    return Ok(new_arr_init!(self.alloc_empty_slice(), span.join(close_b.span)));
-                };
-                let t = self.ws0().peek_tok()?;
-                let mut kind = match t.kind {
-                    // `.[expr]`
-                    TokenKind::CloseBracket => {
-                        let elements = self.scratch_pool_with_first_val(first_expr)?;
-                        new_arr_init!(self.clone_slice_from_scratch_pool(elements)?, Span::ZERO)
-                    },
-                    // `.[expr; count]`
-                    TokenKind::Semicolon => {
-                        self.advanced().ws0();
-                        let count = self.expr().context("array literal short count")?;
-                        expr!(
-                            ArrayInitializerShort { lhs: None, val: first_expr, count },
-                            Span::ZERO
-                        )
-                    },
-                    // `.[expr,]` or `.[expr, expr, ...]`
-                    TokenKind::Comma => {
-                        self.advanced().ws0();
-                        let elems = self.scratch_pool_with_first_val(first_expr)?;
-                        new_arr_init!(self.expr_list(TokenKind::Comma, elems)?.0, Span::ZERO)
-                    },
-                    _ => {
-                        return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
-                    },
-                };
-                let close_b = self.tok(TokenKind::CloseBracket)?;
-                kind.span = span.join(close_b.span);
-                kind
-            },
+            TokenKind::DotOpenBracket => self.advanced().parse_array_initializer(None, span)?,
             TokenKind::Colon => todo!("TokenKind::Colon"),
             TokenKind::Question => {
                 let inner_ty = self.advanced().expr_(PREOP_PRECEDENCE).expect("type after ?");
@@ -716,6 +673,52 @@ impl Parser {
             }
         };
         Ok((self.clone_slice_from_scratch_pool(fields)?, close_b_span))
+    }
+
+    /// `.[1, 2, ..., 10]`
+    /// `  ^^^^^^^^^^^^^^`
+    fn parse_array_initializer(
+        &mut self,
+        lhs: OPtr<Ast>,
+        open_b_span: Span,
+    ) -> ParseResult<Ptr<Ast>> {
+        macro_rules! new_arr_init {
+            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } $(,)? ) => {{
+                let close_b = self.tok(TokenKind::CloseBracket)?;
+                self.alloc(expr_!($kind { lhs, $($field $(: $val )?),* }, open_b_span.join(close_b.span)))?
+                    .upcast()
+            }}
+        }
+
+        let Some(first_expr) = self.ws0().expr().opt().context("first expr in .[...]")? else {
+            // `.[]`
+            return Ok(new_arr_init!(ArrayInitializer { elements: self.alloc_empty_slice() }));
+        };
+        let t = self.ws0().peek_tok()?;
+        Ok(match t.kind {
+            // `.[expr]`
+            TokenKind::CloseBracket => {
+                let elements = self.scratch_pool_with_first_val(first_expr)?;
+                let elements = self.clone_slice_from_scratch_pool(elements)?;
+                new_arr_init!(ArrayInitializer { elements })
+            },
+            // `.[expr; count]`
+            TokenKind::Semicolon => {
+                self.advanced().ws0();
+                let count = self.expr().context("array literal short count")?;
+                new_arr_init!(ArrayInitializerShort { val: first_expr, count })
+            },
+            // `.[expr,]` or `.[expr, expr, ...]`
+            TokenKind::Comma => {
+                self.advanced().ws0();
+                let elems = self.scratch_pool_with_first_val(first_expr)?;
+                let elements = self.expr_list(TokenKind::Comma, elems)?.0;
+                new_arr_init!(ArrayInitializer { elements })
+            },
+            _ => {
+                return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
+            },
+        })
     }
 
     /// parsing starts after the '->'

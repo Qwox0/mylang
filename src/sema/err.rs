@@ -23,10 +23,6 @@ pub enum SemaErrorKind {
     },
     DuplicateEnumVariant,
     DuplicateField,
-    #[error("Cannot initialize a value of type `{ty}` using an initializer")]
-    CannotApplyInitializer {
-        ty: Ptr<ast::Type>,
-    },
     CannotInferInitializerTy,
     CannotInferAutocastTy,
     DuplicateInInitializer,
@@ -53,11 +49,6 @@ pub enum SemaErrorKind {
     UnexpectedTopLevelExpr(Ptr<Ast>),
 
     NotAConstExpr,
-
-    MismatchedArrayLen {
-        expected: usize,
-        got: usize,
-    },
 
     AllocErr(bumpalo::AllocErr),
 

@@ -1,4 +1,11 @@
-use crate::{ast, display_code::display, error::SpannedError, parser::lexer::Span, ptr::Ptr};
+use crate::{
+    ast::{self, AstKind},
+    display_code::display,
+    error::SpannedError,
+    parser::lexer::Span,
+    ptr::Ptr,
+    util::UnwrapDebug,
+};
 use core::fmt;
 use std::{cmp::Ordering, fmt::Display, io::Write};
 
@@ -66,12 +73,64 @@ pub trait DiagnosticReporter {
         expected: Ptr<ast::Type>,
         got: Ptr<ast::Type>,
     ) {
-        self.error(span, &format_args!("expected {expected}; got {got}"));
+        self.error(span, &format_args!("mismatched types: expected {expected}; got {got}"));
     }
 
     #[track_caller]
-    fn error_duplicate_named_arg(&mut self, arg_name: Ptr<ast::Ident>) {
+    fn error_duplicate_named_arg(&self, arg_name: Ptr<ast::Ident>) {
         cerror!(arg_name.span, "Parameter '{}' specified multiple times", &arg_name.text);
+    }
+
+    #[track_caller]
+    fn error_mutate_const_ptr(&self, full_span: Span, ptr: Ptr<ast::Ast>) {
+        cerror!(full_span, "Cannot mutate the value behind an immutable pointer");
+        chint!(ptr.full_span(), "The pointer type `{}` is not `mut`", ptr.ty.u());
+    }
+
+    #[track_caller]
+    fn error_mutate_const_slice(&self, full_span: Span, slice: Ptr<ast::Ast>) {
+        cerror!(full_span, "Cannot mutate the elements of an immutable slice");
+        chint!(slice.full_span(), "The slice type `{}` is not `mut`", slice.ty.u());
+    }
+
+    #[track_caller]
+    fn error_cannot_apply_initializer(
+        &mut self,
+        initializer_kind: InitializerKind,
+        lhs: Ptr<ast::Ast>,
+    ) {
+        if let Some(lhs_ty) = lhs.try_downcast_type() {
+            cerror!(
+                lhs.full_span(),
+                "Cannot initialize a value of type `{lhs_ty}` using {initializer_kind} initializer"
+            );
+            if lhs_ty.kind == AstKind::StructDef {
+                chint!(Span::ZERO, "Consider using a positional initializer (`.(...)`) instead")
+            }
+        } else {
+            cerror!(
+                lhs.full_span(),
+                "Cannot apply {initializer_kind} initializer to a value of type `{}`",
+                lhs.ty.u()
+            );
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub enum InitializerKind {
+    Array,
+    Positional,
+    Named,
+}
+
+impl std::fmt::Display for InitializerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            InitializerKind::Array => "an array",
+            InitializerKind::Positional => "a positional",
+            InitializerKind::Named => "a named",
+        })
     }
 }
 

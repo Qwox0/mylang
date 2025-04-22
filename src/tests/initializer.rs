@@ -1,4 +1,5 @@
-use crate::tests::jit_run_test;
+use super::test_compile_err;
+use crate::tests::{TestSpan, jit_run_test};
 
 #[test]
 fn initializer_on_struct_type() {
@@ -86,8 +87,8 @@ MyStruct :: struct {
     c: [3]f64,
 };
 
-a: MyStruct;
-ptr := &a;
+mut a: MyStruct;
+ptr := &mut a;
 ptr.{
     a = 5,
     c = .[5.2, 2.0, 3.3],
@@ -141,4 +142,25 @@ Vec3 :: struct { x: f32, y: f32, z: f32 };
 Vec3.(1.0, 0.0, 2.5)";
     let res = jit_run_test::<Vec3>(code);
     assert_eq!(*res.ok(), Vec3 { x: 1.0, y: 0.0, z: 2.5 });
+}
+
+#[test]
+fn initializer_on_ref_mut_check() {
+    #[rustfmt::skip]
+    let code = |mut_, initializer_code| format!("
+MyStruct :: struct {{ x: i32 }};
+{mut_} val := MyStruct.(5);
+ptr := val.&{mut_};
+ptr{initializer_code};
+val");
+
+    for initializer_code in [".(10)", ".{ x = 10 }"] {
+        assert_eq!(*jit_run_test::<i32>(code("mut", initializer_code)).ok(), 10);
+
+        test_compile_err(
+            code("", initializer_code),
+            "Cannot mutate the value behind an immutable pointer",
+            |code| TestSpan::of_substr(code, &format!("ptr{initializer_code}")),
+        );
+    }
 }

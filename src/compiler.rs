@@ -205,23 +205,14 @@ pub fn compile_file(
         return CompileResult::ModuleForTesting(BackendModule { context, module });
     }
 
-    if mode == CompileMode::Run && args.out != OutKind::Executable {
-        ctx.error_without_code("Cannot run program if `--out` is not `exe`");
-        return CompileResult::Err;
-    }
-
-    if args.out == OutKind::None {
-        if args.print_compile_time {
-            ctx.compile_time.print();
-        }
-        return CompileResult::Ok;
-    }
-
     let exe_file_path = Path::new("out").join(args.path.file_stem().unwrap());
     let obj_file_path = exe_file_path.with_added_extension("o");
-    let write_obj_file_start = Instant::now();
-    module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
-    ctx.compile_time.writing_obj = write_obj_file_start.elapsed();
+
+    if args.out != OutKind::None {
+        let write_obj_file_start = Instant::now();
+        module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
+        ctx.compile_time.writing_obj = write_obj_file_start.elapsed();
+    }
 
     if args.out == OutKind::Executable {
         let linking_start = std::time::Instant::now();
@@ -263,12 +254,19 @@ pub fn compile_file(
 
     // ##### Executing #####
 
-    if args.out == OutKind::Executable && mode == CompileMode::Run {
-        println!("\nRunning `{}`", exe_file_path.display());
-        if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
-            println!("{e}");
-            return CompileResult::RunErr { err_code: e.code().unwrap_or(1) };
-        }
+    if mode != CompileMode::Run {
+        return CompileResult::Ok;
+    }
+
+    if args.out != OutKind::Executable {
+        ctx.error_without_code("Cannot run program if `--out` is not `exe`");
+        return CompileResult::Err;
+    }
+
+    println!("\nRunning `{}`", exe_file_path.display());
+    if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
+        println!("{e}");
+        return CompileResult::RunErr { err_code: e.code().unwrap_or(1) };
     }
 
     CompileResult::Ok
@@ -304,15 +302,13 @@ impl CompileDurations {
         println!("  Backend:               {:?}", backend_total);
         println!("    LLVM Setup:            {:?}", self.backend_setup);
         println!("    LLVM pass pipeline:    {:?}", self.optimization);
-        if self.writing_obj.is_zero() {
-            return;
+        if !self.writing_obj.is_zero() {
+            println!("    writing obj file:      {:?}", self.writing_obj);
         }
-        println!("    writing obj file:      {:?}", self.writing_obj);
 
-        if self.linking.is_zero() {
-            return;
+        if !self.linking.is_zero() {
+            println!("  Linking:               {:?}", self.linking);
         }
-        println!("  Linking:               {:?}", self.linking);
 
         let total = frontend_total + backend_total + self.linking;
         println!("  Total:                 {:?}", total);

@@ -10,7 +10,7 @@ use crate::{
     },
     cli::BuildArgs,
     context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostics::{DiagnosticReporter, cerror, chint, cinfo, cwarn},
+    diagnostics::{DiagnosticReporter, InitializerKind, cerror, chint, cinfo, cwarn},
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -47,6 +47,7 @@ macro_rules! check_and_set_target {
             ty
         };
         *target_ty = Some(common_ty);
+        target_ty.as_mut().u()
     }};
 }
 
@@ -128,8 +129,10 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     order
 }
 
-/// TODO: add support for libs (without main fn)
 pub fn validate_main(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>], args: &BuildArgs) {
+    if args.is_lib {
+        return;
+    }
     let root_file = cctx.files[cctx.root_file_idx.u()];
     let mut decl_iter = stmts[root_file.stmt_range.u()]
         .iter()
@@ -258,6 +261,50 @@ impl Sema {
             }};
         }
 
+        macro_rules! analyze_array_initializer_lhs {
+            ($lhs:expr, $init_count:expr $(,)?) => {{
+                let lhs: OPtr<Ast> = $lhs;
+                if let Some(lhs) = lhs {
+                    analyze!(lhs, None);
+                }
+                let lhs = lhs.or_else(|| {
+                    // Here we can't set `expr.ty` to `ty_hint` because the there might be a length mismatch
+                    ty_hint.try_downcast::<ast::ArrayTy>().map(|arr_ty| arr_ty.elem_ty)
+                });
+
+                if let Some(lhs) = lhs {
+                    Some(if let Some(elem_ty) = lhs.try_downcast_type() {
+                        elem_ty
+                    } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
+                        && let Some(arr_ty) = ptr_ty.pointee.try_downcast::<ast::ArrayTy>()
+                    {
+                        if self.cctx.do_mut_checks && !ptr_ty.is_mut {
+                            self.cctx.error_mutate_const_ptr(expr.full_span(), lhs);
+                            return SemaResult::HandledErr;
+                        }
+                        expr.ty = Some(ptr_ty.upcast_to_type());
+                        let count: usize = $init_count;
+                        if count != arr_ty.len.int() {
+                            cerror!(
+                                expr.full_span(),
+                                "Cannot initialize the array behind the pointer `{}` with {count} \
+                                 items",
+                                ptr_ty.upcast_to_type(),
+                            );
+                            return SemaResult::HandledErr;
+                        }
+                        arr_ty.elem_ty.downcast_type()
+                    } else {
+                        // TODO: also allow lhs slices?
+                        self.cctx.error_cannot_apply_initializer(InitializerKind::Array, lhs);
+                        return SemaResult::HandledErr;
+                    })
+                } else {
+                    None
+                }
+            }};
+        }
+
         match expr.matchable().as_mut() {
             AstEnum::Ident { text, decl, .. } => {
                 let sym = self.get_symbol(*text, expr.span);
@@ -328,10 +375,15 @@ impl Sema {
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
                     && let Some(s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
                 {
+                    if self.cctx.do_mut_checks && !ptr_ty.is_mut {
+                        self.cctx.error_mutate_const_ptr(expr.full_span(), lhs);
+                        return SemaResult::HandledErr;
+                    }
                     self.validate_call(&s.fields, args, span.end())?;
                     expr.ty = Some(ptr_ty.upcast_to_type())
                 } else {
-                    return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
+                    self.cctx.error_cannot_apply_initializer(InitializerKind::Positional, lhs);
+                    return SemaResult::HandledErr;
                 };
             },
             AstEnum::NamedInitializer { lhs, fields: values, .. } => {
@@ -352,41 +404,23 @@ impl Sema {
                     && let Some(struct_ty) = ptr_ty.pointee.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
+                    if self.cctx.do_mut_checks && !ptr_ty.is_mut {
+                        self.cctx.error_mutate_const_ptr(expr.full_span(), lhs);
+                        return SemaResult::HandledErr;
+                    }
                     self.validate_initializer(struct_ty, *values, is_const, span)?;
                     expr.ty = Some(ptr_ty.upcast_to_type())
                 } else {
-                    return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
+                    self.cctx.error_cannot_apply_initializer(InitializerKind::Named, lhs);
+                    return SemaResult::HandledErr;
                 };
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
-                if let Some(lhs) = *lhs {
-                    analyze!(lhs, None);
-                }
-                let lhs = lhs.or_else(|| ty_hint.upcast().filter(|t| t.kind == AstKind::ArrayTy));
-
                 let mut elem_iter = elements.iter().copied();
 
-                let mut elem_ty = if let Some(lhs) = lhs {
-                    let arr_ty = if let Some(arr_ty) = lhs.try_downcast::<ast::ArrayTy>() {
-                        expr.ty = Some(arr_ty.upcast_to_type());
-                        arr_ty
-                    } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
-                        && let Some(arr_ty) = ptr_ty.pointee.try_downcast::<ast::ArrayTy>()
-                    {
-                        expr.ty = Some(ptr_ty.upcast_to_type());
-                        arr_ty
-                    } else {
-                        return err(CannotApplyInitializer { ty: lhs.ty.u() }, lhs.full_span());
-                    };
-
-                    if elements.len() != arr_ty.len.int() {
-                        return err(
-                            MismatchedArrayLen { expected: arr_ty.len.int(), got: elements.len() },
-                            expr.full_span(),
-                        );
-                    }
-
-                    arr_ty.elem_ty.downcast_type()
+                let elem_ty = analyze_array_initializer_lhs!(*lhs, elements.len());
+                let mut elem_ty = if let Some(elem_ty) = elem_ty {
+                    elem_ty
                 } else {
                     let Some(elem) = elem_iter.next() else {
                         expr.ty = Some(p.empty_array_ty.upcast_to_type()); // `.[]`
@@ -398,7 +432,8 @@ impl Sema {
                 let orig_elem_ty = elem_ty;
 
                 for elem in elem_iter {
-                    let ty = *analyze!(elem, Some(elem_ty));
+                    self.analyze(elem, &Some(elem_ty), is_const)?;
+                    let ty = elem.ty.u();
                     let Some(common_ty) = common_type(ty, elem_ty) else {
                         self.cctx.error_mismatched_types(elem.full_span(), elem_ty, ty);
                         return SemaResult::HandledErr;
@@ -409,7 +444,7 @@ impl Sema {
                 #[cfg(debug_assertions)]
                 debug_assert!(lhs.is_none() || elem_ty == orig_elem_ty);
 
-                if lhs.is_none() {
+                if lhs.is_none() || expr.ty.is_none() {
                     let len = elements.len() as i64;
                     let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
                     let elem_ty = elem_ty.upcast();
@@ -417,17 +452,24 @@ impl Sema {
                     debug_assert!(expr.ty.is_none());
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
+
+                assert!(!is_const, "todo: const array");
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
-                assert!(!is_const, "todo: const array");
-                assert!(lhs.is_none(), "todo: array initializer with lhs");
                 let u64_ty = p.u64;
                 analyze!(*count, Some(u64_ty), true);
                 self.ty_match(*count, u64_ty)?;
                 let len = count.try_get_const_val()?.upcast();
-                let elem_ty = analyze!(*val, None).upcast();
+
+                let mut elem_ty = analyze_array_initializer_lhs!(*lhs, len.int());
+
+                let val_ty = *analyze!(*val, elem_ty);
+                let elem_ty =
+                    check_and_set_target!(val_ty, &mut elem_ty, val.return_val_span()).upcast();
                 let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?.upcast_to_type();
                 expr.ty = Some(arr_ty);
+
+                assert!(!is_const, "todo: const array");
             },
             AstEnum::Dot { lhs: Some(lhs), rhs, .. } => {
                 let lhs_ty = *analyze!(*lhs, None);
@@ -1002,8 +1044,8 @@ impl Sema {
 
                     if let Some(body) = *body {
                         self.analyze(body, ret_ty, false)?;
-                        check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span());
-                        ret_ty.as_mut().u().finalize();
+                        check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span())
+                            .finalize();
                     } else {
                         panic_debug("this function has already been analyzed as a function type")
                     }
@@ -1285,8 +1327,7 @@ impl Sema {
         }
         let res = if let Some(init) = decl.init {
             self.analyze(init, &decl.var_ty, decl.is_const)?;
-            check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span());
-            decl.var_ty.as_mut().u().finalize();
+            check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
             init.as_mut().ty = Some(decl.var_ty.u());
             Ok(())
         } else if decl.var_ty.is_some() {
@@ -1517,7 +1558,7 @@ impl Sema {
                 }
                 cerror!(
                     full_expr.full_span(),
-                    "Cannot modify the value behind an immutable pointer"
+                    "Cannot mutate the value behind an immutable pointer"
                 );
                 chint!(
                     ptr.full_span(),
@@ -1531,7 +1572,7 @@ impl Sema {
                 if slice_ty.is_mut {
                     return Ok(());
                 }
-                cerror!(full_expr.full_span(), "Cannot modify the elements of an immutable slice");
+                cerror!(full_expr.full_span(), "Cannot mutate the elements of an immutable slice");
                 chint!(
                     slice.full_span(),
                     "The slice type `{}` is not `mut`",
@@ -1578,32 +1619,19 @@ impl Sema {
             },
             MutatedValue::Ptr(ptr) => {
                 let ptr_ty = ptr.ty.downcast::<ast::PtrTy>();
-                if ptr_ty.is_mut {
-                    return Ok(());
+                if !ptr_ty.is_mut {
+                    self.cctx.error_mutate_const_ptr(full_expr.full_span(), ptr);
+                    return SemaResult::HandledErr;
                 }
-                cerror!(
-                    full_expr.full_span(),
-                    "Cannot modify the value behind an immutable pointer"
-                );
-                chint!(
-                    ptr.full_span(),
-                    "The pointer type `{}` is not `mut`",
-                    ptr_ty.upcast_to_type()
-                );
-                SemaResult::HandledErr
+                Ok(())
             },
             MutatedValue::Slice(slice) => {
                 let slice_ty = slice.ty.downcast::<ast::SliceTy>();
-                if slice_ty.is_mut {
-                    return Ok(());
+                if !slice_ty.is_mut {
+                    self.cctx.error_mutate_const_slice(full_expr.full_span(), slice);
+                    return SemaResult::HandledErr;
                 }
-                cerror!(full_expr.full_span(), "Cannot modify the elements of the immutable slice",);
-                chint!(
-                    slice.full_span(),
-                    "The slice type `{}` is not `mut`",
-                    slice_ty.upcast_to_type()
-                );
-                SemaResult::HandledErr
+                Ok(())
             },
             MutatedValue::None => Ok(()),
         }

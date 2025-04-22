@@ -4,7 +4,7 @@ use mylang::{
     context::CompilationContext,
     ptr::Ptr,
 };
-use std::path::Path;
+use std::{path::Path, process::Command};
 
 fn test_file(file_path: &str) {
     std::env::set_current_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"))).unwrap();
@@ -48,4 +48,17 @@ fn error_no_main() {
     let res = mylang::compiler::compile(Ptr::from_ref(&ctx), CompileMode::Run, &mut args);
     assert!(matches!(res, CompileResult::Err));
     // TODO: check the error message
+}
+
+#[test]
+fn c_ffi_take_array_arg() {
+    let test_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("./tests/c_ffi_take_array_arg/run.sh");
+    let out = Command::new("sh").arg(test_path).output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end()
+            .ends_with("got array: [1,2,3,4,]")
+    );
 }

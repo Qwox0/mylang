@@ -241,7 +241,7 @@ fn fix_panic() {
     let _err = jit_run_test_raw::<()>("f :: (x: i32) -> {}; test :: -> f(xx i32);")
         .errors()
         .expect_one();
-    // TODO: check if err is type missmatch
+    // TODO: check if err is type mismatch
     panic!("OK")
 }
 
@@ -264,13 +264,6 @@ for _ in 0..10 {} // currently a ';' is required
 .{ val = 3 }";
     let out = *jit_run_test::<i32>(code).ok();
     assert_eq!(out, 3);
-}
-
-#[test]
-#[ignore = "not yet implemented"]
-fn array_constant() {
-    let out = *jit_run_test::<[i64; 5]>("MY_NUMBERS :: .[1,2,3,4,5]; MY_NUMBERS").ok();
-    debug_assert_eq!(out, [1, 2, 3, 4, 5]);
 }
 
 #[test]

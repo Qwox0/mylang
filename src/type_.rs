@@ -106,7 +106,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if let Some(lhs) = lhs.try_downcast::<ast::ArrayTy>() {
         return match rhs.try_downcast::<ast::ArrayTy>() {
-            Some(rhs) if lhs.len.int::<u64>() == lhs.len.int::<u64>() => {
+            Some(rhs) if lhs.len.int::<u64>() == rhs.len.int::<u64>() => {
                 common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type())
             },
             _ => Mismatch,

@@ -39,6 +39,9 @@ pub struct BuildArgs {
     #[clap(skip = true)]
     pub print_compile_time: bool,
 
+    #[arg(long = "lib")]
+    pub is_lib: bool,
+
     /// The name of the first function called by the program
     #[arg(long, default_value = "main")]
     pub entry_point: String,
@@ -96,11 +99,12 @@ impl BuildArgs {
     /// for tests
     pub fn test_args(opt: TestArgsOptions) -> Self {
         BuildArgs {
-            path: PathBuf::new(),
+            path: PathBuf::from("test.mylang"),
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,
             print_compile_time: false,
+            is_lib: false,
             entry_point: opt.entry_point.to_string(),
             debug_ast: opt.debug_ast,
             debug_types: opt.debug_types,
