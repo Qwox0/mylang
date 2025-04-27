@@ -465,16 +465,15 @@ pub fn is_whitespace(c: char) -> bool {
     )
 }
 
-pub fn is_id_start(c: char) -> bool {
+pub fn is_ident_start(c: char) -> bool {
     c == '_' || unicode_xid::UnicodeXID::is_xid_start(c)
 }
 
-pub fn is_id_continue(c: char) -> bool {
+pub fn is_ident_continue(c: char) -> bool {
     unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
 #[derive(Debug, Clone, Copy)]
-//#[derive(Debug, Clone)]
 pub struct Lexer {
     pub code: Cursor,
     next_tok: Option<Token>,
@@ -502,274 +501,15 @@ impl Lexer {
             .unwrap_or_else(|| Span::pos(self.get_code().len(), Some(self.file)))
     }
 
-    /*
-    pub fn span_to(&self, other: Lexer<'_>) -> Span {
-        self.pos_span().join(other.pos_span())
-    }
-    */
-
     pub fn advanced(mut self) -> Self {
         self.advance();
         self
     }
 
     fn load_next(&mut self) -> Option<Token> {
-        /// peeks at the next char, matches the patterns and advances `self` if
-        /// needed. the `default` value is returns if no pattern matches
-        /// the peeked char
-        macro_rules! maybe_followed_by {
-            (
-                default: $default:expr,
-                $( $peek_char_option:pat => $option_res:expr ),* $(,)?
-            ) => {
-                match self.code.peek() {
-                    $(Some($peek_char_option) => {
-                        self.code.advance();
-                        $option_res
-                    },)*
-                    _ => $default,
-                }
-            };
-        }
-
         let start = self.code.pos;
-        let kind = match self.code.next()? {
-            w if is_whitespace(w) => {
-                self.code.advance_while(is_whitespace);
-                TokenKind::Whitespace
-            },
-            '"' => self.string_literal(),
-            '\'' => self.char_literal(),
-            '0' => self.num_literal_with_prefix(),
-            '0'..='9' => self.num_literal(),
-
-            '(' => TokenKind::OpenParenthesis,
-            ')' => TokenKind::CloseParenthesis,
-            '[' => TokenKind::OpenBracket,
-            ']' => TokenKind::CloseBracket,
-            '{' => TokenKind::OpenBrace,
-            '}' => TokenKind::CloseBrace,
-
-            '=' => maybe_followed_by! {
-                default: TokenKind::Eq,
-                '=' => TokenKind::EqEq,
-                '>' => TokenKind::FatArrow,
-            },
-            '!' => maybe_followed_by! {
-                default: TokenKind::Bang,
-                '=' => TokenKind::BangEq,
-            },
-            '<' => maybe_followed_by! {
-                default: TokenKind::Lt,
-                '=' => TokenKind::LtEq,
-                '<' => maybe_followed_by! {
-                    default: TokenKind::LtLt,
-                    '=' => TokenKind::LtLtEq,
-                },
-            },
-            '>' => maybe_followed_by! {
-                default: TokenKind::Gt,
-                '=' => TokenKind::GtEq,
-                '>' => maybe_followed_by! {
-                    default: TokenKind::GtGt,
-                    '=' => TokenKind::GtGtEq,
-                },
-            },
-
-            '+' => maybe_followed_by! {
-                default: TokenKind::Plus,
-                '=' => TokenKind::PlusEq,
-            },
-            '-' => maybe_followed_by! {
-                default: TokenKind::Minus,
-                '=' => TokenKind::MinusEq,
-                '>' => TokenKind::Arrow,
-            },
-            '*' => maybe_followed_by! {
-                default: TokenKind::Asterisk,
-                '=' => TokenKind::AsteriskEq,
-            },
-            '/' => maybe_followed_by! {
-                default: TokenKind::Slash,
-                '/' => self.line_comment(),
-                '*' => self.block_comment(),
-                '=' => TokenKind::SlashEq,
-            },
-            '%' => maybe_followed_by! {
-                default: TokenKind::Percent,
-                '=' => TokenKind::PercentEq,
-            },
-
-            '&' => maybe_followed_by! {
-                default: TokenKind::Ampersand,
-                '&' => maybe_followed_by! {
-                    default: TokenKind::AmpersandAmpersand,
-                    '=' => TokenKind::AmpersandAmpersandEq,
-                },
-                '=' => TokenKind::AmpersandEq,
-            },
-            '|' => maybe_followed_by! {
-                default: TokenKind::Pipe,
-                '|' => maybe_followed_by! {
-                    default: TokenKind::PipePipe,
-                    '=' => TokenKind::PipePipeEq,
-                },
-                '=' => TokenKind::PipeEq,
-                '>' => TokenKind::PipeGt,
-            },
-            '^' => maybe_followed_by! {
-                default: TokenKind::Caret,
-                '=' => TokenKind::CaretEq,
-            },
-
-            '.' => maybe_followed_by! {
-                default: TokenKind::Dot,
-                '.' => maybe_followed_by! {
-                    default: TokenKind::DotDot,
-                    '=' => TokenKind::DotDotEq,
-                },
-                '*' => TokenKind::DotAsterisk,
-                '&' => TokenKind::DotAmpersand,
-                '(' => TokenKind::DotOpenParenthesis,
-                '[' => TokenKind::DotOpenBracket,
-                '{' => TokenKind::DotOpenBrace,
-            },
-            ',' => TokenKind::Comma,
-            ':' => maybe_followed_by! {
-                default: TokenKind::Colon,
-                ':' => TokenKind::ColonColon,
-                '=' => TokenKind::ColonEq,
-            },
-            ';' => TokenKind::Semicolon,
-            '?' => TokenKind::Question,
-            '#' => TokenKind::Pound,
-            '$' => TokenKind::Dollar,
-            '@' => TokenKind::At,
-            '~' => TokenKind::Tilde,
-            '\\' => maybe_followed_by! {
-                default: TokenKind::Backslash,
-                '\\' => self.multiline_string_literal_line(),
-            },
-
-            'b' => maybe_followed_by! {
-                default: self.ident_like(start),
-                '\'' => self.bchar_literal()
-            },
-            c if is_id_start(c) => self.ident_like(start),
-
-            _ => TokenKind::Unknown,
-        };
+        let kind = parse_next_token_kind(&mut self.code)?;
         Some(Token { kind, span: Span::new(start..self.code.pos, Some(self.file)) })
-    }
-
-    fn string_literal(&mut self) -> TokenKind {
-        while let Some(c) = self.code.next() {
-            match c {
-                '\"' => break,
-                '\\' => {
-                    let escape_char = self.code.next();
-                    debug_assert_matches!(
-                        escape_char,
-                        Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"')
-                    )
-                },
-                _ => {},
-            }
-        }
-        TokenKind::StrLit
-    }
-
-    fn multiline_string_literal_line(&mut self) -> TokenKind {
-        while self.code.next().is_some_and(|c| c != '\n') {}
-        TokenKind::MultilineStrLitLine
-    }
-
-    fn bchar_literal(&mut self) -> TokenKind {
-        self.char_literal();
-        TokenKind::BCharLit
-    }
-
-    fn char_literal(&mut self) -> TokenKind {
-        while let Some(c) = self.code.next() {
-            match c {
-                '\'' | '\n' => break,
-                '\\' => {
-                    let escape_char = self.code.next();
-                    debug_assert_matches!(
-                        escape_char,
-                        Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"')
-                    )
-                },
-                _ => {},
-            }
-        }
-        TokenKind::CharLit
-    }
-
-    fn num_literal(&mut self) -> TokenKind {
-        self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-        match self.code.peek().zip(self.code.peek2()) {
-            // an integer might be followed by a range operator `..` or a method `1.foo()`
-            Some(('.', c)) if c != '.' && !is_id_start(c) => {
-                self.code.advance();
-                self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-                TokenKind::FloatLit
-            },
-            _ => TokenKind::IntLit,
-        }
-    }
-
-    fn num_literal_with_prefix(&mut self) -> TokenKind {
-        if self.code.advance_if(|c| matches!(c, 'b' | 'o' | 'x')) {
-            self.code.advance_while(|c| matches!(c, '0'..='9' | '_'));
-            TokenKind::IntLit
-        } else {
-            self.num_literal()
-        }
-    }
-
-    fn line_comment(&mut self) -> TokenKind {
-        let t = match self.code.peek() {
-            Some('!') => TokenKind::LineDocInner,
-            Some('/') => TokenKind::LineDocOuter,
-            _ => TokenKind::LineComment,
-        };
-        while !matches!(self.code.next(), None | Some('\n')) {}
-        t
-    }
-
-    fn block_comment(&mut self) -> TokenKind {
-        let t = match self.code.peek() {
-            Some('!') => TokenKind::BlockDocInner,
-            // `/**/` => CommentType::Comment
-            Some('*') if self.code.peek2() != Some('/') => TokenKind::BlockDocOuter,
-            _ => TokenKind::BlockComment,
-        };
-
-        let mut depth: usize = 1;
-        while let Some(c) = self.code.next() {
-            match c {
-                '/' if self.code.advance_if(|c| c == '*') => depth += 1,
-                '*' if self.code.advance_if(|c| c == '/') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                },
-                _ => (),
-            }
-        }
-
-        t
-    }
-
-    fn ident_like(&mut self, start: usize) -> TokenKind {
-        self.code.advance_while(is_id_continue);
-        match &self.get_code().0[start..self.code.pos] {
-            "true" => TokenKind::BoolLitTrue,
-            "false" => TokenKind::BoolLitFalse,
-            s => s.parse::<Keyword>().map(TokenKind::Keyword).unwrap_or(TokenKind::Ident),
-        }
     }
 
     #[inline]
@@ -795,6 +535,278 @@ impl ParserInterface for Lexer {
 
     fn peek(&self) -> Option<Self::PeekedItem> {
         self.next_tok
+    }
+}
+
+fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
+    /// peeks at the next char, matches the patterns and advances `self` if
+    /// needed. the `default` value is returns if no pattern matches
+    /// the peeked char
+    macro_rules! maybe_followed_by {
+        (
+            default: $default:expr,
+            $( $peek_char_option:pat => $option_res:expr ),* $(,)?
+        ) => {
+            match lex.peek() {
+                $(Some($peek_char_option) => {
+                    lex.advance();
+                    $option_res
+                },)*
+                _ => $default,
+            }
+        };
+    }
+
+    let start = lex.pos;
+    Some(match lex.next()? {
+        w if is_whitespace(w) => {
+            lex.advance_while(is_whitespace);
+            TokenKind::Whitespace
+        },
+        '"' => string_literal(lex),
+        '\'' => char_literal(lex),
+        '0' => num_literal_with_prefix(lex),
+        '0'..='9' => num_literal(lex),
+
+        '(' => TokenKind::OpenParenthesis,
+        ')' => TokenKind::CloseParenthesis,
+        '[' => TokenKind::OpenBracket,
+        ']' => TokenKind::CloseBracket,
+        '{' => TokenKind::OpenBrace,
+        '}' => TokenKind::CloseBrace,
+
+        '=' => maybe_followed_by! {
+            default: TokenKind::Eq,
+            '=' => TokenKind::EqEq,
+            '>' => TokenKind::FatArrow,
+        },
+        '!' => maybe_followed_by! {
+            default: TokenKind::Bang,
+            '=' => TokenKind::BangEq,
+        },
+        '<' => maybe_followed_by! {
+            default: TokenKind::Lt,
+            '=' => TokenKind::LtEq,
+            '<' => maybe_followed_by! {
+                default: TokenKind::LtLt,
+                '=' => TokenKind::LtLtEq,
+            },
+        },
+        '>' => maybe_followed_by! {
+            default: TokenKind::Gt,
+            '=' => TokenKind::GtEq,
+            '>' => maybe_followed_by! {
+                default: TokenKind::GtGt,
+                '=' => TokenKind::GtGtEq,
+            },
+        },
+
+        '+' => maybe_followed_by! {
+            default: TokenKind::Plus,
+            '=' => TokenKind::PlusEq,
+        },
+        '-' => maybe_followed_by! {
+            default: TokenKind::Minus,
+            '=' => TokenKind::MinusEq,
+            '>' => TokenKind::Arrow,
+        },
+        '*' => maybe_followed_by! {
+            default: TokenKind::Asterisk,
+            '=' => TokenKind::AsteriskEq,
+        },
+        '/' => maybe_followed_by! {
+            default: TokenKind::Slash,
+            '/' => line_comment(lex),
+            '*' => block_comment(lex),
+            '=' => TokenKind::SlashEq,
+        },
+        '%' => maybe_followed_by! {
+            default: TokenKind::Percent,
+            '=' => TokenKind::PercentEq,
+        },
+
+        '&' => maybe_followed_by! {
+            default: TokenKind::Ampersand,
+            '&' => maybe_followed_by! {
+                default: TokenKind::AmpersandAmpersand,
+                '=' => TokenKind::AmpersandAmpersandEq,
+            },
+            '=' => TokenKind::AmpersandEq,
+        },
+        '|' => maybe_followed_by! {
+            default: TokenKind::Pipe,
+            '|' => maybe_followed_by! {
+                default: TokenKind::PipePipe,
+                '=' => TokenKind::PipePipeEq,
+            },
+            '=' => TokenKind::PipeEq,
+            '>' => TokenKind::PipeGt,
+        },
+        '^' => maybe_followed_by! {
+            default: TokenKind::Caret,
+            '=' => TokenKind::CaretEq,
+        },
+
+        '.' => maybe_followed_by! {
+            default: TokenKind::Dot,
+            '.' => maybe_followed_by! {
+                default: TokenKind::DotDot,
+                '=' => TokenKind::DotDotEq,
+            },
+            '*' => TokenKind::DotAsterisk,
+            '&' => TokenKind::DotAmpersand,
+            '(' => TokenKind::DotOpenParenthesis,
+            '[' => TokenKind::DotOpenBracket,
+            '{' => TokenKind::DotOpenBrace,
+        },
+        ',' => TokenKind::Comma,
+        ':' => maybe_followed_by! {
+            default: TokenKind::Colon,
+            ':' => TokenKind::ColonColon,
+            '=' => TokenKind::ColonEq,
+        },
+        ';' => TokenKind::Semicolon,
+        '?' => TokenKind::Question,
+        '#' => TokenKind::Pound,
+        '$' => TokenKind::Dollar,
+        '@' => TokenKind::At,
+        '~' => TokenKind::Tilde,
+        '\\' => maybe_followed_by! {
+            default: TokenKind::Backslash,
+            '\\' => multiline_string_literal_line(lex),
+        },
+
+        'b' => maybe_followed_by! {
+            default: ident_like(lex, start),
+            '\'' => bchar_literal(lex)
+        },
+        c if is_ident_start(c) => ident_like(lex, start),
+
+        _ => TokenKind::Unknown,
+    })
+}
+
+fn string_literal(lex: &mut Cursor) -> TokenKind {
+    while let Some(c) = lex.next() {
+        match c {
+            '\"' => break,
+            '\\' => {
+                let escape_char = lex.next();
+                debug_assert_matches!(escape_char, Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"'))
+            },
+            _ => {},
+        }
+    }
+    TokenKind::StrLit
+}
+
+fn multiline_string_literal_line(lex: &mut Cursor) -> TokenKind {
+    while lex.next().is_some_and(|c| c != '\n') {}
+    TokenKind::MultilineStrLitLine
+}
+
+fn bchar_literal(lex: &mut Cursor) -> TokenKind {
+    char_literal(lex);
+    TokenKind::BCharLit
+}
+
+fn char_literal(lex: &mut Cursor) -> TokenKind {
+    while let Some(c) = lex.next() {
+        match c {
+            '\'' | '\n' => break,
+            '\\' => {
+                let escape_char = lex.next();
+                debug_assert_matches!(escape_char, Some('n' | 'r' | 't' | '\\' | '0' | '\'' | '\"'))
+            },
+            _ => {},
+        }
+    }
+    TokenKind::CharLit
+}
+
+fn num_literal(lex: &mut Cursor) -> TokenKind {
+    lex.advance_while(|c| matches!(c, '0'..='9' | '_'));
+
+    let mut peek_lex = lex.clone();
+    match parse_next_token_kind(&mut peek_lex) {
+        Some(TokenKind::Dot) => {
+            // Note: '_' is not a valid first digit.
+            if peek_lex.advance_if(|c| matches!(c, '0'..='9')) {
+                peek_lex.advance_while(|c| matches!(c, '0'..='9' | '_'));
+                *lex = peek_lex;
+                TokenKind::FloatLit
+            } else {
+                let dot_pos = peek_lex.pos;
+                peek_lex.advance_while(is_whitespace);
+                if parse_next_token_kind(&mut peek_lex).is_some_and(|t| t == TokenKind::Ident) {
+                    TokenKind::IntLit
+                } else {
+                    lex.pos = dot_pos;
+                    TokenKind::FloatLit
+                }
+            }
+        },
+        _ => TokenKind::IntLit,
+    }
+}
+
+fn num_literal_with_prefix(lex: &mut Cursor) -> TokenKind {
+    // invalid digits like `0b2` are handled later
+    let digit_matcher = match lex.peek() {
+        Some('b') | Some('o') => |c| matches!(c, '0'..='9' | '_'),
+        Some('x') => |c| matches!(c, '0'..='9' | 'a'..'f' | 'A'..'F' | '_'),
+        _ => return num_literal(lex),
+    };
+    if lex.peek2().is_some_and(digit_matcher) {
+        lex.advance();
+        lex.advance_while(digit_matcher);
+    } else {
+        // weird invalid case like `0b` => `0`: IntLit, `b`: Ident
+    }
+    TokenKind::IntLit
+}
+
+fn line_comment(code: &mut Cursor) -> TokenKind {
+    let t = match code.peek() {
+        Some('!') => TokenKind::LineDocInner,
+        Some('/') => TokenKind::LineDocOuter,
+        _ => TokenKind::LineComment,
+    };
+    while !matches!(code.next(), None | Some('\n')) {}
+    t
+}
+
+fn block_comment(code: &mut Cursor) -> TokenKind {
+    let t = match code.peek() {
+        Some('!') => TokenKind::BlockDocInner,
+        // `/**/` => CommentType::Comment
+        Some('*') if code.peek2() != Some('/') => TokenKind::BlockDocOuter,
+        _ => TokenKind::BlockComment,
+    };
+
+    let mut depth: usize = 1;
+    while let Some(c) = code.next() {
+        match c {
+            '/' if code.advance_if(|c| c == '*') => depth += 1,
+            '*' if code.advance_if(|c| c == '/') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            },
+            _ => (),
+        }
+    }
+
+    t
+}
+
+fn ident_like(code: &mut Cursor, start: usize) -> TokenKind {
+    code.advance_while(is_ident_continue);
+    match &code.code.0[start..code.pos] {
+        "true" => TokenKind::BoolLitTrue,
+        "false" => TokenKind::BoolLitFalse,
+        s => s.parse::<Keyword>().map(TokenKind::Keyword).unwrap_or(TokenKind::Ident),
     }
 }
 

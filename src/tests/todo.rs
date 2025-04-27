@@ -273,10 +273,3 @@ fn validate_lvalue() {
     });
     jit_run_test::<()>("f :: -> struct {x:i32}.(5); f().x = 2").ok();
 }
-
-#[test]
-#[ignore = "not yet implemented"]
-fn fix_postop_addrof_int_lit() {
-    let ptr = *jit_run_test::<*const i64>("1.&").ok();
-    assert!(!ptr.is_null());
-}

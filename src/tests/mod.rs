@@ -27,6 +27,7 @@ mod initializer;
 mod logic_binop;
 mod mut_checks;
 mod parse_function;
+mod parse_number_literals;
 mod ptr;
 mod slice;
 mod string;
