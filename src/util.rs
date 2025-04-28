@@ -88,6 +88,7 @@ pub trait UnwrapDebug {
 impl<T> UnwrapDebug for Option<T> {
     type Inner = T;
 
+    #[inline]
     fn u(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()
@@ -100,6 +101,7 @@ impl<T> UnwrapDebug for Option<T> {
 impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
     type Inner = T;
 
+    #[inline]
     fn u(self) -> Self::Inner {
         if cfg!(debug_assertions) {
             self.unwrap()

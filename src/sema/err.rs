@@ -156,7 +156,6 @@ impl<T, E> Try for SemaResult<T, E> {
 impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
     fn from_residual(residual: SemaResult<!, E>) -> Self {
         match residual {
-            Ok(never) => never,
             NotFinished => SemaResult::NotFinished,
             Err(err) => SemaResult::Err(err.into()),
         }

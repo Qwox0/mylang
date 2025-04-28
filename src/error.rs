@@ -1,5 +1,4 @@
-#[cfg(not(debug_assertions))]
-use crate::codegen::llvm::CodegenError;
+use crate::codegen::llvm::error::CodegenResultError;
 use crate::{
     parser::{ParseError, ParseErrorKind, lexer::Span},
     sema::{SemaError, SemaErrorKind},
@@ -11,10 +10,7 @@ use std::fmt::Debug;
 pub enum Error {
     Parsing(ParseError),
     Sema(SemaError),
-    #[cfg(not(debug_assertions))]
-    Codegen(CodegenError),
-    #[cfg(debug_assertions)]
-    Codegen(anyhow::Error),
+    Codegen(CodegenResultError),
 }
 
 macro_rules! impl_convert_method {
@@ -33,11 +29,7 @@ impl Error {
 
     impl_convert_method! { sema, Sema -> SemaError }
 
-    #[cfg(not(debug_assertions))]
-    impl_convert_method! { codegen, Codegen -> CodegenError }
-
-    #[cfg(debug_assertions)]
-    impl_convert_method! { codegen, Codegen -> anyhow::Error }
+    impl_convert_method! { codegen, Codegen -> CodegenResultError }
 }
 
 macro_rules! impl_from {
@@ -52,10 +44,7 @@ macro_rules! impl_from {
 
 impl_from! { Parsing(ParseError) }
 impl_from! { Sema(SemaError) }
-#[cfg(not(debug_assertions))]
-impl_from! { Codegen(CodegenError) }
-#[cfg(debug_assertions)]
-impl_from! { Codegen(anyhow::Error) }
+impl_from! { Codegen(CodegenResultError) }
 
 pub trait SpannedError: Debug {
     fn span(&self) -> Span;
