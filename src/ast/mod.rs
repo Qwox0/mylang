@@ -684,6 +684,12 @@ impl Ptr<Ast> {
         active
     }
 
+    #[inline]
+    pub fn set_replacement(&mut self, rep: Ptr<Ast>) {
+        debug_assert!(self.replacement.is_none());
+        self.replacement = Some(rep)
+    }
+
     pub fn downcast<V: AstVariant>(self) -> Ptr<V> {
         self.rep().flat_downcast()
     }
@@ -824,6 +830,11 @@ impl Ptr<Type> {
         then!(self.kind.is_struct_kind() => self.downcast_struct_def())
     }
 
+    pub fn try_downcast_fn(self, fn_expr: OPtr<Ast>) -> OPtr<Fn> {
+        then!(self == primitives().fn_val => fn_expr.u().downcast::<Fn>())
+            .or_else(|| self.try_downcast::<Fn>())
+    }
+
     /// Some types (like pointers) are transparent and allow field/method access on its inner type.
     pub fn flatten_transparent(mut self) -> Ptr<Type> {
         loop {
@@ -837,9 +848,9 @@ impl Ptr<Type> {
                 | TypeEnum::EnumDef { .. }
                 | TypeEnum::RangeTy { .. }
                 | TypeEnum::OptionTy { .. }
-                | TypeEnum::Fn { .. } => break self,
-                TypeEnum::PtrTy { pointee: inner, .. }
-                | TypeEnum::SliceTy { elem_ty: inner, .. } => self = inner.downcast_type(),
+                | TypeEnum::Fn { .. }
+                | TypeEnum::SliceTy { .. } => break self,
+                TypeEnum::PtrTy { pointee, .. } => self = pointee.downcast_type(),
                 TypeEnum::Unset => panic_debug("invalid type"),
             }
         }
@@ -968,6 +979,24 @@ impl Type {
     #[inline]
     pub fn matchable(&self) -> Ptr<TypeEnum> {
         Ptr::from(self).cast()
+    }
+
+    pub fn get_arr_elem_ty(&self) -> Ptr<Type> {
+        match self.matchable().as_ref() {
+            TypeEnum::ArrayTy { elem_ty, .. } | TypeEnum::SliceTy { elem_ty, .. } => {
+                elem_ty.downcast_type()
+            },
+            _ => unreachable_debug(),
+        }
+    }
+
+    pub fn get_arr_elem_ty_mut(&mut self) -> &mut Ptr<Type> {
+        match self.matchable().as_mut() {
+            TypeEnum::ArrayTy { elem_ty, .. } | TypeEnum::SliceTy { elem_ty, .. } => {
+                elem_ty.downcast_type_ref()
+            },
+            _ => unreachable_debug(),
+        }
     }
 }
 

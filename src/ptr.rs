@@ -98,6 +98,10 @@ impl<T: ?Sized> Ptr<T> {
         p
     }
 
+    pub fn from_ptr(ptr: *mut T) -> OPtr<T> {
+        NonNull::new(ptr).map(Ptr::new)
+    }
+
     pub fn drop_in_place(self) {
         unsafe { self.0.drop_in_place() }
     }

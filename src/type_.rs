@@ -3,8 +3,8 @@ use crate::{
     context::{ctx, primitives},
     ptr::{OPtr, Ptr},
     util::{
-        Layout, UnwrapDebug, aligned_add, round_up_to_nearest_power_of_two, unreachable_debug,
-        variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
+        Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_nearest_power_of_two,
+        unreachable_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
     },
 };
 
@@ -298,7 +298,10 @@ impl Ptr<ast::Type> {
             | TypeEnum::ArrayTy { elem_ty: t, .. }
             | TypeEnum::OptionTy { inner_ty: t, .. } => t.downcast_type().is_finalized(),
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
-            TypeEnum::Fn { .. } => true,
+            TypeEnum::Fn { body, .. } => {
+                debug_assert!(body.is_none());
+                true
+            },
             TypeEnum::Unset => unreachable_debug(),
         }
     }
@@ -331,8 +334,10 @@ impl Ptr<ast::Type> {
             TypeEnum::RangeTy { elem_ty, .. } => {
                 elem_ty.finalize();
             },
-            TypeEnum::Fn { .. } => {
-                //todo!()
+            TypeEnum::Fn { params, ret_ty, body, .. } => {
+                debug_assert!(body.is_none());
+                debug_assert!(params.iter().all(|p| p.var_ty.u().is_finalized()));
+                debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::Unset => unreachable_debug(),
         }
@@ -342,6 +347,7 @@ impl Ptr<ast::Type> {
 
     /// size of stack allocation in bytes
     pub fn size(self) -> usize {
+        const PTR_SIZE: usize = 8;
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
@@ -354,8 +360,8 @@ impl Ptr<ast::Type> {
                 }
             },
             TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_size(*bits),
-            TypeEnum::PtrTy { .. } => 8,
-            TypeEnum::SliceTy { .. } => 16,
+            TypeEnum::PtrTy { .. } | TypeEnum::Fn { .. } => PTR_SIZE,
+            TypeEnum::SliceTy { .. } => 2 * PTR_SIZE,
             TypeEnum::ArrayTy { len, elem_ty, .. } => {
                 elem_ty.downcast_type().size() * len.int::<usize>()
             },
@@ -371,7 +377,6 @@ impl Ptr<ast::Type> {
                 t.downcast_type().size()
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
-            TypeEnum::Fn { .. } => todo!(),
             TypeEnum::Unset => unreachable_debug(),
         }
     }
@@ -390,7 +395,7 @@ impl Ptr<ast::Type> {
                 }
             },
             TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_alignment(*bits),
-            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } => 8,
+            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => 8,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().alignment(),
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
@@ -400,7 +405,6 @@ impl Ptr<ast::Type> {
             TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { ty, .. } => ty.u().alignment(),
-            TypeEnum::Fn { .. } => todo!(),
             TypeEnum::Unset => unreachable_debug(),
         };
         debug_assert!(alignment.is_power_of_two());
@@ -414,9 +418,12 @@ impl Ptr<ast::Type> {
 
     pub fn is_non_null(self) -> bool {
         match self.matchable().as_ref() {
-            TypeEnum::SimpleTy { .. } => todo!("{:?}", self),
+            TypeEnum::SimpleTy { .. } => {
+                let p = primitives();
+                if self == p.void_ty { false } else { todo!("{:?}", self) }
+            },
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => false,
-            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } => true,
+            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => true,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().is_non_null(),
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } => fields.iter_types().any(Ptr::is_non_null),
@@ -424,27 +431,37 @@ impl Ptr<ast::Type> {
             TypeEnum::EnumDef { .. } => todo!(),
             TypeEnum::RangeTy { .. } => todo!(),
             TypeEnum::OptionTy { .. } => false,
-            TypeEnum::Fn { .. } => todo!(),
             TypeEnum::Unset => unreachable_debug(),
         }
     }
 
+    /// `not is_primitive`
     pub fn is_aggregate(self) -> bool {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => false,
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
-            TypeEnum::OptionTy { ty, .. } if ty.u().is_non_null() => ty.u().is_aggregate(),
+            TypeEnum::OptionTy { inner_ty, .. } if inner_ty.downcast_type().is_non_null() => {
+                inner_ty.downcast_type().is_aggregate()
+            },
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::SliceTy { .. }
             | TypeEnum::ArrayTy { .. }
             | TypeEnum::StructDef { .. }
             | TypeEnum::UnionDef { .. }
-            | TypeEnum::EnumDef { .. }
             | TypeEnum::RangeTy { .. }
             | TypeEnum::OptionTy { .. } => true,
-            TypeEnum::Fn { .. } => todo!(),
+            TypeEnum::EnumDef { is_simple_enum: simple, variants, .. } => {
+                debug_assert_eq!(is_simple_enum(*variants), *simple);
+                !*simple
+            },
+            TypeEnum::Fn { .. } => false,
             TypeEnum::Unset => unreachable_debug(),
         }
+    }
+
+    pub fn is_ffi_noundef(self) -> bool {
+        // arrays are special because they are always passed as a primitive pointer
+        !self.is_aggregate() || self.kind == AstKind::ArrayTy
     }
 }
 

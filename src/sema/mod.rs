@@ -320,8 +320,7 @@ impl Sema {
                     let sym = sym?;
                     *decl = Some(sym);
                     if sym.is_const {
-                        debug_assert!(expr.replacement.is_none());
-                        expr.replacement = Some(sym.const_val());
+                        expr.set_replacement(sym.const_val());
                     } else if is_const {
                         if sym.is_extern {
                             todo!("use of extern symbol in const expr")
@@ -449,7 +448,7 @@ impl Sema {
                     let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
                     let elem_ty = elem_ty.upcast();
                     let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?;
-                    debug_assert!(expr.ty.is_none());
+                    //debug_assert!(expr.ty.is_none());
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
 
@@ -479,8 +478,7 @@ impl Sema {
                         self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.file_level_symbols)
                 {
                     let Some(ty) = s.var_ty else { return NotFinished };
-                    debug_assert!(expr.replacement.is_none());
-                    expr.replacement = Some(s.const_val());
+                    expr.set_replacement(s.const_val());
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
@@ -509,14 +507,20 @@ impl Sema {
                     };
                     let Some(ty) = field.var_ty else { return NotFinished };
                     debug_assert!(field.is_const);
-                    debug_assert!(expr.replacement.is_none());
-                    expr.replacement = Some(field.const_val());
+                    expr.set_replacement(field.const_val());
                     ty
                 } else if let TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } =
                     lhs_ty.flatten_transparent().matchable().as_ref()
                     && let Some((_, field)) = fields.find_field(&rhs.text)
                 {
                     // field access
+                    if lhs_ty.kind == AstKind::PtrTy {
+                        cerror!(
+                            lhs.full_span(),
+                            "automatic dereferencing of pointers is currently not allowed"
+                        );
+                        return SemaResult::HandledErr;
+                    }
                     field.var_ty.u()
                 } else if let TypeEnum::StructDef { consts, .. }
                 | TypeEnum::UnionDef { consts, .. }
@@ -525,9 +529,9 @@ impl Sema {
                     && let Some((_, method)) = consts.find_field(&rhs.text)
                 {
                     // method access
+                    rhs.ty = Some(method.var_ty.u());
+                    rhs.upcast().set_replacement(method.const_val());
                     if method.var_ty == p.fn_val {
-                        debug_assert!(rhs.replacement.is_none());
-                        rhs.replacement = Some(method.const_val());
                         p.method_stub
                     } else if method.var_ty == p.never {
                         p.never
@@ -560,13 +564,12 @@ impl Sema {
                     //        calls and method-like calls might be confusing
                     match self.get_symbol(rhs.text, rhs.span) {
                         Ok(s)
-                            if s.var_ty == p.fn_val
-                                && let f = s.init.u().downcast::<ast::Fn>()
+                            if let Some(f) = s.var_ty.u().try_downcast_fn(s.init)
                                 && let Some(first_param) = f.params.get(0)
                                 && ty_match(lhs.ty.u(), first_param.var_ty.u()) =>
                         {
-                            debug_assert!(rhs.replacement.is_none());
-                            rhs.replacement = Some(f.upcast());
+                            debug_assert!(s.is_const);
+                            rhs.upcast().set_replacement(f.upcast());
                             p.method_stub
                         },
                         NotFinished => return NotFinished,
@@ -653,7 +656,7 @@ impl Sema {
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
-                expr.ty = Some(if let Some(fn_ty) = func.try_downcast::<ast::Fn>().as_mut() {
+                expr.ty = Some(if let Some(fn_ty) = fn_ty.try_downcast_fn(Some(*func)).as_mut() {
                     self.validate_call(&fn_ty.params, args, span.end())?;
                     fn_ty.ret_ty.u()
                 } else if fn_ty == p.method_stub {
@@ -1029,7 +1032,6 @@ impl Sema {
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
             AstEnum::PtrVal { .. } => todo!(),
             AstEnum::Fn { params, ret_ty_expr, ret_ty, body, .. } => {
-                assert!(is_const, "todo: non-const function");
                 let fn_ptr = expr.downcast::<ast::Fn>();
                 if let Some(ret) = *ret_ty_expr {
                     *ret_ty = Some(self.analyze_type(ret)?);

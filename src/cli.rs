@@ -35,9 +35,8 @@ pub struct BuildArgs {
     #[arg(long, default_value = "exe")]
     pub out: OutKind,
 
-    /// Disabled in benchmarks and tests
-    #[clap(skip = true)]
-    pub print_compile_time: bool,
+    #[arg(short, long)]
+    pub quiet: bool,
 
     #[arg(long = "lib")]
     pub is_lib: bool,
@@ -103,7 +102,7 @@ impl BuildArgs {
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,
-            print_compile_time: false,
+            quiet: true,
             is_lib: false,
             entry_point: opt.entry_point.to_string(),
             debug_ast: opt.debug_ast,

@@ -273,3 +273,12 @@ fn validate_lvalue() {
     });
     jit_run_test::<()>("f :: -> struct {x:i32}.(5); f().x = 2").ok();
 }
+
+#[test]
+#[ignore = "not yet implemented"]
+fn lambda_type_mismatch() {
+    let code = "
+take_lambda :: (f: (x: i32) -> i32) -> f(5);
+take_lambda(() -> 10)";
+    test_compile_err(code, "TODO", |code| TestSpan::of_substr(code, "() -> 10"));
+}

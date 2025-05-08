@@ -530,7 +530,7 @@ impl Parser {
                     }
                 })?;
                 let is_mut = self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let elem_ty = self.ws0().expr_(PREOP_PRECEDENCE)?;
+                let elem_ty = self.ws0().expr_(TY_PREFIX_PRECEDENCE)?;
                 match len {
                     Some(len) => expr!(ArrayTy { len, elem_ty }, span),
                     None => expr!(SliceTy { elem_ty, is_mut }, span),
@@ -554,7 +554,7 @@ impl Parser {
                 // TODO: deref prefix
                 let is_mut =
                     self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let pointee = self.ws0().expr_(PREOP_PRECEDENCE).context("pointee type")?;
+                let pointee = self.ws0().expr_(TY_PREFIX_PRECEDENCE).context("pointee type")?;
                 expr!(PtrTy { pointee, is_mut }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
@@ -594,7 +594,7 @@ impl Parser {
             TokenKind::DotOpenBracket => self.advanced().parse_array_initializer(None, span)?,
             TokenKind::Colon => todo!("TokenKind::Colon"),
             TokenKind::Question => {
-                let inner_ty = self.advanced().expr_(PREOP_PRECEDENCE).expect("type after ?");
+                let inner_ty = self.advanced().expr_(TY_PREFIX_PRECEDENCE).expect("type after ?");
                 expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
             TokenKind::Pound => {
@@ -1221,11 +1221,11 @@ impl FollowingOperator {
             FollowingOperator::Dot => DOT_PRECEDENCE,
             FollowingOperator::Call
             | FollowingOperator::Index
-            | FollowingOperator::PostOp(_)
-            | FollowingOperator::SingleArgNoParenFn => POSTOP_PRECEDENCE,
-            FollowingOperator::PositionalInitializer
+            | FollowingOperator::PositionalInitializer
             | FollowingOperator::NamedInitializer
-            | FollowingOperator::ArrayInitializer => 20,
+            | FollowingOperator::ArrayInitializer
+            | FollowingOperator::SingleArgNoParenFn
+            | FollowingOperator::PostOp(_) => POSTOP_PRECEDENCE,
             FollowingOperator::BinOp(k) => k.precedence(),
             FollowingOperator::Range { .. } => RANGE_PRECEDENCE,
             FollowingOperator::Pipe => 4,
@@ -1237,19 +1237,21 @@ impl FollowingOperator {
     }
 }
 
-const MIN_PRECEDENCE: u8 = 0;
-const IF_PRECEDENCE: u8 = 1;
-/// also for `*ty`, `[]ty`, `?ty`
-const PREOP_PRECEDENCE: u8 = 21;
-const POSTOP_PRECEDENCE: u8 = 22;
+const DOT_PRECEDENCE: u8 = 24;
 /// must be higher than [`POSTOP_PRECEDENCE`] and lower than [`DOT_PRECEDENCE`] to parse `... |> A.func(...)` correctly
 const PIPE_TARGET_PRECEDENCE: u8 = 23;
-const DOT_PRECEDENCE: u8 = 24;
+/// for `*ty`, `[]ty`, `?ty`
+const TY_PREFIX_PRECEDENCE: u8 = 22;
+const POSTOP_PRECEDENCE: u8 = 21;
+const PREOP_PRECEDENCE: u8 = 20;
+
 const RANGE_PRECEDENCE: u8 = 10;
 /// `a: ty = init`
 /// `   ^^`
 /// must be higher than [`FollowingOperator::Assign`]!
 const DECL_TYPE_PRECEDENCE: u8 = 4;
+const IF_PRECEDENCE: u8 = 1;
+const MIN_PRECEDENCE: u8 = 0;
 
 impl BinOpKind {
     pub fn precedence(self) -> u8 {

@@ -193,7 +193,7 @@ test :: -> take_array(.[1,-2, 0]);";
     assert!(
         res.module_text()
             .unwrap()
-            .contains(&format!("define i32 @take_array(ptr %{param_name})"))
+            .contains(&format!("define noundef i32 @take_array(ptr noundef %{param_name})"))
     );
     drop(res);
 
@@ -205,6 +205,13 @@ test :: -> take_array(.(.[1,-2, 0]));";
     assert_eq!(*res.ok(), -2);
     let param_name_prefix = if cfg!(debug_assertions) { "arr." } else { "" };
     assert!(res.module_text().unwrap().contains(&format!(
-        "define i32 @take_array(i64 %{param_name_prefix}0, i32 %{param_name_prefix}1)",
+        "define noundef i32 @take_array(i64 %{param_name_prefix}0, i32 %{param_name_prefix}1)",
     )));
+}
+
+#[test]
+fn enum_size() {
+    let res = jit_run_test::<i32>("enum { A, B, C }.B");
+    assert_eq!(*res.ok(), 1);
+    assert!(res.module_text().unwrap().contains(&format!("define noundef i32 @test()")));
 }

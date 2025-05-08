@@ -46,6 +46,8 @@ pub struct CompilationContextInner {
 
     #[cfg(debug_assertions)]
     pub debug_types: bool,
+    #[cfg(debug_assertions)]
+    pub debug_llvm_module_on_invalid_fn: bool,
 }
 
 pub type FilesIndex = usize;
@@ -120,6 +122,8 @@ impl CompilationContext {
 
             #[cfg(debug_assertions)]
             debug_types: false,
+            #[cfg(debug_assertions)]
+            debug_llvm_module_on_invalid_fn: false,
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {

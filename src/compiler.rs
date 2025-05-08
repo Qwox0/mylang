@@ -48,7 +48,9 @@ pub fn compile(
     args: &mut BuildArgs,
 ) -> CompileResult {
     if args.path.is_dir() {
-        println!("Compiling project at {:?}", args.path);
+        if !args.quiet {
+            println!("Compiling project at {:?}", args.path);
+        }
         todo!();
         /*
         for file in args
@@ -67,12 +69,14 @@ pub fn compile(
     }
     let proj_path = args.path.parent().unwrap();
     let entry_file = args.path.file_name().unwrap();
-    print!("Compiling file {:?}", entry_file);
-    if proj_path != Path::new("") {
-        print!(" in project {:?}", proj_path);
-        std::env::set_current_dir(proj_path).unwrap();
+    if !args.quiet {
+        print!("Compiling file {:?}", entry_file);
+        if proj_path != Path::new("") {
+            print!(" in project {:?}", proj_path);
+            std::env::set_current_dir(proj_path).unwrap();
+        }
+        println!("");
     }
-    println!("");
 
     let entry_file = Path::new(entry_file);
     let root_file = SourceFile::read(Ptr::from_ref(entry_file), &ctx.alloc).unwrap();
@@ -88,6 +92,8 @@ pub fn compile_file(
     #[cfg(debug_assertions)]
     {
         ctx.debug_types = args.debug_types;
+        ctx.debug_llvm_module_on_invalid_fn =
+            args.debug_llvm_ir_optimized || args.debug_llvm_ir_unoptimized;
     }
 
     // ##### Parsing #####
@@ -97,7 +103,9 @@ pub fn compile_file(
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
-        eprintln!("Parser Error(s) in {:?}", ctx.compile_time.parser);
+        if !args.quiet {
+            eprintln!("Parser Error(s) in {:?}", ctx.compile_time.parser);
+        }
         return CompileResult::Err;
     }
 
@@ -122,7 +130,7 @@ pub fn compile_file(
     }
 
     if mode == CompileMode::Parse {
-        if args.print_compile_time {
+        if !args.quiet {
             ctx.compile_time.print();
         }
         return CompileResult::Ok;
@@ -146,7 +154,7 @@ pub fn compile_file(
     }
 
     if mode == CompileMode::Check {
-        if args.print_compile_time {
+        if !args.quiet {
             ctx.compile_time.print();
         }
         // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
@@ -193,7 +201,7 @@ pub fn compile_file(
     ctx.compile_time.optimization = backend_start.elapsed();
 
     if args.debug_llvm_ir_optimized {
-        println!("### Optimized LLVM IR:");
+        println!(";### Optimized LLVM IR:");
         println!("{}\n", module.print_to_string().to_string());
     }
 
@@ -248,7 +256,7 @@ pub fn compile_file(
         ctx.compile_time.linking = linking_start.elapsed();
     }
 
-    if args.print_compile_time {
+    if !args.quiet {
         ctx.compile_time.print();
     }
 

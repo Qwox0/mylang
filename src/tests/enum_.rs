@@ -177,3 +177,17 @@ if val == MyBasicEnum.B {
 true";
     assert!(*jit_run_test::<bool>(code).ok())
 }
+
+#[test]
+#[ignore = "unfinished test"]
+fn custom_enum_tag_value() {
+    assert_eq!(*jit_run_test::<i32>("enum { A = 10, B, C }.A").ok(), 10);
+    assert_eq!(*jit_run_test::<i32>("enum { A = 10, B, C }.B").ok(), 11); // ?
+}
+
+#[test]
+fn no_noundef_with_sum_type() {
+    let res = jit_run_test::<u16>("enum { A(u8), B, C }.B");
+    assert_eq!(*res.ok(), 1);
+    assert!(!res.module_text().unwrap().contains("noundef"));
+}
