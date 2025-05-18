@@ -17,6 +17,7 @@
 #![feature(ptr_as_ref_unchecked)]
 #![feature(thread_local)]
 #![feature(formatting_options)]
+#![feature(maybe_uninit_slice)]
 
 pub mod arena_allocator;
 pub mod ast;

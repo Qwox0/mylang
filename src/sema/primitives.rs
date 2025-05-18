@@ -82,7 +82,7 @@ impl Primitives {
             let mut decl = alloc.alloc(ast::Decl::from_ident(ident))?;
             ident.decl = Some(decl);
             decl.is_const = true;
-            Ok(decl)
+            Ok::<_, AllocErr>(decl)
         };
 
         let type_ty_decl = new_primitive_decl("type")?;

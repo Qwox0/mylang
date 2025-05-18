@@ -123,15 +123,16 @@ pub fn unreachable_debug() -> ! {
 }
 
 /// like [`panic`] but UB in release mode.
-#[track_caller]
-#[inline]
-pub fn panic_debug(msg: &str) -> ! {
-    if cfg!(debug_assertions) {
-        panic!("{}", msg)
-    } else {
-        unsafe { unreachable_unchecked() }
-    }
+macro_rules! panic_debug {
+    ($($msg_fmt:expr),* $(,)?) => {
+        if cfg!(debug_assertions) {
+            panic!($($msg_fmt),*)
+        } else {
+            unsafe { ::std::hint::unreachable_unchecked() }
+        }
+    };
 }
+pub(crate) use panic_debug;
 
 pub fn collect_all_result_errors<T, E>(
     i: impl IntoIterator<Item = Result<T, E>>,
@@ -232,15 +233,37 @@ pub trait IteratorExt: Iterator + Sized {
     fn expect_one(self) -> Self::Item
     where Self: FusedIterator {
         self.one().unwrap_or_else(|e| {
-            panic!("Expected the iterator to have exactly one item ({e:?})");
+            let count = match e {
+                IteratorOneError::NoItems => "0",
+                IteratorOneError::TooManyItems => "multiple",
+            };
+            panic!("Expected the iterator to have exactly one item but got {count} items instead");
         })
     }
+
+    fn join(self, sep: impl AsRef<str>) -> String
+    where Self::Item: std::fmt::Display;
 }
 
 impl<I: FusedIterator> IteratorExt for I {
     fn one(mut self) -> Result<Self::Item, IteratorOneError>
     where Self: FusedIterator {
         let Some(item) = self.next() else { return Err(IteratorOneError::NoItems) };
+        if self.next().is_some() {
+            return Err(IteratorOneError::TooManyItems);
+        }
         Ok(item)
+    }
+
+    fn join(mut self, sep: impl AsRef<str>) -> String
+    where Self::Item: std::fmt::Display {
+        let sep = sep.as_ref();
+        let acc = self.next().map(|i| i.to_string()).unwrap_or_else(String::new);
+        self.fold(acc, |mut acc, item| {
+            acc.push_str(sep);
+            use std::fmt::Write;
+            write!(acc, "{item}").u();
+            acc
+        })
     }
 }

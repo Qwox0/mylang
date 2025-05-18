@@ -1,4 +1,5 @@
 use super::{jit_run_test, jit_run_test_raw};
+use crate::{tests::test_parse, util::IteratorExt};
 
 #[test]
 fn if_variants() {
@@ -37,4 +38,12 @@ fn todo_fix_parser() {
 
     let code = "test :: -> struct { ok: bool } { if true .(true) else .(false) }";
     assert_eq!(*jit_run_test_raw::<bool>(code).ok(), true);
+}
+
+#[test]
+fn parse_err_missing_if_body() {
+    let res = test_parse("if a .A");
+    let err = res.errors().expect_one();
+    assert!(err.msg.starts_with("unexpected token: EOF"));
+    assert_eq!(err.span.range(), 7..8);
 }

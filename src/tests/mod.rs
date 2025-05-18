@@ -1,10 +1,14 @@
 use crate::{
+    ast,
     cli::{BuildArgs, TestArgsOptions},
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_file},
     context::CompilationContext,
     diagnostics::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
-    parser::lexer::{Code, Span},
+    parser::{
+        self,
+        lexer::{Code, Span},
+    },
     ptr::Ptr,
     source_file::SourceFile,
     util::IteratorExt,
@@ -29,6 +33,7 @@ mod mut_checks;
 mod parse_function;
 mod parse_number_literals;
 mod ptr;
+mod range;
 mod slice;
 mod string;
 mod struct_;
@@ -143,6 +148,34 @@ pub fn test_compile_err_raw(
         expected_msg_start
     );
     debug_assert_eq!(err.span, expected_span(&res.full_code));
+}
+
+pub fn test_parse(code: &str) -> TestParseRes {
+    let ctx = CompilationContext::new();
+    let test_file = test_file_mock(code.as_ref());
+    let stmts = parser::parse(ctx.0, test_file);
+    TestParseRes { ctx, stmts }
+}
+
+pub struct TestParseRes {
+    #[allow(unused)]
+    ctx: CompilationContext,
+    stmts: Vec<Ptr<ast::Ast>>,
+}
+
+impl TestParseRes {
+    pub fn errors(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
+        self.ctx
+            .diagnostic_reporter
+            .diagnostics
+            .iter()
+            .filter(|e| e.severity.aborts_compilation())
+    }
+
+    pub fn no_error(self) -> Self {
+        assert!(self.errors().count() == 0);
+        self
+    }
 }
 
 #[derive(Debug)]

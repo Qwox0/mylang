@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.86"
 bumpalo = "3.16.0"
 clap = { version = "4.5.4", features = ["derive"] }
 const_for = "0.1.4"

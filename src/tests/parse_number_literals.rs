@@ -64,10 +64,10 @@ fn parsed_tokens_eq(code: &str, expected_tokens: impl AsRef<[Token]>) -> bool {
 #[test]
 fn space_after_dot() {
     assert!(parsed_tokens_eq("1.&", [t!(IntLit 0..1), t!(DotAmpersand 1..3)]));
-    assert!(parsed_tokens_eq("1. &", [t!(FloatLit 0..2), t!(Whitespace 2..3), t!(Ampersand 3..4)]));
+    assert!(parsed_tokens_eq("1. &", [t!(FloatLit 0..2), /* t!(Whitespace 2..3), */ t!(Ampersand 3..4)]));
 
     assert!(parsed_tokens_eq("1.0", [t!(FloatLit 0..3)]));
-    assert!(parsed_tokens_eq("1. 0", [t!(FloatLit 0..2), t!(Whitespace 2..3), t!(IntLit 3..4)]));
+    assert!(parsed_tokens_eq("1. 0", [t!(FloatLit 0..2), /* t!(Whitespace 2..3), */ t!(IntLit 3..4)]));
 
     assert!(parsed_tokens_eq("1.hello()", [
         t!(IntLit 0..1),
@@ -79,7 +79,7 @@ fn space_after_dot() {
     assert!(parsed_tokens_eq("1. hello()", [
         t!(IntLit 0..1),
         t!(Dot 1..2),
-        t!(Whitespace 2..3),
+        // t!(Whitespace 2..3),
         t!(Ident 3..8),
         t!(OpenParenthesis 8..9),
         t!(CloseParenthesis 9..10),

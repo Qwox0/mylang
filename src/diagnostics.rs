@@ -281,12 +281,29 @@ impl fmt::Display for DiagnosticSeverity {
     }
 }
 
+pub struct HandledErr;
+
+impl<T, E: From<HandledErr>> From<HandledErr> for Result<T, E> {
+    fn from(value: HandledErr) -> Self {
+        Err(E::from(value))
+    }
+}
+
 macro_rules! cerror {
-    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
-        crate::diagnostics::DiagnosticReporter::error(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*))
-    };
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
+        crate::diagnostics::DiagnosticReporter::error(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*));
+        crate::diagnostics::HandledErr
+    }};
 }
 pub(crate) use cerror;
+
+macro_rules! cerror2 {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
+        crate::diagnostics::DiagnosticReporter::error(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*));
+        crate::diagnostics::HandledErr.into()
+    }};
+}
+pub(crate) use cerror2;
 
 macro_rules! cwarn {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {

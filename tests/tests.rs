@@ -5,8 +5,10 @@ use mylang::{
     ptr::Ptr,
 };
 use std::{
+    io::{BufRead, BufReader},
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Command, Stdio},
+    thread,
 };
 
 fn test_file(file_path: &str) {
@@ -25,18 +27,59 @@ fn test_file(file_path: &str) {
     }
 }
 
+#[allow(unused)]
+struct Output {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
 fn test_shell_script(sh_path: &str) -> Output {
     let test_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(sh_path);
     println!("testing shell script {:?}: \"\"\"", sh_path);
-    let out = Command::new("bash")
+
+    // <https://stackoverflow.com/a/72831067>
+    let mut child = Command::new("bash")
         .arg(test_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+
+    let child_stdout = child.stdout.take().expect("Internal error, could not take stdout");
+    let child_stderr = child.stderr.take().expect("Internal error, could not take stderr");
+
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+
+    let stdout_thread = thread::spawn(move || {
+        for line in BufReader::new(child_stdout).lines() {
+            let line = line.unwrap();
+            println!("{}", line);
+            stdout_tx.send(line).unwrap();
+        }
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        for line in BufReader::new(child_stderr).lines() {
+            let line = line.unwrap();
+            eprintln!("{}", line);
+            stderr_tx.send(line).unwrap();
+        }
+    });
+
+    let status = child.wait().expect("Internal error, failed to wait on child");
+    stdout_thread.join().unwrap();
+    stderr_thread.join().unwrap();
+
     println!("\"\"\"");
-    assert!(out.status.success());
-    out
+
+    let join_lines = |acc, line: String| acc + line.as_str() + "\n";
+    let stdout = stdout_rx.into_iter().fold(String::new(), join_lines);
+    let stderr = stderr_rx.into_iter().fold(String::new(), join_lines);
+
+    assert!(status.success());
+    Output { status, stdout, stderr }
 }
 
 macro_rules! file_test {
@@ -67,9 +110,5 @@ fn error_no_main() {
 #[test]
 fn c_ffi_take_array_arg() {
     let out = test_shell_script("tests/c_ffi_take_array_arg/run.sh");
-    assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .trim_end()
-            .ends_with("got array: [1,2,3,4,]")
-    );
+    assert!(out.stdout.trim_end().ends_with("got array: [1,2,3,4,]"));
 }

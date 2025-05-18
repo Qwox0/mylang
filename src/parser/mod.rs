@@ -4,12 +4,12 @@
 //! [`Type::Unset`] or [`Type::Unevaluated`]
 
 use crate::{
+    arena_allocator::AllocErr,
     ast::{
-        self, Ast, BinOpKind, Decl, DeclList, DeclMarkerKind, DeclMarkers, Ident, UnaryOpKind,
-        UpcastToAst, ast_new,
+        self, Ast, BinOpKind, Decl, DeclList, DeclMarkers, Ident, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
-    diagnostics::{DiagnosticReporter, cerror, chint},
+    diagnostics::{DiagnosticReporter, cerror, cerror2, chint},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -17,7 +17,6 @@ use crate::{
     util::{UnwrapDebug, then},
 };
 use core::str;
-use error::ParseErrorKind::*;
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use parser_helper::ParserInterface;
@@ -25,6 +24,17 @@ use parser_helper::ParserInterface;
 pub mod error;
 pub mod lexer;
 pub mod parser_helper;
+
+macro_rules! opt {
+    ($self:expr, $method:ident($($arg:expr),* $(,)?)) => {{
+        let _self: &mut Parser = $self;
+        if _self.lex.peek().is_none_or(|t| t.kind.is_expr_terminator()) {
+            Ok(None)
+        } else {
+            _self.$method($($arg),*).map(Some)
+        }
+    }};
+}
 
 macro_rules! expr_ {
     ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
@@ -56,7 +66,7 @@ macro_rules! skip_tokens_until {
 impl Ptr<Ast> {
     pub fn try_to_ident(self) -> ParseResult<Ptr<ast::Ident>> {
         self.try_downcast::<ast::Ident>()
-            .ok_or_else(|| err_val(NotAnIdent, self.full_span()))
+            .ok_or_else(|| cerror2!(self.full_span(), "expected an identifier, got an expression"))
     }
 }
 
@@ -84,11 +94,11 @@ pub fn parse_file_into(
 ) {
     let start_idx = stmts.len();
     let mut p = Parser { lex: Lexer::new(file), cctx };
-    p.ws0().parse_stmts_into(stmts, false);
+    p.parse_stmts_into(stmts, false);
     while let Some(t) = p.lex.next() {
         debug_assert_eq!(t.kind, TokenKind::CloseBrace);
         cerror!(t.span, "unexpected token");
-        p.ws0().parse_stmts_into(stmts, false);
+        p.parse_stmts_into(stmts, false);
     }
     debug_assert!(p.lex.is_empty());
     file.as_mut().set_stmt_range(start_idx..stmts.len());
@@ -105,22 +115,22 @@ impl Parser {
     }
 
     fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
-        let mut lhs = self.ws0().value(/*min_precedence*/).context("expr first val")?;
+        let mut lhs = self.value(/*min_precedence*/)?;
         loop {
             match self.op_chain(lhs, min_precedence) {
-                Ok(Some(node)) => lhs = node,
-                Ok(None) => return Ok(lhs),
-                Err(err) => return Err(err).context("expr op chain element"),
+                Ok(node) if node != lhs => lhs = node,
+                res => return res,
             };
         }
     }
 
-    fn op_chain(&mut self, lhs: Ptr<Ast>, min_precedence: u8) -> ParseResult<Option<Ptr<Ast>>> {
-        let Some(Token { kind, span }) = self.ws0().lex.peek() else { return Ok(None) };
+    /// Returns `Ok(lhs)` iff no further valid [`FollowingOperator`] can be found.
+    fn op_chain(&mut self, lhs: Ptr<Ast>, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
+        let Some(Token { kind, span }) = self.lex.peek() else { return Ok(lhs) };
 
         let op = match FollowingOperator::new(kind) {
             Some(op) if op.precedence() > min_precedence => op,
-            _ => return Ok(None),
+            _ => return Ok(lhs),
         };
         self.lex.advance();
 
@@ -133,14 +143,13 @@ impl Parser {
             };
         }
 
-        Ok(Some(match op {
+        Ok(match op {
             FollowingOperator::Dot => {
-                let rhs = self.ws0().ident().context("dot rhs")?;
+                let rhs = self.ident()?;
                 if &*rhs.text == "as" {
-                    self.ws0().tok(TokenKind::OpenParenthesis).context("expected '('")?;
-                    let target_ty = self.ws0().expr().context("cast target type")?;
-                    let close_p =
-                        self.ws0().tok(TokenKind::CloseParenthesis).context("expected ')'")?;
+                    self.tok(TokenKind::OpenParenthesis)?;
+                    let target_ty = self.expr()?;
+                    let close_p = self.tok(TokenKind::CloseParenthesis)?;
                     let span = span.join(close_p.span);
                     expr!(Cast { operand: lhs, target_ty }, span)
                 } else {
@@ -151,7 +160,7 @@ impl Parser {
             FollowingOperator::Index => {
                 let idx = self.expr()?;
                 let close = self.tok(TokenKind::CloseBracket)?;
-                let mut_t = self.ws0().lex.next_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let mut_t = self.lex.next_if_kind(TokenKind::Keyword(Keyword::Mut));
                 expr!(Index { mut_access: mut_t.is_some(), lhs, idx }, mut_t.unwrap_or(close).span)
             },
             FollowingOperator::PositionalInitializer => {
@@ -174,7 +183,7 @@ impl Parser {
             FollowingOperator::PostOp(mut op) => {
                 let mut span = span;
                 if op == UnaryOpKind::AddrOf
-                    && let Some(t) = self.ws0().lex.next_if_kind(TokenKind::Keyword(Keyword::Mut))
+                    && let Some(t) = self.lex.next_if_kind(TokenKind::Keyword(Keyword::Mut))
                 {
                     op = UnaryOpKind::AddrMutOf;
                     span = span.join(t.span);
@@ -186,28 +195,30 @@ impl Parser {
                 expr!(BinOp { lhs, op, rhs }, span)
             },
             FollowingOperator::Range { is_inclusive } => {
-                let end = self.expr_(op.precedence()).opt().context("range end")?;
+                let end = opt!(self, expr_(op.precedence()))?;
+                if is_inclusive && end.is_none() {
+                    return cerror2!(span, "an inclusive range must have an end bound");
+                }
                 expr!(Range { start: Some(lhs), end, is_inclusive }, span)
             },
             FollowingOperator::Pipe => {
-                let t = self.ws0().peek_tok()?;
+                let t = self.lex.peek_or_eof();
                 match t.kind {
                     TokenKind::Keyword(Keyword::If | Keyword::Then) => {
-                        self.advanced().if_after_cond(lhs, span, true).context("|> if")?.upcast()
+                        self.advanced().if_after_cond(lhs, span, true)?.upcast()
                     },
                     TokenKind::Keyword(Keyword::Match) => {
                         todo!("|> match")
                     },
                     TokenKind::Keyword(Keyword::For) => {
-                        let iter_var =
-                            self.advanced().ws0().ident().context("for iteration variable")?;
-                        self.ws0().opt_do();
-                        let body = self.ws0().expr().context("for body")?;
+                        let iter_var = self.advanced().ident()?;
+                        self.opt_do();
+                        let body = self.expr()?;
                         expr!(For { source: lhs, iter_var, body, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
-                        self.advanced().ws0().opt_do();
-                        let body = self.expr().context("while body")?;
+                        self.advanced().opt_do();
+                        let body = self.expr()?;
                         expr!(While { condition: lhs, body, was_piped: true }, t.span)
                     },
                     _ => {
@@ -224,13 +235,11 @@ impl Parser {
                             //     => omitting the type might produce different code
                             dot.as_mut().lhs = Some(lhs);
                         } else {
-                            args.push(lhs).map_err(|e| self.wrap_alloc_err(e))?;
+                            args.push(lhs).map_err(handle_alloc_err)?;
                         }
-                        self.tok(TokenKind::OpenParenthesis).context("pipe call: expect '('")?;
+                        self.tok(TokenKind::OpenParenthesis)?;
                         self.call(func, args, Some(0))?.upcast()
                     },
-                    // _ => ParseError::unexpected_token(t)
-                    //     .context("expected fn call, 'if', 'match', 'for' or 'while'")?,
                 }
             },
             FollowingOperator::Assign => {
@@ -241,31 +250,25 @@ impl Parser {
                 let rhs = self.expr()?;
                 expr!(BinOpAssign { lhs, op, rhs }, span)
             },
-            FollowingOperator::VarDecl => {
+            FollowingOperator::VarDecl | FollowingOperator::ConstDecl => {
                 let mut d = ast::Decl::from_lhs(lhs)?;
-                d.init = Some(self.expr().context(":= init")?);
-                d.is_const = false;
-                expr!(d)
-            },
-            FollowingOperator::ConstDecl => {
-                let mut d = ast::Decl::from_lhs(lhs)?;
-                d.init = Some(self.expr().context(":: init")?);
-                d.is_const = true;
+                d.init = Some(self.expr()?);
+                d.is_const = matches!(op, FollowingOperator::ConstDecl);
                 expr!(d)
             },
             FollowingOperator::TypedDecl => {
-                let ident = lhs.try_to_ident().context("const decl ident")?;
+                let ident = lhs.try_to_ident()?;
                 let mut d = self.typed_decl(DeclMarkers::default(), ident)?;
                 d.span = ident.span.join(d.span);
                 d.upcast()
             },
-        }))
+        })
     }
 
     /// anything which has higher precedence than any operator
     //pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
     fn value(&mut self) -> ParseResult<Ptr<Ast>> {
-        let Token { kind, span } = self.peek_tok().context("expected value")?;
+        let Token { kind, span } = self.lex.peek_or_eof();
 
         macro_rules! expr {
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }) => { {
@@ -286,109 +289,98 @@ impl Parser {
                 expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None })
             },
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub) => {
-                self.var_decl()?.upcast()
+                self.var_decl(false)?.upcast()
             },
             TokenKind::Keyword(Keyword::Struct) => {
-                self.advanced().ws0().tok(TokenKind::OpenBrace).context("struct '{'")?;
-                let (fields, consts) = self.ws0().struct_body()?;
-                let close_b = self.tok(TokenKind::CloseBrace).context("struct '}'")?;
+                self.advanced().tok(TokenKind::OpenBrace)?;
+                let (fields, consts) = self.struct_body()?;
+                let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(StructDef { fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Union) => {
-                self.advanced().ws0().tok(TokenKind::OpenBrace).context("union '{'")?;
-                let (fields, consts) = self.ws0().struct_body()?;
-                let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
+                self.advanced().tok(TokenKind::OpenBrace)?;
+                let (fields, consts) = self.struct_body()?;
+                let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(UnionDef { fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Enum) => {
-                self.advanced().ws0().tok(TokenKind::OpenBrace).context("enum '{'")?;
+                self.advanced().tok(TokenKind::OpenBrace)?;
                 let mut variants = ScratchPool::new();
                 let consts = Vec::new();
                 loop {
-                    if self.ws0().peek_tok()?.is_invalid_start() {
-                        break;
-                    }
-                    let variant_ident = self.ident().context("enum variant ident")?;
+                    let Some(variant_ident) = opt!(self, ident())? else { break };
                     let ty = then!(
-                        self.ws0().lex.advance_if_kind(TokenKind::OpenParenthesis) => {
-                        let ty_expr = self.expr().context("variant type")?;
-                        self.ws0().tok(TokenKind::CloseParenthesis)?;
+                        self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
+                        let ty_expr = self.expr()?;
+                        self.tok(TokenKind::CloseParenthesis)?;
                         ty_expr
                     });
                     let variant_index = then!(
-                        self.ws0().lex.advance_if_kind(TokenKind::Eq)
-                        => self.expr().context("variant index")?
+                        self.lex.advance_if_kind(TokenKind::Eq)
+                        => self.expr()?
                     );
                     let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
                     decl.var_ty_expr = ty;
                     decl.init = variant_index;
-                    variants.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
-                    if !self.ws0().lex.advance_if_kind(TokenKind::Comma) {
+                    variants.push(decl).map_err(handle_alloc_err)?;
+                    if !self.lex.advance_if_kind(TokenKind::Comma) {
                         break;
                     }
                 }
                 let variants = self.clone_slice_from_scratch_pool(variants)?;
-                let close_b = self.tok(TokenKind::CloseBrace).context("union '}'")?;
+                let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
-                    EnumDef { variants, consts, is_simple_enum: false, tag_ty: None },
+                    EnumDef {
+                        variants,
+                        variant_tags: None,
+                        consts,
+                        is_simple_enum: false,
+                        tag_ty: None
+                    },
                     span.join(close_b.span)
                 )
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::Extern) => {
-                self.advanced().ws1()?;
-                let ident = self.ident()?;
+                let ident = self.advanced().ident()?;
                 let mut d = ast::Decl::from_ident(ident);
                 d.span = span;
                 d.is_extern = true;
-                self.ws0().tok(TokenKind::Colon)?;
-                d.var_ty_expr = Some(self.expr().context("type of extern decl")?);
+                self.tok(TokenKind::Colon)?;
+                d.var_ty_expr = Some(self.expr()?);
                 expr!(d)
             },
             TokenKind::Keyword(Keyword::If) => {
-                let condition = self.advanced().expr().context("if condition")?;
-                self.if_after_cond(condition, span, false).context("if")?.upcast()
+                let condition = self.advanced().expr()?;
+                self.if_after_cond(condition, span, false)?.upcast()
             },
             TokenKind::Keyword(Keyword::Match) => {
                 todo!("match body");
-                let val = self.advanced().expr().context("match value")?;
-                let else_body = self
-                    .ws0()
-                    .lex
-                    .next_if_kind(TokenKind::Keyword(Keyword::Else))
-                    .map(|_else| {
-                        self.ws1()?;
-                        self.expr().context("match else body")
-                    })
-                    .transpose()?;
+                let val = self.advanced().expr()?;
+                let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
+                    => self.expr()?);
                 expr!(Match { val, else_body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::For) => {
-                let iter_var = self.advanced().ws0().ident()?;
-                // "in" is not a global keyword
-                match self.ws0().tok(TokenKind::Ident) {
-                    Ok(i) if &*self.get_text_from_span(i.span) == "in" => Ok(()),
-                    Ok(t) => ParseError::unexpected_token(t),
-                    Err(e) => Err(e),
-                }
-                .context("expected `in`")?;
-                let source = self.ws0().expr().context("for .. in source")?;
-                self.ws0().opt_do();
-                let body = self.expr().context("for .. in body")?;
+                let iter_var = self.advanced().ident()?;
+                self.local_keyword("in")?;
+                let source = self.expr()?;
+                self.opt_do();
+                let body = self.expr()?;
                 expr!(For { source, iter_var, body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
-                let condition = self.advanced().expr().context("while condition")?;
-                self.ws0().opt_do();
-                let body = self.expr().context("while body")?;
+                let condition = self.advanced().expr()?;
+                self.opt_do();
+                let body = self.expr()?;
                 expr!(While { condition, body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let val = self.advanced().expr().opt().context("return expr")?;
+                let val = opt!(self.advanced(), expr())?;
                 expr!(Return { val, parent_fn: None }, span)
             },
             TokenKind::Keyword(Keyword::Break) => {
-                let val = self.advanced().expr().opt().context("break expr")?;
+                let val = opt!(self.advanced(), expr())?;
                 expr!(Break { val }, span)
             },
             TokenKind::Keyword(Keyword::Continue) => {
@@ -396,20 +388,22 @@ impl Parser {
                 expr!(Continue {}, span)
             },
             TokenKind::Keyword(Keyword::Autocast) => {
-                let operand = self.advanced().expr().context("autocast expr")?;
+                let operand = self.advanced().expr()?;
                 expr!(Autocast { operand }, span)
             },
             TokenKind::Keyword(Keyword::Defer) => {
-                let stmt = self.advanced().expr().context("defer expr")?;
+                let stmt = self.advanced().expr()?;
                 expr!(Defer { stmt }, span)
             },
             TokenKind::IntLit => {
-                let res = literals::parse_int_lit(&self.advanced().get_text_from_span(span));
-                expr!(IntVal { val: res.map_err(|e| err_val(InvalidIntLit(e), span))? })
+                let val = literals::parse_int_lit(&self.advanced().get_text_from_span(span))
+                    .map_err(|e| cerror!(span, "invalid integer literal: {e}"))?;
+                expr!(IntVal { val })
             },
             TokenKind::FloatLit => {
-                let res = literals::parse_float_lit(&self.advanced().get_text_from_span(span));
-                expr!(FloatVal { val: res.map_err(|e| err_val(InvalidFloatLit(e), span))? })
+                let val = literals::parse_float_lit(&self.advanced().get_text_from_span(span))
+                    .map_err(|e| cerror!(span, "invalid float literal: {e}"))?;
+                expr!(FloatVal { val })
             },
             TokenKind::BoolLitTrue | TokenKind::BoolLitFalse => {
                 self.lex.advance();
@@ -424,11 +418,13 @@ impl Parser {
                 let end = chars.next_back();
                 debug_assert_eq!(end, Some('\''));
 
-                let Some(c) = chars.next() else { return err(InvalidCharLit, span) };
+                let Some(val) = chars.next() else {
+                    return cerror2!(span, "character literals must not be empty");
+                };
                 if chars.next().is_some() {
-                    return err(InvalidCharLit, span);
+                    return cerror2!(span, "character literal contains more than one character");
                 }
-                expr!(CharVal { val: c })
+                expr!(CharVal { val })
             },
             TokenKind::BCharLit => {
                 let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
@@ -441,9 +437,11 @@ impl Parser {
                 let end = bytes.next_back();
                 debug_assert_eq!(end, Some(b'\''));
 
-                let Some(byte) = bytes.next() else { return err(InvalidBCharLit, span) };
+                let Some(byte) = bytes.next() else {
+                    return cerror2!(span, "byte character literals must not be empty");
+                };
                 if bytes.next().is_some() {
-                    return err(InvalidCharLit, span);
+                    return cerror2!(span, "byte character literal contains more than one byte");
                 }
                 //expr!(BCharLit { val: byte })
                 expr!(IntVal { val: byte as i64 })
@@ -455,7 +453,7 @@ impl Parser {
             TokenKind::MultilineStrLitLine => {
                 // Note: Arena allocates in the wrong direction
                 let mut scratch = Vec::with_capacity(1024);
-                while let Some(t) = self.ws0().lex.next_if_kind(TokenKind::MultilineStrLitLine) {
+                while let Some(t) = self.lex.next_if_kind(TokenKind::MultilineStrLitLine) {
                     scratch.extend_from_slice(self.get_text_from_span(t.span)[2..].as_bytes());
                 }
                 let bytes = self.alloc_slice(&scratch)?;
@@ -464,16 +462,14 @@ impl Parser {
                 expr!(StrVal { text: Ptr::from(&text[0..text.len().saturating_sub(1)]) })
             },
             TokenKind::OpenParenthesis => {
-                self.advanced().ws0();
                 // TODO: currently no tuples allowed!
                 // () -> ...
-                if self.lex.advance_if_kind(TokenKind::CloseParenthesis) {
-                    self.ws0().tok(TokenKind::Arrow).context("'->'")?;
+                if self.advanced().lex.advance_if_kind(TokenKind::CloseParenthesis) {
+                    self.tok(TokenKind::Arrow)?;
                     return Ok(self.function_tail(self.alloc_empty_slice(), span)?.upcast());
                 }
-                let mut first_expr = self.expr().context("expr in (...)")?; // this assumes the parameter syntax is also a valid expression
-                let t = self.ws0().next_tok().context("missing ')'")?;
-                self.ws0();
+                let mut first_expr = self.expr()?; // this assumes the parameter syntax is also a valid expression
+                let t = self.lex.next_or_eof();
                 let params = match t.kind {
                     // (expr)
                     TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
@@ -502,35 +498,36 @@ impl Parser {
                             todo!("better error")
                         };
                         let params = ScratchPool::new_with_first_val(first_decl)
-                            .map_err(|e| self.wrap_alloc_err(e))?;
-                        let params = self
-                            .var_decl_list(TokenKind::Comma, params)
-                            .context("function parameter list")?;
-                        self.ws0().tok(TokenKind::CloseParenthesis).context("')'")?;
-                        self.ws0().tok(TokenKind::Arrow).context("'->'")?;
+                            .map_err(handle_alloc_err)?;
+                        let params = self.var_decl_list(TokenKind::Comma, params, true)?;
+                        self.tok(TokenKind::CloseParenthesis)?;
+                        self.tok(TokenKind::Arrow)?;
                         params
                     },
-                    _ => return ParseError::unexpected_token(t).context("expected ',' or ')'"),
+                    _ => {
+                        return unexpected_token(t, &[
+                            TokenKind::Comma,
+                            TokenKind::CloseParenthesis,
+                        ]);
+                    },
                 };
                 self.function_tail(params, span)?.upcast()
             },
             TokenKind::OpenBracket => {
-                let len = self.advanced().ws0().expr().opt().context("array type count")?;
-                self.tok(TokenKind::CloseBracket).context("array ty ']'").map_err(|e| {
-                    if matches!(e.kind, UnexpectedToken(TokenKind::Comma)) {
-                        cerror!(e.span, "expected ']'");
+                let len = opt!(self.advanced(), expr())?;
+                self.tok(TokenKind::CloseBracket).inspect_err(|_| {
+                    let t = self.lex.peek_or_eof();
+                    if matches!(t.kind, TokenKind::Comma | TokenKind::Semicolon) {
                         chint!(
-                            span.join(e.span),
-                            "if you wanted to create an array value, consider using an array \
+                            span.join(t.span),
+                            "if you want to create an array value, consider using an array \
                              initializer `.[...]` instead"
-                        );
-                        ParseError::handled_err()
-                    } else {
-                        e
+                        )
                     }
                 })?;
-                let is_mut = self.ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let elem_ty = self.ws0().expr_(TY_PREFIX_PRECEDENCE)?;
+                let is_mut =
+                    len.is_none() && self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let elem_ty = self.expr_(TY_PREFIX_PRECEDENCE)?;
                 match len {
                     Some(len) => expr!(ArrayTy { len, elem_ty }, span),
                     None => expr!(SliceTy { elem_ty, is_mut }, span),
@@ -538,12 +535,12 @@ impl Parser {
             },
             TokenKind::OpenBrace => self.block()?.upcast(),
             TokenKind::Bang => {
-                let operand = self.advanced().expr_(PREOP_PRECEDENCE).context("! expr")?;
+                let operand = self.advanced().expr_(PREOP_PRECEDENCE)?;
                 expr!(UnaryOp { op: UnaryOpKind::Not, operand, is_postfix: false }, span)
             },
             TokenKind::Plus => todo!("TokenKind::Plus"),
             TokenKind::Minus => {
-                let operand = self.advanced().expr_(PREOP_PRECEDENCE).context("- expr")?;
+                let operand = self.advanced().expr_(PREOP_PRECEDENCE)?;
                 expr!(UnaryOp { op: UnaryOpKind::Neg, operand, is_postfix: false }, span)
             },
             TokenKind::Arrow => {
@@ -552,37 +549,33 @@ impl Parser {
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
-                let is_mut =
-                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
-                let pointee = self.ws0().expr_(TY_PREFIX_PRECEDENCE).context("pointee type")?;
+                let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let pointee = self.expr_(TY_PREFIX_PRECEDENCE)?;
                 expr!(PtrTy { pointee, is_mut }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
-                let is_mut =
-                    self.advanced().ws0().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
+                let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let op = if is_mut { UnaryOpKind::AddrMutOf } else { UnaryOpKind::AddrOf };
-                let operand = self.expr_(PREOP_PRECEDENCE).context("& <expr>")?;
+                let operand = self.expr_(PREOP_PRECEDENCE)?;
                 expr!(UnaryOp { op, operand, is_postfix: false })
             },
             TokenKind::Dot => {
-                let rhs = self.advanced().ws0().ident().context("dot rhs")?;
+                let rhs = self.advanced().ident()?;
                 expr!(ast::Dot::new(None, rhs, span))
             },
             TokenKind::DotDot => {
-                let end =
-                    self.advanced().ws0().expr_(RANGE_PRECEDENCE).opt().context("range end")?;
+                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
                 expr!(Range { start: None, end, is_inclusive: false })
             },
             TokenKind::DotDotEq => {
-                let end =
-                    self.advanced().ws0().expr_(RANGE_PRECEDENCE).opt().context("range end")?;
+                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
                 if end.is_none() {
-                    return err(ParseErrorKind::RangeInclusiveWithoutEnd, span);
+                    return cerror2!(span, "an inclusive range must have an end bound");
                 }
                 expr!(Range { start: None, end, is_inclusive: true })
             },
             TokenKind::DotOpenParenthesis => {
-                let (args, close_p_span) = self.advanced().ws0().parse_call(ScratchPool::new())?;
+                let (args, close_p_span) = self.advanced().parse_call(ScratchPool::new())?;
                 let span = span.join(close_p_span);
                 expr!(PositionalInitializer { lhs: None, args }, span)
             },
@@ -601,40 +594,42 @@ impl Parser {
                 let directive = self.advanced().ident()?;
                 let directive_name = directive.text.as_ref();
 
-                let mut parse_str_lit_arg = || {
-                    let arg = self.ws0().value()?;
-                    arg.try_downcast::<ast::StrVal>().ok_or_else(|| {
-                        cerror!(
-                            arg.full_span(),
-                            "The #{directive_name} directive expects a path as a string literal"
-                        );
-                        ParseError::handled_err()
-                    })
+                let mut parse_str_lit_arg = |usage: &str| {
+                    let arg = opt!(self, value())?;
+                    arg.and_then(Ptr::<Ast>::try_downcast::<ast::StrVal>)
+                        .ok_or_else::<ParseError, _>(|| {
+                            let span =
+                                if let Some(a) = arg { a.full_span() } else { self.lex.pos_span() };
+                            cerror2!(
+                                span,
+                                "The #{directive_name} directive expects {usage} as a string \
+                                 literal"
+                            )
+                        })
                 };
 
                 let p = primitives();
 
                 if directive_name == "import" {
-                    let path = parse_str_lit_arg()?;
+                    let path = parse_str_lit_arg("a source file path")?;
                     let idx = self
                         .cctx
                         .add_import(path.text.as_ref(), Some(self.lex.file.path))
                         .map_err(|e| {
-                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref());
+                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref())
                         })?;
                     expr!(ImportDirective { path, files_idx: idx })
                 } else if directive_name == "library" {
-                    let str_lit = parse_str_lit_arg()?;
+                    let str_lit = parse_str_lit_arg("a library name")?;
                     self.cctx.add_library(str_lit)?;
                     // TODO: return `{library}` object
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "add_library_search_path" {
-                    let str_lit = parse_str_lit_arg()?;
+                    let str_lit = parse_str_lit_arg("a path")?;
                     self.cctx.add_library_search_path(str_lit.text)?;
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else {
-                    cerror!(directive.span, "Unknown compiler directive");
-                    return handled_err();
+                    return cerror2!(directive.span, "Unknown compiler directive");
                 }
             },
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -642,7 +637,7 @@ impl Parser {
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
             TokenKind::Backslash => todo!("TokenKind::BackSlash"),
             TokenKind::Backtick => todo!("TokenKind::BackTick"),
-            t => return err(UnexpectedToken(t), span).context("expected valid value"),
+            kind => return unexpected_token(Token { kind, span }, &[]),
         })
     }
 
@@ -652,23 +647,25 @@ impl Parser {
     ) -> ParseResult<(Ptr<[(Ptr<ast::Ident>, OPtr<Ast>)]>, Span)> {
         let mut fields = ScratchPool::new();
         let close_b_span = loop {
-            if let Some(t) = self.ws0().lex.next_if_kind(TokenKind::CloseBrace) {
+            if let Some(t) = self.lex.next_if_kind(TokenKind::CloseBrace) {
                 break t.span;
             }
-            let ident = self.ident().context("initializer field ident")?;
-            let init = self
-                .ws0()
-                .lex
-                .next_if_kind(TokenKind::Eq)
-                .map(|_| self.expr().context("init expr"))
-                .transpose()?;
-            fields.push((ident, init)).map_err(|e| self.wrap_alloc_err(e))?;
+            let ident = self.ident()?;
+            let init = then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
+            fields.push((ident, init)).map_err(handle_alloc_err)?;
 
-            match self.next_tok() {
-                Ok(Token { kind: TokenKind::Comma, .. }) => {},
-                Ok(Token { kind: TokenKind::CloseBrace, span }) => break span,
+            match self.lex.next_or_eof() {
+                Token { kind: TokenKind::Comma, .. } => {},
+                Token { kind: TokenKind::CloseBrace, span } => break span,
                 t => {
-                    t.and_then(ParseError::unexpected_token).context("expected '=', ',' or '}'")?
+                    return unexpected_token(
+                        t,
+                        if init.is_none() {
+                            &[TokenKind::Eq, TokenKind::Comma, TokenKind::CloseBrace]
+                        } else {
+                            &[TokenKind::Comma, TokenKind::CloseBrace]
+                        },
+                    );
                 },
             }
         };
@@ -690,11 +687,11 @@ impl Parser {
             }}
         }
 
-        let Some(first_expr) = self.ws0().expr().opt().context("first expr in .[...]")? else {
+        let Some(first_expr) = opt!(self, expr())? else {
             // `.[]`
             return Ok(new_arr_init!(ArrayInitializer { elements: self.alloc_empty_slice() }));
         };
-        let t = self.ws0().peek_tok()?;
+        let t = self.lex.peek_or_eof();
         Ok(match t.kind {
             // `.[expr]`
             TokenKind::CloseBracket => {
@@ -704,32 +701,35 @@ impl Parser {
             },
             // `.[expr; count]`
             TokenKind::Semicolon => {
-                self.advanced().ws0();
-                let count = self.expr().context("array literal short count")?;
+                let count = self.advanced().expr()?;
                 new_arr_init!(ArrayInitializerShort { val: first_expr, count })
             },
             // `.[expr,]` or `.[expr, expr, ...]`
             TokenKind::Comma => {
-                self.advanced().ws0();
-                let elems = self.scratch_pool_with_first_val(first_expr)?;
+                let elems = self.advanced().scratch_pool_with_first_val(first_expr)?;
                 let elements = self.expr_list(TokenKind::Comma, elems)?.0;
                 new_arr_init!(ArrayInitializer { elements })
             },
             _ => {
-                return ParseError::unexpected_token(t).context("expected ']', ';' or ','");
+                return unexpected_token(t, &[
+                    TokenKind::Comma,
+                    TokenKind::Semicolon,
+                    TokenKind::CloseBracket,
+                ]);
             },
         })
     }
 
     /// parsing starts after the '->'
     fn function_tail(&mut self, params: DeclList, start_span: Span) -> ParseResult<Ptr<ast::Fn>> {
-        let expr = self.expr().context("fn return type or body")?;
-        let (ret_ty_expr, body) =
-            if self.ws0().lex.peek().is_some_and(|t| t.kind == TokenKind::OpenBrace) {
-                (Some(expr), self.block()?.upcast())
-            } else {
-                (None, expr)
-            };
+        // TODO: allow `-> i32 1;`?
+        let expr = self.expr()?;
+        let (ret_ty_expr, body) = if self.lex.peek().is_some_and(|t| t.kind == TokenKind::OpenBrace)
+        {
+            (Some(expr), self.block()?.upcast())
+        } else {
+            (None, expr)
+        };
         self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body: Some(body) }, start_span))
     }
 
@@ -739,16 +739,11 @@ impl Parser {
         start_span: Span,
         was_piped: bool,
     ) -> ParseResult<Ptr<ast::If>> {
-        #[allow(unused_must_use)] // token is optional
-        self.ws0()
-            .tok_where(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Then | Keyword::Do)));
-        let then_body = self.expr_(IF_PRECEDENCE).context("then body")?;
-        let else_body = self
-            .ws0()
-            .lex
-            .next_if_kind(TokenKind::Keyword(Keyword::Else))
-            .map(|_| self.expr_(IF_PRECEDENCE).context("else body"))
-            .transpose()?;
+        self.lex
+            .advance_if(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Then | Keyword::Do)));
+        let then_body = self.expr_(IF_PRECEDENCE)?;
+        let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
+            => self.expr_(IF_PRECEDENCE)?);
         self.alloc(expr_!(If { condition, then_body, else_body, was_piped }, start_span))
     }
 
@@ -758,9 +753,12 @@ impl Parser {
     fn parse_call(&mut self, args: ScratchPool<Ptr<Ast>>) -> ParseResult<(Ptr<[Ptr<Ast>]>, Span)> {
         let res: ParseResult<_> = try {
             //let args = self.parse_call_args(args)?;
-            let args = self.expr_list(TokenKind::Comma, args).context("call args")?.0;
-            let closing_paren_span =
-                self.tok(TokenKind::CloseParenthesis).context("expected ',' or ')'")?.span;
+            let args = self.expr_list(TokenKind::Comma, args)?.0;
+            let closing_paren_span = self
+                .tok_custom_err(TokenKind::CloseParenthesis, |t| {
+                    unexpected_token::<!>(t, &[TokenKind::Comma, TokenKind::CloseParenthesis])
+                })?
+                .span;
             (args, closing_paren_span)
         };
         if res.is_err() {
@@ -794,8 +792,7 @@ impl Parser {
         let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true);
 
         let Some(close_b) = self.lex.next() else {
-            cerror!(self.lex.pos_span(), "expected '}}'");
-            return handled_err();
+            return cerror2!(self.lex.pos_span(), "expected '}}'");
         };
         debug_assert_eq!(close_b.kind, TokenKind::CloseBrace);
 
@@ -816,10 +813,9 @@ impl Parser {
         in_block: bool,
     ) -> HasTrailingSemicolon {
         let mut has_trailing_semicolon = false;
-        self.ws0();
         loop {
             self.lex
-                .advance_while(|t| t.kind.is_whitespace() || t.kind == TokenKind::Semicolon);
+                .advance_while(|t| t.kind.is_ignored() || t.kind == TokenKind::Semicolon);
             if self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
                 break;
             }
@@ -837,7 +833,7 @@ impl Parser {
                 },
             };
             stmts.push(expr);
-            has_trailing_semicolon = self.ws0().lex.advance_if_kind(TokenKind::Semicolon);
+            has_trailing_semicolon = self.lex.advance_if_kind(TokenKind::Semicolon);
             let peek = self.lex.peek();
             if !has_trailing_semicolon
                 && (peek.is_some_and(|t| t.kind != TokenKind::CloseBrace)
@@ -858,32 +854,33 @@ impl Parser {
     ) -> ParseResult<(Ptr<[Ptr<Ast>]>, bool)> {
         let mut has_trailing_sep = false;
         loop {
-            let Some(expr) = self.expr().opt().context("expr in list")? else { break };
-            list_pool.push(expr).map_err(|e| self.wrap_alloc_err(e))?;
-            has_trailing_sep = self.ws0().lex.advance_if_kind(sep);
+            let Some(expr) = opt!(self, expr())? else { break };
+            list_pool.push(expr).map_err(handle_alloc_err)?;
+            has_trailing_sep = self.lex.advance_if_kind(sep);
             if !has_trailing_sep {
                 break;
             }
-            self.ws0();
         }
+        debug_assert!(self.lex.peek().is_none_or(|t| t.kind != sep));
         Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
     }
 
-    /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also
-    /// allows a trailing `sep`.
+    /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also allows a trailing
+    /// `sep`.
     fn var_decl_list(
         &mut self,
         sep: TokenKind,
         mut list: ScratchPool<Ptr<ast::Decl>>,
+        allow_ident_only: bool,
     ) -> ParseResult<DeclList> {
         loop {
-            let Some(decl) = self.var_decl().opt().context("var_decl")? else { break };
-            list.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
-            if !self.ws0().lex.advance_if_kind(sep) {
+            let Some(decl) = opt!(self, var_decl(allow_ident_only))? else { break };
+            list.push(decl).map_err(handle_alloc_err)?;
+            if !self.lex.advance_if_kind(sep) {
                 break;
             }
-            self.ws0();
         }
+        debug_assert!(self.lex.peek().is_none_or(|t| t.kind != sep));
         self.clone_slice_from_scratch_pool(list)
     }
 
@@ -891,30 +888,30 @@ impl Parser {
         let mut fields = ScratchPool::new();
         let mut const_fields = Vec::new();
         loop {
-            let Some(decl) = self.var_decl().opt().context("var_decl")? else { break };
+            let Some(decl) = opt!(self, var_decl(false))? else { break };
             if decl.is_const {
                 const_fields.push(decl);
             } else {
-                fields.push(decl).map_err(|e| self.wrap_alloc_err(e))?;
+                fields.push(decl).map_err(handle_alloc_err)?;
             }
-            if !self.ws0().lex.advance_if(|t| {
+            if !self.lex.advance_if(|t| {
                 t.kind == TokenKind::Semicolon || (!decl.is_const && t.kind == TokenKind::Comma)
             }) {
                 break;
             }
-            self.ws0();
         }
         Ok((self.clone_slice_from_scratch_pool(fields)?, const_fields))
     }
 
-    fn var_decl(&mut self) -> ParseResult<Ptr<ast::Decl>> {
+    fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
         let mut markers = DeclMarkers::default();
-        let mut t = self.peek_tok().context("expected variable marker or ident")?;
+        let mut t = self.lex.peek_or_eof();
 
         macro_rules! set_marker {
             ($variant:ident $field:ident) => {
                 if markers.$field {
-                    return err(DuplicateDeclMarker(DeclMarkerKind::$variant), t.span);
+                    let marker_text = Keyword::$variant.as_str();
+                    return cerror2!(t.span, "duplicate marker '{marker_text}' on declaration");
                 } else {
                     markers.$field = true
                 }
@@ -927,25 +924,33 @@ impl Parser {
                 TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
                 TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
                 TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
-                _ => ParseError::unexpected_token(t).context("expected decl marker or ident")?,
+                _ => unexpected_token(t, &[
+                    TokenKind::Ident,
+                    TokenKind::Keyword(Keyword::Mut),
+                    TokenKind::Keyword(Keyword::Rec),
+                    TokenKind::Keyword(Keyword::Pub),
+                ])?,
             }
-            self.advanced().ws1()?;
-            t = self.peek_tok().context("expected variable marker or ident")?;
+            t = self.advanced().lex.peek_or_eof();
         };
 
-        match self.ws0().lex.peek() {
-            Some(Token { kind: TokenKind::Colon, .. }) => {
-                self.advanced().typed_decl(markers, ident)
-            },
-            Some(t @ Token { kind: TokenKind::ColonEq | TokenKind::ColonColon, .. }) => {
+        match self.lex.peek_or_eof() {
+            Token { kind: TokenKind::Colon, .. } => self.advanced().typed_decl(markers, ident),
+            t @ Token { kind: TokenKind::ColonEq | TokenKind::ColonColon, .. } => {
                 let mut d = Decl::from_ident(ident);
                 d.markers = markers;
-                d.init = Some(self.advanced().expr().context("variable initialization")?);
+                d.init = Some(self.advanced().expr()?);
                 d.is_const = t.kind == TokenKind::ColonColon;
                 self.alloc(d)
             },
-            Some(t) => ParseError::unexpected_token(t).context("expected ':', ':=' or '::'"),
-            None => err(NoInput, self.lex.pos_span()),
+            t if allow_ident_only && t.kind.is_expr_terminator() => {
+                let mut d = Decl::from_ident(ident);
+                d.markers = markers;
+                self.alloc(d)
+            },
+            t => {
+                unexpected_token(t, &[TokenKind::Colon, TokenKind::ColonEq, TokenKind::ColonColon]) // TODO: expr terminator if allow_ident_only?
+            },
         }
     }
 
@@ -961,9 +966,9 @@ impl Parser {
     ) -> ParseResult<Ptr<ast::Decl>> {
         let mut d = Decl::from_ident(ident);
         d.markers = markers;
-        d.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE).context("decl type")?);
-        let t = self.ws0().lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
-        d.init = t.map(|_| self.expr().context("variable initialization")).transpose()?;
+        d.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE)?);
+        let t = self.lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
+        d.init = t.map(|_| self.expr()).transpose()?;
         d.is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
         self.alloc(d)
     }
@@ -978,38 +983,36 @@ impl Parser {
         self.alloc(Ident::new(self.get_text_from_span(span), span))
     }
 
+    fn local_keyword(&mut self, local_keyword: &str) -> ParseResult<()> {
+        let i = self.tok(TokenKind::Ident)?;
+        if &*self.get_text_from_span(i.span) != local_keyword {
+            return unexpected_token_expect1(i, format_args!("`{local_keyword}`"));
+        }
+        Ok(())
+    }
+
     /// Parses the `do` keyword 0 or 1 times.
     fn opt_do(&mut self) {
-        #[allow(unused_must_use)] // `do` is optional
-        self.tok(TokenKind::Keyword(Keyword::Do));
+        self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Do));
     }
 
     // -------
 
-    /// 0+ whitespace
-    fn ws0(&mut self) -> &mut Self {
-        self.lex.advance_while(|t| t.kind.is_whitespace());
-        self
-    }
-
-    /// 1+ whitespace
-    fn ws1(&mut self) -> ParseResult<()> {
-        self.tok_where(|t| t.kind.is_whitespace())?;
-        self.ws0();
-        Ok(())
-    }
-
     fn tok(&mut self, tok: TokenKind) -> ParseResult<Token> {
-        self.tok_where(|t| t.kind == tok).with_context(|| format!("token ({:?})", tok))
+        self.tok_custom_err(tok, |t| unexpected_token::<!>(t, &[tok]))
     }
 
-    fn tok_where(&mut self, cond: impl FnOnce(Token) -> bool) -> ParseResult<Token> {
-        let t = self.peek_tok()?;
-        if cond(t) {
+    fn tok_custom_err(
+        &mut self,
+        tok: TokenKind,
+        emit_err: impl FnOnce(Token) -> Result<!, ParseError>,
+    ) -> ParseResult<Token> {
+        let t = self.lex.peek_or_eof();
+        if t.kind == tok {
             self.lex.advance();
             Ok(t)
         } else {
-            ParseError::unexpected_token(t)?
+            emit_err(t)?;
         }
     }
 
@@ -1018,36 +1021,23 @@ impl Parser {
         self
     }
 
-    #[inline]
-    fn next_tok(&mut self) -> ParseResult<Token> {
-        self.lex.next().ok_or(err_val(NoInput, self.lex.pos_span()))
-    }
-
-    #[inline]
-    fn peek_tok(&mut self) -> ParseResult<Token> {
-        self.lex.peek().ok_or(err_val(NoInput, self.lex.pos_span()))
-    }
-
     // helpers:
 
     #[inline]
     fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
-        self.cctx
-            .alloc
-            .alloc(val)
-            .map_err(|e| err_val(AllocErr(e), self.lex.pos_span()))
+        self.cctx.alloc.alloc(val).map_err(handle_alloc_err)
     }
 
     #[inline]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
-        self.cctx.alloc.alloc_slice(slice).map_err(|err| self.wrap_alloc_err(err))
+        self.cctx.alloc.alloc_slice(slice).map_err(handle_alloc_err)
     }
 
     fn scratch_pool_with_first_val<'bump, T>(
         &self,
         first: T,
     ) -> ParseResult<ScratchPool<'bump, T>> {
-        ScratchPool::new_with_first_val(first).map_err(|e| self.wrap_alloc_err(e))
+        ScratchPool::new_with_first_val(first).map_err(handle_alloc_err)
     }
 
     /// Clones all values from a [`ScratchPool`] to `self.alloc`.
@@ -1058,12 +1048,7 @@ impl Parser {
     ) -> ParseResult<Ptr<[T]>> {
         scratch_pool
             .clone_to_slice_into_arena(&self.cctx.alloc)
-            .map_err(|e| self.wrap_alloc_err(e))
-    }
-
-    #[inline]
-    fn wrap_alloc_err(&self, err: bumpalo::AllocErr) -> ParseError {
-        err_val(AllocErr(err), self.lex.pos_span())
+            .map_err(handle_alloc_err)
     }
 
     #[inline]
@@ -1080,6 +1065,10 @@ impl Parser {
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {
         self.lex.get_code()[span].into()
     }
+}
+
+fn handle_alloc_err(err: AllocErr) -> ParseError {
+    cerror2!(Span::ZERO, "allocation error: {err}")
 }
 
 #[derive(Debug)]

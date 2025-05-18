@@ -1,4 +1,5 @@
 use crate::{
+    arena_allocator::AllocErr,
     ast::{self, Ast},
     parser::lexer::Span,
     ptr::Ptr,
@@ -50,7 +51,7 @@ pub enum SemaErrorKind {
 
     NotAConstExpr,
 
-    AllocErr(bumpalo::AllocErr),
+    AllocErr(AllocErr),
 
     HandledErr,
 }
@@ -65,6 +66,18 @@ impl SemaError {
     #[allow(non_upper_case_globals)]
     pub const HandledErr: SemaError =
         SemaError { kind: SemaErrorKind::HandledErr, span: Span::ZERO };
+}
+
+impl From<crate::diagnostics::HandledErr> for SemaError {
+    fn from(_: crate::diagnostics::HandledErr) -> Self {
+        SemaError::HandledErr
+    }
+}
+
+impl From<crate::arena_allocator::AllocErr> for SemaError {
+    fn from(err: AllocErr) -> Self {
+        SemaError { kind: SemaErrorKind::AllocErr(err), span: Span::ZERO }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -157,7 +170,7 @@ impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
     fn from_residual(residual: SemaResult<!, E>) -> Self {
         match residual {
             NotFinished => SemaResult::NotFinished,
-            Err(err) => SemaResult::Err(err.into()),
+            Err(err) => SemaResult::Err(err),
         }
     }
 }

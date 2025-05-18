@@ -1,7 +1,7 @@
 use crate::{
     codegen::llvm::finalize_ty,
     context::{FilesIndex, primitives},
-    diagnostics::cerror,
+    diagnostics::{HandledErr, cerror, cerror2},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema,
@@ -565,6 +565,8 @@ ast_variants! {
         /// simple enum == no associated data
         is_simple_enum: bool,
         variants: DeclList,
+        /// is present after sema of this ast node. always has the same length as `variants`.
+        variant_tags: OPtr<[usize]>,
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
     },
@@ -717,10 +719,8 @@ impl Ptr<Ast> {
 
     pub fn try_get_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
         let p = self.rep();
-        then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(|| {
-            cerror!(self.full_span(), "value not known at compile time");
-            sema::SemaError::HandledErr
-        })
+        then!(p.is_const_val() => p.downcast_const_val())
+            .ok_or_else(|| cerror2!(self.full_span(), "value not known at compile time"))
     }
 
     #[inline]
@@ -851,7 +851,7 @@ impl Ptr<Type> {
                 | TypeEnum::Fn { .. }
                 | TypeEnum::SliceTy { .. } => break self,
                 TypeEnum::PtrTy { pointee, .. } => self = pointee.downcast_type(),
-                TypeEnum::Unset => panic_debug("invalid type"),
+                TypeEnum::Unset => panic_debug!("invalid type"),
             }
         }
     }
@@ -1140,7 +1140,7 @@ impl Decl {
 
     /// `MyStruct.ABC : u8 : /* ... */`
     /// `^^^^^^^^^^^^ lhs`
-    pub fn from_lhs(lhs: Ptr<Ast>) -> Result<Decl, ()> {
+    pub fn from_lhs(lhs: Ptr<Ast>) -> Result<Decl, HandledErr> {
         match lhs.kind {
             AstKind::Ident => Ok(Decl::from_ident(lhs.downcast::<Ident>())),
             AstKind::Dot => {
@@ -1402,13 +1402,6 @@ impl DeclMarkers {
     pub fn is_empty(&self) -> bool {
         !(self.is_pub || self.is_mut || self.is_rec)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclMarkerKind {
-    Pub,
-    Mut,
-    Rec,
 }
 
 pub type DeclList = Ptr<[Ptr<Decl>]>;

@@ -49,7 +49,7 @@ pub fn compile(
 ) -> CompileResult {
     if args.path.is_dir() {
         if !args.quiet {
-            println!("Compiling project at {:?}", args.path);
+            eprintln!("Compiling project at {:?}", args.path);
         }
         todo!();
         /*
@@ -70,12 +70,12 @@ pub fn compile(
     let proj_path = args.path.parent().unwrap();
     let entry_file = args.path.file_name().unwrap();
     if !args.quiet {
-        print!("Compiling file {:?}", entry_file);
+        eprint!("Compiling file {:?}", entry_file);
         if proj_path != Path::new("") {
-            print!(" in project {:?}", proj_path);
+            eprint!(" in project {:?}", proj_path);
             std::env::set_current_dir(proj_path).unwrap();
         }
-        println!("");
+        eprintln!("");
     }
 
     let entry_file = Path::new(entry_file);
@@ -114,18 +114,18 @@ pub fn compile_file(
     macro_rules! debug_ast {
         () => {
             for file in ctx.files.iter() {
-                println!("# File {:?}", file.path);
+                eprintln!("# File {:?}", file.path);
                 for s in stmts[file.stmt_range.u()].iter() {
-                    println!("stmt @ {:x?}", s);
+                    eprintln!("stmt @ {:x?}", s);
                     s.print_tree();
                 }
-                println!();
+                eprintln!();
             }
         };
     }
 
     if args.debug_ast {
-        println!("### AST Nodes:");
+        eprintln!("### AST Nodes:");
         debug_ast!();
     }
 
@@ -149,7 +149,7 @@ pub fn compile_file(
     }
 
     if args.debug_typed_ast {
-        println!("\n### Typed AST Nodes:");
+        eprintln!("\n### Typed AST Nodes:");
         debug_ast!();
     }
 
@@ -172,11 +172,11 @@ pub fn compile_file(
     ctx.compile_time.codegen = codegen_start.elapsed();
 
     if args.debug_functions {
-        print!("functions:");
+        eprint!("functions:");
         for a in module.get_functions() {
-            print!("{:?},", a.get_name());
+            eprint!("{:?},", a.get_name());
         }
-        println!("\n");
+        eprintln!("\n");
     }
 
     if mode == CompileMode::Codegen {
@@ -192,8 +192,8 @@ pub fn compile_file(
     ctx.compile_time.backend_setup = backend_setup_start.elapsed();
 
     if args.debug_llvm_ir_unoptimized {
-        println!("### Unoptimized LLVM IR:");
-        println!("{}\n", module.print_to_string().to_string());
+        eprintln!("### Unoptimized LLVM IR:");
+        eprintln!("{}\n", module.print_to_string().to_string());
     }
 
     let backend_start = Instant::now();
@@ -201,8 +201,19 @@ pub fn compile_file(
     ctx.compile_time.optimization = backend_start.elapsed();
 
     if args.debug_llvm_ir_optimized {
-        println!(";### Optimized LLVM IR:");
-        println!("{}\n", module.print_to_string().to_string());
+        eprintln!(";### Optimized LLVM IR:");
+        eprintln!("{}\n", module.print_to_string().to_string());
+    }
+
+    let exe_file_path = Path::new("out").join(args.path.file_stem().unwrap());
+    let obj_file_path = exe_file_path.with_added_extension("o");
+
+    if args.emit_llvm_ir {
+        std::fs::write(
+            exe_file_path.with_added_extension("ll"),
+            module.print_to_string().to_string(),
+        )
+        .unwrap();
     }
 
     // ##### Linking #####
@@ -212,9 +223,6 @@ pub fn compile_file(
         let module = module.as_mut_ptr();
         return CompileResult::ModuleForTesting(BackendModule { context, module });
     }
-
-    let exe_file_path = Path::new("out").join(args.path.file_stem().unwrap());
-    let obj_file_path = exe_file_path.with_added_extension("o");
 
     if args.out != OutKind::None {
         let write_obj_file_start = Instant::now();
@@ -240,16 +248,16 @@ pub fn compile_file(
             .arg("-lc")
             .arg("-lm");
         if args.debug_linker_args {
-            println!("### Linker Cmd");
-            print!("{}", cmd.get_program().display());
+            eprintln!("### Linker Cmd");
+            eprint!("{}", cmd.get_program().display());
             for args in cmd.get_args() {
-                print!(" {}", args.display());
+                eprint!(" {}", args.display());
             }
-            print!("\n\n");
+            eprint!("\n\n");
         }
         let err = cmd.status().unwrap();
         if !err.success() {
-            println!("linking failed: {:?}", err);
+            eprintln!("linking failed: {:?}", err);
             return CompileResult::Err;
         }
 
@@ -271,9 +279,9 @@ pub fn compile_file(
         return CompileResult::Err;
     }
 
-    println!("\nRunning `{}`", exe_file_path.display());
+    eprintln!("\nRunning `{}`", exe_file_path.display());
     if let Err(e) = std::process::Command::new(exe_file_path).status().unwrap().exit_ok() {
-        println!("{e}");
+        eprintln!("{e}");
         return CompileResult::RunErr { err_code: e.code().unwrap_or(1) };
     }
 
@@ -298,28 +306,28 @@ pub struct CompileDurations {
 impl CompileDurations {
     pub fn print(&self) {
         let frontend_total = self.parser + self.sema + self.codegen;
-        println!("  Frontend:              {:?}", frontend_total);
-        println!("    Lexer, Parser:         {:?}", self.parser);
-        println!("    Semantic Analysis:     {:?}", self.sema);
+        eprintln!("  Frontend:              {:?}", frontend_total);
+        eprintln!("    Lexer, Parser:         {:?}", self.parser);
+        eprintln!("    Semantic Analysis:     {:?}", self.sema);
         if self.codegen.is_zero() {
             return;
         }
-        println!("    LLVM IR Codegen:       {:?}", self.codegen);
+        eprintln!("    LLVM IR Codegen:       {:?}", self.codegen);
 
         let backend_total = self.backend_setup + self.optimization + self.writing_obj;
-        println!("  Backend:               {:?}", backend_total);
-        println!("    LLVM Setup:            {:?}", self.backend_setup);
-        println!("    LLVM pass pipeline:    {:?}", self.optimization);
+        eprintln!("  Backend:               {:?}", backend_total);
+        eprintln!("    LLVM Setup:            {:?}", self.backend_setup);
+        eprintln!("    LLVM pass pipeline:    {:?}", self.optimization);
         if !self.writing_obj.is_zero() {
-            println!("    writing obj file:      {:?}", self.writing_obj);
+            eprintln!("    writing obj file:      {:?}", self.writing_obj);
         }
 
         if !self.linking.is_zero() {
-            println!("  Linking:               {:?}", self.linking);
+            eprintln!("  Linking:               {:?}", self.linking);
         }
 
         let total = frontend_total + backend_total + self.linking;
-        println!("  Total:                 {:?}", total);
+        eprintln!("  Total:                 {:?}", total);
     }
 }
 

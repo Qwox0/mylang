@@ -179,10 +179,9 @@ true";
 }
 
 #[test]
-#[ignore = "unfinished test"]
 fn custom_enum_tag_value() {
     assert_eq!(*jit_run_test::<i32>("enum { A = 10, B, C }.A").ok(), 10);
-    assert_eq!(*jit_run_test::<i32>("enum { A = 10, B, C }.B").ok(), 11); // ?
+    assert_eq!(*jit_run_test::<i32>("enum { A = 10, B, C }.B").ok(), 11);
 }
 
 #[test]

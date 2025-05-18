@@ -1,10 +1,6 @@
 use crate::{
-    context::CompilationContext,
-    parser,
-    tests::{
-        TestSpan, jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw,
-        test_file_mock,
-    },
+    diagnostics::DiagnosticSeverity,
+    tests::{TestSpan, jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw},
     util::IteratorExt,
 };
 
@@ -109,17 +105,6 @@ fn sret_no_memcpy() {
     assert_eq!(*res.ok(), MyStruct { a: 5, b: 10, c: 15 });
     let llvm_module_text = res.module_text().unwrap();
     assert!(!llvm_module_text.contains("memcpy")); // TODO: implement this
-}
-
-#[test]
-fn parse_err_missing_if_body() {
-    let ctx = CompilationContext::new();
-    let test_file = test_file_mock("if a .A".as_ref());
-    parser::parse(ctx.0, test_file);
-    assert_eq!(ctx.diagnostic_reporter.diagnostics.len(), 1);
-    let err = &ctx.diagnostic_reporter.diagnostics[0];
-    assert!(err.msg.starts_with("NoInput"));
-    assert_eq!(err.span.range(), 7..8);
 }
 
 #[test]
@@ -276,9 +261,38 @@ fn validate_lvalue() {
 
 #[test]
 #[ignore = "not yet implemented"]
-fn lambda_type_mismatch() {
+fn prevent_errors_caused_by_errors() {
     let code = "
-take_lambda :: (f: (x: i32) -> i32) -> f(5);
-take_lambda(() -> 10)";
-    test_compile_err(code, "TODO", |code| TestSpan::of_substr(code, "() -> 10"));
+MyStruct :: struct { a: MissingType }
+extern foreign_fn: (_: MyStruct) -> i32;";
+    test_compile_err(code, "unknown ident `MissingType`", |code| {
+        TestSpan::of_substr(code, "MissingType")
+    });
+
+    let code = "
+MyStruct :: struct { a: MissingType }
+extern foreign_fn: (_: i32) -> MyStruct;";
+    test_compile_err(code, "unknown ident `MissingType`", |code| {
+        TestSpan::of_substr(code, "MissingType")
+    });
+}
+
+#[test]
+fn invalid_array_lit_with_hint() {
+    let res = jit_run_test::<()>("[1, 2]");
+    let diagnostics = res.diagnostics();
+    let [error, hint] = diagnostics else {
+        panic!("expected 2 diagnostics, got {}", diagnostics.len())
+    };
+    assert_eq!(error.severity, DiagnosticSeverity::Error);
+    assert_eq!(error.span, TestSpan::of_substr(&res.full_code, ","));
+    assert_eq!(error.msg.as_ref(), "expected `]`, got `,`");
+
+    assert_eq!(hint.severity, DiagnosticSeverity::Info);
+    assert_eq!(hint.span, TestSpan::of_substr(&res.full_code, "[1,"));
+    assert_eq!(
+        hint.msg.as_ref(),
+        "if you want to create an array value, consider using an array initializer `.[...]` \
+         instead"
+    );
 }

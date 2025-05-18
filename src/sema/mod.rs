@@ -1049,7 +1049,7 @@ impl Sema {
                         check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span())
                             .finalize();
                     } else {
-                        panic_debug("this function has already been analyzed as a function type")
+                        panic_debug!("this function has already been analyzed as a function type")
                     }
                 };
                 self.close_scope();
@@ -1119,7 +1119,7 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::EnumDef { variants, is_simple_enum, tag_ty, .. } => {
+            AstEnum::EnumDef { variants, variant_tags, is_simple_enum, tag_ty, .. } => {
                 let mut variant_names = HashSet::new();
                 let int_repr_ty = match util::variant_count_to_tag_size_bits(variants.len()) {
                     0 => p.u0,
@@ -1139,10 +1139,10 @@ impl Sema {
                 };
                 *tag_ty = Some(int_repr_ty.downcast::<ast::IntTy>());
 
-                let mut used_indices = Vec::with_capacity(variants.len());
-                let mut order_idx = 0;
+                let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
+                let mut tag = 0;
                 *is_simple_enum = true;
-                for variant in variants.iter_mut() {
+                for (idx, variant) in variants.iter_mut().enumerate() {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
                     if is_duplicate {
                         return err(DuplicateEnumVariant, variant.ident.span);
@@ -1157,21 +1157,21 @@ impl Sema {
                     if variant.var_ty != p.void_ty {
                         *is_simple_enum = false;
                     }
-                    order_idx = if let Some(variant_idx) = variant_idx {
+                    if let Some(variant_idx) = variant_idx {
                         self.analyze(variant_idx, &Some(int_repr_ty), true)?;
-                        variant_idx.int()
-                    } else {
-                        order_idx + 1
-                    };
+                        tag = variant_idx.int();
+                    }
 
-                    // TODO: improve this
-                    if used_indices.contains(&order_idx) {
+                    // TODO: replace linear search?
+                    if unsafe { used_tags[..idx].assume_init_ref() }.contains(&tag) {
                         cerror!(variant.ident.span, "Duplicate enum variant index");
                         return SemaResult::HandledErr;
                     }
-                    used_indices.push(order_idx);
+                    used_tags[idx].write(tag);
+                    tag += 1;
                 }
-                //self.enum_stack.last_mut().unwrap_debug().push(ty);
+                debug_assert_eq!(variants.len(), used_tags.len());
+                *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
                 expr.ty = Some(p.type_ty);
             },
             AstEnum::RangeTy { .. } => todo!(),
@@ -1312,7 +1312,9 @@ impl Sema {
         if let Some(t) = decl.var_ty_expr {
             let ty = self.analyze_type(t)?;
             decl.var_ty = Some(ty);
-            if decl.is_extern
+            if ty == p.never {
+                decl.ty = Some(p.never);
+            } else if decl.is_extern
                 && let Some(f) = ty.try_downcast::<ast::Fn>()
             {
                 // TODO: remove this special case
@@ -1322,9 +1324,6 @@ impl Sema {
                 decl.var_ty = Some(p.fn_val);
                 decl.is_const = true;
                 return Ok(());
-            }
-            if ty == p.never {
-                decl.ty = Some(p.never);
             }
         }
         let res = if let Some(init) = decl.init {
@@ -1377,7 +1376,6 @@ impl Sema {
             NotFinished => NotFinished,
             Ok(()) => {
                 decl.ident.decl = Some(decl);
-                decl.ty = Some(p.void_ty);
                 Ok(())
             },
         };
@@ -1445,7 +1443,7 @@ impl Sema {
                         "The parameter has already been set by this positional argument"
                     )
                 } else {
-                    cerror!(arg_name.span, "Unknown parameter")
+                    cerror!(arg_name.span, "Unknown parameter");
                 }
                 return SemaResult::HandledErr;
             };
@@ -1710,10 +1708,7 @@ impl Sema {
 
     #[inline]
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> SemaResult<Ptr<T>> {
-        match self.cctx.alloc.alloc(val) {
-            Result::Ok(ok) => Ok(Ptr::from(ok)),
-            Result::Err(e) => err(AllocErr(e), todo!()),
-        }
+        Ok(self.cctx.alloc.alloc(val)?)
     }
 }
 

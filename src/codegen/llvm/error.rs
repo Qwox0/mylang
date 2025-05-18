@@ -23,10 +23,7 @@ pub enum CodegenError {
 unsafe impl Send for CodegenError {}
 unsafe impl Sync for CodegenError {}
 
-#[cfg(not(debug_assertions))]
 pub type CodegenResultError = CodegenError;
-#[cfg(debug_assertions)]
-pub type CodegenResultError = anyhow::Error;
 
 #[derive(Debug)]
 pub enum CodegenResult<T, U = !> {

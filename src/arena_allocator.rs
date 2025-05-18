@@ -1,10 +1,11 @@
 use crate::ptr::Ptr;
-use std::{alloc::Layout, mem::MaybeUninit, ptr::NonNull};
+use std::{alloc::Layout, fmt, mem::MaybeUninit, ptr::NonNull};
 
 #[derive(Debug)]
 pub struct Arena(pub bumpalo::Bump);
 
-pub type AllocErr = bumpalo::AllocErr;
+#[derive(Debug, Clone)]
+pub struct AllocErr(bumpalo::AllocErr);
 
 impl Arena {
     #[inline]
@@ -14,12 +15,15 @@ impl Arena {
 
     #[inline]
     pub fn alloc<T>(&self, val: T) -> Result<Ptr<T>, AllocErr> {
-        self.0.try_alloc(val).map(Ptr::from)
+        match self.0.try_alloc(val) {
+            Ok(t) => Ok(Ptr::from(t)),
+            Err(e) => Err(AllocErr(e)),
+        }
     }
 
     #[inline]
     pub fn alloc_layout(&self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
-        self.0.try_alloc_layout(layout)
+        self.0.try_alloc_layout(layout).map_err(AllocErr)
     }
 
     #[inline]
@@ -58,5 +62,17 @@ impl Arena {
             unsafe { slice.get_unchecked_mut(idx) }.write(t);
         }
         Ok(slice.cast_slice::<T>())
+    }
+}
+
+impl From<bumpalo::AllocErr> for AllocErr {
+    fn from(e: bumpalo::AllocErr) -> Self {
+        AllocErr(e)
+    }
+}
+
+impl fmt::Display for AllocErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }

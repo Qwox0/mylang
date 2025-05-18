@@ -46,6 +46,9 @@ pub struct BuildArgs {
     pub entry_point: String,
 
     #[arg(long)]
+    pub emit_llvm_ir: bool,
+
+    #[arg(long)]
     pub debug_ast: bool,
     #[arg(long)]
     pub debug_types: bool,
@@ -105,6 +108,7 @@ impl BuildArgs {
             quiet: true,
             is_lib: false,
             entry_point: opt.entry_point.to_string(),
+            emit_llvm_ir: false,
             debug_ast: opt.debug_ast,
             debug_types: opt.debug_types,
             debug_typed_ast: opt.debug_typed_ast,

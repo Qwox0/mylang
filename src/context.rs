@@ -2,7 +2,7 @@ use crate::{
     arena_allocator::Arena,
     ast::{self, ast_new},
     compiler::CompileDurations,
-    diagnostics,
+    diagnostics::{self, HandledErr},
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
     sema::primitives::Primitives,
@@ -176,13 +176,13 @@ impl Ptr<CompilationContextInner> {
         idx
     }
 
-    pub fn add_library(self, str_lit: Ptr<ast::StrVal>) -> Result<(), ()> {
+    pub fn add_library(self, str_lit: Ptr<ast::StrVal>) -> Result<(), HandledErr> {
         let name = str_lit.text;
         self.as_mut().libraries.insert(name.as_hash_key());
         Ok(())
     }
 
-    pub fn add_library_search_path(self, path: Ptr<str>) -> Result<(), ()> {
+    pub fn add_library_search_path(self, path: Ptr<str>) -> Result<(), HandledErr> {
         self.as_mut().library_search_paths.insert(path.as_hash_key());
         Ok(())
     }

@@ -279,8 +279,7 @@ impl<'ctx> Codegen<'ctx> {
                     debug_assert_eq!(out_ty.kind, AstKind::EnumDef);
                     debug_assert_eq!(lhs_ty, p.type_ty);
                     let _ = self.llvm_type(enum_def.upcast_to_type());
-                    let (tag, _) = enum_def.variants.find_field(&rhs.text).u();
-                    self.compile_enum_val(enum_def, tag, None, write_target.take())
+                    self.compile_enum_val(enum_def, &rhs.text, None, write_target.take())
                 } else if lhs_ty.kind == AstKind::StructDef || lhs_ty.kind == AstKind::SliceTy {
                     let s_def = lhs_ty.downcast_struct_def();
                     let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty();
@@ -410,9 +409,9 @@ impl<'ctx> Codegen<'ctx> {
                     let enum_ty = out_ty.downcast::<ast::EnumDef>();
                     self.llvm_type(enum_ty.upcast_to_type()); // TODO: find a better way to compile anonymous inline types and functions.
                     debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty.upcast_to_type());
-                    let idx = enum_ty.variants.find_field(&dot.rhs.text).u().0;
                     debug_assert!(args.len() <= 1);
-                    self.compile_enum_val(enum_ty, idx, args.get(0).copied(), write_target.take())
+                    let data = args.get(0).copied();
+                    self.compile_enum_val(enum_ty, &dot.rhs.text, data, write_target.take())
                 } else {
                     unreachable_debug()
                 }
@@ -776,7 +775,7 @@ impl<'ctx> Codegen<'ctx> {
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
-                    _ => panic_debug("for loop over other types"),
+                    _ => panic_debug!("for loop over other types"),
                 };
 
                 self.continue_break_depth = outer_continue_break_depth;
@@ -899,7 +898,7 @@ impl<'ctx> Codegen<'ctx> {
                 }
             },
             AstEnum::ImportDirective { .. } | AstEnum::SimpleDirective { .. } => {
-                panic_debug("directives should have been resolved during sema")
+                panic_debug!("directives should have been resolved during sema")
             },
 
             AstEnum::SimpleTy { .. }
@@ -1038,6 +1037,15 @@ impl<'ctx> Codegen<'ctx> {
             cur_ffi_arg_idx += ret.add_param_attributes(self, *param, ffi_ty, cur_ffi_arg_idx);
         }
 
+        let ret = if let CFfiType::SmallSimpleEnum { ffi_int, small_int } = ret_ffi_ty {
+            debug_assert!(!use_sret);
+            let ret = CodegenValue::new(ret.as_value_ref()).int_val();
+            debug_assert_eq!(ret.get_type(), ffi_int);
+            self.builder.build_int_truncate(ret, small_int, "call")?.as_any_value_enum()
+        } else {
+            ret.as_any_value_enum()
+        };
+
         let p = primitives();
         if ret_ty == p.never {
             self.builder.build_unreachable()?;
@@ -1050,11 +1058,6 @@ impl<'ctx> Codegen<'ctx> {
                 self.build_store(ret_val_ptr, ret, ret_ty.alignment())?;
             }
             stack_val(ret_val_ptr)
-        } else if let CFfiType::SmallSimpleEnum { ffi_int, small_int } = ret_ffi_ty {
-            debug_assert!(!use_sret);
-            let ret = CodegenValue::new(ret.as_value_ref()).int_val();
-            debug_assert_eq!(ret.get_type(), ffi_int);
-            reg(self.builder.build_int_truncate(ret, small_int, "call")?)
         } else {
             debug_assert!(!use_sret);
             reg(ret)
@@ -1064,13 +1067,16 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_enum_val(
         &mut self,
         enum_def: Ptr<ast::EnumDef>,
-        variant_idx: usize,
+        variant_name: &str,
         data: Option<Ptr<Ast>>,
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
+        let variant_idx = enum_def.variants.find_field(variant_name).u().0;
+        let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u();
+
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
         let tag_ty = self.enum_tag_type(enum_def);
-        let tag_val = tag_ty.const_int(variant_idx as u64, false);
+        let tag_val = tag_ty.const_int(variant_tag as u64, false);
         if write_target.is_some() || data.is_some() {
             let enum_ptr = if let Some(ptr) = write_target {
                 ptr
@@ -1277,7 +1283,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module().print_to_stderr();
                 }
                 unsafe { func.delete() };
-                panic_debug("invalid generated function");
+                panic_debug!("invalid generated function");
                 Err(CodegenError::InvalidGeneratedFunction.into())?
             }
         };
@@ -1688,7 +1694,6 @@ impl<'ctx> Codegen<'ctx> {
             },
 
             (_, CFfiType::Simple2(_)) => unreachable_debug(),
-            //_ => panic_debug("unexpected symbol"),
             (Symbol::Void, _) => unreachable_debug(),
             (Symbol::Global(_), _) => todo!("return global"),
             (Symbol::Function(_), _) => todo!("return function"),
@@ -2569,7 +2574,7 @@ impl<'ctx> Symbol<'ctx> {
     #[inline]
     fn basic(self) -> BasicSymbol<'ctx> {
         match self {
-            Symbol::Void => panic_debug("Void is not a basic symbol"),
+            Symbol::Void => panic_debug!("Void is not a basic symbol"),
             Symbol::Stack(val) => BasicSymbol::Stack(val),
             Symbol::Register(val) => BasicSymbol::Register(val),
             Symbol::Global(val) => BasicSymbol::Global(val),
@@ -2807,7 +2812,15 @@ impl<'ctx> CFfiType<'ctx> {
     }
 
     fn do_use_sret(&self) -> bool {
-        [CFfiType::ByValPtr, CFfiType::AsPtr].contains(self)
+        matches!(self, CFfiType::ByValPtr | CFfiType::AsPtr)
+    }
+}
+
+fn has_ffi_noundef(ty: Ptr<ast::Type>, c_ffi_ty: CFfiType<'_>) -> bool {
+    match c_ffi_ty {
+        CFfiType::Zst => false,
+        CFfiType::AsPtr | CFfiType::ByValPtr | CFfiType::SmallSimpleEnum { .. } => true,
+        CFfiType::Simple(_) | CFfiType::Simple2(_) => ty.is_ffi_noundef(),
     }
 }
 
@@ -2893,7 +2906,8 @@ trait AddAttribute: Copy {
                 .context
                 .create_type_attribute(Attribute::get_named_enum_kind_id("sret"), llvm_ty);
             self.add_attributes(AttributeLoc::Param(0), [sret, codegen.noundef]);
-        } else if ret_ffi_type != CFfiType::Zst && f.ret_ty.u().is_ffi_noundef() {
+        } else if has_ffi_noundef(f.ret_ty.u(), ret_ffi_type) {
+            // Note: clang doesn't add the noundef attribute to return types when compiling C code.
             self.add_attribute(AttributeLoc::Return, codegen.noundef);
         }
     }
@@ -2918,7 +2932,7 @@ trait AddAttribute: Copy {
         }
 
         let ffi_param_count = param_ffi_type.as_param_count() as u32;
-        if param.var_ty.u().is_ffi_noundef() {
+        if has_ffi_noundef(param.var_ty.u(), param_ffi_type) {
             for sub_idx in 0..ffi_param_count {
                 self.add_attribute(AttributeLoc::Param(param_ffi_idx + sub_idx), codegen.noundef);
             }

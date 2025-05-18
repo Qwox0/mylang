@@ -1,9 +1,8 @@
-use super::ParseErrorKind;
 use crate::{
     parser::parser_helper::ParserInterface,
     ptr::{OPtr, Ptr},
     source_file::SourceFile,
-    util::UnwrapDebug,
+    util::{UnwrapDebug, panic_debug, unreachable_debug},
 };
 use core::{fmt, ops::Range};
 use std::{
@@ -173,11 +172,13 @@ pub enum TokenKind {
     /// `
     Backtick,
 
+    EOF,
+
     Unknown,
 }
 
 impl TokenKind {
-    pub fn is_whitespace(&self) -> bool {
+    pub fn is_ignored(&self) -> bool {
         matches!(
             self,
             TokenKind::Whitespace
@@ -190,17 +191,14 @@ impl TokenKind {
         )
     }
 
-    /// `true` also means the token ends parsing of the previous expression
-    /// independent of precedence.
     #[inline]
-    pub fn is_invalid_start(self) -> bool {
+    pub fn is_expr_terminator(self) -> bool {
         use TokenKind as K;
         match self {
-            //K::Whitespace(whitespace) => todo!(),
+            K::Whitespace => unreachable_debug(),
             K::Keyword(Keyword::Else) | K::CloseParenthesis | K::CloseBracket | K::CloseBrace |
             //K::FatArrow => todo!(),
-            //K::Arrow => todo!(),
-            K::PipeGt |
+            K::PipeGt | // TODO: is this correct
             K::Comma |
             //K::Colon => todo!(),
             //K::ColonColon => todo!(),
@@ -213,6 +211,84 @@ impl TokenKind {
             //K::Backtick => todo!(),
             _ => false,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenKind::Ident => "an identifier",
+            TokenKind::Keyword(keyword) => keyword.as_str(),
+            TokenKind::BoolLitTrue => "`true`",
+            TokenKind::BoolLitFalse => "`false`",
+            TokenKind::OpenParenthesis => "`(`",
+            TokenKind::CloseParenthesis => "`)`",
+            TokenKind::OpenBracket => "`[`",
+            TokenKind::CloseBracket => "`]`",
+            TokenKind::OpenBrace => "`{`",
+            TokenKind::CloseBrace => "`}`",
+            TokenKind::Eq => "`=`",
+            TokenKind::EqEq => "`==`",
+            TokenKind::FatArrow => "`=>`",
+            TokenKind::Bang => "`!`",
+            TokenKind::BangEq => "`!=`",
+            TokenKind::Lt => "`<`",
+            TokenKind::LtEq => "`<=`",
+            TokenKind::LtLt => "`<<`",
+            TokenKind::LtLtEq => "`<<=`",
+            TokenKind::Gt => "`>`",
+            TokenKind::GtEq => "`>=`",
+            TokenKind::GtGt => "`>>`",
+            TokenKind::GtGtEq => "`>>=`",
+            TokenKind::Plus => "`+`",
+            TokenKind::PlusEq => "`+=`",
+            TokenKind::Minus => "`-`",
+            TokenKind::MinusEq => "`-=`",
+            TokenKind::Arrow => "`->`",
+            TokenKind::Asterisk => "`*`",
+            TokenKind::AsteriskEq => "`*=`",
+            TokenKind::Slash => "`/`",
+            TokenKind::SlashEq => "`/=`",
+            TokenKind::Percent => "`%`",
+            TokenKind::PercentEq => "`%=`",
+            TokenKind::Ampersand => "`&`",
+            TokenKind::AmpersandAmpersand => "`&&`",
+            TokenKind::AmpersandAmpersandEq => "`&&=`",
+            TokenKind::AmpersandEq => "`&=`",
+            TokenKind::Pipe => "`|`",
+            TokenKind::PipePipe => "`||`",
+            TokenKind::PipePipeEq => "`||=`",
+            TokenKind::PipeEq => "`|=`",
+            TokenKind::PipeGt => "`|>`",
+            TokenKind::Caret => "`^`",
+            TokenKind::CaretEq => "`^=`",
+            TokenKind::Dot => "`.`",
+            TokenKind::DotDot => "`..`",
+            TokenKind::DotDotEq => "`..=`",
+            TokenKind::DotAsterisk => "`.*`",
+            TokenKind::DotAmpersand => "`.&`",
+            TokenKind::DotOpenParenthesis => "`.(`",
+            TokenKind::DotOpenBracket => "`.[`",
+            TokenKind::DotOpenBrace => "`.{`",
+            TokenKind::Comma => "`,`",
+            TokenKind::Colon => "`:`",
+            TokenKind::ColonColon => "`::`",
+            TokenKind::ColonEq => "`:=`",
+            TokenKind::Semicolon => "`;`",
+            TokenKind::Question => "`?`",
+            TokenKind::Pound => "`#`",
+            TokenKind::Dollar => "`$`",
+            TokenKind::At => "`@`",
+            TokenKind::Tilde => "`~`",
+            TokenKind::Backslash => "`\"`",
+            TokenKind::Backtick => "```",
+            TokenKind::EOF => "EOF",
+            k => panic_debug!("cannot convert TokenKind::{k:?} to a simple string"),
+        }
+    }
+}
+
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -234,13 +310,6 @@ impl Token {
         todo!()
     }
     */
-
-    /// `true` also means the token ends parsing of the previous expression
-    /// independent of precedence.
-    #[inline]
-    pub fn is_invalid_start(&self) -> bool {
-        self.kind.is_invalid_start()
-    }
 }
 
 macro_rules! keywords {
@@ -251,12 +320,12 @@ macro_rules! keywords {
         }
 
         impl FromStr for Keyword {
-            type Err = ParseErrorKind;
+            type Err = ();
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
                     $($text => Result::Ok(Keyword::$enum_variant),)*
-                    _ => Result::Err(ParseErrorKind::NotAKeyword)
+                    _ => Result::Err(())
                 }
             }
         }
@@ -284,6 +353,7 @@ keywords! {
     AndEq = "and=",
     Or = "or",
     OrEq = "or=",
+    Not = "not",
     If = "if",
     Then = "then",
     Else = "else",
@@ -483,11 +553,9 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(file: Ptr<SourceFile>) -> Lexer {
-        let code = Cursor::new(file.code);
-        let mut lex = Self { code, file, next_tok: None };
-        let first_tok = lex.load_next();
-        lex.next_tok = first_tok;
-        lex
+        let mut code = Cursor::new(file.code);
+        let first_tok = load_next(&mut code, file);
+        Self { code, file, next_tok: first_tok }
     }
 
     #[inline]
@@ -496,20 +564,16 @@ impl Lexer {
     }
 
     pub fn pos_span(&self) -> Span {
-        self.next_tok
-            .map(|t| t.span)
-            .unwrap_or_else(|| Span::pos(self.get_code().len(), Some(self.file)))
+        self.next_tok.map(|t| t.span).unwrap_or(self.eof_span())
+    }
+
+    pub fn eof_span(&self) -> Span {
+        Span::pos(self.get_code().len(), Some(self.file))
     }
 
     pub fn advanced(mut self) -> Self {
         self.advance();
         self
-    }
-
-    fn load_next(&mut self) -> Option<Token> {
-        let start = self.code.pos;
-        let kind = parse_next_token_kind(&mut self.code)?;
-        Some(Token { kind, span: Span::new(start..self.code.pos, Some(self.file)) })
     }
 
     #[inline]
@@ -521,6 +585,14 @@ impl Lexer {
     pub fn advance_if_kind(&mut self, kind: TokenKind) -> bool {
         self.advance_if(|t| t.kind == kind)
     }
+
+    pub fn next_or_eof(&mut self) -> Token {
+        self.next().unwrap_or(Token { kind: TokenKind::EOF, span: self.eof_span() })
+    }
+
+    pub fn peek_or_eof(&self) -> Token {
+        self.peek().unwrap_or(Token { kind: TokenKind::EOF, span: self.eof_span() })
+    }
 }
 
 impl ParserInterface for Lexer {
@@ -529,13 +601,28 @@ impl ParserInterface for Lexer {
 
     fn next(&mut self) -> Option<Self::Item> {
         let t = self.next_tok;
-        self.next_tok = self.load_next();
+        self.next_tok = load_next(&mut self.code, self.file);
         t
     }
 
     fn peek(&self) -> Option<Self::PeekedItem> {
         self.next_tok
     }
+}
+
+fn load_next(lex: &mut Cursor, file: Ptr<SourceFile>) -> Option<Token> {
+    let mut start;
+    let mut kind;
+    loop {
+        start = lex.pos;
+        kind = parse_next_token_kind(lex)?;
+        if kind.is_ignored() {
+            continue;
+        } else {
+            break;
+        };
+    }
+    Some(Token { kind, span: Span::new(start..lex.pos, Some(file)) })
 }
 
 fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {

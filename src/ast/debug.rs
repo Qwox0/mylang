@@ -23,9 +23,9 @@ pub trait DebugAst {
     }
 
     fn print_tree(&self) {
-        println!("| {}", self.to_text());
+        eprintln!("| {}", self.to_text());
         for l in self.write_tree().lines {
-            println!("| {}", l.0);
+            eprintln!("| {}", l.0);
         }
     }
 }
