@@ -10,10 +10,10 @@ use std::fmt::{self, Debug, Display};
 pub trait DebugAst {
     fn debug_impl(&self, buf: &mut impl DebugAstBuf);
 
-    fn to_text(&self) -> String {
-        let mut buf = DebugOneLine::default();
+    fn to_text(&self, is_type: bool) -> String {
+        let mut buf = DebugOneLine::new(is_type);
         self.debug_impl(&mut buf);
-        buf.0
+        buf.line
     }
 
     fn write_tree(&self) -> DebugTree {
@@ -23,7 +23,7 @@ pub trait DebugAst {
     }
 
     fn print_tree(&self) {
-        eprintln!("| {}", self.to_text());
+        eprintln!("| {}", self.to_text(false));
         for l in self.write_tree().lines {
             eprintln!("| {}", l.0);
         }
@@ -181,6 +181,7 @@ impl DebugAst for Ast {
                 markers,
                 ident,
                 on_type,
+                var_ty,
                 var_ty_expr,
                 init,
                 is_const,
@@ -202,6 +203,9 @@ impl DebugAst for Ast {
                 if let Some(var_ty) = var_ty_expr {
                     lines.write(":");
                     lines.write_tree(var_ty);
+                } else if let Some(var_ty) = var_ty {
+                    lines.write(":");
+                    lines.write_tree(var_ty);
                 }
 
                 if let Some(init) = init {
@@ -213,11 +217,15 @@ impl DebugAst for Ast {
                     lines.write_tree(init);
                 }
             },
-            AstEnum::Decl { is_extern: true, ident, var_ty_expr, .. } => {
+            AstEnum::Decl { is_extern: true, ident, var_ty, var_ty_expr, .. } => {
                 lines.write("extern ");
                 lines.write(&ident.text);
                 lines.write(":");
-                lines.write_tree(&var_ty_expr.u());
+                if let Some(var_ty) = var_ty {
+                    lines.write_tree(var_ty);
+                } else {
+                    lines.write_tree(&var_ty_expr.u());
+                }
             },
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
                 if *was_piped {
@@ -294,22 +302,24 @@ impl DebugAst for Ast {
             AstEnum::CharVal { val, .. } => lines.write(&format!("'{}'", *val)),
             AstEnum::StrVal { text, .. } => lines.write(&format!("\"{}\"", text.as_ref())),
             AstEnum::PtrVal { val, .. } => lines.write(&format!("{:p}", *val as *const ())),
-            AstEnum::Fn { params, ret_ty_expr, body, .. } => {
-                let params = *params;
-                let ret_type = *ret_ty_expr;
-                let body = *body;
+            AstEnum::Fn { params, ret_ty, ret_ty_expr, body, .. } => {
                 lines.write("(");
-                lines.write_many_expr(&params, ",");
+                lines.write_many_expr(params, ",");
                 lines.write(")->");
-                if let Some(ret_type) = ret_type {
-                    lines.write_tree(&ret_type);
+                if let Some(ret_type) = ret_ty_expr {
+                    lines.write_tree(ret_type);
+                } else if let Some(ret_ty) = ret_ty {
+                    lines.write_tree(ret_ty);
+                }
+                if lines.write_fn_as_type() {
+                    return;
                 }
                 let Some(body) = body else { return };
                 if body.kind == AstKind::Block {
-                    lines.write_tree(&body);
+                    lines.write_tree(body);
                 } else {
                     lines.write("{");
-                    lines.write_tree(&body);
+                    lines.write_tree(body);
                     lines.write("}");
                 }
             },
@@ -405,6 +415,8 @@ pub trait DebugAstBuf: fmt::Write {
 
     fn write_tree<T: DebugAst>(&mut self, expr: &T);
 
+    fn write_fn_as_type(&self) -> bool;
+
     /// SAFETY: don't leak the `&mut Self` param out of the body of
     /// `single_write_tree`.
     fn write_many<'x, 'l, T>(
@@ -434,13 +446,21 @@ pub trait DebugAstBuf: fmt::Write {
     }
 }
 
-#[derive(Default)]
-pub struct DebugOneLine(pub String);
+pub struct DebugOneLine {
+    pub line: String,
+    write_fn_as_type: bool,
+}
+
+impl DebugOneLine {
+    pub fn new(write_fn_as_type: bool) -> Self {
+        Self { line: String::new(), write_fn_as_type }
+    }
+}
 
 impl fmt::Write for DebugOneLine {
     #[inline]
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        self.0.write_str(text)
+        self.line.write_str(text)
     }
 }
 
@@ -448,6 +468,10 @@ impl DebugAstBuf for DebugOneLine {
     #[inline]
     fn write_tree<T: DebugAst>(&mut self, expr: &T) {
         expr.debug_impl(self);
+    }
+
+    fn write_fn_as_type(&self) -> bool {
+        self.write_fn_as_type
     }
 }
 
@@ -496,6 +520,10 @@ impl DebugAstBuf for DebugTree {
 
         self.write(&"-".repeat(len))
     }
+
+    fn write_fn_as_type(&self) -> bool {
+        false
+    }
 }
 
 impl DebugTree {
@@ -542,7 +570,7 @@ impl Debug for ast::ConstVal {
 
 impl Display for ast::ConstVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{:?}", self.to_text(), self.ty.matchable())
+        write!(f, "{}{:?}", self.to_text(false), self.ty.matchable())
     }
 }
 
@@ -576,6 +604,6 @@ impl Debug for ast::Type {
 
 impl Display for ast::Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_text())
+        f.write_str(&self.to_text(true))
     }
 }

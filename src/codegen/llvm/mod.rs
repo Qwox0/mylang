@@ -315,7 +315,7 @@ impl<'ctx> Codegen<'ctx> {
                         (ptr, len)
                     },
                     TypeEnum::ArrayTy { len, .. } => {
-                        let Symbol::Stack(arr_ptr) = lhs_sym else { unreachable_debug() };
+                        let arr_ptr = self.sym_as_arr_ptr_val(lhs_sym);
                         let len = self.context.i64_type().const_int(len.int(), false);
                         (arr_ptr, len)
                     },
@@ -387,7 +387,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::Autocast { operand, .. } => self.compile_cast(*operand, out_ty),
             AstEnum::Call { func, args, .. } => {
-                if let Some(f) = func.ty.u().try_downcast_fn(Some(*func)) {
+                if let Some(f) = func.ty.u().try_downcast::<ast::Fn>() {
                     let sym = self.compile_expr(*func)?;
                     let fn_val = match sym {
                         Symbol::Function(val) => CallFnVal::Direct(val),
@@ -525,7 +525,6 @@ impl<'ctx> Codegen<'ctx> {
                 debug_assert_eq!(lhs.ty, rhs.ty);
                 let arg_ty = lhs.ty.u();
                 let Symbol::Stack(stack_var) = self.compile_expr(lhs)? else {
-                    todo!("variable mut check during sema");
                     unreachable_debug()
                 };
                 let lhs_llvm_ty = self.llvm_type(arg_ty).basic_ty();
@@ -564,8 +563,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
 
                 if *is_const {
-                    if var_ty == p.fn_val {
-                        let f = init.u().downcast::<ast::Fn>();
+                    if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
+                        debug_assert_eq!(f.upcast(), init.u().rep());
                         if init.u().kind != AstKind::Fn {
                             // don't need to compile an alias again
                             debug_assert!(self.fn_table.contains_key(&f));
@@ -590,10 +589,10 @@ impl<'ctx> Codegen<'ctx> {
                     // compile time values are inlined during sema. We don't have to add those to
                     // the symbol table.
                 } else {
-                    debug_assert_ne!(var_ty, p.fn_val);
                     debug_assert_ne!(var_ty, p.type_ty);
                     debug_assert_ne!(expr.kind, AstKind::Fn);
                     debug_assert_ne!(expr.rep().kind, AstKind::Fn);
+                    debug_assert_ne!(var_ty.kind, AstKind::Fn);
                     debug_assert!(on_type.is_none());
 
                     const ENABLE_NON_MUT_TO_REG: bool = false;
@@ -723,7 +722,7 @@ impl<'ctx> Codegen<'ctx> {
                         let for_info =
                             self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
 
-                        let Symbol::Stack(arr_ptr) = source_sym else { panic!() };
+                        let arr_ptr = self.sym_as_arr_ptr_val(source_sym);
                         let iter_var_sym =
                             Symbol::Stack(self.build_gep(source_ty.arr_ty(), arr_ptr, &[
                                 idx_ty.const_zero(),
@@ -1254,7 +1253,8 @@ impl<'ctx> Codegen<'ctx> {
                         }
                         Symbol::Stack(ptr)
                     },
-                    CFfiType::AsPtr | CFfiType::ByValPtr => {
+                    CFfiType::AsPtr => reg_sym(param_val_iter.next().u().into_pointer_value()),
+                    CFfiType::ByValPtr => {
                         Symbol::Stack(param_val_iter.next().u().into_pointer_value())
                     },
                     CFfiType::SmallSimpleEnum { ffi_int, small_int } => {
@@ -2428,6 +2428,15 @@ impl<'ctx> Codegen<'ctx> {
             Some(Symbol::Register(val)) => val,
             _ => return Ok(None),
         }))
+    }
+
+    fn sym_as_arr_ptr_val(&mut self, sym: Symbol<'ctx>) -> PointerValue<'ctx> {
+        match sym {
+            Symbol::Stack(ptr) => ptr,
+            Symbol::Register(val) => val.ptr_val(),
+            Symbol::Global(_global_value) => todo!(),
+            _ => unreachable_debug(),
+        }
     }
 
     #[inline]

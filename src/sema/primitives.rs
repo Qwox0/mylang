@@ -29,10 +29,10 @@ pub struct Primitives {
     pub f32: Ptr<ast::Type>,
     pub f64: Ptr<ast::Type>,
     pub str_slice_ty: Ptr<ast::Type>,
-    pub fn_val: Ptr<ast::Type>,
     pub type_ty: Ptr<ast::Type>,
 
     // internal Types:
+    pub unknown_ty: Ptr<ast::Type>,
     pub int_lit: Ptr<ast::Type>,
     pub float_lit: Ptr<ast::Type>,
     pub method_stub: Ptr<ast::Type>,
@@ -181,9 +181,9 @@ impl Primitives {
                 init_ty(str_slice);
                 str_slice
             },
-            fn_val: new_primitive_ty!("{fn}", simple_ty, finalized: true),
             type_ty,
 
+            unknown_ty: new_primitive_ty!("{unknown_ty}", simple_ty, finalized: true),
             int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),
             float_lit: new_primitive_ty!("{float literal}", simple_ty, finalized: false),
             method_stub: new_primitive_ty!("{method stub}", simple_ty, finalized: false),
@@ -221,7 +221,7 @@ impl Primitives {
 
 fn insert_symbol_no_duplicate(decls: &mut Vec<Ptr<ast::Decl>>, decl: Ptr<ast::Decl>) {
     if decls.iter().any(|d| &*d.ident.text == &*decl.ident.text) {
-        panic!("duplicate symbol")
+        panic!("duplicate primitive name: {}", decl.ident.text.as_ref())
     }
     decls.push(decl);
 }

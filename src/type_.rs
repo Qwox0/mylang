@@ -2,6 +2,7 @@ use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
     context::{ctx, primitives},
     ptr::{OPtr, Ptr},
+    sema::primitives::Primitives,
     util::{
         Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_nearest_power_of_two,
         unreachable_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
@@ -46,9 +47,9 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         return Lhs;
     }
 
-    if lhs == p.never {
+    if is_bottom_type(lhs, p) || rhs == p.any {
         return Rhs;
-    } else if rhs == p.never {
+    } else if is_bottom_type(rhs, p) || lhs == p.any {
         return Lhs;
     }
 
@@ -161,9 +162,9 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return true;
     }
 
-    if got == p.never || expected == p.any {
+    if is_bottom_type(got, p) || expected == p.any {
         return true;
-    } else if expected == p.never || got == p.any {
+    } else if is_bottom_type(expected, p) || got == p.any {
         return false;
     }
 
@@ -196,7 +197,6 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return true;
     }
 
-    #[allow(unused)]
     if let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() {
         let got_pointee = got_ptr.pointee.downcast_type();
         if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
@@ -247,13 +247,21 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
                 .all(|(g, e)| ty_match(g, e))
         {
             return true;
-        } else if got == p.fn_val {
-            return true; // TODO: better checks here
         }
         return false;
     }
 
     false
+}
+
+/// The bottom type has no values and can transform into any other type.
+///
+/// `common({weak}, i32)` -> `i32`
+/// `ty_match({weak}, i32)` -> `true`
+/// `ty_match(i32, {weak})` -> `false`
+#[inline]
+pub fn is_bottom_type(ty: Ptr<ast::Type>, p: &Primitives) -> bool {
+    ty == p.never || ty == p.unknown_ty
 }
 
 const ZST_ALIGNMENT: usize = 1;
@@ -298,10 +306,7 @@ impl Ptr<ast::Type> {
             | TypeEnum::ArrayTy { elem_ty: t, .. }
             | TypeEnum::OptionTy { inner_ty: t, .. } => t.downcast_type().is_finalized(),
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
-            TypeEnum::Fn { body, .. } => {
-                debug_assert!(body.is_none());
-                true
-            },
+            TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
             TypeEnum::Unset => unreachable_debug(),
         }
     }
@@ -334,8 +339,7 @@ impl Ptr<ast::Type> {
             TypeEnum::RangeTy { elem_ty, .. } => {
                 elem_ty.finalize();
             },
-            TypeEnum::Fn { params, ret_ty, body, .. } => {
-                debug_assert!(body.is_none());
+            TypeEnum::Fn { params, ret_ty, .. } => {
                 debug_assert!(params.iter().all(|p| p.var_ty.u().is_finalized()));
                 debug_assert!(ret_ty.u().is_finalized());
             },

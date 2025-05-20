@@ -4,13 +4,12 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, Decl, DeclListExt, OptionAstExt,
-        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr,
-        type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, OptionAstExt, OptionTypeExt,
+        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr, type_new,
     },
     cli::BuildArgs,
     context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostics::{DiagnosticReporter, InitializerKind, cerror, chint, cinfo, cwarn},
+    diagnostics::{DiagnosticReporter, InitializerKind, cerror, cerror2, chint, cinfo, cwarn},
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -150,7 +149,7 @@ pub fn validate_main(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>], arg
     if main.var_ty == p().never {
         return;
     }
-    if main.var_ty != p().fn_val {
+    if main.var_ty.try_downcast::<ast::Fn>().is_none() {
         cerror!(main.ident.span, "Expected the entry point to be a function");
         return;
     }
@@ -171,9 +170,6 @@ pub struct Sema {
 
     cctx: Ptr<CompilationContextInner>,
     cur_file: OPtr<SourceFile>,
-
-    /// for debugging
-    #[cfg(debug_assertions)]
     cur_decl: OPtr<ast::Decl>,
 }
 
@@ -186,7 +182,6 @@ impl Sema {
             defer_stack: ScopedStack::default(),
             cctx,
             cur_file: None,
-            #[cfg(debug_assertions)]
             cur_decl: None,
         }
     }
@@ -306,18 +301,17 @@ impl Sema {
         }
 
         match expr.matchable().as_mut() {
-            AstEnum::Ident { text, decl, .. } => {
-                let sym = self.get_symbol(*text, expr.span);
-                if sym.is_err()
-                    && let Some(mut i) = self.try_custom_bitwith_int_type(*text)
-                {
+            AstEnum::Ident { text, decl, .. } => match self.get_symbol(*text) {
+                None if let Some(mut i) = self.try_custom_bitwith_int_type(*text) => {
                     i.span = expr.span;
                     i.ty = Some(p.type_ty);
                     debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntTy>());
                     *expr.cast::<ast::IntTy>().as_mut() = i;
                     // decl is not set. Is this a problem?
-                } else {
-                    let sym = sym?;
+                },
+                None => return cerror2!(expr.span, "unknown identifier `{}`", text.as_ref()),
+                Some(sym) => {
+                    let var_ty = self.get_symbol_var_ty(sym)?;
                     *decl = Some(sym);
                     if sym.is_const {
                         expr.set_replacement(sym.const_val());
@@ -327,8 +321,8 @@ impl Sema {
                         };
                         return err(NotAConstExpr, expr.full_span());
                     }
-                    expr.ty = Some(sym.var_ty.u());
-                }
+                    expr.ty = Some(var_ty);
+                },
             },
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
                 self.open_scope();
@@ -531,7 +525,7 @@ impl Sema {
                     // method access
                     rhs.ty = Some(method.var_ty.u());
                     rhs.upcast().set_replacement(method.const_val());
-                    if method.var_ty == p.fn_val {
+                    if method.var_ty.try_downcast::<ast::Fn>().is_some() {
                         p.method_stub
                     } else if method.var_ty == p.never {
                         p.never
@@ -562,18 +556,20 @@ impl Sema {
                     // method-like call:
                     // TODO?: maybe change syntax to `arg~my_fn(...)`. using `.` both for method
                     //        calls and method-like calls might be confusing
-                    match self.get_symbol(rhs.text, rhs.span) {
-                        Ok(s)
-                            if let Some(f) = s.var_ty.u().try_downcast_fn(s.init)
-                                && let Some(first_param) = f.params.get(0)
-                                && ty_match(lhs.ty.u(), first_param.var_ty.u()) =>
-                        {
-                            debug_assert!(s.is_const);
-                            rhs.upcast().set_replacement(f.upcast());
-                            p.method_stub
-                        },
-                        NotFinished => return NotFinished,
-                        _ => return err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span),
+                    let err = || err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span);
+                    let Some(s) = self.get_symbol(rhs.text) else { return err() };
+                    let var_ty = self.get_symbol_var_ty(s)?;
+                    if let Some(f) = var_ty.try_downcast::<ast::Fn>()
+                        && let Some(first_param) = f.params.get(0)
+                        && ty_match(lhs.ty.u(), first_param.var_ty.u())
+                    {
+                        debug_assert!(s.is_const);
+                        rhs.upcast().set_replacement(f.upcast());
+                        p.method_stub
+                    } else if var_ty == p.never {
+                        p.never
+                    } else {
+                        return err();
                     }
                 };
                 expr.ty = Some(t);
@@ -656,9 +652,11 @@ impl Sema {
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
-                expr.ty = Some(if let Some(fn_ty) = fn_ty.try_downcast_fn(Some(*func)).as_mut() {
-                    self.validate_call(&fn_ty.params, args, span.end())?;
-                    fn_ty.ret_ty.u()
+                expr.ty = Some(if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
+                    self.validate_call(&f.params, args, span.end())?;
+
+                    debug_assert!(is_finished_or_recursive(f, self));
+                    f.ret_ty.unwrap_or(p.unknown_ty)
                 } else if fn_ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>().as_mut();
                     let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
@@ -666,7 +664,9 @@ impl Sema {
                         .chain(args.iter().copied())
                         .collect::<Vec<_>>(); // TODO: bench no allocation
                     self.validate_call(&fn_ty.as_ref().params, &args, span.end())?;
-                    fn_ty.ret_ty.u()
+
+                    debug_assert!(is_finished_or_recursive(fn_ty, self));
+                    fn_ty.ret_ty.unwrap_or(p.unknown_ty)
                 } else if fn_ty == p.enum_variant {
                     let Some(dot) = func.try_downcast::<ast::Dot>() else { unreachable_debug() };
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
@@ -1032,15 +1032,37 @@ impl Sema {
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
             AstEnum::PtrVal { .. } => todo!(),
             AstEnum::Fn { params, ret_ty_expr, ret_ty, body, .. } => {
+                for (idx, param) in params.iter().enumerate() {
+                    let param_name = param.ident.text.as_ref();
+                    if let Some(first) =
+                        params[..idx].iter().find(|p| p.ident.text.as_ref() == param_name)
+                    {
+                        cerror!(param.ident.span, "duplicate parameter '{param_name}'");
+                        chint!(first.ident.span, "first definition of '{param_name}'");
+                    }
+                }
+
                 let fn_ptr = expr.downcast::<ast::Fn>();
+                let fn_hint = ty_hint.and_then(|t| t.try_downcast::<ast::Fn>());
+
                 if let Some(ret) = *ret_ty_expr {
                     *ret_ty = Some(self.analyze_type(ret)?);
+                } else if let Some(fn_hint) = fn_hint {
+                    *ret_ty = Some(fn_hint.ret_ty.u());
                 }
+
                 self.function_stack.push(fn_ptr);
                 self.open_scope();
                 let res: SemaResult<()> = try {
-                    for param in params.iter_mut() {
+                    for (p_idx, param) in params.iter_mut().enumerate() {
                         assert!(!param.is_const, "todo: const param");
+                        if param.var_ty_expr.is_none()
+                            && let Some(fn_hint) = fn_hint
+                            && let Some(p_hint) = fn_hint.params.get(p_idx)
+                        {
+                            //debug_assert!(param.var_ty.is_none());
+                            param.var_ty = Some(p_hint.var_ty.u());
+                        }
                         self.analyze_decl(*param, false)?;
                     }
 
@@ -1057,17 +1079,24 @@ impl Sema {
                 res?;
                 debug_assert!(ret_ty.is_some());
 
+                if *ret_ty == p.unknown_ty {
+                    let rec_fn_decl =
+                        self.cur_decl.filter(|d| d.init.is_some_and(|i| i.rep().p_eq(fn_ptr)));
+                    return cerror2!(
+                        rec_fn_decl.map(|d| d.ident.span).unwrap_or_else(|| expr.full_span()),
+                        "cannot infer the return type of this recursive function"
+                    );
+                }
+
                 let is_fn_ty = *ret_ty == p.type_ty && body.u().kind != AstKind::Block;
-                if is_fn_ty {
+                expr.ty = Some(if is_fn_ty {
                     *ret_ty_expr = Some(body.u());
                     *ret_ty = Some(body.cv().downcast_type());
                     *body = None;
-                    expr.ty = Some(p.type_ty);
+                    p.type_ty
                 } else {
-                    // expr.ty = Some(fn_ptr.upcast_to_type());
-                    //expr.ty = Some(p.type_ty);
-                    expr.ty = Some(p.fn_val);
-                }
+                    fn_ptr.upcast_to_type()
+                });
             },
 
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => {
@@ -1272,7 +1301,6 @@ impl Sema {
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
     /// declaration. This also doesn't insert into `self.symbols`.
     fn var_decl_to_value(&mut self, decl_ptr: Ptr<ast::Decl>) -> SemaResult<()> {
-        #[cfg(debug_assertions)]
         let prev_decl = self.cur_decl.replace(decl_ptr);
         let p = p();
         let decl = decl_ptr.as_mut();
@@ -1311,6 +1339,7 @@ impl Sema {
         decl.ty = Some(p.void_ty);
         if let Some(t) = decl.var_ty_expr {
             let ty = self.analyze_type(t)?;
+            debug_assert!(decl.var_ty.is_none_or(|t| t == ty)); // remove this when NotFinished is removed
             decl.var_ty = Some(ty);
             if ty == p.never {
                 decl.ty = Some(p.never);
@@ -1321,7 +1350,6 @@ impl Sema {
                 debug_assert!(f.body.is_none());
                 debug_assert!(decl.init.is_none());
                 decl.init = Some(f.upcast());
-                decl.var_ty = Some(p.fn_val);
                 decl.is_const = true;
                 return Ok(());
             }
@@ -1337,10 +1365,7 @@ impl Sema {
         } else {
             err(VarDeclNoType, decl_ptr.upcast().full_span())
         };
-        #[cfg(debug_assertions)]
-        {
-            self.cur_decl = prev_decl;
-        }
+        self.cur_decl = prev_decl;
         res
     }
 
@@ -1375,6 +1400,7 @@ impl Sema {
             },
             NotFinished => NotFinished,
             Ok(()) => {
+                debug_assert!(decl.var_ty.is_some());
                 decl.ident.decl = Some(decl);
                 Ok(())
             },
@@ -1668,15 +1694,15 @@ impl Sema {
     ) -> SemaResult<[Ptr<ast::Decl>; 2]> {
         let p = p();
         let elem_ptr_ty = self.alloc(type_new!(PtrTy { pointee: elem_ty.upcast(), is_mut }))?;
-        let mut ptr = self.alloc(Decl::new(p.slice_ptr_field_ident, None, Span::ZERO))?;
+        let mut ptr = self.alloc(ast::Decl::new(p.slice_ptr_field_ident, None, Span::ZERO))?;
         ptr.var_ty = Some(elem_ptr_ty.upcast_to_type());
         Ok([ptr, p.slice_len_field])
     }
 
+    /// Note: the returned [`ast::Decl`] might not be fully analyzed.
     #[inline]
-    fn get_symbol(&self, name: Ptr<str>, err_span: Span) -> SemaResult<Ptr<ast::Decl>> {
-        match self
-            .symbols
+    fn get_symbol(&self, name: Ptr<str>) -> OPtr<ast::Decl> {
+        self.symbols
             .get(&name)
             .or_else(|| {
                 // println!("get_symbol > try file ({:?})", name.as_ref());
@@ -1685,11 +1711,21 @@ impl Sema {
             .or_else(|| {
                 // println!("get_symbol > try primitive ({:?})", name.as_ref());
                 self.cctx.primitives_scope.find_symbol(&name)
-            }) {
-            Some(sym) if sym.var_ty.is_some() => Ok(sym),
-            Some(_) => NotFinished,
-            None => err(UnknownIdent(name), err_span),
-        }
+            })
+    }
+
+    fn get_symbol_var_ty(&self, sym: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::Type>> {
+        Ok(if let Some(var_ty) = sym.var_ty {
+            var_ty
+        } else if let Some(f) = sym.init.u().try_downcast::<ast::Fn>()
+            && f == *self.function_stack.last().u()
+        {
+            // Allows the use of an unfinished recursive function but only in its own
+            // body.
+            f.upcast_to_type()
+        } else {
+            return NotFinished;
+        })
     }
 
     fn open_scope(&mut self) {
@@ -1738,4 +1774,8 @@ impl MutatedValue {
             MutatedValue::None => None,
         }
     }
+}
+
+fn is_finished_or_recursive(f: Ptr<ast::Fn>, _self: &Sema) -> bool {
+    f.ret_ty.is_some() || f == *_self.function_stack.last().u()
 }

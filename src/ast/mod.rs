@@ -586,11 +586,13 @@ ast_variants! {
     /// `-> <type> { <body> }`
     /// `-> <body>`
     /// `^ expr.span`
+    // Note: for normal functions the following might not be true: `fn.ty.ty == primitives.type_ty`
     Fn {
         params: DeclList,
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,
-        /// if `body == None` this is a function type
+        /// if `body == None` this Ast node originated from a function type. Note: normal functions
+        /// are also valid [`Type`]s.
         body: OPtr<Ast>,
     },
 }
@@ -726,7 +728,7 @@ impl Ptr<Ast> {
     #[inline]
     pub fn downcast_type(self) -> Ptr<Type> {
         let p = self.rep();
-        debug_assert!(p.is_type());
+        debug_assert!(p.is_type() || p.kind == AstKind::Fn);
         p.cast()
     }
 
@@ -828,11 +830,6 @@ impl Ptr<Type> {
     pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
         debug_assert!(self.replacement.is_none());
         then!(self.kind.is_struct_kind() => self.downcast_struct_def())
-    }
-
-    pub fn try_downcast_fn(self, fn_expr: OPtr<Ast>) -> OPtr<Fn> {
-        then!(self == primitives().fn_val => fn_expr.u().downcast::<Fn>())
-            .or_else(|| self.try_downcast::<Fn>())
     }
 
     /// Some types (like pointers) are transparent and allow field/method access on its inner type.
@@ -1184,7 +1181,7 @@ impl Ptr<Decl> {
         impl std::fmt::Display for DeclLhsDisplay {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 if let Some(ty) = self.on_type {
-                    write!(f, "{}.", ty.to_text())?;
+                    write!(f, "{}.", ty.to_text(false))?;
                 }
                 write!(f, "{}", self.ident.text.as_ref())
             }

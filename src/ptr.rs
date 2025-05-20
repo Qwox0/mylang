@@ -132,6 +132,10 @@ impl<T> Ptr<T> {
         let slice = unsafe { std::slice::from_raw_parts(self.raw(), 1) };
         Ptr::new(NonNull::from_ref(slice))
     }
+
+    pub fn p_eq<U>(self, other: Ptr<U>) -> bool {
+        std::ptr::eq(self.raw(), other.raw() as *mut T)
+    }
 }
 
 impl<T: ?Sized> PartialEq<Ptr<T>> for Ptr<T> {

@@ -76,7 +76,7 @@ pub fn parse(cctx: Ptr<CompilationContextInner>, root_file: SourceFile) -> Vec<P
     cctx.as_mut().root_file_idx = Some(cctx.add_import_from_file(root_file));
     cctx.as_mut().project_path = root_file.path.parent().unwrap().to_path_buf();
 
-    // Note: this idx-based loop is needed because `ctx.semas` might get mutated while the loop is
+    // Note: this idx-based loop is needed because `ctx.files` might get mutated while the loop is
     // running.
     let mut idx = 0;
     while let Some(file) = cctx.files.get(idx).copied() {

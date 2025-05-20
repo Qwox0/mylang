@@ -1,6 +1,7 @@
 use crate::{
     arena_allocator::AllocErr,
     ast::{self, Ast},
+    diagnostics::HandledErr,
     parser::lexer::Span,
     ptr::Ptr,
 };
@@ -36,8 +37,6 @@ pub enum SemaErrorKind {
     MissingArg,
     MissingElseBranch,
 
-    #[error("unknown ident `{}`", &**_0)]
-    UnknownIdent(Ptr<str>),
     /// unknown struct or union field or enum variant
     #[error("no field `{}` on type `{ty}`", &**field)]
     UnknownField {
@@ -180,5 +179,11 @@ impl<T, E, E2: From<E>> FromResidual<Result<Infallible, E>> for SemaResult<T, E2
         match residual {
             Result::Err(err) => Err(err.into()),
         }
+    }
+}
+
+impl<T> From<HandledErr> for SemaResult<T> {
+    fn from(_: HandledErr) -> Self {
+        Err(SemaError::HandledErr)
     }
 }
