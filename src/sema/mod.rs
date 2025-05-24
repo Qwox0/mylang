@@ -17,7 +17,7 @@ use crate::{
     source_file::SourceFile,
     symbol_table::{SemaSymbolTable, linear_search_symbol},
     type_::{RangeKind, common_type, ty_match},
-    util::{self, UnwrapDebug, panic_debug, then, unreachable_debug},
+    util::{self, UnwrapDebug, panic_debug, unreachable_debug},
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
@@ -683,12 +683,12 @@ impl Sema {
                 });
             },
             AstEnum::UnaryOp { op, operand, .. } => {
-                let expr_ty = *analyze!(*operand, None);
-                let const_val = then!(is_const => operand.downcast_const_val());
+                let expr_ty;
 
                 macro_rules! simple_unary_op {
                     ($op:tt $ast_node:ident) => {{
-                        if let Some(const_val) = const_val {
+                        if is_const {
+                            let const_val = operand.downcast_const_val();
                             let val = const_val.downcast::<ast::$ast_node>().val;
                             debug_assert!(expr.replacement.is_none());
                             // TODO: no allocation
@@ -701,42 +701,58 @@ impl Sema {
                     }};
                 }
 
+                let err = |operand_ty| {
+                    cerror!(
+                        expr.full_span(),
+                        "Cannot apply unary operator `{op}` to type `{operand_ty}`"
+                    );
+                    SemaResult::HandledErr
+                };
+
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                        expr_ty = *analyze!(*operand, None);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         self.validate_addr_of(is_mut, *operand, expr)?;
                         let pointee = expr_ty.upcast();
-                        debug_assert!(const_val.is_none(), "todo: const addr of");
+                        debug_assert!(!is_const, "todo: const addr of");
                         self.alloc(type_new!(PtrTy { pointee, is_mut }))?.upcast_to_type()
                     },
-                    UnaryOpKind::Deref
-                        if let Some(ptr_ty) = expr_ty.try_downcast::<ast::PtrTy>() =>
-                    {
-                        debug_assert!(const_val.is_none(), "todo: const deref");
+                    UnaryOpKind::Deref => {
+                        expr_ty = *analyze!(*operand, None);
+                        let Some(ptr_ty) = expr_ty.try_downcast::<ast::PtrTy>() else {
+                            cerror!(
+                                expr.full_span(),
+                                "Cannot dereference value of type `{expr_ty}`",
+                            );
+                            return SemaResult::HandledErr;
+                        };
+
+                        debug_assert!(!is_const, "todo: const deref");
                         ptr_ty.pointee.downcast_type()
                     },
-                    UnaryOpKind::Not if expr_ty == p.bool => simple_unary_op!(!BoolVal),
-                    UnaryOpKind::Not if expr_ty.kind == AstKind::IntTy || expr_ty == p.int_lit => {
-                        simple_unary_op!(!IntVal)
+                    UnaryOpKind::Not => {
+                        expr_ty = *analyze!(*operand, ty_hint);
+                        if expr_ty == p.bool {
+                            simple_unary_op!(!BoolVal)
+                        } else if expr_ty.kind == AstKind::IntTy || expr_ty.is_int_lit() {
+                            simple_unary_op!(!IntVal)
+                        } else {
+                            return err(expr_ty);
+                        }
                     },
-                    UnaryOpKind::Neg if expr_ty.kind == AstKind::IntTy || expr_ty == p.int_lit => {
-                        simple_unary_op!(-IntVal)
-                    },
-                    UnaryOpKind::Neg
-                        if expr_ty.kind == AstKind::FloatTy || expr_ty == p.float_lit =>
-                    {
-                        simple_unary_op!(-FloatVal)
-                    },
-                    UnaryOpKind::Deref => {
-                        cerror!(expr.full_span(), "Cannot dereference value of type `{expr_ty}`",);
-                        return SemaResult::HandledErr;
-                    },
-                    UnaryOpKind::Not | UnaryOpKind::Neg => {
-                        cerror!(
-                            expr.full_span(),
-                            "Cannot apply unary operator `{op}` to value of type `{expr_ty}`"
-                        );
-                        return SemaResult::HandledErr;
+                    UnaryOpKind::Neg => {
+                        expr_ty = *analyze!(*operand, ty_hint);
+                        if expr_ty.is_sint() {
+                            simple_unary_op!(-IntVal)
+                        } else if expr_ty.is_int_lit() {
+                            simple_unary_op!(-IntVal);
+                            p.sint_lit
+                        } else if expr_ty.kind == AstKind::FloatTy || expr_ty == p.float_lit {
+                            simple_unary_op!(-FloatVal)
+                        } else {
+                            return err(expr_ty);
+                        }
                     },
                     UnaryOpKind::Try => todo!("try"),
                 });
@@ -894,7 +910,7 @@ impl Sema {
                 analyze!(*condition, Some(bool_ty));
                 self.ty_match(*condition, bool_ty)?;
 
-                self.analyze(*then_body, &None, is_const)?;
+                self.analyze(*then_body, ty_hint, is_const)?;
                 let then_ty = then_body.ty.u();
                 expr.ty = if let Some(else_body) = *else_body {
                     self.analyze(else_body, &Some(then_ty), is_const)?;
@@ -1011,11 +1027,12 @@ impl Sema {
                 expr.ty = Some(*ret_ty);
             },
 
-            AstEnum::IntVal { .. } => {
-                let ty = ty_hint
-                    .filter(|t| matches!(t.kind, AstKind::IntTy | AstKind::FloatTy))
-                    .unwrap_or(p.int_lit);
-                expr.ty = Some(ty);
+            AstEnum::IntVal { val, .. } => {
+                expr.ty = Some(match ty_hint {
+                    Some(t) if matches!(t.kind, AstKind::IntTy | AstKind::FloatTy) => *t,
+                    _ if val.is_negative() => p.sint_lit,
+                    _ => p.int_lit,
+                });
             },
             AstEnum::FloatVal { .. } => {
                 let ty = ty_hint.filter(|t| t.kind == AstKind::FloatTy).unwrap_or(p.float_lit);
@@ -1150,24 +1167,8 @@ impl Sema {
             },
             AstEnum::EnumDef { variants, variant_tags, is_simple_enum, tag_ty, .. } => {
                 let mut variant_names = HashSet::new();
-                let int_repr_ty = match util::variant_count_to_tag_size_bits(variants.len()) {
-                    0 => p.u0,
-                    ..=8 => p.u8,
-                    ..=16 => p.u16,
-                    ..=32 => p.u32,
-                    ..=64 => p.u64,
-                    ..=128 => p.u128,
-                    bits => {
-                        cerror!(
-                            expr.span,
-                            "enums which can't be represented by an `u128` are currently not \
-                             supported. This enum would require {bits} bits."
-                        );
-                        return SemaResult::HandledErr;
-                    },
-                };
-                *tag_ty = Some(int_repr_ty.downcast::<ast::IntTy>());
 
+                let mut repr_ty = Some(p.int_lit);
                 let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
                 let mut tag = 0;
                 *is_simple_enum = true;
@@ -1187,13 +1188,22 @@ impl Sema {
                         *is_simple_enum = false;
                     }
                     if let Some(variant_idx) = variant_idx {
-                        self.analyze(variant_idx, &Some(int_repr_ty), true)?;
+                        self.analyze(variant_idx, &repr_ty, true)?;
+                        check_and_set_target!(
+                            variant_idx.ty.u(),
+                            &mut repr_ty,
+                            variant_idx.full_span()
+                        );
                         tag = variant_idx.int();
                     }
 
+                    const ALLOW_DUPLICATE_TAG: bool = true;
+
                     // TODO: replace linear search?
-                    if unsafe { used_tags[..idx].assume_init_ref() }.contains(&tag) {
-                        cerror!(variant.ident.span, "Duplicate enum variant index");
+                    if !ALLOW_DUPLICATE_TAG
+                        && unsafe { used_tags[..idx].assume_init_ref() }.contains(&tag)
+                    {
+                        cerror!(variant.ident.span, "Duplicate enum variant tag");
                         return SemaResult::HandledErr;
                     }
                     used_tags[idx].write(tag);
@@ -1201,6 +1211,25 @@ impl Sema {
                 }
                 debug_assert_eq!(variants.len(), used_tags.len());
                 *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
+
+                let repr_ty = repr_ty.u();
+                let min_size_bits = util::variant_count_to_tag_size_bits(variants.len());
+                *tag_ty = Some(if repr_ty.is_int_lit() {
+                    let is_signed = repr_ty == p.sint_lit;
+                    match self.int_primitive(min_size_bits, is_signed) {
+                        Some(int_ty) => int_ty,
+                        None => {
+                            cerror!(
+                                expr.span,
+                                "enums which can't be represented by an `u128` are currently not \
+                                 supported. This enum would require {min_size_bits} bits."
+                            );
+                            return SemaResult::HandledErr;
+                        },
+                    }
+                } else {
+                    repr_ty.downcast::<ast::IntTy>()
+                });
                 expr.ty = Some(p.type_ty);
             },
             AstEnum::RangeTy { .. } => todo!(),
@@ -1685,6 +1714,27 @@ impl Sema {
             self.cctx.error_mismatched_types(expr.full_span(), expected_ty, got_ty);
             SemaResult::HandledErr
         }
+    }
+
+    pub fn int_primitive(&self, bits: u32, is_signed: bool) -> OPtr<ast::IntTy> {
+        let p = p();
+
+        macro_rules! i {
+            ($signed:ident, $unsigned:ident) => {
+                if is_signed { p.$signed } else { p.$unsigned }
+            };
+        }
+
+        let int_ty = match bits {
+            0 => p.u0,
+            ..=8 => i!(i8, u8),
+            ..=16 => i!(i16, u16),
+            ..=32 => i!(i32, u32),
+            ..=64 => i!(i64, u64),
+            ..=128 => i!(i128, u128),
+            _ => return None,
+        };
+        Some(int_ty.downcast::<ast::IntTy>())
     }
 
     pub fn slice_fields(

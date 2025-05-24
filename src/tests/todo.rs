@@ -296,3 +296,27 @@ fn invalid_array_lit_with_hint() {
          instead"
     );
 }
+
+#[test]
+fn incorrect_signedness_of_int_lit() {
+    test_compile_err_raw(
+        "test :: -> u8 { -1 }",
+        "Cannot apply unary operator `-` to type `u8`",
+        |code| TestSpan::of_substr(code, "-1"),
+    );
+
+    test_compile_err(
+        "a: u8 = if true { -1 } else 1;",
+        "Cannot apply unary operator `-` to type `u8`",
+        |code| TestSpan::of_substr(code, "-1"),
+    );
+
+    let code = "
+f :: (p: *u32) -> p.*;
+test :: -> f((-1).&);";
+    test_compile_err_raw(
+        code,
+        "mismatched types: expected *u32; got *{signed integer literal}",
+        |code| TestSpan::of_substr(code, "(-1).&"),
+    );
+}

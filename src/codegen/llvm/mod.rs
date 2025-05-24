@@ -1075,7 +1075,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
         let tag_ty = self.enum_tag_type(enum_def);
-        let tag_val = tag_ty.const_int(variant_tag as u64, false);
+        let tag_val = tag_ty.const_int(variant_tag as u64, variant_tag.is_negative());
         if write_target.is_some() || data.is_some() {
             let enum_ptr = if let Some(ptr) = write_target {
                 ptr
@@ -1557,10 +1557,11 @@ impl<'ctx> Codegen<'ctx> {
         {
             debug_assert!(is_simple_enum(e.variants));
             let tag_ty = self.enum_tag_type(e).as_basic_type_enum();
+            let is_tag_signed = e.tag_ty.u().is_signed;
             let tag_align = enum_alignment(e.variants);
             let val = self.sym_as_val_with_llvm_ty(sym, tag_ty, tag_align)?.int_val();
             let int_ty = self.llvm_type(target_ty).int_ty();
-            return reg(self.builder.build_int_cast_sign_flag(val, int_ty, false, "")?);
+            return reg(self.builder.build_int_cast_sign_flag(val, int_ty, is_tag_signed, "")?);
         }
 
         display(expr.full_span()).finish();

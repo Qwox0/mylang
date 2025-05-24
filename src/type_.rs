@@ -53,7 +53,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         return Lhs;
     }
 
-    let swap_inputs = rhs == p.int_lit || rhs == p.float_lit || rhs.kind == AstKind::OptionTy;
+    let swap_inputs = rhs.is_int_lit() || rhs == p.float_lit || rhs.kind == AstKind::OptionTy;
     if swap_inputs {
         let tmp = rhs;
         rhs = lhs;
@@ -62,7 +62,14 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if lhs == p.int_lit {
         debug_assert_ne!(rhs, p.int_lit, "was already checked above");
-        let matches = matches!(rhs.kind, AstKind::IntTy | AstKind::FloatTy) || rhs == p.float_lit;
+        let matches = matches!(rhs.kind, AstKind::IntTy | AstKind::FloatTy)
+            || rhs == p.sint_lit
+            || rhs == p.float_lit;
+        return if matches { Rhs.flip_if(swap_inputs) } else { Mismatch };
+    } else if lhs == p.sint_lit {
+        debug_assert_ne!(rhs, p.sint_lit, "was already checked above");
+        let matches =
+            rhs.is_sint() || rhs.kind == AstKind::FloatTy || rhs == p.int_lit || rhs == p.float_lit;
         return if matches { Rhs.flip_if(swap_inputs) } else { Mismatch };
     }
 
@@ -71,7 +78,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         debug_assert_ne!(rhs, p.float_lit, "was already checked above");
         return if rhs.kind == AstKind::FloatTy {
             Rhs.flip_if(swap_inputs)
-        } else if rhs == p.int_lit {
+        } else if rhs.is_int_lit() {
             Lhs.flip_if(swap_inputs)
         } else {
             Mismatch
@@ -168,15 +175,17 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return false;
     }
 
-    debug_assert!(expected != p.int_lit && expected != p.float_lit);
+    debug_assert!(expected != p.int_lit && expected != p.sint_lit && expected != p.float_lit);
 
     if got == p.int_lit {
         return matches!(expected.kind, AstKind::IntTy | AstKind::FloatTy)
             || expected == p.float_lit;
+    } else if got == p.sint_lit {
+        return expected.is_sint() || expected.kind == AstKind::FloatTy || expected == p.float_lit;
     }
 
     if got == p.float_lit {
-        return expected.kind == AstKind::FloatTy || expected == p.int_lit;
+        return expected.kind == AstKind::FloatTy || expected.is_int_lit();
     }
 
     // needs to be above every non_null `got` value.
@@ -318,7 +327,7 @@ impl Ptr<ast::Type> {
         debug_assert!(self.ty == p.type_ty || self.kind == AstKind::Fn);
         match self.matchable().as_mut() {
             TypeEnum::SimpleTy { .. } => {
-                if *self == p.int_lit {
+                if self.is_int_lit() {
                     *self = p.i64;
                 } else if *self == p.float_lit {
                     *self = p.f64;

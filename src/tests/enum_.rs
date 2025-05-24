@@ -1,4 +1,4 @@
-use super::jit_run_test;
+use super::{jit_run_test, test_compile_err, TestSpan};
 use crate::{tests::jit_run_test_raw, util::transmute_unchecked};
 
 #[test]
@@ -189,4 +189,21 @@ fn no_noundef_with_sum_type() {
     let res = jit_run_test::<u16>("enum { A(u8), B, C }.B");
     assert_eq!(*res.ok(), 1);
     assert!(!res.module_text().unwrap().contains("noundef"));
+}
+
+#[test]
+fn cast_negative_tag() {
+    let code = "
+MyEnum :: enum { A = -1, B = -2, C = -3 };
+test :: -> MyEnum.B.as(i64);";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), -2)
+}
+
+#[test]
+fn invalid_tag_ty() {
+    test_compile_err(
+        "enum { A = \"hello\" }",
+        "mismatched types: expected {integer literal}; got []u8",
+        |code| TestSpan::of_substr(code, "\"hello\"")
+    );
 }

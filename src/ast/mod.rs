@@ -566,7 +566,7 @@ ast_variants! {
         is_simple_enum: bool,
         variants: DeclList,
         /// is present after sema of this ast node. always has the same length as `variants`.
-        variant_tags: OPtr<[usize]>,
+        variant_tags: OPtr<[isize]>,
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
     },
@@ -746,7 +746,7 @@ impl Ptr<Ast> {
     pub fn int<Int: TryFrom<i64>>(self) -> Int
     where Int::Error: fmt::Debug {
         let int = self.downcast::<IntVal>().val;
-        debug_assert!(Int::try_from(int).is_ok());
+        debug_assert!(Int::try_from(int).is_ok(), "{int}");
         Int::try_from(int).u()
     }
 
@@ -825,6 +825,15 @@ impl Ptr<Type> {
             AstKind::SliceTy => primitives().untyped_slice_struct_def,
             _ => unreachable_debug(),
         }
+    }
+
+    pub fn is_int_lit(self) -> bool {
+        let p = primitives();
+        self == p.int_lit || self == p.sint_lit
+    }
+
+    pub fn is_sint(self) -> bool {
+        self.try_downcast::<IntTy>().is_some_and(|i| i.is_signed)
     }
 
     pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {

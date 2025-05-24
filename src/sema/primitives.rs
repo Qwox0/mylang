@@ -34,6 +34,7 @@ pub struct Primitives {
     // internal Types:
     pub unknown_ty: Ptr<ast::Type>,
     pub int_lit: Ptr<ast::Type>,
+    pub sint_lit: Ptr<ast::Type>,
     pub float_lit: Ptr<ast::Type>,
     pub method_stub: Ptr<ast::Type>,
     pub enum_variant: Ptr<ast::Type>,
@@ -137,7 +138,7 @@ impl Primitives {
 
         let never = new_primitive_ty!("never", simple_ty, finalized: true);
         let never_ptr_ty =
-            ast_new!(PtrTy { pointee: never.upcast(), is_mut: false }).upcast_to_type();
+            ast_new!(PtrTy { pointee: never.upcast(), is_mut: true }).upcast_to_type();
         init_ty(never_ptr_ty);
 
         let any = new_primitive_ty!("any", simple_ty, finalized: true);
@@ -185,6 +186,7 @@ impl Primitives {
 
             unknown_ty: new_primitive_ty!("{unknown_ty}", simple_ty, finalized: true),
             int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),
+            sint_lit: new_primitive_ty!("{signed integer literal}", simple_ty, finalized: false),
             float_lit: new_primitive_ty!("{float literal}", simple_ty, finalized: false),
             method_stub: new_primitive_ty!("{method stub}", simple_ty, finalized: false),
             enum_variant: new_primitive_ty!("{enum variant}", simple_ty, finalized: false),
