@@ -2,7 +2,7 @@ use crate::{
     parser::parser_helper::ParserInterface,
     ptr::{OPtr, Ptr},
     source_file::SourceFile,
-    util::{UnwrapDebug, panic_debug, unreachable_debug},
+    util::{UnwrapDebug, unreachable_debug},
 };
 use core::{fmt, ops::Range};
 use std::{
@@ -215,10 +215,23 @@ impl TokenKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            TokenKind::Whitespace => "whitespace",
+            TokenKind::LineComment | TokenKind::LineDocInner | TokenKind::LineDocOuter => {
+                "a line comment"
+            },
+            TokenKind::BlockComment | TokenKind::BlockDocInner | TokenKind::BlockDocOuter => {
+                "a block comment"
+            },
             TokenKind::Ident => "an identifier",
             TokenKind::Keyword(keyword) => keyword.as_str(),
+            TokenKind::IntLit => "an integer literal",
+            TokenKind::FloatLit => "a float literal",
             TokenKind::BoolLitTrue => "`true`",
             TokenKind::BoolLitFalse => "`false`",
+            TokenKind::CharLit => "a character literal",
+            TokenKind::BCharLit => "a byte character literal",
+            TokenKind::StrLit => "a string literal",
+            TokenKind::MultilineStrLitLine => "a line string literal",
             TokenKind::OpenParenthesis => "`(`",
             TokenKind::CloseParenthesis => "`)`",
             TokenKind::OpenBracket => "`[`",
@@ -281,7 +294,7 @@ impl TokenKind {
             TokenKind::Backslash => "`\"`",
             TokenKind::Backtick => "```",
             TokenKind::EOF => "EOF",
-            k => panic_debug!("cannot convert TokenKind::{k:?} to a simple string"),
+            TokenKind::Unknown => "an unknown token",
         }
     }
 }
@@ -509,6 +522,10 @@ impl Index<Span> for &Code {
     fn index(&self, span: Span) -> &Self::Output {
         &self.0[span.bytes()]
     }
+}
+
+pub fn is_ascii_space_or_tab(ascii: u8) -> bool {
+    matches!(ascii, b'\x09' | b'\x20')
 }
 
 pub fn is_whitespace(c: char) -> bool {

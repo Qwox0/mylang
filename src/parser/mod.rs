@@ -18,7 +18,7 @@ use crate::{
 };
 use core::str;
 pub use error::*;
-use lexer::{Keyword, Lexer, Span, Token, TokenKind};
+use lexer::{Keyword, Lexer, Span, Token, TokenKind, is_ascii_space_or_tab};
 use parser_helper::ParserInterface;
 
 pub mod error;
@@ -454,7 +454,13 @@ impl Parser {
                 // Note: Arena allocates in the wrong direction
                 let mut scratch = Vec::with_capacity(1024);
                 while let Some(t) = self.lex.next_if_kind(TokenKind::MultilineStrLitLine) {
-                    scratch.extend_from_slice(self.get_text_from_span(t.span)[2..].as_bytes());
+                    let line_text = self.get_text_from_span(t.span);
+                    debug_assert_eq!(&line_text[0..2], "\\\\");
+                    // `\\ a` == "a" == `\\a`
+                    let start_idx =
+                        2 + line_text.as_bytes().get(2).copied().is_some_and(is_ascii_space_or_tab)
+                            as usize;
+                    scratch.extend_from_slice(line_text[start_idx..].as_bytes());
                 }
                 let bytes = self.alloc_slice(&scratch)?;
                 let text = unsafe { std::str::from_utf8_unchecked(&bytes) };

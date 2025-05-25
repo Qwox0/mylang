@@ -12,7 +12,7 @@ pub fn unexpected_token<T>(t: Token, expected: &[TokenKind]) -> ParseResult<T> {
     match expected {
         [] => cerror2!(t.span, "unexpected token: {}", t.kind),
         [e] => unexpected_token_expect1(t, e),
-        many => cerror2!(t.span, "expected one {}, got of {}", many.iter().join(", "), t.kind),
+        many => cerror2!(t.span, "expected one of {}, got {}", many.iter().join(", "), t.kind),
     }
 }
 
