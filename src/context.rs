@@ -2,12 +2,12 @@ use crate::{
     arena_allocator::Arena,
     ast::{self, ast_new},
     compiler::CompileDurations,
-    diagnostics::{self, HandledErr},
+    diagnostics::{self, HandledErr, cerror, cerror2, chint, handle_alloc_err},
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
     sema::primitives::Primitives,
     source_file::SourceFile,
-    util::UnwrapDebug,
+    util::{UnwrapDebug, is_canonical},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -29,7 +29,7 @@ pub struct CompilationContextInner {
     pub primitives_scope: Ptr<ast::Block>,
 
     /// absolute import file path -> index into `files`
-    pub imports: HashMap<PathBuf, FilesIndex>,
+    pub imports: HashMap<Box<Path>, FilesIndex>,
     /// This List must contain [`Ptr`]s because it might reallocate while a mutable reference to
     /// [`SourceFile`] is active.
     pub files: Vec<Ptr<SourceFile>>,
@@ -39,7 +39,7 @@ pub struct CompilationContextInner {
     pub library_search_paths: HashSet<HashKeyPtr<str>>,
 
     pub compiler_libs_path: PathBuf,
-    pub project_path: PathBuf,
+    pub project_path: OPtr<Path>,
 
     /// TODO: implement `#mut_checks(.Enabled)`, `#mut_checks(.Disabled)`
     pub do_mut_checks: bool,
@@ -92,13 +92,13 @@ impl CompilationContext {
         let primitives_scope = alloc.alloc(global_scope).unwrap();
 
         let compiler_binary_path = std::env::current_exe().unwrap();
-
-        // TODO: copy `lib/` to be next to the binary
-        let mut compiler_libs_path = compiler_binary_path.parent().unwrap();
-        while compiler_libs_path.file_name().unwrap() != "mylang" {
-            compiler_libs_path = compiler_libs_path.parent().unwrap();
-        }
-        let compiler_libs_path = compiler_libs_path.join("lib");
+        let compiler_libs_path =
+            compiler_binary_path.parent().unwrap().join("lib").canonicalize().unwrap();
+        assert!(
+            compiler_libs_path.is_dir(),
+            "\"{}\" must be a directory",
+            compiler_libs_path.display()
+        );
 
         let ctx = CompilationContextInner {
             alloc,
@@ -116,7 +116,7 @@ impl CompilationContext {
             library_search_paths: HashSet::new(),
 
             compiler_libs_path,
-            project_path: PathBuf::new(),
+            project_path: None,
 
             do_mut_checks: true,
 
@@ -136,48 +136,100 @@ impl CompilationContext {
 }
 
 impl Ptr<CompilationContextInner> {
-    pub fn add_import(
-        self,
-        path: &str,
-        cur_path: OPtr<Path>,
-    ) -> Result<FilesIndex, std::io::Error> {
-        //  if path == "prelude" {
-        //     PathBuf::from(concat!(std::env!("HOME"), "/src/mylang/lib/prelude.mylang"))
-        let path = if path == "std" {
-            self.compiler_libs_path.join("std/mod.mylang")
-        } else if path == "libc" {
-            self.compiler_libs_path.join("libc.mylang")
-        } else {
-            let cur_path = cur_path.u();
-            debug_assert!(cur_path.is_file());
-            cur_path.parent().u().join(path)
+    pub fn set_root_file(mut self, path: PathBuf) -> Result<(), HandledErr> {
+        if self.root_file_idx.is_some() {
+            return cerror2!(Span::ZERO, "Tried to set the root file multiple times");
         }
-        .canonicalize()?;
-        if let Some(idx) = self.imports.get(&path) {
-            return Ok(*idx);
-        }
-        let file = SourceFile::read(Ptr::from_ref(path.as_path()), &self.alloc)?;
-        let file = self.alloc.alloc(file).unwrap();
-        self.as_mut().files.push(file);
-        let idx = self.files.len() - 1;
-        self.as_mut().imports.insert(path, idx);
-        Ok(idx)
+        let root_file_idx = self.add_path_import(path, false, Span::ZERO)?;
+        self.root_file_idx = Some(root_file_idx);
+        let root_file = self.files[self.root_file_idx.u()];
+        self.project_path = Some(Ptr::from_ref(root_file.path.parent().unwrap()));
+        Ok(())
     }
 
-    pub fn add_import_from_file(self, file: SourceFile) -> FilesIndex {
-        if let Some(idx) = self.imports.get(file.path.as_ref()) {
-            return *idx;
+    pub fn add_import(
+        self,
+        import_text: &str,
+        cur_path: Option<&Path>,
+        err_span: Span,
+    ) -> Result<FilesIndex, HandledErr> {
+        let lib = |path| self.add_path_import(path, true, err_span);
+        match import_text {
+            "std" => lib(self.compiler_libs_path.join("std/mod.mylang")),
+            "libc" => lib(self.compiler_libs_path.join("libc.mylang")),
+            "runtime" => lib(self.compiler_libs_path.join("runtime.mylang")),
+            p => {
+                let cur_path = cur_path.u();
+                debug_assert!(is_canonical(cur_path));
+                debug_assert!(cur_path.is_file());
+                // This needs to be canonicalized because import_text might look like "../a.mylang"
+                self.add_path_import(cur_path.parent().u().join(p), false, err_span)
+            },
         }
-        let path = file.path.to_path_buf();
-        let file = self.alloc.alloc(file).unwrap();
+    }
+
+    fn add_path_import(
+        self,
+        mut path: PathBuf,
+        assume_canonicalized: bool,
+        err_span: Span,
+    ) -> Result<FilesIndex, HandledErr> {
+        let res: std::io::Result<_> = try {
+            if assume_canonicalized {
+                debug_assert!(is_canonical(&path));
+            } else {
+                path = path.canonicalize()?;
+            }
+            if let Some(idx) = self.imports.get(path.as_path()) {
+                return Ok(*idx);
+            }
+            SourceFile::read(Ptr::from_ref(path.as_path()), &self.alloc)?
+        };
+        let file = res.map_err(|e| {
+            let p = path.display();
+            cerror!(err_span, "cannot import source file \"{p}\": {e}")
+        })?;
+        self.add_source_file(file, Some(path))
+    }
+
+    #[cfg(test)]
+    pub fn add_test_code_buf(
+        self,
+        code: Ptr<crate::parser::lexer::Code>,
+    ) -> Result<FilesIndex, HandledErr> {
+        self.add_source_file(SourceFile::new(Ptr::from_ref("test.mylang".as_ref()), code), None)
+    }
+
+    fn add_source_file(
+        self,
+        file: SourceFile,
+        path: Option<PathBuf>,
+    ) -> Result<FilesIndex, HandledErr> {
+        let file = self.alloc.alloc(file).map_err(handle_alloc_err)?;
         self.as_mut().files.push(file);
         let idx = self.files.len() - 1;
-        self.as_mut().imports.insert(path, idx);
-        idx
+        if let Some(path) = path {
+            self.as_mut().imports.insert(path.into_boxed_path(), idx);
+        }
+        Ok(idx)
     }
 
     pub fn add_library(self, str_lit: Ptr<ast::StrVal>) -> Result<(), HandledErr> {
         let name = str_lit.text;
+        // TODO: test
+        if let Some(slash_idx) = str_lit.text.rfind(['/', '\\']) {
+            cerror!(
+                str_lit.span,
+                "Currently paths in library names are not supported because they are passed \
+                 directly to the `-l` flag of lld."
+            );
+            chint!(
+                str_lit.span,
+                "Consider adding `#add_library_search_path \"{}\"` instead",
+                &name[..slash_idx]
+            );
+            return Err(HandledErr);
+        }
         self.as_mut().libraries.insert(name.as_hash_key());
         Ok(())
     }
@@ -188,7 +240,7 @@ impl Ptr<CompilationContextInner> {
     }
 
     pub fn path_in_proj(self, path: &Path) -> &Path {
-        path.strip_prefix(&self.project_path).unwrap_or(path)
+        path.strip_prefix(self.project_path.u().as_ref()).unwrap_or(path)
     }
 }
 

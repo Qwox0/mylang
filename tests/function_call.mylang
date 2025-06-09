@@ -66,6 +66,4 @@ main :: -> {
     mut x := MyNum.(5);
     x.&mut.mut_add(100);
     std.assert(x.val == 105);
-
-    0
 }

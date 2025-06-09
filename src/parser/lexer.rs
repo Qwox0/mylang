@@ -357,6 +357,7 @@ keywords! {
     Mut = "mut",
     Rec = "rec",
     Pub = "pub",
+    Static = "static",
     Struct = "struct",
     Union = "union",
     Enum = "enum",
@@ -417,6 +418,10 @@ impl Span {
         Span::pos(self.end - 1, self.file)
     }
 
+    pub fn after(self) -> Span {
+        Span::pos(self.end, self.file)
+    }
+
     pub fn len(&self) -> usize {
         (self.start..self.end).len()
     }
@@ -442,14 +447,6 @@ impl Span {
         let first = iter.next();
         let last = iter.last();
         first.map(|first| last.map(|last| first.join(last)).unwrap_or(first))
-    }
-
-    pub fn start_pos(self) -> Span {
-        Span::pos(self.start, self.file)
-    }
-
-    pub fn after(self) -> Span {
-        Span::pos(self.end, self.file)
     }
 
     pub fn range(&self) -> Range<usize> {

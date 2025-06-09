@@ -2,9 +2,9 @@ extern crate test;
 
 use crate::{
     cli::BuildArgs,
-    compiler::{CompileMode, compile_file},
+    compiler::{CompileMode, compile_ctx},
     context::CompilationContext,
-    tests::test_file_mock,
+    ptr::Ptr,
 };
 use test::*;
 
@@ -57,14 +57,9 @@ pub defer_test :: -> {
     t2 := out == 11;
     return t1 && t2;
 };";
-        let code = code.as_ref();
         let ctx = CompilationContext::new();
-        compile_file(
-            ctx.0,
-            test_file_mock(code),
-            CompileMode::Check,
-            &BuildArgs::comp_bench_args(),
-        );
+        ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+        compile_ctx(ctx.0, CompileMode::Check, &BuildArgs::comp_bench_args());
     })
 }
 
@@ -99,8 +94,8 @@ macro_rules! bench_compilation {
         use crate::diagnostics::DiagnosticReporter;
         let code = $code.as_ref();
         let ctx = CompilationContext::new();
-        let test_file = $crate::tests::test_file_mock(code);
-        let stmts = $crate::parser::parse(ctx.0, test_file);
+        ctx.0.add_test_code_buf($crate::ptr::Ptr::from_ref(code)).unwrap();
+        let stmts = $crate::parser::parse_files_in_ctx(ctx.0);
         assert!(!ctx.do_abort_compilation());
 
         let order = $crate::sema::analyze(ctx.0, &stmts);
@@ -114,10 +109,11 @@ macro_rules! bench_compilation {
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {
         let code = $code.as_ref();
-        let test_file = $crate::tests::test_file_mock(code);
+        let args = crate::cli::BuildArgs::comp_bench_args();
         $b.iter(|| {
             let ctx = CompilationContext::new();
-            black_box($crate::compiler::compile_file(ctx.0, black_box(test_file), $mode, &crate::cli::BuildArgs::comp_bench_args()));
+            ctx.0.add_test_code_buf($crate::ptr::Ptr::from_ref(code)).unwrap();
+            black_box($crate::compiler::compile_ctx(ctx.0, $mode, &args));
         });
     };
 }

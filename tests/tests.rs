@@ -34,13 +34,18 @@ struct Output {
     stderr: String,
 }
 
-fn test_shell_script(sh_path: &str) -> Output {
-    let test_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(sh_path);
-    println!("testing shell script {:?}: \"\"\"", sh_path);
+fn test_cmd(cmd: &mut Command) -> Output {
+    println!(
+        "testing command '{}{}': \"\"\"",
+        cmd.get_program().display(),
+        cmd.get_args()
+            .map(std::ffi::OsStr::display)
+            .fold(String::new(), |acc, arg| acc + " " + &arg.to_string())
+    );
 
     // <https://stackoverflow.com/a/72831067>
-    let mut child = Command::new("bash")
-        .arg(test_path)
+    let mut child = cmd
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -78,7 +83,6 @@ fn test_shell_script(sh_path: &str) -> Output {
     let stdout = stdout_rx.into_iter().fold(String::new(), join_lines);
     let stderr = stderr_rx.into_iter().fold(String::new(), join_lines);
 
-    assert!(status.success());
     Output { status, stdout, stderr }
 }
 
@@ -99,16 +103,14 @@ file_test! { named_call_args }
 #[test]
 fn error_no_main() {
     std::env::set_current_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"))).unwrap();
-    let ctx = CompilationContext::new();
-    let mut args =
-        BuildArgs { path: "./no_main.mylang".into(), quiet: true, ..BuildArgs::default() };
-    let res = mylang::compiler::compile(Ptr::from_ref(&ctx), CompileMode::Run, &mut args);
-    assert!(matches!(res, CompileResult::Err));
-    // TODO: check the error message
+    let out = test_cmd(Command::new("mylang").arg("run").arg("./no_main.mylang"));
+    assert!(!out.status.success());
+    assert!(out.stderr.contains("Couldn't find the entry point 'main' in 'no_main.mylang'"));
 }
 
 #[test]
 fn c_ffi_take_array_arg() {
-    let out = test_shell_script("tests/c_ffi_take_array_arg/run.sh");
+    let out = test_cmd(Command::new("bash").arg("./c_ffi_take_array_arg/run.sh"));
+    assert!(out.status.success());
     assert!(out.stdout.trim_end().ends_with("got array: [1,2,3,4,]"));
 }

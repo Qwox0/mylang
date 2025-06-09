@@ -32,36 +32,15 @@ impl Arena {
         Ok(Ptr::new(raw).cast::<MaybeUninit<T>>())
     }
 
-    /// # Source
-    ///
-    /// see [`bumpalo::Bump::alloc_slice_copy`]
     #[inline]
     pub fn alloc_slice<T: Copy>(&self, slice: &[T]) -> Result<Ptr<[T]>, AllocErr> {
-        let dst = self.alloc_uninit_slice(slice.len())?;
-        unsafe {
-            let mut dst = std::mem::transmute::<Ptr<[MaybeUninit<T>]>, Ptr<[T]>>(dst);
-            core::ptr::copy_nonoverlapping(slice.as_ptr(), dst.as_mut_ptr(), slice.len());
-            Ok(dst)
-        }
+        Ok(Ptr::from_ref(self.0.try_alloc_slice_copy(slice)?))
     }
 
     pub fn alloc_uninit_slice<T>(&self, len: usize) -> Result<Ptr<[MaybeUninit<T>]>, AllocErr> {
         let layout = Layout::array::<T>(len).unwrap();
         let dst = self.alloc_layout(layout)?.cast::<MaybeUninit<T>>();
         Ok(Ptr::from(unsafe { core::slice::from_raw_parts_mut(dst.as_ptr(), len) }))
-    }
-
-    pub fn alloc_slice_from_unsized_iter<T, I: Iterator<Item = T> + Clone>(
-        &self,
-        iter: I,
-    ) -> Result<Ptr<[T]>, AllocErr> {
-        let len = iter.clone().count();
-        let mut slice = self.alloc_uninit_slice::<T>(len)?;
-        for (idx, t) in iter.enumerate() {
-            debug_assert!(idx < slice.len());
-            unsafe { slice.get_unchecked_mut(idx) }.write(t);
-        }
-        Ok(slice.cast_slice::<T>())
     }
 }
 

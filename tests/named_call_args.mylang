@@ -35,6 +35,4 @@ main :: -> {
     res := my_numbers.format();
     std.println(res);
     std.assert(std.str.eq(res, "a: 3; b: 65535; c: 123; d: 0"));
-
-    0
 }

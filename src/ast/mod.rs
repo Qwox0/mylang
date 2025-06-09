@@ -293,7 +293,7 @@ macro_rules! ast_variants {
         }
 
         impl ConstVal {
-            pub const KINDS: [AstKind; 20] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+            pub const KINDS: [AstKind; 22] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
         }
 
         impl Type {
@@ -512,9 +512,12 @@ ast_variants! {
         path: Ptr<StrVal>,
         files_idx: FilesIndex,
     },
+    ProgramMainDirective {},
     SimpleDirective {
         ret_ty: Ptr<Type>,
     },
+    /// `#no_mangle my_item :: ...`
+    AnnotationDirective {}
 
     ===== Types =====
 
@@ -689,9 +692,9 @@ impl Ptr<Ast> {
     }
 
     #[inline]
-    pub fn set_replacement(&mut self, rep: Ptr<Ast>) {
+    pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none());
-        self.replacement = Some(rep)
+        self.as_mut().replacement = Some(rep)
     }
 
     pub fn downcast<V: AstVariant>(self) -> Ptr<V> {
@@ -721,8 +724,9 @@ impl Ptr<Ast> {
 
     pub fn try_get_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
         let p = self.rep();
-        then!(p.is_const_val() => p.downcast_const_val())
-            .ok_or_else(|| cerror2!(self.full_span(), "value not known at compile time"))
+        then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(
+            || cerror2!(self.full_span(), "value not known at compile time"), // TODO: `#run` hint
+        )
     }
 
     #[inline]
@@ -896,6 +900,7 @@ impl Ast {
             AstEnum::For { body, .. } | AstEnum::While { body, .. } => {
                 body.block_expects_trailing_semicolon()
             },
+            AstEnum::AnnotationDirective { .. } => false,
             _ => true,
         }
     }
@@ -1395,18 +1400,25 @@ impl fmt::Display for UnaryOpKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclMarkers {
-    pub is_pub: bool,
-    pub is_mut: bool,
-    pub is_rec: bool,
+    data: u8,
 }
 
 impl DeclMarkers {
+    pub const IS_MUT_MASK: u8 = 0x1;
+    pub const IS_PUB_MASK: u8 = 0x4;
+    pub const IS_REC_MASK: u8 = 0x2;
+    pub const IS_STATIC_MASK: u8 = 0x8;
+
     pub const fn default() -> Self {
-        Self { is_pub: false, is_mut: false, is_rec: false }
+        Self { data: 0 }
     }
 
-    pub fn is_empty(&self) -> bool {
-        !(self.is_pub || self.is_mut || self.is_rec)
+    pub fn get(&self, mask: u8) -> bool {
+        self.data & mask != 0
+    }
+
+    pub fn set(&mut self, mask: u8) {
+        self.data |= mask;
     }
 }
 

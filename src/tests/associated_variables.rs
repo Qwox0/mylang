@@ -1,4 +1,4 @@
-use super::jit_run_test;
+use super::{jit_run_test, test_compile_err_raw};
 use crate::{
     diagnostics::DiagnosticSeverity,
     tests::{TestSpan, jit_run_test_raw},
@@ -94,4 +94,26 @@ fn error_access_missing_const() {
 MyStruct :: struct {};
 test :: -> MyStruct.SOME_MISSING_CONST;";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn use_associated_const_in_struct_def() {
+    let code = "
+    MyArr :: struct { arr: [MyArr.LEN]i64 };
+    MyArr.LEN :: 10;
+    test :: -> {}";
+    jit_run_test_raw::<()>(code).ok();
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn allow_associated_const_on_failed_struct() {
+    let code = "
+    MyArr :: struct { x: error };
+    MyArr.NUM :: 10;
+    test :: -> {}";
+    test_compile_err_raw(code, "unknown identifier `error`", |code| {
+        TestSpan::of_substr(code, "error")
+    });
 }

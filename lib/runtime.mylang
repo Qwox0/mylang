@@ -1,0 +1,18 @@
+libc :: #import "libc";
+
+mut static args: []*libc.c_char;
+
+init_runtime :: (argc: libc.c_int, argv: **libc.c_char) -> {
+    args = .{ ptr = argv, len = argc.as(u64) };
+}
+
+#no_mangle
+/* __entry_point */
+main :: (argc: libc.c_int, argv: **libc.c_char) -> libc.c_int {
+    init_runtime(argc, argv);
+
+    program_main :: #program_main;
+    program_main();
+
+    return 0;
+}

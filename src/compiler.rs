@@ -3,17 +3,18 @@ use crate::{
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
     context::CompilationContextInner,
-    diagnostics::DiagnosticReporter,
-    parser::{self},
+    diagnostics::{DiagnosticReporter, HandledErr},
+    parser::{self, lexer::Span},
     ptr::Ptr,
-    sema::{self},
-    source_file::SourceFile,
+    sema,
     util::{UnwrapDebug, unreachable_debug},
 };
 use inkwell::context::Context;
 use std::{
     assert_matches::debug_assert_matches,
+    convert::Infallible,
     mem::ManuallyDrop,
+    ops::FromResidual,
     path::Path,
     time::{Duration, Instant},
 };
@@ -47,30 +48,11 @@ pub fn compile(
     mode: CompileMode,
     args: &mut BuildArgs,
 ) -> CompileResult {
-    if args.path.is_dir() {
-        if !args.quiet {
-            eprintln!("Compiling project at {:?}", args.path);
-        }
-        todo!();
-        /*
-        for file in args
-            .path
-            .read_dir()
-            .unwrap()
-            .map(|f| f.unwrap().path())
-            .filter(|p| p.is_file())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "mylang"))
-        {
-            util::write_file_to_string(&file, &mut code).unwrap();
-        }
-        */
-    } else if !args.path.is_file() {
-        panic!("{:?} is not a dir nor a file", args.path)
-    }
-    let proj_path = args.path.parent().unwrap();
-    let entry_file = args.path.file_name().unwrap();
+    ctx.set_root_file(args.path.clone())?;
+
     if !args.quiet {
-        eprint!("Compiling file {:?}", entry_file);
+        let proj_path = args.path.parent().unwrap();
+        eprint!("Compiling file {:?}", args.path.file_name().unwrap());
         if proj_path != Path::new("") {
             eprint!(" in project {:?}", proj_path);
             std::env::set_current_dir(proj_path).unwrap();
@@ -78,14 +60,15 @@ pub fn compile(
         eprintln!("");
     }
 
-    let entry_file = Path::new(entry_file);
-    let root_file = SourceFile::read(Ptr::from_ref(entry_file), &ctx.alloc).unwrap();
-    compile_file(ctx, root_file, mode, args)
+    if !args.is_lib {
+        let _: usize = ctx.add_import("runtime", None, Span::ZERO)?;
+    }
+
+    compile_ctx(ctx, mode, args)
 }
 
-pub fn compile_file(
+pub fn compile_ctx(
     mut ctx: Ptr<CompilationContextInner>,
-    file: SourceFile,
     mode: CompileMode,
     args: &BuildArgs,
 ) -> CompileResult {
@@ -99,7 +82,7 @@ pub fn compile_file(
     // ##### Parsing #####
 
     let parse_start = Instant::now();
-    let stmts = parser::parse(ctx, file);
+    let stmts = parser::parse_files_in_ctx(ctx);
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -140,7 +123,6 @@ pub fn compile_file(
 
     let sema_start = Instant::now();
     let order = sema::analyze(ctx, &stmts);
-    sema::validate_main(ctx, &stmts, args);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -356,6 +338,12 @@ impl CompileResult {
             CompileResult::Err | CompileResult::RunErr { .. } => false,
             CompileResult::ModuleForTesting(_) => unreachable_debug(),
         }
+    }
+}
+
+impl FromResidual<Result<Infallible, HandledErr>> for CompileResult {
+    fn from_residual(_: Result<Infallible, HandledErr>) -> Self {
+        CompileResult::Err
     }
 }
 

@@ -48,7 +48,7 @@ impl<T> ScopedStack<T> {
 
     /// Iterates over the scopes of the stack in pop order.
     #[inline]
-    pub fn iter_scopes(&self) -> ScopedStackScopeIter<T> {
+    pub fn iter_scopes(&self) -> ScopedStackScopeIter<'_, T> {
         let Range { start, end } = self.values.as_ptr_range();
         ScopedStackScopeIter { start, end, cur_len: self.cur_len, _lifetime: PhantomData }
     }

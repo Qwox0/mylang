@@ -1,4 +1,5 @@
 use crate::{
+    arena_allocator::AllocErr,
     ast::{self, AstKind},
     display_code::display,
     error::SpannedError,
@@ -281,6 +282,7 @@ impl fmt::Display for DiagnosticSeverity {
     }
 }
 
+#[derive(Debug)]
 pub struct HandledErr;
 
 impl<T, E: From<HandledErr>> From<HandledErr> for Result<T, E> {
@@ -325,3 +327,7 @@ macro_rules! chint {
     };
 }
 pub(crate) use chint;
+
+pub fn handle_alloc_err(e: AllocErr) -> HandledErr {
+    cerror!(Span::ZERO, "allocation failed: {e}")
+}

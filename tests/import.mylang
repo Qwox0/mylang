@@ -23,6 +23,4 @@ main :: -> {
 
     res := add(res, 5);
     std.assert(res == 40);
-
-    0
 }

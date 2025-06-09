@@ -1,4 +1,4 @@
-use super::{HasAstKind, OptionTypeExt};
+use super::{DeclMarkers, HasAstKind, OptionTypeExt};
 use crate::{
     ast::{self, Ast, AstEnum, AstKind, UnaryOpKind, UpcastToAst},
     context::primitives,
@@ -188,10 +188,11 @@ impl DebugAst for Ast {
                 ..
             } => {
                 lines.write(&format!(
-                    "{}{}{}",
-                    if markers.is_pub { "pub " } else { "" },
-                    mut_marker(markers.is_mut),
-                    if markers.is_rec { "rec " } else { "" }
+                    "{}{}{}{}",
+                    if markers.get(DeclMarkers::IS_PUB_MASK) { "pub " } else { "" },
+                    if markers.get(DeclMarkers::IS_MUT_MASK) { "mut " } else { "" },
+                    if markers.get(DeclMarkers::IS_REC_MASK) { "rec " } else { "" },
+                    if markers.get(DeclMarkers::IS_STATIC_MASK) { "static " } else { "" },
                 ));
 
                 if let Some(ty_expr) = on_type {
@@ -292,7 +293,9 @@ impl DebugAst for Ast {
                 lines.write("#import ");
                 lines.write_tree(path);
             },
-            AstEnum::SimpleDirective { span, .. } => {
+            AstEnum::ProgramMainDirective { span, .. }
+            | AstEnum::SimpleDirective { span, .. }
+            | AstEnum::AnnotationDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());
             },
 
@@ -537,11 +540,6 @@ impl DebugTree {
         self.ensure_lines(self.cur_line);
         self.lines.get_mut(self.cur_line).unwrap()
     }
-}
-
-#[inline]
-pub fn mut_marker(is_mut: bool) -> &'static str {
-    if is_mut { "mut " } else { "" }
 }
 
 impl Debug for Ast {

@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn first_character_in_line() {
         let file = test_file_mock("this is the first line\nsecond line".as_ref());
-        let span = word_span("second", &file).start_pos();
+        let span = word_span("second", &file).start();
         let expected = format!(
             " --> test.mylang:2:1
   │

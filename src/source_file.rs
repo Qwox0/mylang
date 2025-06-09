@@ -32,7 +32,7 @@ impl SourceFile {
         self.stmt_range = Some(stmt_range.into())
     }
 
-    pub fn read(path: Ptr<Path>, alloc: &Arena) -> Result<SourceFile, std::io::Error> {
+    pub fn read(path: Ptr<Path>, alloc: &Arena) -> std::io::Result<SourceFile> {
         let code = std::fs::read_to_string(path.as_ref())?;
         let code = Ptr::from_ref(alloc.0.alloc_str(&code).as_ref());
         Result::Ok(Self::new(path, code))

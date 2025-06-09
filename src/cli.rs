@@ -41,10 +41,9 @@ pub struct BuildArgs {
     #[arg(long = "lib")]
     pub is_lib: bool,
 
-    /// The name of the first function called by the program
-    #[arg(long, default_value = "main")]
-    pub entry_point: String,
-
+    // /// The name of the first function called by the program
+    // #[arg(long, default_value = "main")]
+    // pub entry_point: String,
     #[arg(long)]
     pub emit_llvm_ir: bool,
 
@@ -94,7 +93,6 @@ impl BuildArgs {
             debug_typed_ast: false,
             llvm_optimization_level: 0,
             print_llvm_module: false,
-            entry_point: "main",
         })
     }
 
@@ -106,8 +104,7 @@ impl BuildArgs {
             target_triple: None,
             out: OutKind::None,
             quiet: true,
-            is_lib: false,
-            entry_point: opt.entry_point.to_string(),
+            is_lib: true,
             emit_llvm_ir: false,
             debug_ast: opt.debug_ast,
             debug_types: opt.debug_types,
@@ -127,7 +124,6 @@ pub struct TestArgsOptions {
     pub debug_typed_ast: bool,
     pub llvm_optimization_level: u8,
     pub print_llvm_module: bool,
-    pub entry_point: &'static str,
 }
 
 impl Default for TestArgsOptions {
@@ -138,7 +134,6 @@ impl Default for TestArgsOptions {
             debug_typed_ast: Default::default(),
             llvm_optimization_level: Default::default(),
             print_llvm_module: Default::default(),
-            entry_point: "test",
         }
     }
 }

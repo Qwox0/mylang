@@ -13,7 +13,6 @@ use crate::{
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
-    source_file::SourceFile,
     util::{UnwrapDebug, then},
 };
 use core::str;
@@ -70,38 +69,26 @@ impl Ptr<Ast> {
     }
 }
 
-pub fn parse(cctx: Ptr<CompilationContextInner>, root_file: SourceFile) -> Vec<Ptr<Ast>> {
+pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> Vec<Ptr<Ast>> {
     let mut stmts = Vec::new();
-    // cctx.add_import("prelude", None).unwrap();
-    cctx.as_mut().root_file_idx = Some(cctx.add_import_from_file(root_file));
-    cctx.as_mut().project_path = root_file.path.parent().unwrap().to_path_buf();
-
     // Note: this idx-based loop is needed because `ctx.files` might get mutated while the loop is
     // running.
     let mut idx = 0;
     while let Some(file) = cctx.files.get(idx).copied() {
-        parse_file_into(file, cctx, &mut stmts);
+        let start_idx = stmts.len();
+        let mut p = Parser { lex: Lexer::new(file), cctx };
+        p.parse_stmts_into(&mut stmts, false);
+        while let Some(t) = p.lex.next() {
+            debug_assert_eq!(t.kind, TokenKind::CloseBrace);
+            cerror!(t.span, "unexpected token");
+            p.parse_stmts_into(&mut stmts, false);
+        }
+        debug_assert!(p.lex.is_empty());
+        file.as_mut().set_stmt_range(start_idx..stmts.len());
 
         idx += 1;
     }
     stmts
-}
-
-pub fn parse_file_into(
-    file: Ptr<SourceFile>,
-    cctx: Ptr<CompilationContextInner>,
-    stmts: &mut Vec<Ptr<Ast>>,
-) {
-    let start_idx = stmts.len();
-    let mut p = Parser { lex: Lexer::new(file), cctx };
-    p.parse_stmts_into(stmts, false);
-    while let Some(t) = p.lex.next() {
-        debug_assert_eq!(t.kind, TokenKind::CloseBrace);
-        cerror!(t.span, "unexpected token");
-        p.parse_stmts_into(stmts, false);
-    }
-    debug_assert!(p.lex.is_empty());
-    file.as_mut().set_stmt_range(start_idx..stmts.len());
 }
 
 pub struct Parser {
@@ -288,7 +275,7 @@ impl Parser {
             TokenKind::Ident => {
                 expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None })
             },
-            TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub) => {
+            TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub | Keyword::Static) => {
                 self.var_decl(false)?.upcast()
             },
             TokenKind::Keyword(Keyword::Struct) => {
@@ -356,10 +343,12 @@ impl Parser {
             },
             TokenKind::Keyword(Keyword::Match) => {
                 todo!("match body");
+                /*
                 let val = self.advanced().expr()?;
                 let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
                     => self.expr()?);
                 expr!(Match { val, else_body, was_piped: false }, span)
+                */
             },
             TokenKind::Keyword(Keyword::For) => {
                 let iter_var = self.advanced().ident()?;
@@ -597,8 +586,8 @@ impl Parser {
                 expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
             TokenKind::Pound => {
-                let directive = self.advanced().ident()?;
-                let directive_name = directive.text.as_ref();
+                let directive_ident = self.advanced().ident()?;
+                let directive_name = directive_ident.text.as_ref();
 
                 let mut parse_str_lit_arg = |usage: &str| {
                     let arg = opt!(self, value())?;
@@ -618,12 +607,8 @@ impl Parser {
 
                 if directive_name == "import" {
                     let path = parse_str_lit_arg("a source file path")?;
-                    let idx = self
-                        .cctx
-                        .add_import(path.text.as_ref(), Some(self.lex.file.path))
-                        .map_err(|e| {
-                            cerror!(path.span, "Cannot import \"{}\" ({e})", path.text.as_ref())
-                        })?;
+                    let idx =
+                        self.cctx.add_import(&path.text, Some(&self.lex.file.path), path.span)?;
                     expr!(ImportDirective { path, files_idx: idx })
                 } else if directive_name == "library" {
                     let str_lit = parse_str_lit_arg("a library name")?;
@@ -634,8 +619,13 @@ impl Parser {
                     let str_lit = parse_str_lit_arg("a path")?;
                     self.cctx.add_library_search_path(str_lit.text)?;
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
+                } else if directive_name == "program_main" {
+                    expr!(ProgramMainDirective {}, span.join(directive_ident.span))
+                } else if directive_name == "no_mangle" {
+                    // currently not implemented
+                    expr!(AnnotationDirective {}, span.join(directive_ident.span))
                 } else {
-                    return cerror2!(directive.span, "Unknown compiler directive");
+                    return cerror2!(span.join(directive_ident.span), "Unknown compiler directive");
                 }
             },
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -914,12 +904,12 @@ impl Parser {
         let mut t = self.lex.peek_or_eof();
 
         macro_rules! set_marker {
-            ($variant:ident $field:ident) => {
-                if markers.$field {
+            ($variant:ident $mask:ident) => {
+                if markers.get(DeclMarkers::$mask) {
                     let marker_text = Keyword::$variant.as_str();
                     return cerror2!(t.span, "duplicate marker '{marker_text}' on declaration");
                 } else {
-                    markers.$field = true
+                    markers.set(DeclMarkers::$mask)
                 }
             };
         }
@@ -927,14 +917,16 @@ impl Parser {
         let ident = loop {
             match t.kind {
                 TokenKind::Ident => break self.advanced().ident_from_span(t.span)?,
-                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut is_mut),
-                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec is_rec),
-                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub is_pub),
+                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut IS_MUT_MASK),
+                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec IS_REC_MASK),
+                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB_MASK),
+                TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC_MASK),
                 _ => unexpected_token(t, &[
                     TokenKind::Ident,
                     TokenKind::Keyword(Keyword::Mut),
                     TokenKind::Keyword(Keyword::Rec),
                     TokenKind::Keyword(Keyword::Pub),
+                    TokenKind::Keyword(Keyword::Static),
                 ])?,
             }
             t = self.advanced().lex.peek_or_eof();
@@ -1074,7 +1066,7 @@ impl Parser {
 }
 
 fn handle_alloc_err(err: AllocErr) -> ParseError {
-    cerror2!(Span::ZERO, "allocation error: {err}")
+    crate::diagnostics::handle_alloc_err(err).into()
 }
 
 #[derive(Debug)]
@@ -1201,7 +1193,6 @@ impl FollowingOperator {
             TokenKind::ColonEq => FollowingOperator::VarDecl,
             //TokenKind::Semicolon => todo!("TokenKind::Semicolon"),
             TokenKind::Question => FollowingOperator::PostOp(UnaryOpKind::Try),
-            TokenKind::Pound => todo!("TokenKind::Pound"),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
             TokenKind::Tilde => todo!("TokenKind::Tilde"),

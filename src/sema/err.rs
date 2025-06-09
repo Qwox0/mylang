@@ -1,5 +1,4 @@
 use crate::{
-    arena_allocator::AllocErr,
     ast::{self, Ast},
     diagnostics::HandledErr,
     parser::lexer::Span,
@@ -48,10 +47,6 @@ pub enum SemaErrorKind {
 
     UnexpectedTopLevelExpr(Ptr<Ast>),
 
-    NotAConstExpr,
-
-    AllocErr(AllocErr),
-
     HandledErr,
 }
 
@@ -70,12 +65,6 @@ impl SemaError {
 impl From<crate::diagnostics::HandledErr> for SemaError {
     fn from(_: crate::diagnostics::HandledErr) -> Self {
         SemaError::HandledErr
-    }
-}
-
-impl From<crate::arena_allocator::AllocErr> for SemaError {
-    fn from(err: AllocErr) -> Self {
-        SemaError { kind: SemaErrorKind::AllocErr(err), span: Span::ZERO }
     }
 }
 

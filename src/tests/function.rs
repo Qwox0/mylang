@@ -132,6 +132,22 @@ fn use_correct_return_type() {
 }
 
 #[test]
+#[ignore = "not implemented"]
+fn specialize_return_type_to_optional() {
+    let code = "test :: -> {
+        if false return 1;
+        None
+    };";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+
+    let code = "test :: -> {
+        if false return 1;
+        Some(5.0)
+    };";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+}
+
+#[test]
 fn specialize_return_type() {
     let code = "test :: -> {
         if false return 1;

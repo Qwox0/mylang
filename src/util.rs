@@ -190,11 +190,6 @@ pub fn transmute_unchecked<T, U>(val: &T) -> U {
     unsafe { std::ptr::read(ptr) }
 }
 
-pub fn any_as_bytes<T: Sized>(p: &T) -> &[u8; core::mem::size_of::<T>()] {
-    //let slice = unsafe { core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>()) };
-    unsafe { (p as *const T as *const [u8; core::mem::size_of::<T>()]).as_ref_unchecked() }
-}
-
 pub fn read_file_to_buf(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
     std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
     Ok(())
@@ -266,4 +261,8 @@ impl<I: FusedIterator> IteratorExt for I {
             acc
         })
     }
+}
+
+pub fn is_canonical(path: &Path) -> bool {
+    path.canonicalize().is_ok_and(|p| p.as_path() == path)
 }

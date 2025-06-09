@@ -1,9 +1,9 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, OptionTypeExt, TypeEnum,
-        UnaryOpKind, UpcastToAst, is_pos_arg,
+        self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, DeclMarkers, OptionTypeExt,
+        TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
-    context::primitives,
+    context::{ctx, primitives},
     display_code::display,
     literals::replace_escape_chars,
     ptr::Ptr,
@@ -41,7 +41,7 @@ use inkwell::{
         IntMathValue, IntValue, PhiValue, PointerValue, StructValue,
     },
 };
-use std::{borrow::Cow, collections::HashMap, marker::PhantomData, path::Path};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, marker::PhantomData, path::Path};
 
 pub mod error;
 pub mod jit;
@@ -189,7 +189,6 @@ impl<'ctx> Codegen<'ctx> {
                 );
                 Ok(self.get_symbol(decl.u()))
             },
-            // AstEnum::Parenthesis { expr, .. } => self.compile_expr_with_write_target(*expr, write_target) ,
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
                 self.open_scope();
                 let res: CodegenResultAndControlFlow<Symbol> = try {
@@ -524,11 +523,11 @@ impl<'ctx> Codegen<'ctx> {
             &mut AstEnum::BinOpAssign { lhs, op, rhs, .. } => {
                 debug_assert_eq!(lhs.ty, rhs.ty);
                 let arg_ty = lhs.ty.u();
-                let Symbol::Stack(stack_var) = self.compile_expr(lhs)? else {
+                let BasicSymbol::Ref(lhs_ptr) = self.compile_expr(lhs)?.basic() else {
                     unreachable_debug()
                 };
                 let lhs_llvm_ty = self.llvm_type(arg_ty).basic_ty();
-                let lhs_val = self.build_load(lhs_llvm_ty, stack_var, "lhs", arg_ty.alignment())?;
+                let lhs_val = self.build_load(lhs_llvm_ty, lhs_ptr, "lhs", arg_ty.alignment())?;
 
                 let binop_res = if matches!(op, BinOpKind::And | BinOpKind::Or) {
                     debug_assert_eq!(arg_ty, p.bool);
@@ -551,12 +550,13 @@ impl<'ctx> Codegen<'ctx> {
                         t => todo!("{:?}", t),
                     }
                 };
-                self.build_store(stack_var, binop_res.basic_val(), arg_ty.alignment())?;
+                self.build_store(lhs_ptr, binop_res.basic_val(), arg_ty.alignment())?;
                 Ok(Symbol::Void)
             },
             AstEnum::Decl {
                 markers, ident, on_type, var_ty, init, is_const, is_extern, ..
             } => {
+                let decl = expr.downcast::<ast::Decl>();
                 let var_ty = var_ty.u();
                 if let Some(init) = init {
                     init.ty = Some(var_ty);
@@ -568,19 +568,10 @@ impl<'ctx> Codegen<'ctx> {
                         if init.u().kind != AstKind::Fn {
                             // don't need to compile an alias again
                             debug_assert!(self.fn_table.contains_key(&f));
+                        } else if *is_extern {
+                            self.compile_prototype(f, FnKind::FnDef(decl));
                         } else {
-                            let name = match on_type {
-                                Some(ty) => {
-                                    let ty = ty.downcast_type();
-                                    Cow::Owned(format!("{}.{}", ty, &*ident.text)) // TODO: use correct type name
-                                },
-                                None => Cow::Borrowed(ident.text.as_ref()),
-                            };
-                            if *is_extern {
-                                self.compile_prototype(name.as_ref(), f);
-                            } else {
-                                self.compile_fn(name.as_ref(), f)?;
-                            }
+                            self.compile_fn(f, FnKind::FnDef(decl))?;
                         }
                     } else if var_ty == p.type_ty {
                         self.llvm_type(init.u().downcast_type());
@@ -597,12 +588,24 @@ impl<'ctx> Codegen<'ctx> {
 
                     const ENABLE_NON_MUT_TO_REG: bool = false;
 
-                    let sym = if *is_extern {
+                    let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
+                    let sym = if *is_extern || is_static {
                         let ty = self.llvm_type(var_ty).basic_ty();
-                        Symbol::Global(self.module().add_global(ty, None, &ident.text))
+                        let name = self.mangle_symbol(decl);
+                        let global = self.module().add_global(ty, None, name.as_ref());
+                        if is_static {
+                            global.set_initializer(&ty.const_zero());
+                            if self.cur_fn.is_some() {
+                                // C does this for all `static`s
+                                global.set_linkage(Linkage::Internal);
+                            }
+                            global.set_constant(!markers.get(DeclMarkers::IS_MUT_MASK));
+                        }
+                        global.set_alignment(var_ty.alignment() as u32);
+                        Symbol::Global(global)
                     } else if ENABLE_NON_MUT_TO_REG
                         && let Some(init) = init
-                        && !markers.is_mut
+                        && !markers.get(DeclMarkers::IS_MUT_MASK)
                     {
                         self.compile_expr(*init)?
                     } else {
@@ -896,9 +899,12 @@ impl<'ctx> Codegen<'ctx> {
                     todo!("other const ptrs")
                 }
             },
-            AstEnum::ImportDirective { .. } | AstEnum::SimpleDirective { .. } => {
+            AstEnum::ImportDirective { .. }
+            | AstEnum::ProgramMainDirective { .. }
+            | AstEnum::SimpleDirective { .. } => {
                 panic_debug!("directives should have been resolved during sema")
             },
+            AstEnum::AnnotationDirective { .. } => Ok(Symbol::Void),
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -915,7 +921,7 @@ impl<'ctx> Codegen<'ctx> {
                 let f = expr.downcast::<ast::Fn>();
                 Ok(Symbol::Function(match self.fn_table.get(&f) {
                     Some(val) => *val,
-                    None => self.compile_fn("lambda", f)?,
+                    None => self.compile_fn(f, FnKind::Lambda)?,
                 }))
             },
         }
@@ -1100,10 +1106,11 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    fn compile_fn(&mut self, name: &str, f: Ptr<ast::Fn>) -> CodegenResult<FunctionValue<'ctx>> {
+    fn compile_fn(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> CodegenResult<FunctionValue<'ctx>> {
+        debug_assert!(def.is_lamda_or(|d| d.init.is_some_and(|i| i.rep() == f.upcast())));
         let prev_bb = self.builder.get_insert_block();
 
-        let (fn_val, use_sret) = self.compile_prototype(name, f);
+        let (fn_val, use_sret) = self.compile_prototype(f, def);
 
         let prev_sret_ptr = if use_sret {
             let sret_ptr = fn_val.get_first_param().u().into_pointer_value();
@@ -1156,7 +1163,11 @@ impl<'ctx> Codegen<'ctx> {
         (fn_ty, ret_type)
     }
 
-    fn compile_prototype(&mut self, name: &str, f: Ptr<ast::Fn>) -> (FunctionValue<'ctx>, bool) {
+    fn compile_prototype(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> (FunctionValue<'ctx>, bool) {
+        let name = match def {
+            FnKind::FnDef(decl) => self.mangle_symbol(decl),
+            FnKind::Lambda => "lambda".into(), // TODO: also mangle lambda (e.g. `my_fn.lambda`)
+        };
         debug_assert!(
             self.fn_table.get(&f).is_none(),
             "called compile_prototype multiple times on the same function ('{name}')"
@@ -1164,7 +1175,7 @@ impl<'ctx> Codegen<'ctx> {
         let (fn_type, ret_ffi_ty) = self.fn_type(f);
         let use_sret = ret_ffi_ty.do_use_sret();
 
-        let fn_val = self.module().add_function(name, fn_type, Some(Linkage::External));
+        let fn_val = self.module().add_function(name.as_ref(), fn_type, Some(Linkage::External));
         let mut params_iter = fn_val.get_param_iter();
 
         fn_val.add_ret_attributes(self, ret_ffi_ty, f);
@@ -1231,7 +1242,9 @@ impl<'ctx> Codegen<'ctx> {
                         let param = param_val_iter.next().u();
                         debug_assert_eq!(param.get_type(), simple_ty);
                         let param = CodegenValue::new(param.as_value_ref());
-                        if param_def.markers.is_mut || param_ty.is_aggregate() {
+                        if param_def.markers.get(DeclMarkers::IS_MUT_MASK)
+                            || param_ty.is_aggregate()
+                        {
                             self.position_builder_at_start(func.get_first_basic_block().u());
                             Symbol::Stack(self.build_alloca_value(param.basic_val(), param_ty)?)
                         } else {
@@ -1283,7 +1296,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module().print_to_stderr();
                 }
                 unsafe { func.delete() };
-                panic_debug!("invalid generated function");
+                //panic_debug!("invalid generated function");
                 Err(CodegenError::InvalidGeneratedFunction.into())?
             }
         };
@@ -1292,6 +1305,29 @@ impl<'ctx> Codegen<'ctx> {
         self.cur_fn = outer_fn;
         self.builder.clear_insertion_position();
         res
+    }
+
+    fn mangle_symbol<'n>(&self, decl: Ptr<ast::Decl>) -> Cow<'n, str> {
+        let name = decl.ident.text.as_ref();
+        if decl.is_extern {
+            name.into()
+        } else if name == "main" {
+            if decl
+                .span
+                .file
+                .is_some_and(|f| f.path.as_ref() == ctx().compiler_libs_path.join("runtime.mylang"))
+            {
+                // not needed when `#no_mangle` is implemented
+                return name.into();
+            }
+            "_main".into()
+        } else if let Some(ty) = decl.on_type {
+            format!("{}.{name}", ty.downcast_type()).into() // TODO: use correct type name
+        } else if let Some(f) = self.cur_fn {
+            format!("{}.{name}", f.get_name().to_str().unwrap()).into()
+        } else {
+            name.into()
+        }
     }
 
     fn compile_positional_initializer_body(
@@ -1489,11 +1525,11 @@ impl<'ctx> Codegen<'ctx> {
             let target = self.llvm_type(target_ty);
             return if let Some(target_i_ty) = target_ty.try_downcast::<ast::IntTy>() {
                 let int_ty = target.int_ty();
-                return reg(if target_i_ty.is_signed {
+                reg(if target_i_ty.is_signed {
                     self.builder.build_float_to_signed_int(float, int_ty, "")?
                 } else {
                     self.builder.build_float_to_unsigned_int(float, int_ty, "")?
-                });
+                })
             } else {
                 unreachable_debug()
             };
@@ -1620,13 +1656,13 @@ impl<'ctx> Codegen<'ctx> {
         ty: Ptr<ast::Type>,
     ) -> CodegenResult<PointerValue<'ctx>> {
         Ok(match sym.basic() {
-            BasicSymbol::Stack(ptr_value) => ptr_value,
-            BasicSymbol::Register(val) => {
+            BasicSymbol::Ref(ptr_value) => ptr_value,
+            BasicSymbol::Val(val) => {
                 #[cfg(debug_assertions)]
                 println!("INFO: doing stack allocation for register value: {val:?}");
                 self.build_alloca_value(val.basic_val(), ty)?
             },
-            BasicSymbol::Global(val) => val.as_pointer_value(),
+            BasicSymbol::Zst => panic_debug!("{ty} is not represented as a symbol"),
         })
     }
 
@@ -1654,14 +1690,15 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn build_return(&mut self, ret_sym: Symbol<'ctx>, ret_ty: Ptr<ast::Type>) -> CodegenResult<()> {
-        let ret = match (ret_sym, self.c_ffi_type(ret_ty).flatten_simple2(self)) {
+        let ret = match (ret_sym.basic(), self.c_ffi_type(ret_ty).flatten_simple2(self)) {
             (_, CFfiType::Zst) => None,
-            (Symbol::Register(val), CFfiType::AsPtr | CFfiType::ByValPtr) => {
+            (BasicSymbol::Zst, _) => unreachable_debug(),
+            (BasicSymbol::Val(val), CFfiType::AsPtr | CFfiType::ByValPtr) => {
                 let sret_ptr = self.sret_ptr.u();
                 self.build_store(sret_ptr, val.basic_val(), ret_ty.alignment())?;
                 None
             },
-            (Symbol::Stack(ptr), CFfiType::AsPtr | CFfiType::ByValPtr) => {
+            (BasicSymbol::Ref(ptr), CFfiType::AsPtr | CFfiType::ByValPtr) => {
                 let sret_ptr = self.sret_ptr.u();
                 let alignment = ret_ty.alignment() as u32;
                 self.builder.build_memcpy(
@@ -1673,16 +1710,16 @@ impl<'ctx> Codegen<'ctx> {
                 )?;
                 None
             },
-            (Symbol::Register(val), CFfiType::Simple(llvm_ty)) if ret_ty.is_aggregate() => {
+            (BasicSymbol::Val(val), CFfiType::Simple(llvm_ty)) if ret_ty.is_aggregate() => {
                 let ret = self.build_alloca(llvm_ty, "ret", ret_ty)?;
                 self.build_store(ret, val.basic_val(), ret_ty.alignment())?;
                 Some(self.builder.build_load(llvm_ty, ret, "ret")?)
             },
-            (Symbol::Register(val), CFfiType::Simple(_)) => Some(val.basic_val()),
-            (Symbol::Stack(ptr), CFfiType::Simple(ty)) => {
+            (BasicSymbol::Val(val), CFfiType::Simple(_)) => Some(val.basic_val()),
+            (BasicSymbol::Ref(ptr), CFfiType::Simple(ty)) => {
                 Some(self.build_load(ty, ptr, "ret", ret_ty.alignment())?)
             },
-            (Symbol::Register(val), CFfiType::SmallSimpleEnum { small_int, ffi_int }) => {
+            (BasicSymbol::Val(val), CFfiType::SmallSimpleEnum { small_int, ffi_int }) => {
                 let enum_ty = ret_ty.downcast::<ast::EnumDef>();
                 debug_assert!(enum_ty.is_simple_enum);
                 debug_assert!(enum_ty.tag_ty.u().bits < DEFAULT_C_ENUM_BITS);
@@ -1690,14 +1727,10 @@ impl<'ctx> Codegen<'ctx> {
                 debug_assert_eq!(val.get_type(), small_int);
                 Some(self.builder.build_int_z_extend(val, ffi_int, "ret")?.as_basic_value_enum())
             },
-            (Symbol::Stack(ptr), CFfiType::SmallSimpleEnum { ffi_int, .. }) => {
+            (BasicSymbol::Ref(ptr), CFfiType::SmallSimpleEnum { ffi_int, .. }) => {
                 Some(self.build_load(ffi_int, ptr, "ret", ret_ty.alignment())?)
             },
-
             (_, CFfiType::Simple2(_)) => unreachable_debug(),
-            (Symbol::Void, _) => unreachable_debug(),
-            (Symbol::Global(_), _) => todo!("return global"),
-            (Symbol::Function(_), _) => todo!("return function"),
         };
         match ret {
             Some(ret) => self.builder.build_return(Some(&ret))?,
@@ -2163,7 +2196,7 @@ impl<'ctx> Codegen<'ctx> {
             } else if ty == p.type_ty {
                 todo!("type_ty")
             } else {
-                unreachable_debug()
+                panic_debug!("cannot compile type: {ty}");
             };
         }
 
@@ -2402,17 +2435,14 @@ impl<'ctx> Codegen<'ctx> {
         alignment: usize,
     ) -> CodegenResult<CodegenValue<'ctx>> {
         Ok(match sym.basic() {
-            BasicSymbol::Stack(ptr) => {
+            BasicSymbol::Ref(ptr) => {
                 CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?.as_value_ref())
             },
-            BasicSymbol::Register(val) => {
+            BasicSymbol::Val(val) => {
                 debug_assert_eq!(val.basic_val().get_type(), llvm_ty);
                 val
             },
-            BasicSymbol::Global(val) => {
-                //let val = self.build_load(llvm_ty, val.as_pointer_value(), "", alignment)?;
-                CodegenValue::new(val.as_value_ref())
-            },
+            BasicSymbol::Zst => panic_debug!("a zst is an invalid value"),
         })
     }
 
@@ -2427,6 +2457,7 @@ impl<'ctx> Codegen<'ctx> {
                 CodegenValue::new(self.build_load(llvm_ty, ptr, "", ty.alignment())?.as_value_ref())
             },
             Some(Symbol::Register(val)) => val,
+            Some(Symbol::Global(val)) => CodegenValue::new(val.as_value_ref()),
             _ => return Ok(None),
         }))
     }
@@ -2575,20 +2606,20 @@ enum Symbol<'ctx> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BasicSymbol<'ctx> {
-    Stack(PointerValue<'ctx>),
-    Register(CodegenValue<'ctx>),
-    Global(GlobalValue<'ctx>),
+    Zst,
+    Val(CodegenValue<'ctx>),
+    Ref(PointerValue<'ctx>),
 }
 
 impl<'ctx> Symbol<'ctx> {
     #[inline]
     fn basic(self) -> BasicSymbol<'ctx> {
         match self {
-            Symbol::Void => panic_debug!("Void is not a basic symbol"),
-            Symbol::Stack(val) => BasicSymbol::Stack(val),
-            Symbol::Register(val) => BasicSymbol::Register(val),
-            Symbol::Global(val) => BasicSymbol::Global(val),
-            Symbol::Function(val) => BasicSymbol::Global(val.as_global_value()),
+            Symbol::Void => BasicSymbol::Zst,
+            Symbol::Stack(val) => BasicSymbol::Ref(val),
+            Symbol::Register(val) => BasicSymbol::Val(val),
+            Symbol::Global(val) => BasicSymbol::Ref(val.as_pointer_value()),
+            Symbol::Function(val) => BasicSymbol::Ref(val.as_global_value().as_pointer_value()),
         }
     }
 }
@@ -2962,5 +2993,20 @@ impl<'ctx> AddAttribute for CallSiteValue<'ctx> {
     #[inline]
     fn add_attribute(self, loc: AttributeLoc, attribute: Attribute) {
         self.add_attribute(loc, attribute);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FnKind {
+    FnDef(Ptr<ast::Decl>),
+    Lambda,
+}
+
+impl FnKind {
+    fn is_lamda_or(self, f: impl FnOnce(Ptr<ast::Decl>) -> bool) -> bool {
+        match self {
+            FnKind::FnDef(def) => f(def),
+            FnKind::Lambda => true,
+        }
     }
 }

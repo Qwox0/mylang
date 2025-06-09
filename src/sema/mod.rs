@@ -4,12 +4,14 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, OptionAstExt, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr, type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OptionAstExt,
+        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, iter_field_expr,
+        type_new,
     },
-    cli::BuildArgs,
     context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostics::{DiagnosticReporter, InitializerKind, cerror, cerror2, chint, cinfo, cwarn},
+    diagnostics::{
+        DiagnosticReporter, InitializerKind, cerror, cerror2, chint, cinfo, cwarn, handle_alloc_err,
+    },
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -51,24 +53,38 @@ macro_rules! check_and_set_target {
 }
 
 pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<usize> {
+    let p = p();
     // validate top level stmts
     for file in cctx.files.iter().copied() {
         let file_stmts = &stmts[file.stmt_range.u()];
         for (idx, s) in file_stmts.iter().copied().enumerate() {
+            if matches!(
+                s.kind,
+                AstKind::SimpleDirective | AstKind::ImportDirective | AstKind::AnnotationDirective
+            ) {
+                continue;
+            }
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
                 cerror!(s.full_span(), "unexpected top level expression");
+                s.set_replacement(p.never.upcast());
+                s.as_mut().ty = Some(p.never);
                 continue;
             };
             debug_assert!(!decl.is_const || decl.init.is_some());
-            if decl.init.is_none() && !decl.is_extern {
-                cerror!(decl.ident.span, "Global variables are currently not supported");
+            if !decl.is_const && !decl.is_extern && !decl.markers.get(DeclMarkers::IS_STATIC_MASK) {
+                cerror!(
+                    decl.ident.span,
+                    "Global variables must be marked as const (`{0} :: ...`), static (`static {0} \
+                     := ...`) or extern (`extern {0}: ...)",
+                    decl.ident.text.as_ref()
+                );
                 continue;
             }
             debug_assert!(decl.ty.is_none());
             if decl.on_type.is_none()
                 && let Some(dup) = linear_search_symbol(&file_stmts[..idx], &decl.ident.text)
             {
-                cerror!(decl.ident.span, "Duplicate definition in module scope.");
+                cerror!(decl.ident.span, "Duplicate definition in module scope");
                 chint!(dup.ident.span, "First definition here");
             }
         }
@@ -128,41 +144,9 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     order
 }
 
-pub fn validate_main(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>], args: &BuildArgs) {
-    if args.is_lib {
-        return;
-    }
-    let root_file = cctx.files[cctx.root_file_idx.u()];
-    let mut decl_iter = stmts[root_file.stmt_range.u()]
-        .iter()
-        .filter_map(|a| a.try_downcast::<ast::Decl>());
-    let Some(main) = decl_iter.find(|d| &*d.ident.text == &*args.entry_point) else {
-        cerror!(
-            root_file.full_span().start(),
-            "Couldn't find the entry point function '{}' in '{}'",
-            args.entry_point,
-            cctx.path_in_proj(&root_file.path).display()
-        );
-        return;
-    };
-    debug_assert!(decl_iter.all(|d| &*d.ident.text != &*args.entry_point));
-    if main.var_ty == p().never {
-        return;
-    }
-    if main.var_ty.try_downcast::<ast::Fn>().is_none() {
-        cerror!(main.ident.span, "Expected the entry point to be a function");
-        return;
-    }
-    let main_fn = main.init.u().downcast::<ast::Fn>();
-    if !main_fn.ret_ty.u().matches_int() && args.entry_point != "test" {
-        cerror!(main.ident.span, "Currently the entry point function has to return an integer");
-        return;
-    }
-}
-
 /// Semantic analyzer
 pub struct Sema {
-    file_level_symbols: Ptr<[Ptr<Ast>]>,
+    stmts: Ptr<[Ptr<Ast>]>,
     /// doesn't contain file-level symbols
     pub symbols: SemaSymbolTable,
     function_stack: Vec<Ptr<ast::Fn>>,
@@ -174,9 +158,9 @@ pub struct Sema {
 }
 
 impl Sema {
-    pub fn new(cctx: Ptr<CompilationContextInner>, file_level_symbols: Ptr<[Ptr<Ast>]>) -> Sema {
+    pub fn new(cctx: Ptr<CompilationContextInner>, stmts: Ptr<[Ptr<Ast>]>) -> Sema {
         Sema {
-            file_level_symbols,
+            stmts,
             symbols: ScopedStack::default(),
             function_stack: vec![],
             defer_stack: ScopedStack::default(),
@@ -280,13 +264,12 @@ impl Sema {
                         expr.ty = Some(ptr_ty.upcast_to_type());
                         let count: usize = $init_count;
                         if count != arr_ty.len.int() {
-                            cerror!(
+                            return cerror2!(
                                 expr.full_span(),
                                 "Cannot initialize the array behind the pointer `{}` with {count} \
                                  items",
                                 ptr_ty.upcast_to_type(),
                             );
-                            return SemaResult::HandledErr;
                         }
                         arr_ty.elem_ty.downcast_type()
                     } else {
@@ -301,7 +284,7 @@ impl Sema {
         }
 
         match expr.matchable().as_mut() {
-            AstEnum::Ident { text, decl, .. } => match self.get_symbol(*text) {
+            AstEnum::Ident { text, decl, span, .. } => match self.get_symbol(*text) {
                 None if let Some(mut i) = self.try_custom_bitwith_int_type(*text) => {
                     i.span = expr.span;
                     i.ty = Some(p.type_ty);
@@ -317,9 +300,16 @@ impl Sema {
                         expr.set_replacement(sym.const_val());
                     } else if is_const {
                         if sym.is_extern {
-                            todo!("use of extern symbol in const expr")
+                            return cerror2!(
+                                *span,
+                                "the use of extern symbols in constants is currently not \
+                                 implemented"
+                            );
                         };
-                        return err(NotAConstExpr, expr.full_span());
+                        return cerror2!(
+                            *span,
+                            "cannot access a non-constant symbol in a constant"
+                        );
                     }
                     expr.ty = Some(var_ty);
                 },
@@ -330,7 +320,7 @@ impl Sema {
                     let max_idx = stmts.len().wrapping_sub(1);
                     for (idx, s) in stmts.iter().enumerate() {
                         let expected_ty = if max_idx == idx { ty_hint } else { &None };
-                        match self.analyze(*s, expected_ty, is_const) {
+                        match self.analyze(*s, expected_ty, false) {
                             Ok(()) => {
                                 // s.ty = s.ty.finalize();
                                 debug_assert!(s.ty.is_some());
@@ -468,8 +458,7 @@ impl Sema {
                 let lhs_ty = *analyze!(*lhs, None);
                 let t = if lhs_ty == p.module
                     && let m = lhs.downcast::<ast::ImportDirective>()
-                    && let Some(s) =
-                        self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.file_level_symbols)
+                    && let Some(s) = self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.stmts)
                 {
                     let Some(ty) = s.var_ty else { return NotFinished };
                     expr.set_replacement(s.const_val());
@@ -509,11 +498,10 @@ impl Sema {
                 {
                     // field access
                     if lhs_ty.kind == AstKind::PtrTy {
-                        cerror!(
+                        return cerror2!(
                             lhs.full_span(),
                             "automatic dereferencing of pointers is currently not allowed"
                         );
-                        return SemaResult::HandledErr;
                     }
                     field.var_ty.u()
                 } else if let TypeEnum::StructDef { consts, .. }
@@ -647,7 +635,16 @@ impl Sema {
             },
             AstEnum::Call { func, args, .. } => {
                 if is_const {
-                    return err(NotAConstExpr, expr.full_span());
+                    cerror!(expr.full_span(), "Cannot directly call a function in a constant");
+                    chint!(
+                        expr.full_span().start(),
+                        "Consider using the #run directive to explicitly run the function at \
+                         compile time (currently not implemented): {}",
+                        func.try_flat_downcast::<ast::Ident>()
+                            .map(|i| format!(": `#run {}(...)`", i.text.as_ref()))
+                            .unwrap_or_default()
+                    );
+                    return SemaResult::HandledErr;
                 }
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
@@ -802,7 +799,8 @@ impl Sema {
                     };
 
                     macro_rules! calc_num_binop {
-                        ($op:tt $(, allow $float_val:ident)?) => {
+                        ($op:tt $(, allow $float_val:ident)?) => {{
+                            debug_assert!(common_ty.is_finalized());
                             if common_ty.kind == AstKind::IntTy {
                                 let val = lhs.downcast::<ast::IntVal>().val
                                     $op rhs.downcast::<ast::IntVal>().val;
@@ -814,7 +812,7 @@ impl Sema {
                                     .upcast())
                             })? else {
                                 None
-                            }
+                            }}
                         };
                     }
 
@@ -838,8 +836,10 @@ impl Sema {
                         BinOpKind::And => todo!(),
                         BinOpKind::Or => todo!(),
                     }) else {
-                        cerror!(expr.full_span(), "umimplemented compiletime binary operation");
-                        return SemaResult::HandledErr;
+                        return cerror2!(
+                            expr.full_span(),
+                            "unimplemented compiletime binary operation {op:?}"
+                        );
                     };
                     out_val.as_mut().ty = expr.ty;
                     expr.replacement = Some(out_val);
@@ -916,11 +916,10 @@ impl Sema {
                     self.analyze(else_body, &Some(then_ty), is_const)?;
                     let else_ty = else_body.ty.u();
                     let Some(common_ty) = common_type(then_ty, else_ty) else {
-                        cerror!(
+                        return cerror2!(
                             else_body.full_span(),
                             "'then' and 'else' branches have incompatible types"
                         );
-                        return SemaResult::HandledErr;
                     };
                     Some(common_ty)
                 } else if then_body.ty == Some(p.void_ty) || then_body.ty == Some(p.never) {
@@ -942,12 +941,11 @@ impl Sema {
                         *elem_ty
                     },
                     _ => {
-                        cerror!(
+                        return cerror2!(
                             source.full_span(),
                             "cannot iterate over value of type `{}`",
                             source.ty.u()
                         );
-                        return SemaResult::HandledErr;
                     },
                 };
 
@@ -1023,8 +1021,52 @@ impl Sema {
             AstEnum::ImportDirective { .. } => {
                 expr.ty = Some(p.module);
             },
+            AstEnum::ProgramMainDirective { .. } => {
+                let entry_point_name = "main";
+                let root_file = self.cctx.files[self.cctx.root_file_idx.u()];
+                let mut decl_iter = self.stmts[root_file.stmt_range.u()]
+                    .iter()
+                    .filter_map(|a| a.try_downcast::<ast::Decl>());
+                let Some(main) = decl_iter.find(|d| &*d.ident.text == entry_point_name) else {
+                    return cerror2!(
+                        root_file.full_span().start(),
+                        "Couldn't find the entry point '{}' in '{}'",
+                        entry_point_name,
+                        self.cctx.path_in_proj(&root_file.path).display()
+                    );
+                };
+                debug_assert!(decl_iter.all(|d| &*d.ident.text != entry_point_name));
+                let Some(main_ty) = main.var_ty else { return NotFinished };
+                if main_ty != p.never {
+                    let Some(main_fn) = main.var_ty.try_downcast::<ast::Fn>() else {
+                        return cerror2!(
+                            main.ident.span,
+                            "Expected the entry point to be a function"
+                        );
+                    };
+                    let main_ret_ty = main_fn.ret_ty.u();
+                    if main_ret_ty != p.void_ty
+                        && main_ret_ty != p.never
+                        // not handled in `runtime.mylang`:
+                        && main_ret_ty.kind != AstKind::IntTy
+                    {
+                        return cerror2!(
+                            main.ident.span,
+                            "Entry point '{}' has invalid return type `{}`",
+                            entry_point_name,
+                            main_ret_ty
+                        );
+                    }
+                    //expr.set_replacement(main_fn.upcast());
+                    expr.set_replacement(main.const_val());
+                }
+                expr.ty = Some(main_ty);
+            },
             AstEnum::SimpleDirective { ret_ty, .. } => {
                 expr.ty = Some(*ret_ty);
+            },
+            AstEnum::AnnotationDirective { .. } => {
+                expr.ty = Some(p.void_ty);
             },
 
             AstEnum::IntVal { val, .. } => {
@@ -1133,7 +1175,10 @@ impl Sema {
                 analyze!(*len, Some(u64_ty), true);
                 self.ty_match(*len, u64_ty)?;
                 if !len.rep().is_const_val() {
-                    return err(NotAConstExpr, len.full_span());
+                    return cerror2!(
+                        len.full_span(),
+                        "cannot evaluate the array length at compile time"
+                    );
                 }
                 expr.ty = Some(p.type_ty);
             },
@@ -1169,7 +1214,8 @@ impl Sema {
                 let mut variant_names = HashSet::new();
 
                 let mut repr_ty = Some(p.int_lit);
-                let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
+                let mut used_tags =
+                    self.cctx.alloc.alloc_uninit_slice(variants.len()).map_err(handle_alloc_err)?;
                 let mut tag = 0;
                 *is_simple_enum = true;
                 for (idx, variant) in variants.iter_mut().enumerate() {
@@ -1203,8 +1249,7 @@ impl Sema {
                     if !ALLOW_DUPLICATE_TAG
                         && unsafe { used_tags[..idx].assume_init_ref() }.contains(&tag)
                     {
-                        cerror!(variant.ident.span, "Duplicate enum variant tag");
-                        return SemaResult::HandledErr;
+                        return cerror2!(variant.ident.span, "Duplicate enum variant tag");
                     }
                     used_tags[idx].write(tag);
                     tag += 1;
@@ -1219,12 +1264,11 @@ impl Sema {
                     match self.int_primitive(min_size_bits, is_signed) {
                         Some(int_ty) => int_ty,
                         None => {
-                            cerror!(
+                            return cerror2!(
                                 expr.span,
                                 "enums which can't be represented by an `u128` are currently not \
                                  supported. This enum would require {min_size_bits} bits."
                             );
-                            return SemaResult::HandledErr;
                         },
                     }
                 } else {
@@ -1357,11 +1401,10 @@ impl Sema {
                     consts.push(decl_ptr);
                 },
                 _ => {
-                    cerror!(
+                    return cerror2!(
                         ty_expr.full_span(),
                         "cannot define an associated variable on a primitive type"
                     );
-                    return SemaResult::HandledErr;
                 },
             }
         }
@@ -1400,12 +1443,8 @@ impl Sema {
 
     fn analyze_decl(&mut self, mut decl: Ptr<ast::Decl>, is_const: bool) -> SemaResult<()> {
         let p = p();
-        let res = try {
-            if is_const && !(decl.is_const || decl.is_extern) {
-                err(NotAConstExpr, decl.upcast().full_span())?;
-            }
-            self.var_decl_to_value(decl)?
-        };
+        let _ = is_const; // TODO: non-toplevel constant contexts?
+        let res = self.var_decl_to_value(decl);
         #[cfg(debug_assertions)]
         if self.cctx.debug_types {
             let label = match &res {
@@ -1461,12 +1500,11 @@ impl Sema {
         while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
             let Some(&param) = params.get(pos_idx) else {
                 let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
-                cerror!(
+                return cerror2!(
                     pos_arg.full_span(),
                     "Got {pos_arg_count} positional arguments, but expected at most {} arguments",
                     params.len(),
                 );
-                return SemaResult::HandledErr;
             };
             self.analyze_and_finalize_with_known_type(pos_arg, param.var_ty.u(), false)?;
 
@@ -1479,16 +1517,14 @@ impl Sema {
         let mut was_set = vec![false; remaining_params.len()];
         for &arg in remaining_args {
             if is_pos_arg(&arg) {
-                cerror!(
+                return cerror2!(
                     arg.full_span(),
                     "Cannot specify a positional argument after named arguments"
                 );
-                return SemaResult::HandledErr;
             }
             let named_arg = arg.downcast::<ast::Assign>();
             let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
-                cerror!(named_arg.lhs.full_span(), "Expected a parameter name");
-                return SemaResult::HandledErr;
+                return cerror2!(named_arg.lhs.full_span(), "Expected a parameter name");
             };
             let Some((param_idx, param)) = remaining_params.find_field(&arg_name.text) else {
                 if let Some((idx, _)) = params[..pos_idx].find_field(&arg_name.text) {
@@ -1573,12 +1609,11 @@ impl Sema {
             AstMatch::Ident(_) | AstMatch::Dot(_) | AstMatch::Index(_) => {},
             AstMatch::UnaryOp(op) if op.op == UnaryOpKind::Deref => {},
             _ => {
-                cerror!(
+                return cerror2!(
                     lvalue.full_span(),
                     "Cannot assign a value to an expression of kind '{:?}'",
                     lvalue.kind
                 );
-                return SemaResult::HandledErr;
             },
         }
         if !self.cctx.do_mut_checks {
@@ -1590,7 +1625,7 @@ impl Sema {
                     cwarn!(ident.span, "INTERNAL: This ident doesn't have a declaration");
                     return Ok(());
                 };
-                if decl.markers.is_mut {
+                if decl.markers.get(DeclMarkers::IS_MUT_MASK) {
                     return Ok(());
                 }
                 let var_name = decl.ident.text.as_ref();
@@ -1655,7 +1690,7 @@ impl Sema {
                     cwarn!(ident.span, "INTERNAL: This ident doesn't have a declaration");
                     return Ok(());
                 };
-                if decl.markers.is_mut {
+                if decl.markers.get(DeclMarkers::IS_MUT_MASK) {
                     return Ok(());
                 }
                 if decl.is_const {
@@ -1756,7 +1791,7 @@ impl Sema {
             .get(&name)
             .or_else(|| {
                 // println!("get_symbol > try file ({:?})", name.as_ref());
-                self.cur_file.u().find_symbol(&name, self.file_level_symbols)
+                self.cur_file.u().find_symbol(&name, self.stmts)
             })
             .or_else(|| {
                 // println!("get_symbol > try primitive ({:?})", name.as_ref());
@@ -1794,7 +1829,7 @@ impl Sema {
 
     #[inline]
     fn alloc<T: core::fmt::Debug>(&self, val: T) -> SemaResult<Ptr<T>> {
-        Ok(self.cctx.alloc.alloc(val)?)
+        Ok(self.cctx.alloc.alloc(val).map_err(handle_alloc_err)?)
     }
 }
 

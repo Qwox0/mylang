@@ -2,7 +2,7 @@ use crate::{
     ast,
     cli::{BuildArgs, TestArgsOptions},
     codegen::llvm::CodegenModuleExt,
-    compiler::{BackendModule, CompileMode, CompileResult, compile_file},
+    compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
     context::CompilationContext,
     diagnostics::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
     parser::{
@@ -25,6 +25,7 @@ mod defer;
 mod enum_;
 mod for_loop;
 mod function;
+mod global_scope;
 mod if_;
 mod index;
 mod initializer;
@@ -47,8 +48,7 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     debug_types: false,
     debug_typed_ast: false,
     llvm_optimization_level: 0,
-    print_llvm_module: false,
-    entry_point: "test",
+    print_llvm_module: true,
 };
 
 pub struct JitRunTestResult<RetTy> {
@@ -71,11 +71,10 @@ impl<RetTy> JitRunTestResult<RetTy> {
     }
 
     pub fn errors(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
-        let diag = self.diagnostics();
         if self.ret.is_some() {
             panic!("Test failed! Expected compiler error, but compilation succeded.")
         }
-        diag.iter().filter(|e| e.severity.aborts_compilation())
+        self.diagnostics().iter().filter(|e| e.severity.aborts_compilation())
     }
 
     pub fn warnings(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
@@ -101,9 +100,8 @@ pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> 
 pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<RetTy> {
     let code = code.to_string();
     let ctx = CompilationContext::new();
-    let test_file = test_file_mock(code.as_ref());
-    let res =
-        compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
+    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+    let res = compile_ctx(ctx.0, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
     let backend_mod = match res {
         CompileResult::ModuleForTesting(backend_module) => Some(backend_module),
         CompileResult::Err => None,
@@ -111,7 +109,7 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<Re
     };
     let ret = backend_mod.as_ref().map(|m| {
         m.codegen_module()
-            .jit_run_fn::<RetTy>(TEST_OPTIONS.entry_point, inkwell::OptimizationLevel::None)
+            .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
             .unwrap()
     });
     JitRunTestResult { ret, ctx, full_code: code, backend_mod }
@@ -133,8 +131,8 @@ pub fn test_compile_err_raw(
 ) {
     let code = code.to_string();
     let ctx = CompilationContext::new();
-    let test_file = test_file_mock(code.as_ref());
-    compile_file(ctx.0, test_file, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
+    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+    compile_ctx(ctx.0, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
     let res = JitRunTestResult::<()> { ret: None, ctx, full_code: code, backend_mod: None };
     let err = res
         .errors()
@@ -152,8 +150,8 @@ pub fn test_compile_err_raw(
 
 pub fn test_parse(code: &str) -> TestParseRes {
     let ctx = CompilationContext::new();
-    let test_file = test_file_mock(code.as_ref());
-    let stmts = parser::parse(ctx.0, test_file);
+    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+    let stmts = parser::parse_files_in_ctx(ctx.0);
     TestParseRes { ctx, stmts }
 }
 
@@ -215,11 +213,11 @@ impl TestSpan {
     }
 
     pub fn start(self) -> TestSpan {
-        TestSpan(self.0.start_pos())
+        TestSpan(self.0.start())
     }
 
     pub fn start_with_len(self, len: usize) -> TestSpan {
-        let mut span = self.0.start_pos();
+        let mut span = self.0.start();
         span.end = span.start + len;
         TestSpan(span)
     }

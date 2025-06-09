@@ -1,15 +1,13 @@
 extern crate test;
 
-use crate::{
-    context::CompilationContext, diagnostics::DiagnosticReporter, parser,
-    tests::test_file_mock,
-};
+use crate::{context::CompilationContext, diagnostics::DiagnosticReporter, parser, ptr::Ptr};
 use test::*;
 
 #[inline]
 fn bench_parse(code: &str) {
     let ctx = CompilationContext::new();
-    parser::parse(ctx.0, test_file_mock(code.as_ref()));
+    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+    parser::parse_files_in_ctx(ctx.0);
     assert!(!ctx.do_abort_compilation());
     assert!(ctx.diagnostic_reporter.diagnostics.is_empty());
 }
