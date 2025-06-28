@@ -161,7 +161,7 @@ test :: -> pass_through(.(.[1,2]), 2);";
 fn call_by_value_struct_with_many_small_fields() {
     let code = "
 MyStruct :: struct { a: i8, b: i8, c: [6]i8, x: u32 }
-take_struct :: (s: MyStruct) -> s.x
+take_struct :: (s: MyStruct) -> s.x;
 test :: -> take_struct(.(0, 10, .[1; 6], 99));";
     let out = *jit_run_test_raw::<u32>(code).ok();
     assert_eq!(out, 99);

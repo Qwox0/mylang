@@ -289,13 +289,12 @@ impl DebugAst for Ast {
                 }
             },
             AstEnum::Continue { .. } => lines.write("continue"),
+            AstEnum::Empty { .. } => {},
             AstEnum::ImportDirective { path, .. } => {
                 lines.write("#import ");
                 lines.write_tree(path);
             },
-            AstEnum::ProgramMainDirective { span, .. }
-            | AstEnum::SimpleDirective { span, .. }
-            | AstEnum::AnnotationDirective { span, .. } => {
+            AstEnum::ProgramMainDirective { span, .. } | AstEnum::SimpleDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());
             },
 

@@ -293,7 +293,7 @@ macro_rules! ast_variants {
         }
 
         impl ConstVal {
-            pub const KINDS: [AstKind; 22] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+            pub const KINDS: [AstKind; 21] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
         }
 
         impl Type {
@@ -498,6 +498,8 @@ ast_variants! {
     },
     Continue {},
 
+    Empty {},
+
     ===== Constant Values =====
 
     IntVal { val: i64 },
@@ -516,8 +518,6 @@ ast_variants! {
     SimpleDirective {
         ret_ty: Ptr<Type>,
     },
-    /// `#no_mangle my_item :: ...`
-    AnnotationDirective {}
 
     ===== Types =====
 
@@ -761,6 +761,14 @@ impl Ptr<Ast> {
             .unwrap_or(self)
             .full_span()
     }
+
+    /// ```mylang
+    /// print :: -> i32 { /* ... */ };
+    /// if true then print();
+    /// ```
+    pub fn can_ignore_yielded_value(self) -> bool {
+        self.ty.u().matches_void() || self.kind == AstKind::Call
+    }
 }
 
 impl Ptr<ConstVal> {
@@ -888,10 +896,13 @@ impl Ast {
                     return true;
                 }
                 let Some(init) = init else { return true };
-                !matches!(
-                    init.kind,
-                    AstKind::StructDef | AstKind::UnionDef | AstKind::EnumDef | AstKind::Fn
-                )
+                match init.matchable2() {
+                    AstMatch::StructDef(_) | AstMatch::UnionDef(_) | AstMatch::EnumDef(_) => false,
+                    AstMatch::Fn(f) => {
+                        f.body.unwrap_or_else(|| f.ret_ty_expr.u()).kind != AstKind::Block
+                    },
+                    _ => true,
+                }
             },
             &AstEnum::If { then_body, else_body, .. } => {
                 else_body.unwrap_or(then_body).block_expects_trailing_semicolon()
@@ -900,7 +911,7 @@ impl Ast {
             AstEnum::For { body, .. } | AstEnum::While { body, .. } => {
                 body.block_expects_trailing_semicolon()
             },
-            AstEnum::AnnotationDirective { .. } => false,
+            AstEnum::Empty { .. } => false,
             _ => true,
         }
     }
@@ -1114,6 +1125,13 @@ impl AstKind {
     #[inline]
     pub fn is_type_kind(self) -> bool {
         Type::KINDS.contains(&self)
+    }
+
+    pub fn is_allowed_top_level(self) -> bool {
+        matches!(
+            self,
+            AstKind::Decl | AstKind::Empty | AstKind::SimpleDirective | AstKind::ImportDirective
+        )
     }
 }
 

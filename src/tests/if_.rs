@@ -1,5 +1,8 @@
 use super::{jit_run_test, jit_run_test_raw};
-use crate::{tests::test_parse, util::IteratorExt};
+use crate::{
+    tests::{TestSpan, test_compile_err, test_parse},
+    util::IteratorExt,
+};
 
 #[test]
 fn if_variants() {
@@ -46,4 +49,20 @@ fn parse_err_missing_if_body() {
     let err = res.errors().expect_one();
     assert!(err.msg.starts_with("unexpected token: EOF"));
     assert_eq!(err.span.range(), 7..8);
+}
+
+#[test]
+fn single_branch_yields_value() {
+    test_compile_err(
+        "{ if true 1; }",
+        "Cannot yield a value from this `if` because it doesn't have an `else` branch.",
+        |code| TestSpan::of_substr(code, "1"),
+    );
+
+    // function calls don't trigger the error.
+    let code = r#"{
+print :: -> i32 #import "libc".printf("hello world".ptr);
+if true print();
+}"#;
+    jit_run_test::<()>(code).ok();
 }

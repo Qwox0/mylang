@@ -203,12 +203,13 @@ impl TokenKind {
             //K::Colon => todo!(),
             //K::ColonColon => todo!(),
             //K::ColonEq => todo!(),
-            K::Semicolon => true,
+            K::Semicolon |
             //K::Pound => todo!(),
             //K::Dollar => todo!(),
             //K::At => todo!(),
             //K::Tilde => todo!(),
             //K::Backtick => todo!(),
+            K::EOF => true,
             _ => false,
         }
     }
@@ -557,7 +558,7 @@ pub fn is_ident_continue(c: char) -> bool {
     unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Lexer {
     pub code: Cursor,
     next_tok: Option<Token>,
@@ -583,6 +584,15 @@ impl Lexer {
 
     pub fn eof_span(&self) -> Span {
         Span::pos(self.get_code().len(), Some(self.file))
+    }
+
+    pub fn get_state(&self) -> LexerState {
+        LexerState { pos: self.code.pos, next_tok: self.next_tok }
+    }
+
+    pub fn set_state(&mut self, state: LexerState) {
+        self.code.pos = state.pos;
+        self.next_tok = state.next_tok;
     }
 
     pub fn advanced(mut self) -> Self {
@@ -973,12 +983,7 @@ impl ParserInterface for Cursor {
     }
 }
 
-/*
-#[test]
-fn parse_token_span() {
-    let code = "
-";
-    let lex = Lexer::new(code.as_ref());
-    panic!()
+pub struct LexerState {
+    pos: usize,
+    next_tok: Option<Token>,
 }
-*/

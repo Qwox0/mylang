@@ -27,7 +27,7 @@ pub mod parser_helper;
 macro_rules! opt {
     ($self:expr, $method:ident($($arg:expr),* $(,)?)) => {{
         let _self: &mut Parser = $self;
-        if _self.lex.peek().is_none_or(|t| t.kind.is_expr_terminator()) {
+        if _self.lex.peek_or_eof().kind.is_expr_terminator() {
             Ok(None)
         } else {
             _self.$method($($arg),*).map(Some)
@@ -614,18 +614,14 @@ impl Parser {
                         .ok_or_else::<ParseError, _>(|| {
                             let span =
                                 if let Some(a) = arg { a.full_span() } else { self.lex.pos_span() };
-                            cerror2!(
-                                span,
-                                "The #{directive_name} directive expects {usage} as a string \
-                                 literal"
-                            )
+                            cerror2!(span, "Expected {usage} after the #{directive_name} directive")
                         })
                 };
 
                 let p = primitives();
 
                 if directive_name == "import" {
-                    let path = parse_str_lit_arg("a source file path")?;
+                    let path = parse_str_lit_arg("a path string literal")?;
                     let idx =
                         self.cctx.add_import(&path.text, Some(&self.lex.file.path), path.span)?;
                     expr!(ImportDirective { path, files_idx: idx })
@@ -635,14 +631,35 @@ impl Parser {
                     // TODO: return `{library}` object
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "add_library_search_path" {
-                    let str_lit = parse_str_lit_arg("a path")?;
+                    let str_lit = parse_str_lit_arg("a path string literal")?;
                     self.cctx.add_library_search_path(str_lit.text)?;
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "program_main" {
                     expr!(ProgramMainDirective {}, span.join(directive_ident.span))
                 } else if directive_name == "no_mangle" {
-                    // currently not implemented
-                    expr!(AnnotationDirective {}, span.join(directive_ident.span))
+                    return cerror2!(
+                        span.join(directive_ident.span),
+                        "#{directive_name} is currently not implemented"
+                    );
+                } else if directive_name == "__runtime_entry_point" {
+                    let func = self.expr()?;
+                    let Some(decl) = func.try_downcast::<ast::Decl>() else {
+                        return cerror2!(
+                            span,
+                            "Expected a function declaration after #{directive_name} directive"
+                        );
+                    };
+                    if self.cctx.args.is_lib {
+                        // Skip the entry_point `func` in libs to prevent name conflicts with "main"
+                        expr!(Empty {}, span.join(directive_ident.span))
+                    } else {
+                        let main_ident = expr!(
+                            Ident { text: Ptr::from_ref("main"), decl: Some(decl) },
+                            decl.ident.span
+                        );
+                        decl.ident.upcast().set_replacement(main_ident);
+                        func
+                    }
                 } else {
                     return cerror2!(span.join(directive_ident.span), "Unknown compiler directive");
                 }
@@ -737,11 +754,21 @@ impl Parser {
 
     /// parsing starts after the '->'
     fn function_tail(&mut self, params: DeclList, start_span: Span) -> ParseResult<Ptr<ast::Fn>> {
-        // TODO: allow `-> i32 1;`?
         let expr = self.expr()?;
-        let (ret_ty_expr, body) = if self.lex.peek().is_some_and(|t| t.kind == TokenKind::OpenBrace)
-        {
-            (Some(expr), self.block()?.upcast())
+        let between_expr_state = self.lex.get_state();
+        let (ret_ty_expr, body) = if expr.kind != AstKind::Block
+            && let Some(body) = opt!(self, expr())?
+            && {
+                debug_assert!(!AstKind::Block.is_allowed_top_level());
+                let is_invalid_body = body.kind.is_allowed_top_level();
+                if is_invalid_body {
+                    self.lex.set_state(between_expr_state); // causes "expected ';'" (see tests::function::error_missing_semicolon_after_fn)
+                    // Note: If there are multiple functions without a trailing ';' between them,
+                    // this function is called O(n^2) times.
+                }
+                !is_invalid_body
+            } {
+            (Some(expr), body)
         } else {
             (None, expr)
         };

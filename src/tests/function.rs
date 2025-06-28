@@ -33,14 +33,14 @@ factorial :: (x: i64) -> i64 {
     // global with `rec`
     let code = format!(
         "rec {factorial_code}
-test :: -> factorial(10)"
+test :: -> factorial(10);"
     );
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
 
     // global without `rec`
     let code = format!(
         "{factorial_code}
-test :: -> factorial(10)"
+test :: -> factorial(10);"
     );
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
 
@@ -60,7 +60,7 @@ test :: -> factorial(10)"
 fn recursive_fn_difficult_ret_infer() {
     let code = "
 rec factorial :: (x: i64) -> if x == 0 then 1 else x * factorial(x-1);
-test :: -> factorial(10)";
+test :: -> factorial(10);";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
 }
 
@@ -225,5 +225,17 @@ take_lambda :: (f: (x: i32) -> i32) -> f(5);
 take_lambda((x: f32) -> 10)";
     test_compile_err(code, "mismatched types: expected (x:i32)->i32; got (x:f32)->i32", |code| {
         TestSpan::of_substr(code, "(x: f32) -> 10")
+    });
+}
+
+#[test]
+fn error_missing_semicolon_after_fn() {
+    let code = "
+a :: -> 1
+ok :: -> 1; // decls are not allowed as the second expression after `->`
+ok2 :: -> _ := ok(); // but decls are allowed directly after `->`
+";
+    test_compile_err_raw(code, "expected ';'", |code| {
+        TestSpan::of_substr(code, "a :: -> 1").after()
     });
 }

@@ -5,15 +5,11 @@ use crate::{
     compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
     context::CompilationContext,
     diagnostics::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
-    parser::{
-        self,
-        lexer::{Code, Span},
-    },
+    parser::{self, lexer::Span},
     ptr::Ptr,
-    source_file::SourceFile,
     util::IteratorExt,
 };
-use std::{fmt::Display, iter::FusedIterator, path::Path};
+use std::{fmt::Display, iter::FusedIterator};
 
 mod alignment;
 mod args;
@@ -89,15 +85,13 @@ impl<RetTy> JitRunTestResult<RetTy> {
     }
 }
 
-pub fn test_file_mock(code: &Code) -> SourceFile {
-    SourceFile::new(Ptr::from_ref(Path::new("test.mylang")), Ptr::from_ref(code))
-}
-
+#[track_caller]
 pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> {
     let code = format!("test :: -> {{ {code} }};");
     jit_run_test_raw(code)
 }
 
+#[track_caller]
 pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<RetTy> {
     let code = code.to_string();
     let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
@@ -116,6 +110,7 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<Re
     JitRunTestResult { ret, ctx, full_code: code, backend_mod }
 }
 
+#[track_caller]
 pub fn test_compile_err(
     code: impl Display,
     expected_msg_start: &str,
@@ -125,6 +120,7 @@ pub fn test_compile_err(
     test_compile_err_raw(code, expected_msg_start, expected_span)
 }
 
+#[track_caller]
 pub fn test_compile_err_raw(
     code: impl ToString,
     expected_msg_start: &str,
@@ -225,6 +221,10 @@ impl TestSpan {
 
     pub fn end(self) -> TestSpan {
         TestSpan(self.0.end())
+    }
+
+    pub fn after(self) -> TestSpan {
+        TestSpan(self.0.after())
     }
 }
 

@@ -34,7 +34,6 @@ pub enum SemaErrorKind {
     NotAType,
 
     MissingArg,
-    MissingElseBranch,
 
     /// unknown struct or union field or enum variant
     #[error("no field `{}` on type `{ty}`", &**field)]

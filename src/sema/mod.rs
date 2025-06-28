@@ -58,16 +58,12 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     for file in cctx.files.iter().copied() {
         let file_stmts = &stmts[file.stmt_range.u()];
         for (idx, s) in file_stmts.iter().copied().enumerate() {
-            if matches!(
-                s.kind,
-                AstKind::SimpleDirective | AstKind::ImportDirective | AstKind::AnnotationDirective
-            ) {
-                continue;
-            }
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
-                cerror!(s.full_span(), "unexpected top level expression");
-                s.set_replacement(p.never.upcast());
-                s.as_mut().ty = Some(p.never);
+                if !s.kind.is_allowed_top_level() {
+                    cerror!(s.full_span(), "unexpected top level expression");
+                    s.set_replacement(p.never.upcast());
+                    s.as_mut().ty = Some(p.never);
+                }
                 continue;
             };
             debug_assert!(!decl.is_const || decl.init.is_some());
@@ -927,10 +923,14 @@ impl Sema {
                         );
                     };
                     Some(common_ty)
-                } else if then_body.ty == Some(p.void_ty) || then_body.ty == Some(p.never) {
+                } else if then_body.can_ignore_yielded_value() {
                     Some(p.void_ty)
                 } else {
-                    return err(MissingElseBranch, expr.full_span());
+                    return cerror2!(
+                        then_body.return_val_span(),
+                        "Cannot yield a value from this `if` because it doesn't have an `else` \
+                         branch."
+                    );
                 }
             },
             AstEnum::Match { .. } => todo!(),
@@ -961,7 +961,7 @@ impl Sema {
                     self.analyze_decl(iter_var_decl, false)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
-                    if !body.ty.u().matches_void() && body.kind == AstKind::Block {
+                    if !body.can_ignore_yielded_value() {
                         self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
                         return SemaResult::HandledErr;
                     }
@@ -978,7 +978,7 @@ impl Sema {
                 self.open_scope();
                 let res: SemaResult<()> = try {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
-                    if !body.ty.u().matches_void() && body.kind == AstKind::Block {
+                    if !body.can_ignore_yielded_value() {
                         self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
                         return SemaResult::HandledErr;
                     }
@@ -1022,11 +1022,21 @@ impl Sema {
                 // TODO: check if in loop
                 expr.ty = Some(p.never)
             },
+            AstEnum::Empty { .. } => {
+                expr.ty = Some(p.void_ty);
+            },
             AstEnum::ImportDirective { .. } => {
                 expr.ty = Some(p.module);
             },
             AstEnum::ProgramMainDirective { .. } => {
-                let entry_point_name = "main";
+                if self.cctx.args.is_lib {
+                    return cerror2!(
+                        expr.full_span(),
+                        "The program entry point is not available when compiling with `--lib`."
+                    );
+                }
+                debug_assert!(!self.cctx.args.is_lib);
+                let entry_point_name = self.cctx.args.entry_point.as_str();
                 let root_file = self.cctx.files[self.cctx.root_file_idx.u()];
                 let mut decl_iter = self.stmts[root_file.stmt_range.u()]
                     .iter()
@@ -1061,16 +1071,12 @@ impl Sema {
                             main_ret_ty
                         );
                     }
-                    //expr.set_replacement(main_fn.upcast());
                     expr.set_replacement(main.const_val());
                 }
                 expr.ty = Some(main_ty);
             },
             AstEnum::SimpleDirective { ret_ty, .. } => {
                 expr.ty = Some(*ret_ty);
-            },
-            AstEnum::AnnotationDirective { .. } => {
-                expr.ty = Some(p.void_ty);
             },
 
             AstEnum::IntVal { val, .. } => {

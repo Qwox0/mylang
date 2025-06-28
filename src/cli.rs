@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::{panic::Location, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -41,9 +41,10 @@ pub struct BuildArgs {
     #[arg(long = "lib")]
     pub is_lib: bool,
 
-    // /// The name of the first function called by the program
-    // #[arg(long, default_value = "main")]
-    // pub entry_point: String,
+    /// The name of the first function called by the program
+    #[arg(long, default_value = "main")]
+    pub entry_point: String,
+
     #[arg(long)]
     pub emit_llvm_ir: bool,
 
@@ -93,18 +94,20 @@ impl BuildArgs {
             debug_typed_ast: false,
             llvm_optimization_level: 0,
             print_llvm_module: false,
+            is_lib: false,
         })
     }
 
     /// for tests
+    #[track_caller]
     pub fn test_args(opt: TestArgsOptions) -> Self {
         BuildArgs {
-            path: PathBuf::from("test.mylang"),
+            path: PathBuf::from(Location::caller().file()),
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,
             quiet: true,
-            is_lib: true,
+            is_lib: opt.is_lib,
             emit_llvm_ir: false,
             debug_ast: opt.debug_ast,
             debug_types: opt.debug_types,
@@ -113,6 +116,7 @@ impl BuildArgs {
             debug_llvm_ir_unoptimized: false,
             debug_llvm_ir_optimized: opt.print_llvm_module,
             debug_linker_args: false,
+            ..BuildArgs::default()
         }
     }
 }
@@ -124,6 +128,7 @@ pub struct TestArgsOptions {
     pub debug_typed_ast: bool,
     pub llvm_optimization_level: u8,
     pub print_llvm_module: bool,
+    pub is_lib: bool,
 }
 
 impl Default for TestArgsOptions {
@@ -134,6 +139,7 @@ impl Default for TestArgsOptions {
             debug_typed_ast: Default::default(),
             llvm_optimization_level: Default::default(),
             print_llvm_module: Default::default(),
+            is_lib: true,
         }
     }
 }

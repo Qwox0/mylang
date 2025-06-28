@@ -88,12 +88,15 @@ mod tests {
     use crate::{
         diagnostics::{COLOR_RED, COLOR_UNSET},
         display_code::display,
-        parser::lexer::Span,
+        parser::lexer::{Code, Span},
         ptr::Ptr,
         source_file::SourceFile,
-        tests::test_file_mock,
     };
-    use std::ops::Range;
+    use std::{ops::Range, path::Path};
+
+    fn test_file_mock(code: &Code) -> SourceFile {
+        SourceFile::new(Ptr::from_ref(Path::new("test.mylang")), Ptr::from_ref(code))
+    }
 
     fn span(range: Range<usize>, file: &SourceFile) -> Span {
         Span::new(range, Some(Ptr::from_ref(file)))

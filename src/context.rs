@@ -202,7 +202,7 @@ impl Ptr<CompilationContextInner> {
         self,
         code: Ptr<crate::parser::lexer::Code>,
     ) -> Result<FilesIndex, HandledErr> {
-        self.add_source_file(SourceFile::new(Ptr::from_ref("test.mylang".as_ref()), code), None)
+        self.add_source_file(SourceFile::new(Ptr::from_ref(ctx().args.path.as_ref()), code), None)
     }
 
     fn add_source_file(

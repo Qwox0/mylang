@@ -746,7 +746,6 @@ impl<'ctx> Codegen<'ctx> {
                                 for_info.idx_int,
                             ])?);
                         self.symbols.push((iter_var.decl.u(), iter_var_sym));
-                        debug_assert!(body.ty.u().matches_void());
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
@@ -760,7 +759,6 @@ impl<'ctx> Codegen<'ctx> {
                         let iter_var_sym =
                             Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
                         self.symbols.push((iter_var.decl.u(), iter_var_sym));
-                        debug_assert!(body.ty.u().matches_void());
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
@@ -869,6 +867,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Unreachable(())
             },
+            AstEnum::Empty { .. } => Ok(Symbol::Void),
 
             AstEnum::IntVal { val, .. } => {
                 match expr.ty.as_mut().u().finalize().matchable().as_ref() {
@@ -916,9 +915,9 @@ impl<'ctx> Codegen<'ctx> {
             AstEnum::ImportDirective { .. }
             | AstEnum::ProgramMainDirective { .. }
             | AstEnum::SimpleDirective { .. } => {
-                panic_debug!("directives should have been resolved during sema")
+                //panic_debug!("directives should have been resolved during sema")
+                Ok(Symbol::Void)
             },
-            AstEnum::AnnotationDirective { .. } => Ok(Symbol::Void),
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -1330,18 +1329,13 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn mangle_symbol<'n>(&self, decl: Ptr<ast::Decl>) -> Cow<'n, str> {
+        if decl.ident.replacement.is_some() {
+            return decl.ident.rep().flat_downcast::<ast::Ident>().text.as_ref().into();
+        }
         let name = decl.ident.text.as_ref();
         if decl.is_extern {
             name.into()
         } else if name == "main" {
-            if decl
-                .span
-                .file
-                .is_some_and(|f| f.path.as_ref() == ctx().compiler_libs_path.join("runtime.mylang"))
-            {
-                // not needed when `#no_mangle` is implemented
-                return name.into();
-            }
             "_main".into()
         } else if let Some(ty) = decl.on_type {
             format!("{}.{name}", ty.downcast_type()).into() // TODO: use correct type name
