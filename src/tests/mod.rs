@@ -49,6 +49,7 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     debug_typed_ast: false,
     llvm_optimization_level: 0,
     print_llvm_module: true,
+    is_lib: true,
 };
 
 pub struct JitRunTestResult<RetTy> {
@@ -99,9 +100,9 @@ pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> 
 
 pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<RetTy> {
     let code = code.to_string();
-    let ctx = CompilationContext::new();
-    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
-    let res = compile_ctx(ctx.0, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
+    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
+    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
+    let res = compile_ctx(ctx.0, CompileMode::TestRun);
     let backend_mod = match res {
         CompileResult::ModuleForTesting(backend_module) => Some(backend_module),
         CompileResult::Err => None,
@@ -130,9 +131,9 @@ pub fn test_compile_err_raw(
     expected_span: impl FnOnce(&str) -> TestSpan,
 ) {
     let code = code.to_string();
-    let ctx = CompilationContext::new();
-    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
-    compile_ctx(ctx.0, CompileMode::TestRun, &BuildArgs::test_args(TEST_OPTIONS));
+    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
+    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
+    compile_ctx(ctx.0, CompileMode::TestRun);
     let res = JitRunTestResult::<()> { ret: None, ctx, full_code: code, backend_mod: None };
     let err = res
         .errors()
@@ -149,8 +150,8 @@ pub fn test_compile_err_raw(
 }
 
 pub fn test_parse(code: &str) -> TestParseRes {
-    let ctx = CompilationContext::new();
-    ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
+    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
+    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
     let stmts = parser::parse_files_in_ctx(ctx.0);
     TestParseRes { ctx, stmts }
 }

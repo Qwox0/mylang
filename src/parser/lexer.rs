@@ -855,7 +855,7 @@ fn num_literal_with_prefix(lex: &mut Cursor) -> TokenKind {
     // invalid digits like `0b2` are handled later
     let digit_matcher = match lex.peek() {
         Some('b') | Some('o') => |c| matches!(c, '0'..='9' | '_'),
-        Some('x') => |c| matches!(c, '0'..='9' | 'a'..'f' | 'A'..'F' | '_'),
+        Some('x') => |c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | '_'),
         _ => return num_literal(lex),
     };
     if lex.peek2().is_some_and(digit_matcher) {

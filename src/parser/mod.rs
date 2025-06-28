@@ -6,10 +6,10 @@
 use crate::{
     arena_allocator::AllocErr,
     ast::{
-        self, Ast, BinOpKind, Decl, DeclList, DeclMarkers, Ident, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
-    diagnostics::{DiagnosticReporter, cerror, cerror2, chint},
+    diagnostics::{DiagnosticReporter, cerror, cerror2, chint, cwarn},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -385,8 +385,27 @@ impl Parser {
                 expr!(Defer { stmt }, span)
             },
             TokenKind::IntLit => {
-                let val = literals::parse_int_lit(&self.advanced().get_text_from_span(span))
-                    .map_err(|e| cerror!(span, "invalid integer literal: {e}"))?;
+                use std::num::IntErrorKind;
+                let val = match literals::parse_int_lit(&self.advanced().get_text_from_span(span)) {
+                    Ok(val) => val,
+                    Err(e) if *e.kind() == IntErrorKind::PosOverflow => {
+                        cwarn!(
+                            span,
+                            "Currently, the compiler cannot store a literal this big internally. \
+                             Using i64::MAX instead."
+                        );
+                        i64::MAX
+                    },
+                    Err(e) if *e.kind() == IntErrorKind::NegOverflow => {
+                        cwarn!(
+                            span,
+                            "Currently, the compiler cannot store a literal this small \
+                             internally. Using i64::MIN instead."
+                        );
+                        i64::MIN
+                    },
+                    Err(e) => return cerror2!(span, "invalid integer literal: {e}"),
+                };
                 expr!(IntVal { val })
             },
             TokenKind::FloatLit => {
@@ -461,7 +480,7 @@ impl Parser {
                 // () -> ...
                 if self.advanced().lex.advance_if_kind(TokenKind::CloseParenthesis) {
                     self.tok(TokenKind::Arrow)?;
-                    return Ok(self.function_tail(self.alloc_empty_slice(), span)?.upcast());
+                    return Ok(self.function_tail(Ptr::empty_slice(), span)?.upcast());
                 }
                 let mut first_expr = self.expr()?; // this assumes the parameter syntax is also a valid expression
                 let t = self.lex.next_or_eof();
@@ -540,7 +559,7 @@ impl Parser {
             },
             TokenKind::Arrow => {
                 self.lex.advance();
-                self.function_tail(self.alloc_empty_slice(), span)?.upcast()
+                self.function_tail(Ptr::empty_slice(), span)?.upcast()
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
@@ -685,7 +704,7 @@ impl Parser {
 
         let Some(first_expr) = opt!(self, expr())? else {
             // `.[]`
-            return Ok(new_arr_init!(ArrayInitializer { elements: self.alloc_empty_slice() }));
+            return Ok(new_arr_init!(ArrayInitializer { elements: Ptr::empty_slice() }));
         };
         let t = self.lex.peek_or_eof();
         Ok(match t.kind {
@@ -880,7 +899,7 @@ impl Parser {
         self.clone_slice_from_scratch_pool(list)
     }
 
-    fn struct_body(&mut self) -> ParseResult<(DeclList, Vec<Ptr<Decl>>)> {
+    fn struct_body(&mut self) -> ParseResult<(DeclList, Vec<Ptr<ast::Decl>>)> {
         let mut fields = ScratchPool::new();
         let mut const_fields = Vec::new();
         loop {
@@ -935,14 +954,14 @@ impl Parser {
         match self.lex.peek_or_eof() {
             Token { kind: TokenKind::Colon, .. } => self.advanced().typed_decl(markers, ident),
             t @ Token { kind: TokenKind::ColonEq | TokenKind::ColonColon, .. } => {
-                let mut d = Decl::from_ident(ident);
+                let mut d = ast::Decl::from_ident(ident);
                 d.markers = markers;
                 d.init = Some(self.advanced().expr()?);
                 d.is_const = t.kind == TokenKind::ColonColon;
                 self.alloc(d)
             },
             t if allow_ident_only && t.kind.is_expr_terminator() => {
-                let mut d = Decl::from_ident(ident);
+                let mut d = ast::Decl::from_ident(ident);
                 d.markers = markers;
                 self.alloc(d)
             },
@@ -962,7 +981,7 @@ impl Parser {
         markers: DeclMarkers,
         ident: Ptr<ast::Ident>,
     ) -> ParseResult<Ptr<ast::Decl>> {
-        let mut d = Decl::from_ident(ident);
+        let mut d = ast::Decl::from_ident(ident);
         d.markers = markers;
         d.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE)?);
         let t = self.lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
@@ -978,7 +997,7 @@ impl Parser {
 
     /// this doesn't check if the text at span is valid
     fn ident_from_span(&self, span: Span) -> ParseResult<Ptr<ast::Ident>> {
-        self.alloc(Ident::new(self.get_text_from_span(span), span))
+        self.alloc(ast::Ident::new(self.get_text_from_span(span), span))
     }
 
     fn local_keyword(&mut self, local_keyword: &str) -> ParseResult<()> {
@@ -1047,11 +1066,6 @@ impl Parser {
         scratch_pool
             .clone_to_slice_into_arena(&self.cctx.alloc)
             .map_err(handle_alloc_err)
-    }
-
-    #[inline]
-    fn alloc_empty_slice<T>(&self) -> Ptr<[T]> {
-        Ptr::from(&[] as &[T])
     }
 
     #[inline]

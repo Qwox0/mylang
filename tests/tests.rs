@@ -1,8 +1,6 @@
 use mylang::{
     cli::BuildArgs,
     compiler::{CompileMode, CompileResult},
-    context::CompilationContext,
-    ptr::Ptr,
 };
 use std::{
     io::{BufRead, BufReader},
@@ -13,15 +11,14 @@ use std::{
 
 fn test_file(file_path: &str) {
     std::env::set_current_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"))).unwrap();
-    let ctx = CompilationContext::new();
-    let mut args = BuildArgs {
+    let args = BuildArgs {
         path: file_path.into(),
         debug_ast: false,
         quiet: true,
         debug_llvm_ir_unoptimized: true,
         ..BuildArgs::default()
     };
-    let res = mylang::compiler::compile(Ptr::from_ref(&ctx), CompileMode::Run, &mut args);
+    let res = mylang::compiler::compile(CompileMode::Run, args);
     if !matches!(res, CompileResult::Ok) {
         panic!("Compilation of '{file_path}' failed!")
     }

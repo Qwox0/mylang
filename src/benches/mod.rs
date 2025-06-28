@@ -57,9 +57,9 @@ pub defer_test :: -> {
     t2 := out == 11;
     return t1 && t2;
 };";
-        let ctx = CompilationContext::new();
-        ctx.0.add_test_code_buf(Ptr::from_ref(code.as_ref())).unwrap();
-        compile_ctx(ctx.0, CompileMode::Check, &BuildArgs::comp_bench_args());
+        let ctx = CompilationContext::new(BuildArgs::comp_bench_args());
+        ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
+        compile_ctx(ctx.0, CompileMode::Check);
     })
 }
 
@@ -93,8 +93,9 @@ macro_rules! bench_compilation {
     (@body@ $b:expr; $code:expr; codegen_only) => {
         use crate::diagnostics::DiagnosticReporter;
         let code = $code.as_ref();
-        let ctx = CompilationContext::new();
-        ctx.0.add_test_code_buf($crate::ptr::Ptr::from_ref(code)).unwrap();
+        let code = $crate::ptr::Ptr::from_ref(code);
+        let ctx = CompilationContext::new($crate::cli::BuildArgs::comp_bench_args());
+        ctx.0.set_test_root(code).unwrap();
         let stmts = $crate::parser::parse_files_in_ctx(ctx.0);
         assert!(!ctx.do_abort_compilation());
 
@@ -108,12 +109,11 @@ macro_rules! bench_compilation {
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {
-        let code = $code.as_ref();
-        let args = crate::cli::BuildArgs::comp_bench_args();
+        let code = $crate::ptr::Ptr::from_ref($code.as_ref());
         $b.iter(|| {
-            let ctx = CompilationContext::new();
-            ctx.0.add_test_code_buf($crate::ptr::Ptr::from_ref(code)).unwrap();
-            black_box($crate::compiler::compile_ctx(ctx.0, $mode, &args));
+            let ctx = CompilationContext::new($crate::cli::BuildArgs::comp_bench_args());
+            ctx.0.set_test_root(code).unwrap();
+            black_box($crate::compiler::compile_ctx(ctx.0, $mode));
         });
     };
 }

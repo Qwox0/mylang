@@ -86,12 +86,6 @@ impl<T: ?Sized> Ptr<T> {
         p
     }
 
-    /*
-    pub const fn from_ref(r: &T) -> Ptr<T> {
-        Ptr(NonNull::from_ref(r))
-    }
-    */
-
     pub fn from_ref(r: &T) -> Ptr<T> {
         let p = Ptr(NonNull::from_ref(r));
         debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr ({p:p}) might be invalid");
@@ -113,6 +107,10 @@ impl<T: ?Sized> Ptr<T> {
 }
 
 impl<T> Ptr<[T]> {
+    pub fn empty_slice() -> Ptr<[T]> {
+        Ptr::from(&[] as &[T])
+    }
+
     pub fn cast_slice<U>(self) -> Ptr<[U]> {
         unsafe { std::mem::transmute(self) }
     }

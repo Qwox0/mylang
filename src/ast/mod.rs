@@ -1170,7 +1170,7 @@ impl Decl {
 }
 
 impl Ptr<Decl> {
-    pub fn const_val(&self) -> Ptr<Ast> {
+    pub fn const_val(self) -> Ptr<Ast> {
         let never = primitives().never;
         if self.ty.u() == never {
             return never.upcast();
@@ -1179,6 +1179,10 @@ impl Ptr<Decl> {
         let cv = self.init.u().rep();
         debug_assert!(cv.is_const_val());
         cv
+    }
+
+    pub fn try_const_val(self) -> OPtr<Ast> {
+        then!(self.is_const => self.const_val())
     }
 
     pub fn lhs_span(self) -> Span {

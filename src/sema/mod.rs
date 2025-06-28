@@ -189,7 +189,7 @@ impl Sema {
     ) -> SemaResult<()> {
         let res = self._analyze_inner(expr, ty_hint, is_const);
         #[cfg(debug_assertions)]
-        if self.cctx.debug_types {
+        if self.cctx.args.debug_types {
             let label = match &res {
                 Ok(()) => format!("type: {}", expr.ty.u()),
                 NotFinished => "not finished".to_string(),
@@ -460,8 +460,11 @@ impl Sema {
                     && let m = lhs.downcast::<ast::ImportDirective>()
                     && let Some(s) = self.cctx.files[m.files_idx].find_symbol(&rhs.text, self.stmts)
                 {
+                    rhs.decl = Some(s);
                     let Some(ty) = s.var_ty else { return NotFinished };
-                    expr.set_replacement(s.const_val());
+                    if let Some(cv) = s.try_const_val() {
+                        expr.set_replacement(cv);
+                    }
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
@@ -799,20 +802,19 @@ impl Sema {
                     };
 
                     macro_rules! calc_num_binop {
-                        ($op:tt $(, allow $float_val:ident)?) => {{
-                            debug_assert!(common_ty.is_finalized());
-                            if common_ty.kind == AstKind::IntTy {
+                        ($op:tt $(, allow $float_val:ident)?) => {
+                            if common_ty.kind == AstKind::IntTy || common_ty.is_int_lit() {
                                 let val = lhs.downcast::<ast::IntVal>().val
                                     $op rhs.downcast::<ast::IntVal>().val;
                                 Some(self.alloc(ast_new!(IntVal { val, span: expr.full_span() }))?
                                     .upcast())
-                            } $( else if common_ty.kind == AstKind::FloatTy {
+                            } $( else if common_ty.kind == AstKind::FloatTy || common_ty == p.float_lit {
                                 let val = lhs.float_val() $op rhs.float_val();
                                 Some(self.alloc(ast_new!($float_val { val, span: expr.full_span() }))?
                                     .upcast())
                             })? else {
                                 None
-                            }}
+                            }
                         };
                     }
 
@@ -847,7 +849,10 @@ impl Sema {
             },
             AstEnum::Range { start, end, is_inclusive, .. } => {
                 let (elem_ty, rkind): (Ptr<ast::Type>, _) = match (start, end) {
-                    (None, None) => (p.u0, RangeKind::Full),
+                    (None, None) => {
+                        expr.ty = Some(p.full_range);
+                        return Ok(());
+                    },
                     (None, Some(end)) => (
                         *analyze!(*end, None),
                         if *is_inclusive { RangeKind::ToInclusive } else { RangeKind::To },
@@ -951,10 +956,9 @@ impl Sema {
 
                 self.open_scope();
                 let res: SemaResult<()> = try {
-                    let mut iter_var_decl = ast::Decl::from_ident(*iter_var);
+                    let mut iter_var_decl = self.alloc(ast::Decl::from_ident(*iter_var))?;
                     iter_var_decl.var_ty = Some(elem_ty);
-                    // SAFETY: `iter_var_decl` lives until `close_scope` is called so this is fine
-                    self.analyze_decl(Ptr::from_ref(&iter_var_decl), false)?;
+                    self.analyze_decl(iter_var_decl, false)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
                     if !body.ty.u().matches_void() && body.kind == AstKind::Block {
@@ -1261,16 +1265,14 @@ impl Sema {
                 let min_size_bits = util::variant_count_to_tag_size_bits(variants.len());
                 *tag_ty = Some(if repr_ty.is_int_lit() {
                     let is_signed = repr_ty == p.sint_lit;
-                    match self.int_primitive(min_size_bits, is_signed) {
-                        Some(int_ty) => int_ty,
-                        None => {
-                            return cerror2!(
-                                expr.span,
-                                "enums which can't be represented by an `u128` are currently not \
-                                 supported. This enum would require {min_size_bits} bits."
-                            );
-                        },
-                    }
+                    let Some(int_ty) = self.int_primitive(min_size_bits, is_signed) else {
+                        return cerror2!(
+                            expr.span,
+                            "enums which can't be represented by an `u128` are currently not \
+                             supported. This enum would require {min_size_bits} bits."
+                        );
+                    };
+                    int_ty
                 } else {
                     repr_ty.downcast::<ast::IntTy>()
                 });
@@ -1446,7 +1448,7 @@ impl Sema {
         let _ = is_const; // TODO: non-toplevel constant contexts?
         let res = self.var_decl_to_value(decl);
         #[cfg(debug_assertions)]
-        if self.cctx.debug_types {
+        if self.cctx.args.debug_types {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
                 NotFinished => "not finished".to_string(),

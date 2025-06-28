@@ -3,6 +3,7 @@ use crate::{
     ast::{self, UpcastToAst},
     parser::lexer::Span,
     ptr::Ptr,
+    type_::RangeKind,
 };
 
 #[derive(Debug)]
@@ -30,6 +31,8 @@ pub struct Primitives {
     pub f64: Ptr<ast::Type>,
     pub str_slice_ty: Ptr<ast::Type>,
     pub type_ty: Ptr<ast::Type>,
+
+    pub full_range: Ptr<ast::Type>,
 
     // internal Types:
     pub unknown_ty: Ptr<ast::Type>,
@@ -183,6 +186,8 @@ impl Primitives {
                 str_slice
             },
             type_ty,
+
+            full_range: new_primitive_ty!("..", RangeTy { rkind: RangeKind::Full, elem_ty: void_ty }),
 
             unknown_ty: new_primitive_ty!("{unknown_ty}", simple_ty, finalized: true),
             int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),

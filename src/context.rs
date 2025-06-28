@@ -1,6 +1,7 @@
 use crate::{
     arena_allocator::Arena,
     ast::{self, ast_new},
+    cli::BuildArgs,
     compiler::CompileDurations,
     diagnostics::{self, HandledErr, cerror, cerror2, chint, handle_alloc_err},
     parser::lexer::Span,
@@ -44,10 +45,7 @@ pub struct CompilationContextInner {
     /// TODO: implement `#mut_checks(.Enabled)`, `#mut_checks(.Disabled)`
     pub do_mut_checks: bool,
 
-    #[cfg(debug_assertions)]
-    pub debug_types: bool,
-    #[cfg(debug_assertions)]
-    pub debug_llvm_module_on_invalid_fn: bool,
+    pub args: BuildArgs,
 }
 
 pub type FilesIndex = usize;
@@ -79,7 +77,7 @@ impl Drop for CompilationContext {
 }
 
 impl CompilationContext {
-    pub fn new() -> CompilationContext {
+    pub fn new(args: BuildArgs) -> CompilationContext {
         let alloc = Arena::new();
 
         let mut stmts = Vec::new();
@@ -120,10 +118,7 @@ impl CompilationContext {
 
             do_mut_checks: true,
 
-            #[cfg(debug_assertions)]
-            debug_types: false,
-            #[cfg(debug_assertions)]
-            debug_llvm_module_on_invalid_fn: false,
+            args,
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {
@@ -136,13 +131,17 @@ impl CompilationContext {
 }
 
 impl Ptr<CompilationContextInner> {
-    pub fn set_root_file(mut self, path: PathBuf) -> Result<(), HandledErr> {
+    pub fn set_source_root(self, path: PathBuf) -> Result<(), HandledErr> {
+        let root_file_idx = self.add_path_import(path, false, Span::ZERO)?;
+        self.set_root_file(root_file_idx)
+    }
+
+    pub fn set_root_file(mut self, root_file_idx: usize) -> Result<(), HandledErr> {
         if self.root_file_idx.is_some() {
             return cerror2!(Span::ZERO, "Tried to set the root file multiple times");
         }
-        let root_file_idx = self.add_path_import(path, false, Span::ZERO)?;
         self.root_file_idx = Some(root_file_idx);
-        let root_file = self.files[self.root_file_idx.u()];
+        let root_file = self.files[root_file_idx];
         self.project_path = Some(Ptr::from_ref(root_file.path.parent().unwrap()));
         Ok(())
     }
@@ -190,6 +189,12 @@ impl Ptr<CompilationContextInner> {
             cerror!(err_span, "cannot import source file \"{p}\": {e}")
         })?;
         self.add_source_file(file, Some(path))
+    }
+
+    #[cfg(test)]
+    pub fn set_test_root(self, code: Ptr<crate::parser::lexer::Code>) -> Result<(), HandledErr> {
+        let root_file_idx = self.add_test_code_buf(code)?;
+        self.set_root_file(root_file_idx)
     }
 
     #[cfg(test)]
@@ -241,6 +246,12 @@ impl Ptr<CompilationContextInner> {
 
     pub fn path_in_proj(self, path: &Path) -> &Path {
         path.strip_prefix(self.project_path.u().as_ref()).unwrap_or(path)
+    }
+}
+
+impl CompilationContextInner {
+    pub fn debug_llvm_module_on_invalid_fn(&self) -> bool {
+        self.args.debug_llvm_ir_optimized || self.args.debug_llvm_ir_unoptimized
     }
 }
 

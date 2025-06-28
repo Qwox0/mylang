@@ -2,8 +2,8 @@ use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt},
-    context::CompilationContextInner,
-    diagnostics::{DiagnosticReporter, HandledErr},
+    context::{CompilationContext, CompilationContextInner},
+    diagnostics::{DiagnosticReporter, HandledErr, cwarn},
     parser::{self, lexer::Span},
     ptr::Ptr,
     sema,
@@ -43,12 +43,10 @@ pub enum CompileMode {
     Codegen,
 }
 
-pub fn compile(
-    ctx: Ptr<CompilationContextInner>,
-    mode: CompileMode,
-    args: &mut BuildArgs,
-) -> CompileResult {
-    ctx.set_root_file(args.path.clone())?;
+pub fn compile(mode: CompileMode, args: BuildArgs) -> CompileResult {
+    let ctx = CompilationContext::new(args);
+    let args = &ctx.args;
+    ctx.0.set_source_root(args.path.clone())?;
 
     if !args.quiet {
         let proj_path = args.path.parent().unwrap();
@@ -61,23 +59,14 @@ pub fn compile(
     }
 
     if !args.is_lib {
-        let _: usize = ctx.add_import("runtime", None, Span::ZERO)?;
+        let _: usize = ctx.0.add_import("runtime", None, Span::ZERO)?;
     }
 
-    compile_ctx(ctx, mode, args)
+    compile_ctx(ctx.0, mode)
 }
 
-pub fn compile_ctx(
-    mut ctx: Ptr<CompilationContextInner>,
-    mode: CompileMode,
-    args: &BuildArgs,
-) -> CompileResult {
-    #[cfg(debug_assertions)]
-    {
-        ctx.debug_types = args.debug_types;
-        ctx.debug_llvm_module_on_invalid_fn =
-            args.debug_llvm_ir_optimized || args.debug_llvm_ir_unoptimized;
-    }
+pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> CompileResult {
+    let args = &ctx.as_ref().args;
 
     // ##### Parsing #####
 
@@ -210,6 +199,15 @@ pub fn compile_ctx(
         let write_obj_file_start = Instant::now();
         module.compile_to_obj_file(&target_machine, &obj_file_path).unwrap();
         ctx.compile_time.writing_obj = write_obj_file_start.elapsed();
+    }
+
+    if args.is_lib {
+        cwarn!(
+            Span::ZERO,
+            "finished building object file. Building a static or dynamic library is currently not \
+             implemented"
+        );
+        return CompileResult::Ok;
     }
 
     if args.out == OutKind::Executable {

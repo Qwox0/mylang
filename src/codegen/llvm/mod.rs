@@ -73,6 +73,7 @@ pub struct Codegen<'ctx> {
     continue_break_depth: usize,
 
     noundef: Attribute,
+    empty_struct_ty: StructType<'ctx>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -91,7 +92,8 @@ impl<'ctx> Codegen<'ctx> {
             return_depth: 0,
             continue_break_depth: 0,
 
-            noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 1),
+            noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 0),
+            empty_struct_ty: context.struct_type(&[], false),
         };
 
         // needed for string slice literals
@@ -184,7 +186,7 @@ impl<'ctx> Codegen<'ctx> {
         match expr.matchable().as_mut() {
             AstEnum::Ident { decl, .. } => {
                 debug_assert!(
-                    !expr.is_const_val(),
+                    !decl.u().is_const,
                     "constants should have been replaced during sema"
                 );
                 Ok(self.get_symbol(decl.u()))
@@ -274,7 +276,14 @@ impl<'ctx> Codegen<'ctx> {
             AstEnum::Dot { lhs, rhs, .. } => {
                 let lhs = lhs.u();
                 let lhs_ty = lhs.ty.u();
-                if let Some(enum_def) = lhs.try_downcast::<ast::EnumDef>() {
+                if lhs_ty == p.module {
+                    let decl = rhs.decl.u();
+                    debug_assert!(
+                        !decl.is_const,
+                        "constants should have been replaced during sema"
+                    );
+                    Ok(self.get_symbol(decl))
+                } else if let Some(enum_def) = lhs.try_downcast::<ast::EnumDef>() {
                     debug_assert_eq!(out_ty.kind, AstKind::EnumDef);
                     debug_assert_eq!(lhs_ty, p.type_ty);
                     let _ = self.llvm_type(enum_def.upcast_to_type());
@@ -297,8 +306,6 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::Index { lhs, idx, .. } => {
                 debug_assert!(idx.ty.u().is_finalized());
-                let idx_val = try_compile_expr_as_val!(self, *idx);
-
                 let elem_ty_out = match idx.ty.matchable().as_ref() {
                     TypeEnum::IntTy { .. } => out_ty,
                     TypeEnum::RangeTy { .. } => out_ty.get_arr_elem_ty(),
@@ -309,10 +316,7 @@ impl<'ctx> Codegen<'ctx> {
                 let lhs_sym = self.compile_expr(*lhs)?;
 
                 let (ptr, len) = match lhs.ty.matchable().as_mut() {
-                    TypeEnum::SliceTy { .. } => {
-                        let (ptr, len) = self.build_slice_field_access(lhs_sym)?;
-                        (ptr, len)
-                    },
+                    TypeEnum::SliceTy { .. } => self.build_slice_field_access(lhs_sym)?,
                     TypeEnum::ArrayTy { len, .. } => {
                         let arr_ptr = self.sym_as_arr_ptr_val(lhs_sym);
                         let len = self.context.i64_type().const_int(len.int(), false);
@@ -321,17 +325,20 @@ impl<'ctx> Codegen<'ctx> {
                     _ => unreachable_debug(),
                 };
                 let llvm_elem_ty = self.llvm_type(elem_ty).basic_ty();
+
+                let idx_val = try_compile_expr_as_val!(self, *idx);
                 match idx.ty.matchable().as_ref() {
                     TypeEnum::IntTy { .. } => {
                         stack_val(self.build_gep(llvm_elem_ty, ptr, &[idx_val.int_val()])?)
                     },
                     TypeEnum::RangeTy { elem_ty, rkind, .. } => {
-                        let i = elem_ty.downcast::<ast::IntTy>();
+                        let i = elem_ty.try_downcast::<ast::IntTy>();
                         let range_val = idx_val.struct_val();
 
                         let (ptr, len) = match rkind {
                             RangeKind::Full => (ptr, len),
                             RangeKind::From => {
+                                debug_assert!(i.is_some());
                                 let start = self
                                     .builder
                                     .build_extract_value(range_val, 0, "start")?
@@ -348,7 +355,7 @@ impl<'ctx> Codegen<'ctx> {
                                 if rkind.is_inclusive() {
                                     end = self.builder.build_int_add(
                                         end,
-                                        end.get_type().const_int(1, i.is_signed),
+                                        end.get_type().const_int(1, i.u().is_signed),
                                         "",
                                     )?;
                                 }
@@ -366,7 +373,7 @@ impl<'ctx> Codegen<'ctx> {
                                 if rkind.is_inclusive() {
                                     end = self.builder.build_int_add(
                                         end,
-                                        end.get_type().const_int(1, i.is_signed),
+                                        end.get_type().const_int(1, i.u().is_signed),
                                         "",
                                     )?;
                                 }
@@ -464,11 +471,16 @@ impl<'ctx> Codegen<'ctx> {
                     && matches!(op, BinOpKind::Eq | BinOpKind::Ne)
                 {
                     debug_assert!(is_simple_enum(e.variants));
-                    let tag_ty = self.enum_tag_type(e).as_basic_type_enum();
+                    let tag_ty = match self.enum_tag_type(e) {
+                        EnumTagType::Zero => return self.build_unreachable(),
+                        EnumTagType::One { .. } => return reg(self.bool_val(true)),
+                        EnumTagType::IntTy(int_type) => int_type,
+                    };
+                    let tag_ty = tag_ty.as_basic_type_enum();
                     let tag_align = enum_alignment(e.variants);
                     let lhs = self.sym_as_val_with_llvm_ty(lhs_sym, tag_ty, tag_align)?.int_val();
                     let rhs = self.sym_as_val_with_llvm_ty(rhs_sym, tag_ty, tag_align)?.int_val();
-                    return self.build_int_binop(lhs, rhs, false, op).map(reg_sym).coerce();
+                    return reg(self.build_int_binop(lhs, rhs, false, op)?);
                 }
 
                 let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?;
@@ -574,6 +586,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.compile_fn(f, FnKind::FnDef(decl))?;
                         }
                     } else if var_ty == p.type_ty {
+                        // Ensure that the type is in `type_table`
                         self.llvm_type(init.u().downcast_type());
                     }
 
@@ -599,7 +612,9 @@ impl<'ctx> Codegen<'ctx> {
                                 // C does this for all `static`s
                                 global.set_linkage(Linkage::Internal);
                             }
-                            global.set_constant(!markers.get(DeclMarkers::IS_MUT_MASK));
+                            global.set_constant(
+                                ctx().do_mut_checks && !markers.get(DeclMarkers::IS_MUT_MASK),
+                            );
                         }
                         global.set_alignment(var_ty.alignment() as u32);
                         Symbol::Global(global)
@@ -691,8 +706,7 @@ impl<'ctx> Codegen<'ctx> {
                 if out_ty == p.void_ty {
                     return Ok(Symbol::Void);
                 } else if out_ty == p.never {
-                    self.builder.build_unreachable()?;
-                    return Unreachable(());
+                    return self.build_unreachable();
                 }
 
                 if let Some(write_target) = write_target {
@@ -1053,8 +1067,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let p = primitives();
         if ret_ty == p.never {
-            self.builder.build_unreachable()?;
-            Unreachable(())
+            return self.build_unreachable();
         } else if ret_ty == p.void_ty {
             Ok(Symbol::Void)
         } else if let Some(ret_val_ptr) = ret_val_ptr {
@@ -1080,8 +1093,13 @@ impl<'ctx> Codegen<'ctx> {
         let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u();
 
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
-        let tag_ty = self.enum_tag_type(enum_def);
-        let tag_val = tag_ty.const_int(variant_tag as u64, variant_tag.is_negative());
+        let tag_ty = match self.enum_tag_type(enum_def) {
+            EnumTagType::Zero => panic_debug!("Enum has no variants"),
+            EnumTagType::One { .. } => None,
+            EnumTagType::IntTy(int_type) => Some(int_type),
+        };
+        let tag_val =
+            tag_ty.map(|tag_ty| tag_ty.const_int(variant_tag as u64, variant_tag.is_negative()));
         if write_target.is_some() || data.is_some() {
             let enum_ptr = if let Some(ptr) = write_target {
                 ptr
@@ -1090,19 +1108,23 @@ impl<'ctx> Codegen<'ctx> {
             };
 
             // set tag
-            let tag_ptr = enum_ptr;
-            self.build_store(tag_ptr, tag_val, enum_alignment(enum_def.variants))?;
+            if let Some(tag) = tag_val {
+                let tag_ptr = enum_ptr;
+                self.build_store(tag_ptr, tag, enum_alignment(enum_def.variants))?;
+            }
 
             // set data
             if let Some(data) = data {
-                let data_ptr = self.builder.build_struct_gep(enum_ty, enum_ptr, 1, "enum_data")?;
+                let data_idx = tag_val.is_some() as u32;
+                let data_ptr =
+                    self.builder.build_struct_gep(enum_ty, enum_ptr, data_idx, "enum_data")?;
                 debug_assert_eq!(data.ty, enum_def.variants[variant_idx].var_ty.u());
                 self.compile_expr_with_write_target(data, Some(data_ptr))?;
             }
 
             stack_val(enum_ptr)
         } else {
-            reg(tag_val)
+            Ok(tag_val.map(reg_sym).unwrap_or(Symbol::Void))
         }
     }
 
@@ -1292,7 +1314,7 @@ impl<'ctx> Codegen<'ctx> {
                 func
             } else {
                 #[cfg(debug_assertions)]
-                if crate::context::ctx().debug_llvm_module_on_invalid_fn {
+                if crate::context::ctx().debug_llvm_module_on_invalid_fn() {
                     self.module().print_to_stderr();
                 }
                 unsafe { func.delete() };
@@ -1589,15 +1611,26 @@ impl<'ctx> Codegen<'ctx> {
 
         if let Some(e) = expr_ty.try_downcast::<ast::EnumDef>()
             && e.is_simple_enum
-            && target_ty.kind == AstKind::IntTy
+            && let Some(target_int) = target_ty.try_downcast::<ast::IntTy>()
         {
             debug_assert!(is_simple_enum(e.variants));
-            let tag_ty = self.enum_tag_type(e).as_basic_type_enum();
+            let target_ty = self.llvm_type(target_ty).int_ty();
+            let tag_ty = match self.enum_tag_type(e) {
+                EnumTagType::Zero => return self.build_unreachable(),
+                EnumTagType::One { tag } => {
+                    return reg(target_ty.const_int(tag as u64, target_int.is_signed));
+                },
+                EnumTagType::IntTy(int_type) => int_type.as_basic_type_enum(),
+            };
             let is_tag_signed = e.tag_ty.u().is_signed;
             let tag_align = enum_alignment(e.variants);
             let val = self.sym_as_val_with_llvm_ty(sym, tag_ty, tag_align)?.int_val();
-            let int_ty = self.llvm_type(target_ty).int_ty();
-            return reg(self.builder.build_int_cast_sign_flag(val, int_ty, is_tag_signed, "")?);
+            return reg(self.builder.build_int_cast_sign_flag(
+                val,
+                target_ty,
+                is_tag_signed,
+                "",
+            )?);
         }
 
         display(expr.full_span()).finish();
@@ -1739,6 +1772,11 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    fn build_unreachable<T>(&self) -> CodegenResultAndControlFlow<T> {
+        let _inst: InstructionValue<'ctx> = self.builder.build_unreachable()?;
+        Unreachable(())
+    }
+
     #[inline]
     fn build_gep(
         &self,
@@ -1756,14 +1794,14 @@ impl<'ctx> Codegen<'ctx> {
         idx: u32,
         name: &str,
     ) -> CodegenResult<Symbol<'ctx>> {
-        match struct_sym {
-            Symbol::Stack(ptr) => {
+        match struct_sym.basic() {
+            BasicSymbol::Ref(ptr) => {
                 stack_val(self.builder.build_struct_gep(struct_ty, ptr, idx, name)?)
             },
-            Symbol::Register(val) => {
+            BasicSymbol::Val(val) => {
                 reg(self.builder.build_extract_value(val.struct_val(), idx, name)?)
             },
-            _ => unreachable_debug(),
+            BasicSymbol::Zst => Ok(Symbol::Void),
         }
     }
 
@@ -2055,9 +2093,9 @@ impl<'ctx> Codegen<'ctx> {
     /// LLVM does not make a distinction between signed and unsigned integer
     /// type
     fn int_type(&self, bits: u32) -> IntType<'ctx> {
+        assert!(bits > 0);
         // See <https://llvm.org/docs/Frontend/PerformanceTips.html#avoid-loads-and-stores-of-non-byte-sized-types>
         match bits {
-            0 => self.context.custom_width_int_type(bits),
             ..=8 => self.context.i8_type(),
             ..=16 => self.context.i16_type(),
             ..=32 => self.context.i32_type(),
@@ -2072,6 +2110,7 @@ impl<'ctx> Codegen<'ctx> {
             16 => self.context.f16_type(),
             32 => self.context.f32_type(),
             64 => self.context.f64_type(),
+            80 => self.context.x86_f80_type(),
             128 => self.context.f128_type(),
             bits => todo!("{bits}-bit float"),
         }
@@ -2136,27 +2175,43 @@ impl<'ctx> Codegen<'ctx> {
     ) -> BasicTypeEnum<'ctx> {
         let ast::EnumDef { variants, is_simple_enum, .. } = *enum_def;
         debug_assert_eq!(is_simple_enum, util::is_simple_enum(variants));
-        let tag_int_ty = self.enum_tag_type(enum_def);
+        let tag_ty = self
+            .enum_tag_type(enum_def)
+            .sized()
+            .map(Into::into)
+            .unwrap_or(self.empty_struct_ty.as_basic_type_enum());
         if enum_def.is_simple_enum {
-            tag_int_ty.into()
+            tag_ty
         } else {
             let data_ty = self.new_union_type(variants, None).as_basic_type_enum();
-            self.struct_type_inner(&[tag_int_ty.into(), data_ty], name, false).into()
+            self.struct_type_inner(&[tag_ty.into(), data_ty], name, false).into()
         }
     }
 
     #[inline]
-    fn enum_tag_type(&self, enum_def: Ptr<ast::EnumDef>) -> IntType<'ctx> {
+    fn enum_tag_type(&self, enum_def: Ptr<ast::EnumDef>) -> EnumTagType<'ctx> {
         let tag_bits = enum_def.tag_ty.u().bits;
         debug_assert_eq!(
             tag_bits,
             util::variant_count_to_tag_size_bytes(enum_def.variants.len()) * 8
         );
-        self.int_type(tag_bits)
+        match tag_bits {
+            // Note: This condition will be too strict when never variants are filtered out.
+            0 if enum_def.variants.len() == 0 => EnumTagType::Zero,
+            0 => {
+                debug_assert!(enum_def.variants.len() == 1);
+                let tag = enum_def.variants[0].init.map(Ptr::<Ast>::int).unwrap_or(0);
+                EnumTagType::One { tag }
+            },
+            b => EnumTagType::IntTy(self.int_type(b)),
+        }
     }
 
     #[inline]
     fn range_type(&mut self, range_ty: Ptr<ast::RangeTy>) -> StructType<'ctx> {
+        if range_ty.upcast_to_type() == primitives().full_range {
+            return self.empty_struct_ty;
+        }
         let e = self.llvm_type(range_ty.elem_ty).basic_ty();
         let fields = &[e; 2][..range_ty.rkind.get_field_count()];
         self.struct_type_inner(fields, None, false)
@@ -2255,12 +2310,13 @@ impl<'ctx> Codegen<'ctx> {
     fn c_ffi_type(&mut self, ty: Ptr<ast::Type>) -> CFfiType<'ctx> {
         if let Some(struct_ty) = ty.try_downcast_struct_def() {
             return self.c_ffi_struct(struct_ty.fields);
-        } else if let Some(enum_ty) = ty.try_downcast::<ast::EnumDef>()
-            && enum_ty.is_simple_enum
+        } else if let Some(enum_def) = ty.try_downcast::<ast::EnumDef>()
+            && enum_def.is_simple_enum
         {
-            let tag_bits = enum_ty.tag_ty.u().bits;
-            let tag_ty = self.int_type(tag_bits);
-            return if tag_bits < DEFAULT_C_ENUM_BITS {
+            let Some(tag_ty) = self.enum_tag_type(enum_def).sized() else {
+                return CFfiType::Zst;
+            };
+            return if enum_def.tag_ty.u().bits < DEFAULT_C_ENUM_BITS {
                 CFfiType::SmallSimpleEnum {
                     small_int: tag_ty,
                     ffi_int: self.int_type(DEFAULT_C_ENUM_BITS),
@@ -3008,5 +3064,18 @@ impl FnKind {
             FnKind::FnDef(def) => f(def),
             FnKind::Lambda => true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EnumTagType<'ctx> {
+    Zero,
+    One { tag: isize },
+    IntTy(IntType<'ctx>),
+}
+
+impl<'ctx> EnumTagType<'ctx> {
+    fn sized(self) -> Option<IntType<'ctx>> {
+        if let EnumTagType::IntTy(int_ty) = self { Some(int_ty) } else { None }
     }
 }
