@@ -324,7 +324,7 @@ impl Ptr<ast::Type> {
     /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
     pub fn finalize(&mut self) -> Ptr<ast::Type> {
         let p = primitives();
-        debug_assert!(self.ty == p.type_ty || self.kind == AstKind::Fn);
+        debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
         match self.matchable().as_mut() {
             TypeEnum::SimpleTy { .. } => {
                 if self.is_int_lit() {

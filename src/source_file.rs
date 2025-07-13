@@ -1,30 +1,27 @@
 use crate::{
     arena_allocator::Arena,
-    ast,
+    ast::Scope,
     parser::lexer::{Code, Span},
     ptr::Ptr,
-    symbol_table::linear_search_symbol,
-    util::UnwrapDebug,
 };
 use std::{ops, path::Path, range::Range};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct SourceFile {
     pub path: Ptr<Path>,
     pub code: Ptr<Code>,
 
     /// This is only [`None`] iff the `code` hasn't been parse yet.
-    ///
-    /// not owned.
     pub stmt_range: Option<Range<usize>>,
-    //pub root_scope: OPtr<ast::Block>,
+    /// not available during parsing
+    pub scope: Option<Scope>,
 }
 
 impl SourceFile {
     /// The callee has to make sure that the provided combination of `path` and `code` makes sense.
     #[inline]
     pub fn new(path: Ptr<Path>, code: Ptr<Code>) -> SourceFile {
-        Self { path, code, stmt_range: None }
+        Self { path, code, stmt_range: None, scope: None }
     }
 
     #[inline]
@@ -40,14 +37,6 @@ impl SourceFile {
 
     pub fn has_been_parsed(&self) -> bool {
         self.stmt_range.is_some()
-    }
-
-    pub fn find_symbol(
-        self,
-        name: &str,
-        all_stmts: Ptr<[Ptr<ast::Ast>]>,
-    ) -> Option<Ptr<ast::Decl>> {
-        linear_search_symbol(&all_stmts[self.stmt_range.u()], name)
     }
 }
 

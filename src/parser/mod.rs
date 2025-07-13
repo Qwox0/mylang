@@ -4,12 +4,12 @@
 //! [`Type::Unset`] or [`Type::Unevaluated`]
 
 use crate::{
-    arena_allocator::AllocErr,
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, Scope, ScopeAndAggregateInfo,
+        ScopeKind, ScopePos, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
-    diagnostics::{DiagnosticReporter, cerror, cerror2, chint, cwarn},
+    diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scratch_pool::ScratchPool,
@@ -42,12 +42,13 @@ macro_rules! expr_ {
 }
 
 /// This won't consume the token matching `$until_pat`
+#[rustfmt::skip]
 macro_rules! skip_tokens_until {
     (
-        $p:expr,until =
-        $until_pat:pat,scope_open =
-        $open_scope_pat:pat,scope_close =
-        $close_scope_pat:pat $(,)?
+        $p:expr,
+        until = $until_pat:pat,
+        scope_open = $open_scope_pat:pat,
+        scope_close = $close_scope_pat:pat $(,)?
     ) => {
         let mut depth: usize = 0;
         $p.lex.advance_while(|t| {
@@ -62,10 +63,48 @@ macro_rules! skip_tokens_until {
     };
 }
 
+macro_rules! parse_in_block {
+    ($self:ident, sep = [ $( $sep:path ),* $(,)? ], in_block = $in_block:ident, $parse_item:expr) => {{
+        let mut has_trailing_sep = false;
+        const SEP: &[TokenKind] = &[$($sep),*];
+        loop {
+            $self.lex.advance_while(|t| t.kind.is_ignored() || SEP.contains(&t.kind));
+            if $self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
+                break;
+            }
+            let res: Result<Ptr<ast::Ast>, ParseError> = try {
+                $parse_item
+            };
+            let Ok(expr) = res else {
+                skip_tokens_until!(
+                    $self,
+                    until = TokenKind::CloseBrace $( | $sep )*,
+                    scope_open = TokenKind::OpenBrace,
+                    scope_close = TokenKind::CloseBrace,
+                );
+                continue;
+            };
+            has_trailing_sep = $self.lex.advance_if(|t| SEP.contains(&t.kind));
+            let peek = $self.lex.peek();
+            if !has_trailing_sep
+                && (peek.is_some_and(|t| t.kind != TokenKind::CloseBrace)
+                    || (!$in_block && peek.is_none()))
+                //&& peek.kind != TokenKind::CloseBrace
+                //&& (!$in_block || peek.kind != TokenKind::EOF)
+                && expr.block_expects_trailing_sep()
+            {
+                expected_token(expr.full_span().after(), SEP);
+                continue;
+            }
+        }
+        has_trailing_sep
+    }};
+}
+
 impl Ptr<Ast> {
-    pub fn try_to_ident(self) -> ParseResult<Ptr<ast::Ident>> {
+    pub fn try_to_ident(self) -> Result<Ptr<ast::Ident>, HandledErr> {
         self.try_downcast::<ast::Ident>()
-            .ok_or_else(|| cerror2!(self.full_span(), "expected an identifier, got an expression"))
+            .ok_or_else(|| cerror!(self.full_span(), "expected an identifier, got an expression"))
     }
 }
 
@@ -84,7 +123,14 @@ pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> Vec<Ptr<Ast
             p.parse_stmts_into(&mut stmts, false);
         }
         debug_assert!(p.lex.is_empty());
-        file.as_mut().set_stmt_range(start_idx..stmts.len());
+        let stmt_range = start_idx..stmts.len();
+        file.as_mut().set_stmt_range(stmt_range.clone());
+
+        let mut scope =
+            Scope::from_stmts(&stmts[stmt_range], ScopeKind::File, &cctx.alloc).unwrap();
+        scope.parent = Some(cctx.root_scope);
+        scope.pos_in_parent = ScopePos(cctx.root_scope.decls.len());
+        file.as_mut().scope = Some(scope);
 
         idx += 1;
     }
@@ -201,7 +247,10 @@ impl Parser {
                         let iter_var = self.advanced().ident()?;
                         self.opt_do();
                         let body = self.expr()?;
-                        expr!(For { source: lhs, iter_var, body, was_piped: true }, t.span)
+
+                        let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
+                        let scope = Scope::new(self.alloc_slice(&[iter_var])?, ScopeKind::ForLoop);
+                        expr!(For { source: lhs, iter_var, body, scope, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         self.advanced().opt_do();
@@ -221,8 +270,9 @@ impl Parser {
                             //     => the second syntax is converted to a method-like call
                             //     => omitting the type might produce different code
                             dot.as_mut().lhs = Some(lhs);
+                            dot.as_mut().has_lhs = true;
                         } else {
-                            args.push(lhs).map_err(handle_alloc_err)?;
+                            args.push(lhs)?;
                         }
                         self.tok(TokenKind::OpenParenthesis)?;
                         self.call(func, args, Some(0))?.upcast()
@@ -245,7 +295,8 @@ impl Parser {
             },
             FollowingOperator::TypedDecl => {
                 let ident = lhs.try_to_ident()?;
-                let mut d = self.typed_decl(DeclMarkers::default(), ident)?;
+                let d = self.alloc(ast::Decl::from_ident(ident))?;
+                let mut d = self.typed_decl(d)?;
                 d.span = ident.span.join(d.span);
                 d.upcast()
             },
@@ -280,45 +331,50 @@ impl Parser {
             },
             TokenKind::Keyword(Keyword::Struct) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let (fields, consts) = self.struct_body()?;
+                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body()?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(StructDef { fields, consts }, span.join(close_b.span))
+                expr!(StructDef { scope, fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Union) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let (fields, consts) = self.struct_body()?;
+                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body()?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(UnionDef { fields, consts }, span.join(close_b.span))
+                expr!(UnionDef { scope, fields, consts }, span.join(close_b.span))
             },
             TokenKind::Keyword(Keyword::Enum) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let mut variants = ScratchPool::new();
-                let consts = Vec::new();
-                loop {
-                    let Some(variant_ident) = opt!(self, ident())? else { break };
-                    let ty = then!(
-                        self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
-                        let ty_expr = self.expr()?;
-                        self.tok(TokenKind::CloseParenthesis)?;
-                        ty_expr
-                    });
-                    let variant_index = then!(
-                        self.lex.advance_if_kind(TokenKind::Eq)
-                        => self.expr()?
-                    );
-                    let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
-                    decl.var_ty_expr = ty;
-                    decl.init = variant_index;
-                    variants.push(decl).map_err(handle_alloc_err)?;
-                    if !self.lex.advance_if_kind(TokenKind::Comma) {
-                        break;
+                let mut variants = Vec::new();
+                //let consts = Vec::new(); // TODO: allow constants in enum block
+                parse_in_block!(
+                    self,
+                    sep = [TokenKind::Semicolon, TokenKind::Comma],
+                    in_block = true,
+                    {
+                        let Some(variant_ident) = opt!(self, ident())? else { break };
+                        let ty = then!(
+                            self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
+                            let ty_expr = self.expr()?;
+                            self.tok(TokenKind::CloseParenthesis)?;
+                            ty_expr
+                        });
+                        let variant_index = then!(
+                            self.lex.advance_if_kind(TokenKind::Eq)
+                            => self.expr()?
+                        );
+                        let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
+                        decl.var_ty_expr = ty;
+                        decl.init = variant_index;
+                        variants.push(decl);
+                        decl.upcast() // Note: variants are not constant and thus always expect a trailing seperator
                     }
-                }
-                let variants = self.clone_slice_from_scratch_pool(variants)?;
+                );
                 let close_b = self.tok(TokenKind::CloseBrace)?;
+                let ScopeAndAggregateInfo { scope, fields, consts } =
+                    Scope::for_aggregate(variants, vec![], &self.cctx.alloc)?;
                 expr!(
                     EnumDef {
-                        variants,
+                        scope,
+                        variants: fields,
                         variant_tags: None,
                         consts,
                         is_simple_enum: false,
@@ -356,7 +412,10 @@ impl Parser {
                 let source = self.expr()?;
                 self.opt_do();
                 let body = self.expr()?;
-                expr!(For { source, iter_var, body, was_piped: false }, span)
+
+                let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
+                let scope = Scope::new(self.alloc_slice(&[iter_var])?, ScopeKind::ForLoop);
+                expr!(For { source, iter_var, body, scope, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr()?;
@@ -511,8 +570,7 @@ impl Parser {
                         } else {
                             todo!("better error")
                         };
-                        let params = ScratchPool::new_with_first_val(first_decl)
-                            .map_err(handle_alloc_err)?;
+                        let params = ScratchPool::new_with_first_val(first_decl)?;
                         let params = self.var_decl_list(TokenKind::Comma, params, true)?;
                         self.tok(TokenKind::CloseParenthesis)?;
                         self.tok(TokenKind::Arrow)?;
@@ -684,7 +742,7 @@ impl Parser {
             }
             let ident = self.ident()?;
             let init = then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
-            fields.push((ident, init)).map_err(handle_alloc_err)?;
+            fields.push((ident, init))?;
 
             match self.lex.next_or_eof() {
                 Token { kind: TokenKind::Comma, .. } => {},
@@ -762,7 +820,7 @@ impl Parser {
                 debug_assert!(!AstKind::Block.is_allowed_top_level());
                 let is_invalid_body = body.kind.is_allowed_top_level();
                 if is_invalid_body {
-                    self.lex.set_state(between_expr_state); // causes "expected ';'" (see tests::function::error_missing_semicolon_after_fn)
+                    self.lex.set_state(between_expr_state); // causes "expected `;`" (see tests::function::error_missing_semicolon_after_fn)
                     // Note: If there are multiple functions without a trailing ';' between them,
                     // this function is called O(n^2) times.
                 }
@@ -772,7 +830,9 @@ impl Parser {
         } else {
             (None, expr)
         };
-        self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body: Some(body) }, start_span))
+        let body = Some(body);
+        let scope = Scope::new(params, ScopeKind::Fn);
+        self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body, scope }, start_span))
     }
 
     fn if_after_cond(
@@ -797,9 +857,10 @@ impl Parser {
             //let args = self.parse_call_args(args)?;
             let args = self.expr_list(TokenKind::Comma, args)?.0;
             let closing_paren_span = self
-                .tok_custom_err(TokenKind::CloseParenthesis, |t| {
-                    unexpected_token::<!>(t, &[TokenKind::Comma, TokenKind::CloseParenthesis])
-                })?
+                .tok_with_expected(TokenKind::CloseParenthesis, &[
+                    TokenKind::Comma,
+                    TokenKind::CloseParenthesis,
+                ])?
                 .span;
             (args, closing_paren_span)
         };
@@ -833,14 +894,12 @@ impl Parser {
         let mut stmts = Vec::new();
         let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true);
 
-        let Some(close_b) = self.lex.next() else {
-            return cerror2!(self.lex.pos_span(), "expected '}}'");
-        };
-        debug_assert_eq!(close_b.kind, TokenKind::CloseBrace);
+        let close_b = self.tok(TokenKind::CloseBrace)?;
 
         let span = open_b.span.join(close_b.span);
         let stmts = self.alloc_slice(&stmts)?;
-        Ok(self.alloc(ast_new!(Block { span, has_trailing_semicolon, stmts }))?)
+        let scope = Scope::from_stmts(&stmts, ScopeKind::Block, &self.cctx.alloc)?;
+        Ok(self.alloc(ast::Block::new(stmts, scope, has_trailing_semicolon, span))?)
     }
 
     /// Parses the insides of a [`Parser::block`]: Expressions and statements seperated by ';'.
@@ -854,38 +913,11 @@ impl Parser {
         stmts: &mut Vec<Ptr<Ast>>,
         in_block: bool,
     ) -> HasTrailingSemicolon {
-        let mut has_trailing_semicolon = false;
-        loop {
-            self.lex
-                .advance_while(|t| t.kind.is_ignored() || t.kind == TokenKind::Semicolon);
-            if self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
-                break;
-            }
-            let expr = match self.expr() {
-                Ok(expr) => expr,
-                Err(e) => {
-                    self.cctx.error2(&e);
-                    skip_tokens_until!(
-                        self,
-                        until = TokenKind::CloseBrace | TokenKind::Semicolon,
-                        scope_open = TokenKind::OpenBrace,
-                        scope_close = TokenKind::CloseBrace,
-                    );
-                    continue;
-                },
-            };
+        parse_in_block!(self, sep = [TokenKind::Semicolon], in_block = in_block, {
+            let expr = self.expr()?;
             stmts.push(expr);
-            has_trailing_semicolon = self.lex.advance_if_kind(TokenKind::Semicolon);
-            let peek = self.lex.peek();
-            if !has_trailing_semicolon
-                && (peek.is_some_and(|t| t.kind != TokenKind::CloseBrace)
-                    || (!in_block && peek.is_none()))
-                && expr.block_expects_trailing_semicolon()
-            {
-                cerror!(expr.full_span().after(), "expected ';'");
-            }
-        }
-        has_trailing_semicolon
+            expr
+        })
     }
 
     /// Also returns a `has_trailing_sep` [`bool`].
@@ -897,7 +929,7 @@ impl Parser {
         let mut has_trailing_sep = false;
         loop {
             let Some(expr) = opt!(self, expr())? else { break };
-            list_pool.push(expr).map_err(handle_alloc_err)?;
+            list_pool.push(expr)?;
             has_trailing_sep = self.lex.advance_if_kind(sep);
             if !has_trailing_sep {
                 break;
@@ -917,7 +949,7 @@ impl Parser {
     ) -> ParseResult<DeclList> {
         loop {
             let Some(decl) = opt!(self, var_decl(allow_ident_only))? else { break };
-            list.push(decl).map_err(handle_alloc_err)?;
+            list.push(decl)?;
             if !self.lex.advance_if_kind(sep) {
                 break;
             }
@@ -926,23 +958,24 @@ impl Parser {
         self.clone_slice_from_scratch_pool(list)
     }
 
-    fn struct_body(&mut self) -> ParseResult<(DeclList, Vec<Ptr<ast::Decl>>)> {
-        let mut fields = ScratchPool::new();
-        let mut const_fields = Vec::new();
-        loop {
-            let Some(decl) = opt!(self, var_decl(false))? else { break };
-            if decl.is_const {
-                const_fields.push(decl);
+    /// also returns the field_count
+    fn struct_body(&mut self) -> ParseResult<ScopeAndAggregateInfo> {
+        let mut fields = Vec::new();
+        let mut consts = Vec::new();
+        parse_in_block!(self, sep = [TokenKind::Semicolon, TokenKind::Comma], in_block = true, {
+            let expr = self.expr()?;
+            if let Some(decl) = expr.try_downcast::<ast::Decl>() {
+                if decl.is_const {
+                    consts.push(decl);
+                } else {
+                    fields.push(decl);
+                }
             } else {
-                fields.push(decl).map_err(handle_alloc_err)?;
-            }
-            if !self.lex.advance_if(|t| {
-                t.kind == TokenKind::Semicolon || (!decl.is_const && t.kind == TokenKind::Comma)
-            }) {
-                break;
-            }
-        }
-        Ok((self.clone_slice_from_scratch_pool(fields)?, const_fields))
+                cerror!(expr.full_span(), "expected field or constant declaration");
+            };
+            expr
+        });
+        Scope::for_aggregate(fields, consts, &self.cctx.alloc)
     }
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
@@ -978,20 +1011,17 @@ impl Parser {
             t = self.advanced().lex.peek_or_eof();
         };
 
+        let mut d = self.alloc(ast::Decl::from_ident(ident))?;
+        d.markers = markers;
+
         match self.lex.peek_or_eof() {
-            Token { kind: TokenKind::Colon, .. } => self.advanced().typed_decl(markers, ident),
+            Token { kind: TokenKind::Colon, .. } => self.advanced().typed_decl(d),
             t @ Token { kind: TokenKind::ColonEq | TokenKind::ColonColon, .. } => {
-                let mut d = ast::Decl::from_ident(ident);
-                d.markers = markers;
                 d.init = Some(self.advanced().expr()?);
                 d.is_const = t.kind == TokenKind::ColonColon;
-                self.alloc(d)
+                Ok(d)
             },
-            t if allow_ident_only && t.kind.is_expr_terminator() => {
-                let mut d = ast::Decl::from_ident(ident);
-                d.markers = markers;
-                self.alloc(d)
-            },
+            t if allow_ident_only && t.kind.is_expr_terminator() => Ok(d),
             t => {
                 unexpected_token(t, &[TokenKind::Colon, TokenKind::ColonEq, TokenKind::ColonColon]) // TODO: expr terminator if allow_ident_only?
             },
@@ -1003,18 +1033,12 @@ impl Parser {
     /// `      ^`
     ///
     /// Also returns the [`Span`] of the parsed type.
-    fn typed_decl(
-        &mut self,
-        markers: DeclMarkers,
-        ident: Ptr<ast::Ident>,
-    ) -> ParseResult<Ptr<ast::Decl>> {
-        let mut d = ast::Decl::from_ident(ident);
-        d.markers = markers;
+    fn typed_decl(&mut self, mut d: Ptr<ast::Decl>) -> ParseResult<Ptr<ast::Decl>> {
         d.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE)?);
         let t = self.lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
         d.init = t.map(|_| self.expr()).transpose()?;
         d.is_const = t.is_some_and(|t| t.kind == TokenKind::Colon);
-        self.alloc(d)
+        Ok(d)
     }
 
     fn ident(&mut self) -> ParseResult<Ptr<ast::Ident>> {
@@ -1043,20 +1067,18 @@ impl Parser {
     // -------
 
     fn tok(&mut self, tok: TokenKind) -> ParseResult<Token> {
-        self.tok_custom_err(tok, |t| unexpected_token::<!>(t, &[tok]))
+        self.tok_with_expected(tok, &[tok])
     }
 
-    fn tok_custom_err(
-        &mut self,
-        tok: TokenKind,
-        emit_err: impl FnOnce(Token) -> Result<!, ParseError>,
-    ) -> ParseResult<Token> {
+    fn tok_with_expected(&mut self, tok: TokenKind, expected: &[TokenKind]) -> ParseResult<Token> {
+        debug_assert!(expected.contains(&tok));
         let t = self.lex.peek_or_eof();
         if t.kind == tok {
             self.lex.advance();
             Ok(t)
         } else {
-            emit_err(t)?;
+            debug_assert!(!expected.contains(&t.kind));
+            return unexpected_token(t, expected);
         }
     }
 
@@ -1069,19 +1091,19 @@ impl Parser {
 
     #[inline]
     fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
-        self.cctx.alloc.alloc(val).map_err(handle_alloc_err)
+        self.cctx.alloc.alloc(val)
     }
 
     #[inline]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
-        self.cctx.alloc.alloc_slice(slice).map_err(handle_alloc_err)
+        self.cctx.alloc.alloc_slice(slice)
     }
 
     fn scratch_pool_with_first_val<'bump, T>(
         &self,
         first: T,
     ) -> ParseResult<ScratchPool<'bump, T>> {
-        ScratchPool::new_with_first_val(first).map_err(handle_alloc_err)
+        ScratchPool::new_with_first_val(first)
     }
 
     /// Clones all values from a [`ScratchPool`] to `self.alloc`.
@@ -1090,9 +1112,7 @@ impl Parser {
         &self,
         scratch_pool: ScratchPool<T>,
     ) -> ParseResult<Ptr<[T]>> {
-        scratch_pool
-            .clone_to_slice_into_arena(&self.cctx.alloc)
-            .map_err(handle_alloc_err)
+        scratch_pool.clone_to_slice_into_arena(&self.cctx.alloc)
     }
 
     #[inline]
@@ -1104,10 +1124,6 @@ impl Parser {
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {
         self.lex.get_code()[span].into()
     }
-}
-
-fn handle_alloc_err(err: AllocErr) -> ParseError {
-    crate::diagnostics::handle_alloc_err(err).into()
 }
 
 #[derive(Debug)]
@@ -1210,7 +1226,7 @@ impl FollowingOperator {
                 FollowingOperator::BinOpAssign(BinOpKind::And)
             },
             TokenKind::AmpersandEq => FollowingOperator::BinOpAssign(BinOpKind::BitAnd),
-            TokenKind::Pipe => FollowingOperator::BinOpAssign(BinOpKind::BitOr),
+            TokenKind::Pipe => FollowingOperator::BinOp(BinOpKind::BitOr),
             TokenKind::PipePipe | TokenKind::Keyword(Keyword::Or) => {
                 FollowingOperator::BinOp(BinOpKind::Or)
             },

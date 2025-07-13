@@ -67,6 +67,12 @@ impl From<crate::diagnostics::HandledErr> for SemaError {
     }
 }
 
+impl From<!> for SemaError {
+    fn from(never: !) -> Self {
+        never
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SemaResult<T, E = SemaError> {
@@ -158,6 +164,23 @@ impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
         match residual {
             NotFinished => SemaResult::NotFinished,
             Err(err) => SemaResult::Err(err),
+        }
+    }
+}
+
+impl<T> FromResidual<SemaResult<!, HandledErr>> for SemaResult<T> {
+    fn from_residual(residual: SemaResult<!, HandledErr>) -> Self {
+        match residual {
+            NotFinished => SemaResult::NotFinished,
+            Err(err) => SemaResult::Err(err.into()),
+        }
+    }
+}
+
+impl<T> FromResidual<SemaResult<!, !>> for SemaResult<T> {
+    fn from_residual(residual: SemaResult<!, !>) -> Self {
+        match residual {
+            NotFinished => SemaResult::NotFinished,
         }
     }
 }

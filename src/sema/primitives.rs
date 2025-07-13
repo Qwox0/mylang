@@ -1,6 +1,6 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
-    ast::{self, UpcastToAst},
+    ast::{self, Scope, ScopeKind, UpcastToAst},
     parser::lexer::Span,
     ptr::Ptr,
     type_::RangeKind,
@@ -187,7 +187,10 @@ impl Primitives {
             },
             type_ty,
 
-            full_range: new_primitive_ty!("..", RangeTy { rkind: RangeKind::Full, elem_ty: void_ty }),
+            full_range: new_primitive_ty!("..", RangeTy {
+                rkind: RangeKind::Full,
+                elem_ty: void_ty
+            }),
 
             unknown_ty: new_primitive_ty!("{unknown_ty}", simple_ty, finalized: true),
             int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),
@@ -207,9 +210,11 @@ impl Primitives {
             slice_ptr_field_ident: untyped_slice_ptr_field.ident,
             slice_len_field,
             untyped_slice_struct_def: {
+                let fields = alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?;
                 let def = ast_new!(StructDef {
-                    fields: alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?,
-                    consts: Vec::new(),
+                    scope: Scope::new(fields, ScopeKind::Aggregate),
+                    fields,
+                    consts: Vec::new()
                 });
                 init_ty(def.upcast_to_type());
                 def

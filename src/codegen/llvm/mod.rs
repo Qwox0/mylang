@@ -41,7 +41,10 @@ use inkwell::{
         IntMathValue, IntValue, PhiValue, PointerValue, StructValue,
     },
 };
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, marker::PhantomData, path::Path};
+use std::{
+    assert_matches::debug_assert_matches, borrow::Cow, collections::HashMap, fmt::Debug,
+    marker::PhantomData, path::Path,
+};
 
 pub mod error;
 pub mod jit;
@@ -147,8 +150,11 @@ impl<'ctx> Codegen<'ctx> {
         // println!("compile {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
 
         debug_assert!(expr.ty.u().is_finalized());
-        expr = expr.rep();
+
+        // Don't use the type of the replacement. because the init type of `_: *u8 = nil;` should
+        // be `*u8` not `*never`
         let out_ty = expr.ty.u();
+        expr = expr.rep();
         debug_assert!(out_ty.is_finalized());
 
         let p = primitives();
@@ -288,9 +294,8 @@ impl<'ctx> Codegen<'ctx> {
                     debug_assert_eq!(lhs_ty, p.type_ty);
                     let _ = self.llvm_type(enum_def.upcast_to_type());
                     self.compile_enum_val(enum_def, &rhs.text, None, write_target.take())
-                } else if lhs_ty.kind == AstKind::StructDef || lhs_ty.kind == AstKind::SliceTy {
-                    let s_def = lhs_ty.downcast_struct_def();
-                    let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty();
+                } else if let Some(s_def) = lhs_ty.try_downcast_struct_def() {
+                    let struct_ty = self.llvm_type(s_def.upcast_to_type()).struct_ty();
                     let struct_sym = self.compile_expr(lhs)?;
                     let (field_idx, _) = s_def.fields.find_field(&rhs.text).u();
                     self.build_struct_access(struct_ty, struct_sym, field_idx as u32, &rhs.text)
@@ -570,9 +575,8 @@ impl<'ctx> Codegen<'ctx> {
             } => {
                 let decl = expr.downcast::<ast::Decl>();
                 let var_ty = var_ty.u();
-                if let Some(init) = init {
-                    init.ty = Some(var_ty);
-                }
+                debug_assert!(var_ty.is_finalized());
+                debug_assert!(init.is_none_or(|init| init.ty == var_ty));
 
                 if *is_const {
                     if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
@@ -745,7 +749,7 @@ impl<'ctx> Codegen<'ctx> {
                                 idx_ty.const_zero(),
                                 for_info.idx_int,
                             ])?);
-                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
+                        self.symbols.push((*iter_var, iter_var_sym));
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
@@ -758,7 +762,7 @@ impl<'ctx> Codegen<'ctx> {
                         let elem_ty = self.llvm_type(elem_ty.downcast_type()).basic_ty();
                         let iter_var_sym =
                             Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
-                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
+                        self.symbols.push((*iter_var, iter_var_sym));
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
@@ -785,7 +789,7 @@ impl<'ctx> Codegen<'ctx> {
                             rkind.is_inclusive(),
                         )?;
                         let iter_var_sym = reg_sym(for_info.idx);
-                        self.symbols.push((iter_var.decl.u(), iter_var_sym));
+                        self.symbols.push((*iter_var, iter_var_sym));
                         let out = self.compile_expr(*body).handle_unreachable()?;
                         self.build_for_end(for_info, out)?
                     },
@@ -1350,7 +1354,7 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         struct_ty: StructType<'ctx>,
         struct_ptr: PointerValue<'ctx>,
-        fields: Ptr<[Ptr<ast::Decl>]>,
+        fields: DeclList,
         args: &[Ptr<Ast>],
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         for_each_call_arg(
@@ -2167,8 +2171,7 @@ impl<'ctx> Codegen<'ctx> {
         enum_def: Ptr<ast::EnumDef>,
         name: Option<Ptr<str>>,
     ) -> BasicTypeEnum<'ctx> {
-        let ast::EnumDef { variants, is_simple_enum, .. } = *enum_def;
-        debug_assert_eq!(is_simple_enum, util::is_simple_enum(variants));
+        debug_assert_eq!(enum_def.is_simple_enum, is_simple_enum(enum_def.variants));
         let tag_ty = self
             .enum_tag_type(enum_def)
             .sized()
@@ -2177,7 +2180,7 @@ impl<'ctx> Codegen<'ctx> {
         if enum_def.is_simple_enum {
             tag_ty
         } else {
-            let data_ty = self.new_union_type(variants, None).as_basic_type_enum();
+            let data_ty = self.new_union_type(enum_def.variants, None).as_basic_type_enum();
             self.struct_type_inner(&[tag_ty.into(), data_ty], name, false).into()
         }
     }
@@ -2933,7 +2936,7 @@ pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> Ptr<ast::
 
 /// `f: (value: Ptr<Ast>, param_def: Ptr<ast::Decl>, param_idx: usize) -> CodegenResult<(), U>`
 pub fn for_each_call_arg<'ctx, U>(
-    params: Ptr<[Ptr<ast::Decl>]>,
+    params: DeclList,
     args: impl IntoIterator<Item = Ptr<Ast>>,
     mut f: impl FnMut(Ptr<Ast>, Ptr<ast::Decl>, usize) -> CodegenResult<(), U>,
 ) -> CodegenResult<(), U> {

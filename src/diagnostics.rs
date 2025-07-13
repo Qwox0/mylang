@@ -1,5 +1,4 @@
 use crate::{
-    arena_allocator::AllocErr,
     ast::{self, AstKind},
     display_code::display,
     error::SpannedError,
@@ -327,7 +326,3 @@ macro_rules! chint {
     };
 }
 pub(crate) use chint;
-
-pub fn handle_alloc_err(e: AllocErr) -> HandledErr {
-    cerror!(Span::ZERO, "allocation failed: {e}")
-}

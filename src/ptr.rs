@@ -110,16 +110,18 @@ impl<T> Ptr<[T]> {
     pub fn empty_slice() -> Ptr<[T]> {
         Ptr::from(&[] as &[T])
     }
-
-    pub fn cast_slice<U>(self) -> Ptr<[U]> {
-        unsafe { std::mem::transmute(self) }
-    }
 }
 
 impl<T> Ptr<MaybeUninit<T>> {
     pub fn write(self, val: T) -> Ptr<T> {
         self.as_mut().write(val);
         self.cast::<T>()
+    }
+}
+
+impl<T> Ptr<[MaybeUninit<T>]> {
+    pub fn assume_init(self) -> Ptr<[T]> {
+        Ptr::from_ref(unsafe { self.assume_init_ref() })
     }
 }
 

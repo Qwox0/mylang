@@ -1,9 +1,9 @@
 use crate::{
     arena_allocator::Arena,
-    ast::{self, ast_new},
+    ast::{self, Scope, ScopeKind},
     cli::BuildArgs,
     compiler::CompileDurations,
-    diagnostics::{self, HandledErr, cerror, cerror2, chint, handle_alloc_err},
+    diagnostics::{self, HandledErr, cerror, cerror2, chint},
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
     sema::primitives::Primitives,
@@ -27,10 +27,11 @@ pub struct CompilationContextInner {
     pub compile_time: CompileDurations,
 
     pub primitives: Primitives,
-    pub primitives_scope: Ptr<ast::Block>,
+    pub root_scope: Ptr<Scope>,
 
     /// absolute import file path -> index into `files`
-    pub imports: HashMap<Box<Path>, FilesIndex>,
+    //pub imports: HashMap<Box<Path>, FilesIndex>, // If I use this valgrind shows false positives
+    pub imports: HashMap<PathBuf, FilesIndex>,
     /// This List must contain [`Ptr`]s because it might reallocate while a mutable reference to
     /// [`SourceFile`] is active.
     pub files: Vec<Ptr<SourceFile>>,
@@ -80,18 +81,17 @@ impl CompilationContext {
     pub fn new(args: BuildArgs) -> CompilationContext {
         let alloc = Arena::new();
 
-        let mut stmts = Vec::new();
-        let primitives = Primitives::setup(&mut stmts, &alloc);
-        let stmts = alloc.alloc_slice(&stmts).unwrap();
-        let stmts = Ptr::<[Ptr<ast::Decl>]>::cast_slice::<Ptr<ast::Ast>>(stmts);
+        let mut decls = Vec::new();
+        let primitives = Primitives::setup(&mut decls, &alloc);
+        let decls = alloc.alloc_slice(&decls).unwrap();
+        let root_scope = alloc.alloc(Scope::new(decls, ScopeKind::Root)).unwrap();
 
-        let global_scope =
-            ast_new!(Block { span: Span::ZERO, has_trailing_semicolon: false, stmts });
-        let primitives_scope = alloc.alloc(global_scope).unwrap();
-
-        let compiler_binary_path = std::env::current_exe().unwrap();
-        let compiler_libs_path =
-            compiler_binary_path.parent().unwrap().join("lib").canonicalize().unwrap();
+        let compiler_libs_path = if !cfg!(miri) {
+            let compiler_binary_path = std::env::current_exe().unwrap();
+            compiler_binary_path.parent().unwrap().join("lib").canonicalize().unwrap()
+        } else {
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/debug/lib"))
+        };
         assert!(
             compiler_libs_path.is_dir(),
             "\"{}\" must be a directory",
@@ -104,7 +104,7 @@ impl CompilationContext {
             compile_time: CompileDurations::default(),
 
             primitives,
-            primitives_scope,
+            root_scope,
 
             imports: HashMap::new(),
             files: Vec::new(),
@@ -210,11 +210,12 @@ impl Ptr<CompilationContextInner> {
         file: SourceFile,
         path: Option<PathBuf>,
     ) -> Result<FilesIndex, HandledErr> {
-        let file = self.alloc.alloc(file).map_err(handle_alloc_err)?;
+        let file = self.alloc.alloc(file)?;
         self.as_mut().files.push(file);
         let idx = self.files.len() - 1;
         if let Some(path) = path {
-            self.as_mut().imports.insert(path.into_boxed_path(), idx);
+            //self.as_mut().imports.insert(path.into_boxed_path(), idx);
+            self.as_mut().imports.insert(path, idx);
         }
         Ok(idx)
     }

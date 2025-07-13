@@ -31,5 +31,9 @@ bench() {
 }
 
 for i in $(seq 1 9); do
+    bench check "../aoc2024/day0${i}.mylang"
+done
+
+for i in $(seq 1 9); do
     bench build "../aoc2024/day0${i}.mylang"
 done

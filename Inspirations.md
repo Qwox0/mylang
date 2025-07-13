@@ -31,3 +31,4 @@ Unimplemented:
 * `?break`: Rust, Odin
 * `?continue`: Rust, Odin
 * `pub`, `pub(get)`, `pub(set)`, `pub(init)`: Rust, Swift
+* `$T` Generics: Zig, Haskell, Jai

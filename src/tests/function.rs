@@ -235,7 +235,7 @@ a :: -> 1
 ok :: -> 1; // decls are not allowed as the second expression after `->`
 ok2 :: -> _ := ok(); // but decls are allowed directly after `->`
 ";
-    test_compile_err_raw(code, "expected ';'", |code| {
+    test_compile_err_raw(code, "expected `;`", |code| {
         TestSpan::of_substr(code, "a :: -> 1").after()
     });
 }

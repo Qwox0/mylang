@@ -1,11 +1,18 @@
-use crate::ptr::Ptr;
-use std::{alloc::Layout, fmt, mem::MaybeUninit, ptr::NonNull};
+use crate::{
+    diagnostics::{HandledErr, cerror},
+    parser::lexer::Span,
+    ptr::Ptr,
+};
+use std::{alloc::Layout, mem::MaybeUninit, ptr::NonNull};
 
 #[derive(Debug)]
 pub struct Arena(pub bumpalo::Bump);
 
-#[derive(Debug, Clone)]
-pub struct AllocErr(bumpalo::AllocErr);
+pub type AllocErr = HandledErr;
+
+pub fn handle_alloc_err(e: bumpalo::AllocErr) -> AllocErr {
+    cerror!(Span::ZERO, "allocation failed: {e}")
+}
 
 impl Arena {
     #[inline]
@@ -15,15 +22,12 @@ impl Arena {
 
     #[inline]
     pub fn alloc<T>(&self, val: T) -> Result<Ptr<T>, AllocErr> {
-        match self.0.try_alloc(val) {
-            Ok(t) => Ok(Ptr::from(t)),
-            Err(e) => Err(AllocErr(e)),
-        }
+        Ok(Ptr::from_ref(self.0.try_alloc(val)?))
     }
 
     #[inline]
     pub fn alloc_layout(&self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
-        self.0.try_alloc_layout(layout).map_err(AllocErr)
+        self.0.try_alloc_layout(layout).map_err(handle_alloc_err)
     }
 
     #[inline]
@@ -46,12 +50,6 @@ impl Arena {
 
 impl From<bumpalo::AllocErr> for AllocErr {
     fn from(e: bumpalo::AllocErr) -> Self {
-        AllocErr(e)
-    }
-}
-
-impl fmt::Display for AllocErr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        handle_alloc_err(e)
     }
 }

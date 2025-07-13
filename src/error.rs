@@ -1,7 +1,6 @@
 use crate::{
-    parser::{ParseError, lexer::Span},
+    parser::lexer::Span,
     sema::{SemaError, SemaErrorKind},
-    util::unreachable_debug,
 };
 use std::fmt::Debug;
 
@@ -11,20 +10,6 @@ pub trait SpannedError: Debug {
     fn get_text(&self) -> String;
 
     fn was_already_handled(&self) -> bool;
-}
-
-impl SpannedError for ParseError {
-    fn span(&self) -> Span {
-        unreachable_debug()
-    }
-
-    fn get_text(&self) -> String {
-        unreachable_debug()
-    }
-
-    fn was_already_handled(&self) -> bool {
-        true
-    }
 }
 
 impl SpannedError for SemaError {

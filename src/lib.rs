@@ -4,16 +4,16 @@
 #![feature(iter_intersperse)]
 #![feature(new_range_api)]
 #![feature(if_let_guard)]
-#![feature(let_chains)]
 #![feature(try_blocks)]
 #![feature(assert_matches)]
-#![allow(incomplete_features)]
 #![feature(path_add_extension)]
 #![feature(exit_status_error)]
 #![feature(ptr_as_ref_unchecked)]
 #![feature(thread_local)]
 #![feature(formatting_options)]
 #![feature(maybe_uninit_slice)]
+#![feature(arbitrary_self_types)]
+#![feature(impl_trait_in_bindings)]
 
 pub mod arena_allocator;
 pub mod ast;

@@ -177,3 +177,21 @@ mod tests {
         assert_eq!(display(span).color_code(COLOR_RED).label("label").finish_to_string(), expected);
     }
 }
+
+#[allow(unused_macros)]
+macro_rules! debug_expr {
+    ($expr:expr) => {{
+        let expr = &$expr;
+        print!("\nDEBUG {:?} @ {}", expr.kind, ::std::panic::Location::caller());
+        if expr.span.file.is_some() {
+            println!();
+            crate::display_code::display(expr.span)
+                //.label(&format!("kind: {:?}", expr.kind))
+                .finish();
+        } else {
+            println!(", span: {:?} (no file)", expr.span);
+        }
+        println!("  {:x?}", expr.as_ref());
+    }};
+}
+pub(crate) use debug_expr;

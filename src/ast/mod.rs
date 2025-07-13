@@ -1,4 +1,5 @@
 use crate::{
+    arena_allocator::{AllocErr, Arena},
     codegen::llvm::finalize_ty,
     context::{FilesIndex, primitives},
     diagnostics::{HandledErr, cerror, cerror2},
@@ -293,11 +294,11 @@ macro_rules! ast_variants {
         }
 
         impl ConstVal {
-            pub const KINDS: [AstKind; 21] = [$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
+            pub const KINDS: &[AstKind] = &[$(AstKind::$c_name,)+ $(AstKind::$t_name,)+];
         }
 
         impl Type {
-            pub const KINDS: [AstKind; 12] = [$(AstKind::$t_name,)+];
+            pub const KINDS: &[AstKind] = &[$(AstKind::$t_name,)+];
         }
     };
 }
@@ -311,11 +312,9 @@ ast_variants! {
     /// `{ <stmt>* }`
     Block {
         has_trailing_semicolon: bool,
-        // parent: OPtr<Block>,
-        // pos_in_parent: StmtPos,
-        /// all statements in this block
+        scope: Scope,
+        /// all statements (including declarations) in this block
         stmts: Ptr<[Ptr<Ast>]>,
-        //decls: Vec<Ptr<Decl>>,
     },
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
@@ -467,14 +466,16 @@ ast_variants! {
     For {
         was_piped: bool,
         source: Ptr<Ast>,
-        iter_var: Ptr<Ident>,
+        iter_var: Ptr<Decl>,
         body: Ptr<Ast>,
+        scope: Scope,
     },
     /// `while <cond> <body>`
     While {
         was_piped: bool,
         condition: Ptr<Ast>,
         body: Ptr<Ast>,
+        // currently no `Scope` needed. This will change when declarations are allowed in `condition`
     },
 
     /*
@@ -553,23 +554,43 @@ ast_variants! {
     },
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
-    // TODO?: change this to use [`Block`]
     StructDef {
-        fields: DeclList,
+        /// the first [`Self::field_count`] values in [`Scope::decls`] are fields the remaining
+        /// decls are constants.
+        scope: Scope,
+        /// points to the fields in [`Scope::decls`].
+        // TODO(size): replace with `field_count`
+        fields: Ptr<[Ptr<Decl>]>,
+        /// contains the constants which are also in [`Scope::decls`] plus constants which are
+        /// defined later.
         consts: Vec<Ptr<Decl>>,
     },
     /// `union { a: int, b: String, c: (u8, u32) }`
     UnionDef {
-        fields: DeclList,
+        /// the first [`Self::field_count`] values in [`Scope::decls`] are fields the remaining
+        /// decls are constants.
+        scope: Scope,
+        /// points to the fields in [`Scope::decls`].
+        // TODO(size): replace with `field_count`
+        fields: Ptr<[Ptr<Decl>]>,
+        /// contains the constants which are also in [`Scope::decls`] plus constants which are
+        /// defined later.
         consts: Vec<Ptr<Decl>>,
     },
     /// `enum { A, B(i64) }`
     EnumDef {
         /// simple enum == no associated data
         is_simple_enum: bool,
-        variants: DeclList,
+        /// the first `variant_tags.len()` values in [`Scope::decls`] are variants the remaining
+        /// decls are constants.
+        scope: Scope,
+        /// points to the fields in [`Scope::decls`].
+        // TODO(size): replace with `variant_count`
+        variants: Ptr<[Ptr<Decl>]>,
         /// is present after sema of this ast node. always has the same length as `variants`.
         variant_tags: OPtr<[isize]>,
+        /// contains the constants which are also in [`Scope::decls`] plus constants which are
+        /// defined later.
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
     },
@@ -597,6 +618,7 @@ ast_variants! {
         /// if `body == None` this Ast node originated from a function type. Note: normal functions
         /// are also valid [`Type`]s.
         body: OPtr<Ast>,
+        scope: Scope,
     },
 }
 
@@ -693,7 +715,8 @@ impl Ptr<Ast> {
 
     #[inline]
     pub fn set_replacement(self, rep: Ptr<Ast>) {
-        debug_assert!(self.replacement.is_none());
+        debug_assert!(self.replacement.is_none_or(|r| r == rep));
+        //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
         self.as_mut().replacement = Some(rep)
     }
 
@@ -722,7 +745,7 @@ impl Ptr<Ast> {
         p.cast()
     }
 
-    pub fn try_get_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
+    pub fn try_downcast_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
         let p = self.rep();
         then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(
             || cerror2!(self.full_span(), "value not known at compile time"), // TODO: `#run` hint
@@ -732,13 +755,19 @@ impl Ptr<Ast> {
     #[inline]
     pub fn downcast_type(self) -> Ptr<Type> {
         let p = self.rep();
-        debug_assert!(p.is_type() || p.kind == AstKind::Fn);
+        //debug_assert!(p.is_type() || p.kind == AstKind::Fn);
+        debug_assert!(p.has_type_kind());
         p.cast()
     }
 
     pub fn try_downcast_type(self) -> OPtr<Type> {
         let p = self.rep();
         then!(p.is_type() => p.downcast_type())
+    }
+
+    pub fn try_downcast_type_by_kind(self) -> OPtr<Type> {
+        let p = self.rep();
+        then!(p.has_type_kind() => p.downcast_type())
     }
 
     pub fn downcast_type_ref(&mut self) -> &mut Ptr<Type> {
@@ -806,7 +835,7 @@ impl Ptr<ConstVal> {
 }
 
 impl Ptr<Type> {
-    #[cfg_attr(debug_assertions, track_caller)]
+    /// always behaves like a `flat_downcast`.
     pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
         debug_assert!(self.replacement.is_none());
         debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
@@ -888,7 +917,7 @@ impl Ast {
         AstMatch::match_(Ptr::<Ast>::from_ref(self))
     }
 
-    pub(crate) fn block_expects_trailing_semicolon(&self) -> bool {
+    pub(crate) fn block_expects_trailing_sep(&self) -> bool {
         match self.matchable().as_ref() {
             AstEnum::Block { .. } => false,
             AstEnum::Decl { init, is_const, .. } => {
@@ -905,11 +934,11 @@ impl Ast {
                 }
             },
             &AstEnum::If { then_body, else_body, .. } => {
-                else_body.unwrap_or(then_body).block_expects_trailing_semicolon()
+                else_body.unwrap_or(then_body).block_expects_trailing_sep()
             },
             AstEnum::Match { .. } => todo!(),
             AstEnum::For { body, .. } | AstEnum::While { body, .. } => {
-                body.block_expects_trailing_semicolon()
+                body.block_expects_trailing_sep()
             },
             AstEnum::Empty { .. } => false,
             _ => true,
@@ -962,7 +991,7 @@ impl Ast {
                 if *was_piped { condition.full_span() } else { span }.join(r_span)
             },
             AstEnum::Match { .. } => todo!(),
-            AstEnum::For { source: l, iter_var: _, body, was_piped, .. }
+            AstEnum::For { source: l, body, was_piped, .. }
             | AstEnum::While { condition: l, body, was_piped, .. } => {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
@@ -1085,25 +1114,6 @@ impl OptionTypeExt for Option<Ptr<Type>> {
     }
 }
 
-/// The number of [`Decl`]s before this statement.
-///
-/// ```text
-/// stmt pos=0
-/// decl pos=0
-/// stmt pos=1
-/// stmt pos=1
-/// decl pos=1
-/// stmt pos=2
-/// ```
-///
-/// A [`Decl`] has the same pos as the statement before it because ...
-///
-/// ```mylang
-/// a := a + 1; // the `a` in the init expr shouldn't be resolved to this decl.
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StmtPos(pub usize);
-
 impl AstEnum {
     #[inline]
     pub fn as_ast(&self) -> Ptr<Ast> {
@@ -1185,30 +1195,26 @@ impl Decl {
             _ => Err(cerror!(lhs.full_span(), "expected variable name")),
         }
     }
-}
 
-impl Ptr<Decl> {
-    pub fn const_val(self) -> Ptr<Ast> {
+    pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
         let never = primitives().never;
         if self.ty.u() == never {
             return never.upcast();
         }
         debug_assert!(self.is_const);
-        let cv = self.init.u().rep();
-        debug_assert!(cv.is_const_val());
-        cv
+        self.init.u().downcast_const_val().upcast()
     }
 
-    pub fn try_const_val(self) -> OPtr<Ast> {
+    pub fn try_const_val(self: Ptr<Decl>) -> OPtr<Ast> {
         then!(self.is_const => self.const_val())
     }
 
-    pub fn lhs_span(self) -> Span {
+    pub fn lhs_span(self: Ptr<Decl>) -> Span {
         let name_span = self.ident.span;
         self.on_type.map(|t| t.full_span().join(name_span)).unwrap_or(name_span)
     }
 
-    pub fn display_lhs(self) -> impl std::fmt::Display {
+    pub fn display_lhs(self: Ptr<Decl>) -> impl std::fmt::Display {
         struct DeclLhsDisplay {
             on_type: OPtr<Ast>,
             ident: Ptr<Ident>,
@@ -1225,6 +1231,145 @@ impl Ptr<Decl> {
 
         DeclLhsDisplay { on_type: self.on_type, ident: self.ident }
     }
+}
+
+impl Block {
+    pub fn new(
+        stmts: Ptr<[Ptr<Ast>]>,
+        scope: Scope,
+        has_trailing_semicolon: bool,
+        span: Span,
+    ) -> Self {
+        ast_new!(Block { span, has_trailing_semicolon, stmts, scope })
+    }
+
+    pub fn new_anon(stmts: Ptr<[Ptr<Ast>]>, scope: Scope) -> Self {
+        Block::new(stmts, scope, false, Span::ZERO)
+    }
+}
+
+/// The number of [`Decl`]s before this statement in the current [`Scope`].
+///
+/// ```text
+/// stmt pos=0
+/// decl pos=0
+/// stmt pos=1
+/// stmt pos=1
+/// decl pos=1
+/// stmt pos=2
+/// ```
+///
+/// A [`Decl`] has the same pos as the statement before it because ...
+///
+/// ```mylang
+/// a := a + 1; // the `a` in the init expr shouldn't resolve to this decl.
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScopePos(pub usize);
+
+impl ScopePos {
+    pub const UNSET: Self = ScopePos(usize::MAX);
+
+    #[inline]
+    pub fn inc(&mut self) {
+        self.0 += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    Root,
+    File,
+    Block,
+    ForLoop,
+    Fn,
+    /// `struct`s, `union`s, `enum`s
+    Aggregate,
+}
+
+impl ScopeKind {
+    pub fn allows_shadowing(self) -> bool {
+        matches!(self, ScopeKind::Block)
+    }
+}
+
+#[derive(Debug)]
+pub struct Scope {
+    pub parent: OPtr<Scope>,
+    pub pos_in_parent: ScopePos,
+    pub decls: DeclList,
+    // Vec is only needed for custom types
+    //pub decls: Vec<Ptr<Decl>>, // nocheckin
+    pub kind: ScopeKind,
+}
+
+impl Scope {
+    pub fn new(decls: DeclList, kind: ScopeKind) -> Scope {
+        //pub fn new(decls: Vec<Ptr<Decl>>, kind: ScopeKind) -> Scope {
+        Scope { parent: None, pos_in_parent: ScopePos::UNSET, decls, kind }
+    }
+
+    pub fn from_stmts(
+        stmts: &[Ptr<Ast>],
+        kind: ScopeKind,
+        alloc: &Arena, // nocheckin
+    ) -> Result<Scope, AllocErr> {
+        // TODO: bench copy vs preallocate `stmts.len`
+        let decls = stmts.iter().filter_map(|s| s.try_downcast::<Decl>()).collect::<Vec<_>>();
+        Ok(Scope::new(alloc.alloc_slice(&decls)?, kind))
+        //Ok(Scope::new(decls, kind))
+    }
+
+    /// also returns the fields as a [`DeclList`].
+    pub fn for_aggregate(
+        fields: Vec<Ptr<Decl>>,
+        consts: Vec<Ptr<Decl>>,
+        alloc: &Arena, // nocheckin
+    ) -> Result<ScopeAndAggregateInfo, AllocErr> {
+        let field_count = fields.len();
+        let mut decls = fields;
+        decls.extend(&consts);
+        let scope = Scope::new(alloc.alloc_slice(&decls)?, ScopeKind::Aggregate);
+        let fields = Ptr::from_ref(scope.decls.get(..field_count).u());
+        Ok(ScopeAndAggregateInfo { scope, fields, consts })
+    }
+
+    pub fn find_decl_norec(&self, name: &str, cur_pos: ScopePos) -> OPtr<Decl> {
+        linear_search_symbol(&self.decls[..cur_pos.0], name)
+    }
+
+    pub fn find_decl(&self, name: &str, cur_pos: ScopePos) -> OPtr<Decl> {
+        let mut cur_scope = Some(Ptr::from_ref(self));
+        let mut cur_pos = cur_pos;
+        while let Some(scope) = cur_scope {
+            let decls = if scope.kind.allows_shadowing() {
+                &scope.decls[..cur_pos.0]
+            } else {
+                &scope.decls
+            };
+            if let Some(sym) = linear_search_symbol(decls, name) {
+                return Some(sym);
+            }
+            cur_scope = scope.parent;
+            cur_pos = scope.pos_in_parent;
+        }
+        return None;
+    }
+}
+
+pub fn linear_search_symbol(decls: &[Ptr<Decl>], name: &str) -> Option<Ptr<Decl>> {
+    decls
+        .iter()
+        .copied()
+        .rev() // `rev()` because of shadowing
+        .filter(|d| d.on_type.is_none())
+        .find(|d| *d.ident.text == *name)
+}
+
+pub struct ScopeAndAggregateInfo {
+    pub scope: Scope,
+    pub fields: DeclList,
+    pub consts: Vec<Ptr<Decl>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1460,16 +1605,6 @@ impl DeclListExt for [Ptr<Decl>] {
     fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_ {
         self.iter().map(|decl| decl.var_ty.u())
     }
-}
-
-pub fn iter_field_expr<'a>(
-    fields: &'a [Ptr<Decl>],
-    const_fields: &'a [Ptr<Decl>],
-) -> impl Iterator<Item = Ptr<Decl>> + 'a {
-    fields
-        .iter()
-        .copied()
-        .chain(const_fields.iter().copied().take_while(|f| f.on_type.is_none()))
 }
 
 pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {

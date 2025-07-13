@@ -18,18 +18,18 @@ pub test :: (mut x := 1) { // TODO: test this (better error)
 
 #[test]
 fn good_error_message2() {
-    test_compile_err_raw("test :: -> A; A :: 1 ", "expected ';'", |code| {
+    test_compile_err_raw("test :: -> A; A :: 1 ", "expected `;`", |code| {
         TestSpan::pos(code.len() - 1)
     });
 
-    test_compile_err_raw("test :: -> { 1 ", "expected '}'", |code| TestSpan::pos(code.len()));
+    test_compile_err_raw("test :: -> { 1 ", "expected `}`, got EOF", |code| TestSpan::pos(code.len()));
 
     let code = "
 test :: -> {
     MyStruct :: struct { x: i64 };
     MyStruct.{ x = 5 }
 ";
-    test_compile_err_raw(code, "expected '}'", |code| TestSpan::pos(code.len()));
+    test_compile_err_raw(code, "expected `}`, got EOF", |code| TestSpan::pos(code.len()));
 }
 
 /*
