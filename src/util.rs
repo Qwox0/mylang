@@ -1,4 +1,9 @@
-use crate::{ast::DeclList, context::primitives, parser::lexer::Code};
+use crate::{
+    ast::DeclList,
+    context::primitives,
+    parser::lexer::Code,
+    ptr::{OPtr, Ptr},
+};
 use core::fmt;
 use std::{
     hint::unreachable_unchecked,
@@ -78,18 +83,18 @@ pub fn resolve_file_loc(byte_pos: usize, code: &Code) -> FileLoc {
 }
 
 pub trait UnwrapDebug {
-    type Inner;
+    type Unwrapped;
 
     /// like [`Option::unwrap`] but UB in release mode.
     #[track_caller]
-    fn u(self) -> Self::Inner;
+    fn u(self) -> Self::Unwrapped;
 }
 
 impl<T> UnwrapDebug for Option<T> {
-    type Inner = T;
+    type Unwrapped = T;
 
     #[inline]
-    fn u(self) -> Self::Inner {
+    fn u(self) -> Self::Unwrapped {
         if cfg!(debug_assertions) {
             self.unwrap()
         } else {
@@ -99,15 +104,24 @@ impl<T> UnwrapDebug for Option<T> {
 }
 
 impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
-    type Inner = T;
+    type Unwrapped = T;
 
     #[inline]
-    fn u(self) -> Self::Inner {
+    fn u(self) -> Self::Unwrapped {
         if cfg!(debug_assertions) {
             self.unwrap()
         } else {
             unsafe { self.unwrap_unchecked() }
         }
+    }
+}
+
+impl<T> UnwrapDebug for Ptr<[OPtr<T>]> {
+    type Unwrapped = Ptr<[Ptr<T>]>;
+
+    fn u(self) -> Self::Unwrapped {
+        debug_assert!(self.iter().all(Option::is_some));
+        unsafe { std::mem::transmute::<Self, Self::Unwrapped>(self) }
     }
 }
 

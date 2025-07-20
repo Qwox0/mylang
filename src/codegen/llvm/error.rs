@@ -23,15 +23,13 @@ pub enum CodegenError {
 unsafe impl Send for CodegenError {}
 unsafe impl Sync for CodegenError {}
 
-pub type CodegenResultError = CodegenError;
-
 #[derive(Debug)]
 pub enum CodegenResult<T, U = !> {
     Ok(T),
     /// Represents the [`unreachable`](https://llvm.org/docs/LangRef.html#i-unreachable) Terminator
     /// Instruction.
     Unreachable(U),
-    Err(CodegenResultError),
+    Err(CodegenError),
 }
 
 pub type CodegenResultAndControlFlow<T> = CodegenResult<T, ()>;
@@ -60,7 +58,7 @@ impl<T> CodegenResultAndControlFlow<T> {
         matches!(self, Ok(_))
     }
 
-    pub fn handle_unreachable(self) -> Result<Option<T>, CodegenResultError> {
+    pub fn handle_unreachable(self) -> Result<Option<T>, CodegenError> {
         match self {
             Ok(t) => Result::Ok(Some(t)),
             Unreachable(_) => Result::Ok(None),
@@ -68,7 +66,7 @@ impl<T> CodegenResultAndControlFlow<T> {
         }
     }
 
-    pub fn as_do_continue(self) -> Result<bool, CodegenResultError> {
+    pub fn as_do_continue(self) -> Result<bool, CodegenError> {
         self.handle_unreachable().map(|t| t.is_some())
     }
 }
@@ -125,7 +123,7 @@ impl<T> FromResidual<CodegenResult<!>> for CodegenResultAndControlFlow<T> {
 }
 
 impl<T, U, E> FromResidual<Result<Infallible, E>> for CodegenResult<T, U>
-where E: Into<CodegenResultError>
+where E: Into<CodegenError>
 {
     fn from_residual(residual: Result<Infallible, E>) -> Self {
         match residual {

@@ -1,7 +1,8 @@
 use super::{DeclMarkers, HasAstKind, OptionTypeExt};
 use crate::{
-    ast::{self, Ast, AstEnum, AstKind, UnaryOpKind, UpcastToAst},
+    ast::{self, Ast, AstEnum, AstKind, TypeEnum, UnaryOpKind, UpcastToAst},
     context::primitives,
+    parser::lexer::Span,
     ptr::Ptr,
     util::{self, UnwrapDebug, unreachable_debug},
 };
@@ -40,7 +41,15 @@ impl<T: DebugAst> DebugAst for Ptr<T> {
 impl DebugAst for Ast {
     #[inline]
     fn debug_impl(&self, lines: &mut impl DebugAstBuf) {
-        let ptr = Ptr::from_ref(self);
+        let mut ptr = Ptr::from_ref(self);
+        let ty = ptr.ty;
+        if ptr.replacement.is_some() {
+            let rep = ptr.rep();
+            if rep.span != Span::ZERO {
+                ptr = rep;
+            }
+        }
+
         let parenthesis_count = ptr.parenthesis_count;
         for _ in 0..parenthesis_count {
             lines.write("(");
@@ -68,7 +77,7 @@ impl DebugAst for Ast {
                 lines.write_opt_tree(lhs.as_ref());
                 lines.write(".{");
                 lines.write_many(
-                    &fields,
+                    fields.iter(),
                     |(field, val), _, lines| {
                         lines.write_tree(field);
                         if let Some(val) = val {
@@ -83,7 +92,7 @@ impl DebugAst for Ast {
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
                 lines.write_opt_tree(lhs.as_ref());
                 lines.write(".[");
-                lines.write_many(&elements, |e, _, l| l.write_tree(e), ",");
+                lines.write_many(elements.iter(), |e, _, l| l.write_tree(e), ",");
                 lines.write("]");
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
@@ -132,7 +141,7 @@ impl DebugAst for Ast {
                         DebugAstBuf::write_tree(lines, arg);
                     }
                 };
-                lines.write_many(&args, inner, ",");
+                lines.write_many(args.iter(), inner, ",");
                 lines.write(")");
             },
             AstEnum::UnaryOp { op, operand, is_postfix: false, .. } => {
@@ -304,6 +313,27 @@ impl DebugAst for Ast {
             AstEnum::CharVal { val, .. } => lines.write(&format!("'{}'", *val)),
             AstEnum::StrVal { text, .. } => lines.write(&format!("\"{}\"", text.as_ref())),
             AstEnum::PtrVal { val, .. } => lines.write(&format!("{:p}", *val as *const ())),
+            AstEnum::AggregateVal { elements, .. } => match ty.matchable().as_ref() {
+                TypeEnum::ArrayTy { elem_ty, .. } => {
+                    lines.write_tree(elem_ty);
+                    lines.write(".[");
+                    lines.write_many_expr(elements, ", ");
+                    lines.write("]");
+                },
+                TypeEnum::StructDef { fields, .. } => {
+                    debug_assert_eq!(fields.len(), elements.len());
+                    lines.write(".{");
+                    lines.write_many(
+                        fields.iter().zip(elements.iter()),
+                        |(f, e), _, lines| {
+                            lines.write_fmt(format_args!("{}={e}", f.ident.text.as_ref())).unwrap();
+                        },
+                        ", ",
+                    );
+                    lines.write("}");
+                },
+                cv => todo!("debug {cv:?}"),
+            },
             AstEnum::Fn { params, ret_ty, ret_ty_expr, body, .. } => {
                 lines.write("(");
                 lines.write_many_expr(params, ",");
@@ -353,7 +383,7 @@ impl DebugAst for Ast {
             AstEnum::StructDef { fields, .. } | AstEnum::UnionDef { fields, .. } => {
                 lines.write(if self.kind == AstKind::StructDef { "struct{" } else { "union{" });
                 lines.write_many(
-                    fields,
+                    fields.iter(),
                     |f, _, b| {
                         b.write_tree(&f.ident);
                         b.write(":");
@@ -370,7 +400,7 @@ impl DebugAst for Ast {
             AstEnum::EnumDef { variants, .. } => {
                 lines.write("enum{");
                 lines.write_many(
-                    &variants,
+                    variants.iter(),
                     |v, _, lines| {
                         lines.write_tree(&v.ident);
                         if let Some(ty_expr) = v.var_ty.filter(|t| *t != primitives().void_ty) {
@@ -421,13 +451,13 @@ pub trait DebugAstBuf: fmt::Write {
 
     /// SAFETY: don't leak the `&mut Self` param out of the body of
     /// `single_write_tree`.
-    fn write_many<'x, 'l, T>(
+    fn write_many<'l, T>(
         &'l mut self,
-        elements: &'x [T],
-        mut single_write_tree: impl FnMut(&'x T, usize, &'l mut Self),
+        elements: impl IntoIterator<Item = T>,
+        mut single_write_tree: impl FnMut(T, usize, &'l mut Self),
         sep: &str,
     ) {
-        for (idx, x) in elements.iter().enumerate() {
+        for (idx, x) in elements.into_iter().enumerate() {
             if idx != 0 {
                 self.write(sep);
             }
@@ -567,7 +597,12 @@ impl Debug for ast::ConstVal {
 
 impl Display for ast::ConstVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{:?}", self.to_text(false), self.ty.matchable())
+        write!(f, "{}", self.to_text(false))?;
+        match self.ty {
+            Some(ty) if self.kind != AstKind::AggregateVal => write!(f, "{ty}"),
+            Some(_) => Ok(()),
+            None => write!(f, "untyped"),
+        }
     }
 }
 

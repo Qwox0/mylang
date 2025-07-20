@@ -6,14 +6,14 @@ use crate::tests::jit_run_test;
 /// Rust does something else.
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct Arr<T, const LEN: usize> {
-    val: [T; LEN],
+pub struct CRetArr<T, const LEN: usize> {
+    pub val: [T; LEN],
     __force_sret: [u64; 10],
 }
 
 #[test]
 fn arr_initializer_with_lhs() {
-    assert_eq!(jit_run_test::<Arr<u8, 4>>("u8.[1, 2, 3, 4]").ok().val, [1, 2, 3, 4]);
+    assert_eq!(jit_run_test::<CRetArr<u8, 4>>("u8.[1, 2, 3, 4]").ok().val, [1, 2, 3, 4]);
 }
 
 /// also tests that the `elem_ty` is still inferred correctly.
@@ -29,7 +29,7 @@ fn arr_initializer_len_mismatch() {
 #[test]
 fn arr_initializer_on_ptr() {
     let code = "{ mut arr: [4]i64; ptr := &mut arr; ptr.[5, 6, 7, 8]; arr }";
-    assert_eq!(jit_run_test::<Arr<i64, 4>>(code).ok().val, [5, 6, 7, 8]);
+    assert_eq!(jit_run_test::<CRetArr<i64, 4>>(code).ok().val, [5, 6, 7, 8]);
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn arr_initializer_on_ptr_len_mismatch() {
 #[test]
 #[ignore = "not yet implemented"]
 fn arr_initializer_on_slice() {
-    let out = *jit_run_test::<Arr<i64, 4>>(
+    let out = *jit_run_test::<CRetArr<i64, 4>>(
         "{ arr := .[1, 2, 3, 4]; slice := arr[1..]; slice.[5, 6, 7]; arr }",
     )
     .ok();
@@ -73,13 +73,6 @@ fn arr_initializer_on_ref_mut_check() {
         |code| TestSpan::of_substr(code,  "slice.[5, 6, 7]"),
     );
     */
-}
-
-#[test]
-#[ignore = "not yet implemented"]
-fn array_constant() {
-    let out = *jit_run_test::<[i64; 5]>("MY_NUMBERS :: .[1,2,3,4,5]; MY_NUMBERS").ok();
-    debug_assert_eq!(out, [1, 2, 3, 4, 5]);
 }
 
 #[test]

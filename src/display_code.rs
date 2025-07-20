@@ -194,4 +194,5 @@ macro_rules! debug_expr {
         println!("  {:x?}", expr.as_ref());
     }};
 }
+#[allow(unused)]
 pub(crate) use debug_expr;

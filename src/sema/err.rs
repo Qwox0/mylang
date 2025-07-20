@@ -22,25 +22,12 @@ pub enum SemaErrorKind {
         lhs_ty: Ptr<ast::Type>,
         rhs_ty: Ptr<ast::Type>,
     },
-    DuplicateEnumVariant,
-    DuplicateField,
-    CannotInferInitializerTy,
     CannotInferAutocastTy,
-    DuplicateInInitializer,
-    MissingFieldInInitializer {
-        field: Ptr<str>,
-    },
     ReturnNotInAFunction,
     NotAType,
 
     MissingArg,
 
-    /// unknown struct or union field or enum variant
-    #[error("no field `{}` on type `{ty}`", &**field)]
-    UnknownField {
-        ty: Ptr<ast::Type>,
-        field: Ptr<str>,
-    },
     CannotInfer,
     UnionFieldWithDefaultValue,
 
@@ -189,6 +176,14 @@ impl<T, E, E2: From<E>> FromResidual<Result<Infallible, E>> for SemaResult<T, E2
     fn from_residual(residual: Result<Infallible, E>) -> Self {
         match residual {
             Result::Err(err) => Err(err.into()),
+        }
+    }
+}
+
+impl<T, E> FromResidual<Option<Infallible>> for SemaResult<Option<T>, E> {
+    fn from_residual(residual: Option<Infallible>) -> Self {
+        match residual {
+            None => Ok(None),
         }
     }
 }

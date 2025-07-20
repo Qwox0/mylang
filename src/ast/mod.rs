@@ -2,10 +2,9 @@ use crate::{
     arena_allocator::{AllocErr, Arena},
     codegen::llvm::finalize_ty,
     context::{FilesIndex, primitives},
-    diagnostics::{HandledErr, cerror, cerror2},
+    diagnostics::{HandledErr, cerror},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    sema,
     type_::{RangeKind, ty_match},
     util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
@@ -54,12 +53,7 @@ inherit_ast! {
 
 /// Constructor for ast nodes
 macro_rules! ast_new {
-    ($kind:ident {
-        $(
-            $field:ident
-            $( : $val:expr )?
-        ),* $(,)?
-    }) => {
+    (local $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
         crate::ast::$kind {
             kind: crate::ast::AstKind::$kind,
             ty: None,
@@ -68,16 +62,18 @@ macro_rules! ast_new {
             $( $field $(: $val)? ),*
         }
     };
+    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }) => { {
+        let expr = ast_new!(local $kind { $($field $(:$val)?),* });
+        crate::context::ctx().alloc.alloc(expr)?
+    } };
+    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
+        ast_new!($kind { span: $span, $($field $(:$val)?),* })
+    };
 }
 pub(crate) use ast_new;
 
 macro_rules! type_new {
-    ($kind:ident {
-        $(
-            $field:ident
-            $( : $val:expr )?
-        ),* $(,)?
-    }) => {{
+    (local $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {{
         let kind = crate::ast::AstKind::$kind;
         debug_assert!(crate::ast::Type::KINDS.contains(&kind));
         crate::ast::$kind {
@@ -89,6 +85,9 @@ macro_rules! type_new {
             $( $field $(: $val)? ),*
         }
     }};
+    ($kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
+        crate::context::ctx().alloc.alloc(crate::ast::type_new!(local $kind { $($field $(:$val)?),* }))?
+    };
 }
 pub(crate) use type_new;
 
@@ -208,21 +207,30 @@ macro_rules! ast_variants {
                 replacement: OPtr<Ast>,
                 span: Span,
                 parenthesis_count: u8,
-                $($field : $ty),*
+                $(
+                    $(#[$field_attr])*
+                    $field : $ty
+                ),*
             },)+
             $($c_name {
                 ty: OPtr<$crate::ast::Type>,
                 replacement: OPtr<Ast>,
                 span: Span,
                 parenthesis_count: u8,
-                $($c_field : $c_ty),*
+                $(
+                    $(#[$c_field_attr])*
+                    $c_field : $c_ty
+                ),*
             },)+
             $($t_name {
                 ty: OPtr<$crate::ast::Type>,
                 replacement: OPtr<Ast>,
                 span: Span,
                 parenthesis_count: u8,
-                $($t_field : $t_ty),*
+                $(
+                    $(#[$t_field_attr])*
+                    $t_field : $t_ty
+                ),*
             },)+
         }
 
@@ -510,6 +518,13 @@ ast_variants! {
     // BCharLit { val: u8 },
     StrVal { text: Ptr<str> },
     PtrVal { val: u64 },
+    /// used for constant `struct` values, `union` values, `enum` values and `array` values
+    AggregateVal {
+        /// Always contains all fields in the same order as defined.
+        // `.[val; N]`: store `val` only once?
+        elements: Ptr<[Ptr<ConstVal>]>,
+        //bytes: Ptr<[u8]>
+    },
 
     ImportDirective {
         path: Ptr<StrVal>,
@@ -682,8 +697,7 @@ impl Ptr<Ast> {
         if self.ty.u() != primitives().type_ty {
             return false;
         }
-        debug_assert!(self.has_type_kind(), "expected type kind; got: {:?}", self.kind);
-        debug_assert_ne!(self.ty, None);
+        debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
         true
     }
 
@@ -717,6 +731,11 @@ impl Ptr<Ast> {
     pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
+        if rep.ty.is_none() {
+            // Currently only needed for displaying replacements (like `ConstVal`s). Maybe can be
+            // removed in the future.
+            rep.as_mut().ty = Some(self.ty.u());
+        }
         self.as_mut().replacement = Some(rep)
     }
 
@@ -745,11 +764,9 @@ impl Ptr<Ast> {
         p.cast()
     }
 
-    pub fn try_downcast_const_val(self) -> Result<Ptr<ConstVal>, sema::SemaError> {
+    pub fn try_downcast_const_val(self) -> OPtr<ConstVal> {
         let p = self.rep();
-        then!(p.is_const_val() => p.downcast_const_val()).ok_or_else(
-            || cerror2!(self.full_span(), "value not known at compile time"), // TODO: `#run` hint
-        )
+        then!(p.is_const_val() => p.downcast_const_val())
     }
 
     #[inline]
@@ -761,8 +778,7 @@ impl Ptr<Ast> {
     }
 
     pub fn try_downcast_type(self) -> OPtr<Type> {
-        let p = self.rep();
-        then!(p.is_type() => p.downcast_type())
+        then!(self.is_type() => self.downcast_type())
     }
 
     pub fn try_downcast_type_by_kind(self) -> OPtr<Type> {
@@ -1148,19 +1164,19 @@ impl AstKind {
 impl Ident {
     #[inline]
     pub const fn new(text: Ptr<str>, span: Span) -> Ident {
-        ast_new!(Ident { span, text, decl: None })
+        ast_new!(local Ident { span, text, decl: None })
     }
 }
 
 impl Dot {
     pub const fn new(lhs: Option<Ptr<Ast>>, rhs: Ptr<Ident>, span: Span) -> Dot {
-        ast_new!(Dot { span, lhs, has_lhs: lhs.is_some(), rhs })
+        ast_new!(local Dot { span, lhs, has_lhs: lhs.is_some(), rhs })
     }
 }
 
 impl Decl {
     pub const fn new(ident: Ptr<Ident>, associated_type_expr: OPtr<Ast>, span: Span) -> Decl {
-        ast_new!(Decl {
+        ast_new!(local Decl {
             span,
             is_const: false,
             is_extern: false,
@@ -1180,17 +1196,13 @@ impl Decl {
     /// `MyStruct.ABC : u8 : /* ... */`
     /// `^^^^^^^^^^^^ lhs`
     pub fn from_lhs(lhs: Ptr<Ast>) -> Result<Decl, HandledErr> {
-        match lhs.kind {
-            AstKind::Ident => Ok(Decl::from_ident(lhs.downcast::<Ident>())),
-            AstKind::Dot => {
-                let dot = lhs.downcast::<Dot>();
-                match dot.lhs {
-                    Some(ty_expr) => Ok(Decl::new(dot.rhs, Some(ty_expr), lhs.full_span())),
-                    None => Err(cerror!(
-                        dot.span,
-                        "A member declaration requires an associated type name"
-                    )),
-                }
+        match lhs.matchable2() {
+            AstMatch::Ident(lhs) => Ok(Decl::from_ident(lhs)),
+            AstMatch::Dot(dot) => match dot.lhs {
+                Some(ty_expr) => Ok(Decl::new(dot.rhs, Some(ty_expr), lhs.full_span())),
+                None => {
+                    Err(cerror!(dot.span, "A member declaration requires an associated type name"))
+                },
             },
             _ => Err(cerror!(lhs.full_span(), "expected variable name")),
         }
@@ -1240,7 +1252,7 @@ impl Block {
         has_trailing_semicolon: bool,
         span: Span,
     ) -> Self {
-        ast_new!(Block { span, has_trailing_semicolon, stmts, scope })
+        ast_new!(local Block { span, has_trailing_semicolon, stmts, scope })
     }
 
     pub fn new_anon(stmts: Ptr<[Ptr<Ast>]>, scope: Scope) -> Self {

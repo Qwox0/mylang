@@ -38,10 +38,13 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
     use CommonTypeSelection::*;
     let p = primitives();
 
-    #[cfg(debug_assertions)]
-    if lhs == p.type_ty || rhs == p.type_ty {
-        println!("WARN: checking common_type_impl for primitive `type`");
-    }
+    // // Keep this for when NotFinished is removed.
+    //#[cfg(debug_assertions)]
+    //if lhs == p.type_ty || rhs == p.type_ty {
+    //    println!(
+    //        "WARN: checking common_type_impl for primitive `type`. Usually this is not wanted"
+    //    );
+    //}
 
     if lhs == rhs {
         return Lhs;

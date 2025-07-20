@@ -107,7 +107,6 @@ fn use_associated_const_in_struct_def() {
 }
 
 #[test]
-#[ignore = "not implemented"]
 fn allow_associated_const_on_failed_struct() {
     let code = "
     MyArr :: struct { x: error };
@@ -116,4 +115,16 @@ fn allow_associated_const_on_failed_struct() {
     test_compile_err_raw(code, "unknown identifier `error`", |code| {
         TestSpan::of_substr(code, "error")
     });
+}
+
+#[test]
+fn nested() {
+    let code = "
+MyStruct :: struct {};
+MyStruct.Inner :: struct {};
+MyStruct.Inner.Inner2 :: struct {};
+MyStruct.Inner.Inner2.Inner3 :: struct {};
+MyStruct.Inner.Inner2.NUM :: 10;
+test :: -> MyStruct.Inner.Inner2.NUM;";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
 }

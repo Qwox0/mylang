@@ -35,9 +35,12 @@ macro_rules! opt {
     }};
 }
 
-macro_rules! expr_ {
+macro_rules! expr {
     ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
-        ast_new!($kind { span: $span, $($field $(:$val)?),* })
+        ast_new!($kind { $($field $(:$val)?),* }, $span).upcast()
+    };
+    ($expr:expr) => {
+        crate::context::ctx().alloc.alloc($expr)?.upcast()
     };
 }
 
@@ -166,15 +169,6 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.lex.advance();
-
-        macro_rules! expr {
-            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
-                self.alloc(expr_!($kind { $($field $(:$val)?),* }, $span))?.upcast()
-            };
-            ($expr:expr) => {
-                self.alloc($expr)?.upcast()
-            };
-        }
 
         Ok(match op {
             FollowingOperator::Dot => {
@@ -308,23 +302,9 @@ impl Parser {
     fn value(&mut self) -> ParseResult<Ptr<Ast>> {
         let Token { kind, span } = self.lex.peek_or_eof();
 
-        macro_rules! expr {
-            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }) => { {
-                let expr = expr_!($kind { $($field $(:$val)?),* }, span);
-                self.alloc(expr)?.upcast()
-            } };
-            ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => { {
-                let expr = expr_!($kind { $($field $(:$val)?),* }, $span);
-                self.alloc(expr)?.upcast()
-            } };
-            ($expr:expr) => {
-                self.alloc($expr)?.upcast()
-            };
-        }
-
         Ok(match kind {
             TokenKind::Ident => {
-                expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None })
+                expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None }, span)
             },
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub | Keyword::Static) => {
                 self.var_decl(false)?.upcast()
@@ -386,12 +366,12 @@ impl Parser {
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
             TokenKind::Keyword(Keyword::Extern) => {
                 let ident = self.advanced().ident()?;
-                let mut d = ast::Decl::from_ident(ident);
+                let mut d = self.alloc(ast::Decl::from_ident(ident))?;
                 d.span = span;
                 d.is_extern = true;
                 self.tok(TokenKind::Colon)?;
                 d.var_ty_expr = Some(self.expr()?);
-                expr!(d)
+                d.upcast()
             },
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.advanced().expr()?;
@@ -465,16 +445,16 @@ impl Parser {
                     },
                     Err(e) => return cerror2!(span, "invalid integer literal: {e}"),
                 };
-                expr!(IntVal { val })
+                expr!(IntVal { val }, span)
             },
             TokenKind::FloatLit => {
                 let val = literals::parse_float_lit(&self.advanced().get_text_from_span(span))
                     .map_err(|e| cerror!(span, "invalid float literal: {e}"))?;
-                expr!(FloatVal { val })
+                expr!(FloatVal { val }, span)
             },
             TokenKind::BoolLitTrue | TokenKind::BoolLitFalse => {
                 self.lex.advance();
-                expr!(BoolVal { val: kind == TokenKind::BoolLitTrue })
+                expr!(BoolVal { val: kind == TokenKind::BoolLitTrue }, span)
             },
             TokenKind::CharLit => {
                 let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
@@ -491,7 +471,7 @@ impl Parser {
                 if chars.next().is_some() {
                     return cerror2!(span, "character literal contains more than one character");
                 }
-                expr!(CharVal { val })
+                expr!(CharVal { val }, span)
             },
             TokenKind::BCharLit => {
                 let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
@@ -510,12 +490,12 @@ impl Parser {
                 if bytes.next().is_some() {
                     return cerror2!(span, "byte character literal contains more than one byte");
                 }
-                //expr!(BCharLit { val: byte })
-                expr!(IntVal { val: byte as i64 })
+                //expr!(BCharLit { val: byte }, span)
+                expr!(IntVal { val: byte as i64 }, span)
             },
             TokenKind::StrLit => {
                 let lit = self.advanced().get_text_from_span(span);
-                expr!(StrVal { text: Ptr::from(&lit[1..lit.len().saturating_sub(1)]) })
+                expr!(StrVal { text: Ptr::from(&lit[1..lit.len().saturating_sub(1)]) }, span)
             },
             TokenKind::MultilineStrLitLine => {
                 // Note: Arena allocates in the wrong direction
@@ -532,7 +512,7 @@ impl Parser {
                 let bytes = self.alloc_slice(&scratch)?;
                 let text = unsafe { std::str::from_utf8_unchecked(&bytes) };
                 debug_assert!(text.ends_with('\n'));
-                expr!(StrVal { text: Ptr::from(&text[0..text.len().saturating_sub(1)]) })
+                expr!(StrVal { text: Ptr::from(&text[0..text.len().saturating_sub(1)]) }, span)
             },
             TokenKind::OpenParenthesis => {
                 // TODO: currently no tuples allowed!
@@ -629,7 +609,7 @@ impl Parser {
                 let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let op = if is_mut { UnaryOpKind::AddrMutOf } else { UnaryOpKind::AddrOf };
                 let operand = self.expr_(PREOP_PRECEDENCE)?;
-                expr!(UnaryOp { op, operand, is_postfix: false })
+                expr!(UnaryOp { op, operand, is_postfix: false }, span)
             },
             TokenKind::Dot => {
                 let rhs = self.advanced().ident()?;
@@ -637,14 +617,14 @@ impl Parser {
             },
             TokenKind::DotDot => {
                 let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
-                expr!(Range { start: None, end, is_inclusive: false })
+                expr!(Range { start: None, end, is_inclusive: false }, span)
             },
             TokenKind::DotDotEq => {
                 let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
                 if end.is_none() {
                     return cerror2!(span, "an inclusive range must have an end bound");
                 }
-                expr!(Range { start: None, end, is_inclusive: true })
+                expr!(Range { start: None, end, is_inclusive: true }, span)
             },
             TokenKind::DotOpenParenthesis => {
                 let (args, close_p_span) = self.advanced().parse_call(ScratchPool::new())?;
@@ -678,11 +658,12 @@ impl Parser {
 
                 let p = primitives();
 
+                // function-like directives:
                 if directive_name == "import" {
                     let path = parse_str_lit_arg("a path string literal")?;
                     let idx =
                         self.cctx.add_import(&path.text, Some(&self.lex.file.path), path.span)?;
-                    expr!(ImportDirective { path, files_idx: idx })
+                    expr!(ImportDirective { path, files_idx: idx }, span)
                 } else if directive_name == "library" {
                     let str_lit = parse_str_lit_arg("a library name")?;
                     self.cctx.add_library(str_lit)?;
@@ -694,7 +675,9 @@ impl Parser {
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "program_main" {
                     expr!(ProgramMainDirective {}, span.join(directive_ident.span))
-                } else if directive_name == "no_mangle" {
+                }
+                // annotation directives:
+                else if directive_name == "no_mangle" {
                     return cerror2!(
                         span.join(directive_ident.span),
                         "#{directive_name} is currently not implemented"
@@ -715,7 +698,10 @@ impl Parser {
                             Ident { text: Ptr::from_ref("main"), decl: Some(decl) },
                             decl.ident.span
                         );
-                        decl.ident.upcast().set_replacement(main_ident);
+                        // not using `set_replacement` because it requires a type and this is just
+                        // a temporary hack.
+                        debug_assert!(decl.ident.replacement.is_none());
+                        decl.as_mut().ident.replacement = Some(main_ident);
                         func
                     }
                 } else {
@@ -772,8 +758,7 @@ impl Parser {
         macro_rules! new_arr_init {
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } $(,)? ) => {{
                 let close_b = self.tok(TokenKind::CloseBracket)?;
-                self.alloc(expr_!($kind { lhs, $($field $(: $val )?),* }, open_b_span.join(close_b.span)))?
-                    .upcast()
+                expr!($kind { lhs, $($field $(: $val )?),* }, open_b_span.join(close_b.span))
             }}
         }
 
@@ -832,7 +817,7 @@ impl Parser {
         };
         let body = Some(body);
         let scope = Scope::new(params, ScopeKind::Fn);
-        self.alloc(expr_!(Fn { params, ret_ty_expr, ret_ty: None, body, scope }, start_span))
+        Ok(ast_new!(Fn { params, ret_ty_expr, ret_ty: None, body, scope }, start_span))
     }
 
     fn if_after_cond(
@@ -846,7 +831,7 @@ impl Parser {
         let then_body = self.expr_(IF_PRECEDENCE)?;
         let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
             => self.expr_(IF_PRECEDENCE)?);
-        self.alloc(expr_!(If { condition, then_body, else_body, was_piped }, start_span))
+        Ok(ast_new!(If { condition, then_body, else_body, was_piped }, start_span))
     }
 
     /// `... ( ... )`
@@ -883,7 +868,7 @@ impl Parser {
         pipe_idx: Option<usize>,
     ) -> ParseResult<Ptr<ast::Call>> {
         let (args, closing_paren_span) = self.parse_call(args)?;
-        self.alloc(expr_!(Call { func, args, pipe_idx }, closing_paren_span))
+        Ok(ast_new!(Call { func, args, pipe_idx }, closing_paren_span))
     }
 
     /// expects next token to be '{' and parses until and including the '}'

@@ -29,6 +29,8 @@ pub struct Primitives {
     pub char: Ptr<ast::Type>,
     pub f32: Ptr<ast::Type>,
     pub f64: Ptr<ast::Type>,
+    /// temporary?
+    pub f128: Ptr<ast::Type>,
     pub str_slice_ty: Ptr<ast::Type>,
     pub type_ty: Ptr<ast::Type>,
 
@@ -179,6 +181,7 @@ impl Primitives {
             char: new_primitive_ty!("char", simple_ty, finalized: true),
             f32: new_primitive_ty!("f32", FloatTy { bits: 32 }),
             f64: new_primitive_ty!("f64", FloatTy { bits: 64 }),
+            f128: new_primitive_ty!("f128", FloatTy { bits: 128 }),
             str_slice_ty: {
                 let str_slice =
                     ast_new!(SliceTy { elem_ty: u8.upcast(), is_mut: false }).upcast_to_type();

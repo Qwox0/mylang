@@ -10,18 +10,19 @@ use crate::{
     },
     context::{CompilationContextInner, ctx_mut, primitives as p},
     diagnostics::{
-        DiagnosticReporter, HandledErr, InitializerKind, cerror, cerror2, chint, cinfo, cwarn,
+        DiagnosticReporter, HandledErr, InitializerKind, cerror, cerror2, chint, cinfo,
+        cunimplemented, cwarn,
     },
     display_code::display,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     type_::{RangeKind, common_type, ty_match},
-    util::{self, UnwrapDebug, panic_debug, unreachable_debug},
+    util::{self, UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
-use std::{collections::HashSet, fmt::Write};
+use std::{collections::HashSet, fmt::Write, iter};
 
 mod err;
 pub mod primitives;
@@ -233,6 +234,7 @@ impl Sema {
             }};
         }
 
+        /// This exists because I want to use [`analyze!`]
         macro_rules! analyze_array_initializer_lhs {
             ($lhs:expr, $init_count:expr $(,)?) => {{
                 let lhs: OPtr<Ast> = $lhs;
@@ -310,6 +312,7 @@ impl Sema {
                 Some(sym) => {
                     let var_ty = self.get_symbol_var_ty(sym)?;
                     *decl = Some(sym);
+                    expr.ty = Some(var_ty);
                     if sym.is_const {
                         expr.set_replacement(sym.const_val());
                     } else if is_const {
@@ -322,10 +325,9 @@ impl Sema {
                         };
                         return cerror2!(
                             *span,
-                            "cannot access a non-constant symbol in a constant"
+                            "cannot access a non-constant symbol at compile time"
                         );
                     }
-                    expr.ty = Some(var_ty);
                 },
             },
             AstEnum::Block { stmts, has_trailing_semicolon, scope, .. } => {
@@ -363,12 +365,21 @@ impl Sema {
                 } else if let Some(s_def) = ty_hint.try_downcast::<ast::StructDef>() {
                     s_def.upcast()
                 } else {
-                    return err(CannotInferInitializerTy, expr.full_span());
+                    return self.cctx.error_cannot_infer_initializer_lhs(expr).into();
                 };
                 if let Some(s) = lhs.try_downcast::<ast::StructDef>() {
                     // allow slices?
-                    self.validate_call(&s.fields, args, span.end())?;
-                    expr.ty = Some(s.upcast_to_type())
+                    self.validate_call(&s.fields, args, span.end(), is_const)?;
+                    expr.ty = Some(s.upcast_to_type());
+
+                    if is_const {
+                        let all_args = args
+                            .iter()
+                            .copied()
+                            .chain(s.fields[args.len()..].iter().map(|f| f.init.u()));
+                        let cv = self.create_aggregate_const_val(s.fields.len(), all_args)?;
+                        expr.set_replacement(cv.upcast());
+                    }
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
                     && let Some(s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
                 {
@@ -376,8 +387,13 @@ impl Sema {
                         self.cctx.error_mutate_const_ptr(expr.full_span(), lhs);
                         return SemaResult::HandledErr;
                     }
-                    self.validate_call(&s.fields, args, span.end())?;
-                    expr.ty = Some(ptr_ty.upcast_to_type())
+                    expr.ty = Some(ptr_ty.upcast_to_type());
+
+                    if is_const {
+                        return self.cctx.error_const_ptr_initializer(expr).into();
+                    } else {
+                        self.validate_call(&s.fields, args, span.end(), false)?;
+                    }
                 } else {
                     self.cctx.error_cannot_apply_initializer(InitializerKind::Positional, lhs);
                     return SemaResult::HandledErr;
@@ -390,13 +406,19 @@ impl Sema {
                 } else if let Some(s_def) = ty_hint.filter(|t| t.kind.is_struct_kind()) {
                     s_def.upcast()
                 } else {
-                    return err(CannotInferInitializerTy, expr.full_span());
+                    return self.cctx.error_cannot_infer_initializer_lhs(expr).into();
                 };
                 if let Some(struct_ty) = lhs.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
-                    self.validate_initializer(struct_ty, *values, is_const, span)?;
-                    expr.ty = Some(struct_ty)
+                    let const_values =
+                        self.validate_initializer(struct_ty, *values, is_const, span)?;
+                    debug_assert_eq!(const_values.is_some(), is_const);
+                    expr.ty = Some(struct_ty);
+                    if let Some(elements) = const_values {
+                        let val = ast_new!(AggregateVal { elements }, expr.span);
+                        expr.set_replacement(val.upcast());
+                    }
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
                     && let Some(struct_ty) = ptr_ty.pointee.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
@@ -405,8 +427,12 @@ impl Sema {
                         self.cctx.error_mutate_const_ptr(expr.full_span(), lhs);
                         return SemaResult::HandledErr;
                     }
-                    self.validate_initializer(struct_ty, *values, is_const, span)?;
-                    expr.ty = Some(ptr_ty.upcast_to_type())
+                    if is_const {
+                        return self.cctx.error_const_ptr_initializer(expr).into();
+                    } else {
+                        self.validate_initializer(struct_ty, *values, is_const, span)?;
+                        expr.ty = Some(ptr_ty.upcast_to_type());
+                    }
                 } else {
                     self.cctx.error_cannot_apply_initializer(InitializerKind::Named, lhs);
                     return SemaResult::HandledErr;
@@ -443,30 +469,42 @@ impl Sema {
 
                 if lhs.is_none() || expr.ty.is_none() {
                     let len = elements.len() as i64;
-                    let len = self.alloc(ast_new!(IntVal { span: Span::ZERO, val: len }))?.upcast();
-                    let elem_ty = elem_ty.upcast();
-                    let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?;
+                    let len = ast_new!(IntVal { val: len }, Span::ZERO).upcast();
+                    let arr_ty = type_new!(ArrayTy { len, elem_ty: elem_ty.upcast() });
                     //debug_assert!(expr.ty.is_none());
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
 
-                assert!(!is_const, "todo: const array");
+                if is_const {
+                    let cv =
+                        self.create_aggregate_const_val(elements.len(), elements.iter().copied())?;
+                    expr.set_replacement(cv.upcast());
+                }
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
-                let u64_ty = p.u64;
-                analyze!(*count, Some(u64_ty), true);
-                self.ty_match(*count, u64_ty)?;
-                let len = count.try_downcast_const_val()?.upcast();
+                analyze!(*count, Some(p.u64), true);
+                self.ty_match(*count, p.u64)?;
+                let len = count
+                    .try_downcast_const_val()
+                    .ok_or_else(|| {
+                        self.cctx
+                            .error_non_const(*count, "Array length must be known at compile time")
+                    })?
+                    .upcast();
 
                 let mut elem_ty = analyze_array_initializer_lhs!(*lhs, len.int());
 
                 let val_ty = *analyze!(*val, elem_ty);
                 let elem_ty =
                     check_and_set_target!(val_ty, &mut elem_ty, val.return_val_span()).upcast();
-                let arr_ty = self.alloc(type_new!(ArrayTy { len, elem_ty }))?.upcast_to_type();
-                expr.ty = Some(arr_ty);
+                let arr_ty = type_new!(ArrayTy { len, elem_ty });
+                expr.ty = Some(arr_ty.upcast_to_type());
 
-                assert!(!is_const, "todo: const array");
+                if is_const {
+                    let len = len.int();
+                    let cv = self.create_aggregate_const_val(len, iter::repeat_n(*val, len))?;
+                    expr.set_replacement(cv.upcast());
+                }
             },
             AstEnum::Dot { has_lhs: true, lhs: Some(lhs), rhs, .. } => {
                 let lhs_ty = *analyze!(*lhs, None);
@@ -522,8 +560,9 @@ impl Sema {
                     ty
                 } else if let TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } =
                     lhs_ty.flatten_transparent().matchable().as_ref()
-                    && let Some((_, field)) = fields.find_field(&rhs.text)
+                    && let Some((f_idx, field)) = fields.find_field(&rhs.text)
                 {
+                    debug_assert!(!field.is_const);
                     // field access
                     if lhs_ty.kind == AstKind::PtrTy {
                         return cerror2!(
@@ -531,13 +570,27 @@ impl Sema {
                             "automatic dereferencing of pointers is currently not allowed"
                         );
                     }
-                    field.var_ty.or_not_finished()?
+                    let ty = field.var_ty.or_not_finished()?;
+                    if is_const {
+                        let Some(cv) = lhs.try_downcast_const_val() else {
+                            return cerror2!(
+                                lhs.full_span(),
+                                "Cannot access a field of a non-constant value in a constant \
+                                 context"
+                            );
+                        };
+                        let const_field =
+                            *cv.downcast::<ast::AggregateVal>().elements.get(f_idx).u();
+                        expr.set_replacement(const_field.upcast());
+                    }
+                    ty
                 } else if let TypeEnum::StructDef { consts, .. }
                 | TypeEnum::UnionDef { consts, .. }
                 | TypeEnum::EnumDef { consts, .. } =
                     lhs_ty.flatten_transparent().matchable().as_ref()
                     && let Some((_, method)) = consts.find_field(&rhs.text)
                 {
+                    debug_assert!(method.is_const);
                     // method access
                     rhs.ty = Some(method.var_ty.or_not_finished()?);
                     rhs.upcast().set_replacement(method.const_val());
@@ -561,7 +614,7 @@ impl Sema {
                     && &*rhs.text == "ptr"
                 {
                     // TODO: remove this allocation (test if cast SliceTy -> PointerTy is valid)
-                    self.alloc(type_new!(PtrTy { pointee: elem_ty, is_mut }))?.upcast_to_type()
+                    type_new!(PtrTy { pointee: elem_ty, is_mut }).upcast_to_type()
                 } else if lhs_ty.kind == AstKind::SliceTy && &*rhs.text == "len" {
                     p.u64
                 } else {
@@ -569,24 +622,24 @@ impl Sema {
                         debug_assert!(expr.ty.is_some());
                         return Ok(());
                     }
+                    let mut ty = None;
                     // method-like call:
                     // TODO?: maybe change syntax to `arg~my_fn(...)`. using `.` both for method
                     //        calls and method-like calls might be confusing
-                    let err = || err(UnknownField { ty: lhs_ty, field: rhs.text }, rhs.span);
-                    let Some(s) = self.get_symbol(rhs.text) else { return err() };
-                    let var_ty = self.get_symbol_var_ty(s)?;
-                    if let Some(f) = var_ty.try_downcast::<ast::Fn>()
-                        && let Some(first_param) = f.params.get(0)
-                        && ty_match(lhs.ty.u(), first_param.var_ty.u())
-                    {
-                        debug_assert!(s.is_const);
-                        rhs.upcast().set_replacement(f.upcast());
-                        p.method_stub
-                    } else if var_ty == p.never {
-                        p.never
-                    } else {
-                        return err();
+                    if let Some(s) = self.get_symbol(rhs.text) {
+                        let var_ty = self.get_symbol_var_ty(s)?;
+                        if let Some(f) = var_ty.try_downcast::<ast::Fn>()
+                            && let Some(first_param) = f.params.get(0)
+                            && ty_match(lhs.ty.u(), first_param.var_ty.u())
+                        {
+                            debug_assert!(s.is_const);
+                            rhs.upcast().set_replacement(f.upcast());
+                            ty = Some(p.method_stub);
+                        } else if var_ty == p.never {
+                            ty = Some(p.never);
+                        }
                     }
+                    ty.ok_or_else(|| self.cctx.error_unknown_field(*rhs, lhs_ty))?
                 };
                 expr.ty = Some(t);
             },
@@ -606,8 +659,7 @@ impl Sema {
                     return err(CannotInfer, expr.full_span());
                 };
                 let Some((_, variant)) = enum_ty.variants.find_field(&rhs.text) else {
-                    let ty = enum_ty.upcast_to_type();
-                    return err(UnknownField { ty, field: rhs.text }, rhs.span);
+                    return self.cctx.error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
                 };
                 *lhs = Some(enum_ty.upcast());
                 expr.ty = Some(if variant.var_ty.u() == p.void_ty {
@@ -617,7 +669,6 @@ impl Sema {
                 });
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
-                assert!(!is_const, "todo: const index");
                 let lhs_ty = analyze!(*lhs, None);
                 let (TypeEnum::SliceTy { elem_ty, .. } | TypeEnum::ArrayTy { elem_ty, .. }) =
                     lhs_ty.matchable().as_ref()
@@ -628,14 +679,18 @@ impl Sema {
                 let elem_ty = elem_ty.downcast_type();
                 let idx_ty = analyze!(*idx, None).finalize();
 
-                expr.ty = Some(match idx_ty.matchable().as_ref() {
+                match idx_ty.matchable().as_ref() {
                     TypeEnum::RangeTy { elem_ty: i, rkind, .. }
                         if i.matches_int() || *rkind == RangeKind::Full =>
                     {
                         self.validate_addr_of(*mut_access, *lhs, expr)?;
-                        let elem_ty = elem_ty.upcast();
-                        self.alloc(type_new!(SliceTy { elem_ty, is_mut: *mut_access }))?
-                            .upcast_to_type()
+                        let slice_ty =
+                            type_new!(SliceTy { elem_ty: elem_ty.upcast(), is_mut: *mut_access });
+                        expr.ty = Some(slice_ty.upcast_to_type());
+
+                        if is_const {
+                            cunimplemented!(expr.full_span(), "const slicing");
+                        }
                     },
                     _ if *mut_access => {
                         cerror!(
@@ -645,12 +700,33 @@ impl Sema {
                         chint!(expr.span, "to reference the value mutably, use `.&mut` instead");
                         return SemaResult::HandledErr;
                     },
-                    TypeEnum::IntTy { .. } => elem_ty,
+                    TypeEnum::IntTy { .. } => {
+                        expr.ty = Some(elem_ty);
+
+                        if is_const {
+                            if lhs_ty.kind == AstKind::SliceTy {
+                                cunimplemented!(
+                                    expr.full_span(),
+                                    "indexing into slice at compile time"
+                                )
+                            }
+                            let arr = lhs.downcast::<ast::AggregateVal>();
+                            let idx = idx.int::<usize>();
+                            if idx >= arr.elements.len() {
+                                return cerror2!(
+                                    expr.full_span(),
+                                    "index out of bounds: the length is {} but the index is {idx}",
+                                    arr.elements.len(),
+                                );
+                            }
+                            expr.set_replacement(arr.elements[idx].upcast());
+                        }
+                    },
                     _ => {
                         cerror!(idx.full_span(), "Cannot index into array with `{idx_ty}`");
                         return SemaResult::HandledErr;
                     },
-                });
+                }
             },
             AstEnum::Cast { operand, target_ty, .. } => {
                 let ty = self.analyze_type(*target_ty)?;
@@ -672,8 +748,8 @@ impl Sema {
                     cerror!(expr.full_span(), "Cannot directly call a function in a constant");
                     chint!(
                         expr.full_span().start(),
-                        "Consider using the #run directive to explicitly run the function at \
-                         compile time (currently not implemented): {}",
+                        "Consider using the `#run` directive to evaluate the function at compile \
+                         time (currently not implemented): {}",
                         func.try_flat_downcast::<ast::Ident>()
                             .map(|i| format!(": `#run {}(...)`", i.text.as_ref()))
                             .unwrap_or_default()
@@ -684,7 +760,7 @@ impl Sema {
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
                 expr.ty = Some(if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
-                    self.validate_call(&f.params, args, span.end())?;
+                    self.validate_call(&f.params, args, span.end(), false)?;
 
                     debug_assert!(is_finished_or_recursive(f, self));
                     f.ret_ty.unwrap_or(p.unknown_ty)
@@ -694,7 +770,7 @@ impl Sema {
                     let args = std::iter::once(dot.lhs.u())
                         .chain(args.iter().copied())
                         .collect::<Vec<_>>(); // TODO: bench no allocation
-                    self.validate_call(&fn_ty.as_ref().params, &args, span.end())?;
+                    self.validate_call(&fn_ty.as_ref().params, &args, span.end(), false)?;
 
                     debug_assert!(is_finished_or_recursive(fn_ty, self));
                     fn_ty.ret_ty.unwrap_or(p.unknown_ty)
@@ -702,7 +778,7 @@ impl Sema {
                     let Some(dot) = func.try_downcast::<ast::Dot>() else { unreachable_debug() };
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(&dot.rhs.text).u().1;
-                    self.validate_call(&[variant], args, span.end())?;
+                    self.validate_call(&[variant], args, span.end(), false)?;
                     enum_ty.upcast_to_type()
                 } else {
                     cerror!(
@@ -747,7 +823,7 @@ impl Sema {
                         self.validate_addr_of(is_mut, *operand, expr)?;
                         let pointee = expr_ty.upcast();
                         debug_assert!(!is_const, "todo: const addr of");
-                        self.alloc(type_new!(PtrTy { pointee, is_mut }))?.upcast_to_type()
+                        type_new!(PtrTy { pointee, is_mut }).upcast_to_type()
                     },
                     UnaryOpKind::Deref => {
                         expr_ty = *analyze!(*operand, None);
@@ -826,11 +902,18 @@ impl Sema {
                     },
                 });
                 if is_const {
-                    let Some((lhs, rhs)) =
-                        lhs.try_downcast_const_val().ok().zip(rhs.try_downcast_const_val().ok())
-                    else {
-                        return SemaResult::HandledErr;
-                    };
+                    let lhs = lhs.try_downcast_const_val().ok_or_else(|| {
+                        self.cctx.error_non_const(
+                            *lhs,
+                            "Left-hand side of compile time operation not known at compile time",
+                        )
+                    })?;
+                    let rhs = rhs.try_downcast_const_val().ok_or_else(|| {
+                        self.cctx.error_non_const(
+                            *rhs,
+                            "Right-hand side of compile time operation not known at compile time",
+                        )
+                    })?;
 
                     macro_rules! calc_num_binop {
                         ($op:tt $(, allow $float_val:ident)?) => {
@@ -903,8 +986,7 @@ impl Sema {
                         (common_ty, kind)
                     },
                 };
-                let range_ty = self.alloc(type_new!(RangeTy { elem_ty, rkind }))?;
-                expr.ty = Some(range_ty.upcast_to_type());
+                expr.ty = Some(type_new!(RangeTy { elem_ty, rkind }).upcast_to_type());
             },
             AstEnum::Assign { lhs, rhs, .. } => {
                 assert!(!is_const, "todo: Assign in const");
@@ -1137,6 +1219,7 @@ impl Sema {
             */
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
             AstEnum::PtrVal { .. } => todo!(),
+            AstEnum::AggregateVal { .. } => todo!(),
             AstEnum::Fn { params, ret_ty_expr, ret_ty, body, scope, .. } => {
                 for (idx, param) in params.iter().enumerate() {
                     let param_name = param.ident.text.as_ref();
@@ -1236,7 +1319,11 @@ impl Sema {
                 handle_struct_scope!(scope, |field, _| {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
-                        return err(DuplicateField, field.ident.span);
+                        return cerror2!(
+                            field.ident.span,
+                            "duplicate struct field `{}`",
+                            field.ident.text.as_ref()
+                        );
                     }
                     debug_assert!(field.is_const == consts.contains(&field));
                     self.var_decl_to_value(field)
@@ -1248,7 +1335,11 @@ impl Sema {
                 handle_struct_scope!(scope, |field, _| {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
-                        return err(DuplicateField, field.ident.span);
+                        return cerror2!(
+                            field.ident.span,
+                            "duplicate union field `{}`",
+                            field.ident.text.as_ref()
+                        );
                     }
                     debug_assert!(field.is_const == consts.contains(&field));
                     if let Some(d) = field.init {
@@ -1273,7 +1364,11 @@ impl Sema {
                 handle_struct_scope!(scope, |variant, idx| {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
                     if is_duplicate {
-                        return err(DuplicateEnumVariant, variant.ident.span);
+                        return cerror2!(
+                            variant.ident.span,
+                            "duplicate enum variant `{}`",
+                            variant.ident.text.as_ref()
+                        );
                     }
                     if variant.var_ty_expr.is_none() {
                         variant.as_mut().var_ty_expr = Some(p.void_ty.upcast());
@@ -1366,16 +1461,16 @@ impl Sema {
         };
         let bits = name[1..].parse().ok()?;
         debug_assert!(![8, 16, 32, 64, 128].contains(&bits));
-        Some(type_new!(IntTy { bits, is_signed }))
+        Some(type_new!(local IntTy { bits, is_signed }))
     }
 
     pub fn validate_initializer(
         &mut self,
         struct_ty: Ptr<ast::Type>,
-        mut initializer_values: Ptr<[(Ptr<ast::Ident>, Option<Ptr<Ast>>)]>,
+        initializer_values: Ptr<[(Ptr<ast::Ident>, Option<Ptr<Ast>>)]>,
         is_const: bool,
         initializer_span: Span,
-    ) -> SemaResult<()> {
+    ) -> SemaResult<OPtr<[Ptr<ast::ConstVal>]>> {
         let fields = match struct_ty.matchable().as_ref() {
             TypeEnum::StructDef { fields, .. } => &**fields,
             TypeEnum::SliceTy { elem_ty, is_mut, .. } => {
@@ -1384,42 +1479,93 @@ impl Sema {
             _ => unreachable_debug(),
         };
 
+        let mut ok = true;
+        macro_rules! on_err {
+            () => {
+                ok = false;
+                continue
+            };
+        }
+        let mut const_values =
+            then!(is_const => self.cctx.alloc.alloc_slice_default(fields.len())?);
+        macro_rules! handle_const_val {
+            ($f_idx:expr, $val_expr:expr) => {
+                if let Some(const_values) = const_values.as_mut() {
+                    if let Some(cv) = $val_expr.try_downcast_const_val() {
+                        const_values[$f_idx] = Some(cv);
+                    } else {
+                        self.cctx.error_non_const_initializer_field($val_expr);
+                        on_err!();
+                    }
+                }
+            };
+        }
         let mut is_initialized_field = vec![false; fields.len()];
-        for (f, init) in initializer_values.iter_mut() {
-            match try {
-                let field = f.text;
-                let Some((f_idx, f_decl)) = fields.find_field(&field) else {
-                    err(UnknownField { ty: struct_ty, field }, f.span)?
-                };
+        for (f, init) in initializer_values.as_mut().iter_mut() {
+            let Some((f_idx, f_decl)) = fields.find_field(&f.text) else {
+                self.cctx.error_unknown_field(*f, struct_ty);
+                on_err!();
+            };
 
-                if is_initialized_field[f_idx] {
-                    err(DuplicateInInitializer, f.span)?
-                }
-                is_initialized_field[f_idx] = true;
+            if is_initialized_field[f_idx] {
+                cerror!(f.span, "Duplicate field in named initializer");
+                let (prev, prev_init) =
+                    initializer_values.iter().find(|v| v.0.text.as_ref() == f.text.as_ref()).u();
+                let prev_span =
+                    prev_init.map(|init| prev.span.join(init.full_span())).unwrap_or(prev.span);
+                chint!(prev_span, "first initialization here");
+                on_err!();
+            }
+            is_initialized_field[f_idx] = true;
 
-                if init.is_none() {
-                    *init = Some(f.upcast())
-                }
-                self.analyze_and_finalize_with_known_type(init.u(), f_decl.var_ty.u(), is_const)?;
-            } {
+            let init = *init.get_or_insert(f.upcast());
+            match self.analyze_and_finalize_with_known_type(init, f_decl.var_ty.u(), is_const) {
                 Ok(()) => {},
                 NotFinished => NotFinished::<!, !>?,
-                Err(err) => self.cctx.error2(&err),
+                Err(err) => {
+                    self.cctx.error2(&err);
+                    on_err!();
+                },
             }
+            handle_const_val!(f_idx, init);
         }
 
-        for missing_field in is_initialized_field
-            .into_iter()
-            .enumerate()
-            .filter(|(_, is_init)| !is_init)
-            .map(|(idx, _)| fields[idx])
-            .filter(|f| f.init.is_none())
+        for (f_idx, _) in
+            is_initialized_field.into_iter().enumerate().filter(|(_, is_init)| !is_init)
         {
-            let field = missing_field.ident.text;
-            self.cctx
-                .error2(&err_val(MissingFieldInInitializer { field }, initializer_span));
+            let field = fields[f_idx];
+            let Some(init) = field.init else {
+                cerror!(initializer_span, "missing field `{}` in initializer", field.ident.text);
+                on_err!();
+            };
+            handle_const_val!(f_idx, init);
         }
-        Ok(())
+        if ok {
+            Ok(const_values.map(|cvalues| cvalues.u()))
+        } else {
+            SemaResult::HandledErr
+        }
+    }
+
+    fn create_aggregate_const_val(
+        &mut self,
+        expected_elem_count: usize,
+        all_element_exprs: impl IntoIterator<Item = Ptr<ast::Ast>>,
+    ) -> SemaResult<Ptr<ast::AggregateVal>> {
+        let mut ok = true;
+        let mut elements = self.cctx.alloc.alloc_slice_default(expected_elem_count)?;
+        for (elem, arg) in elements.iter_mut().zip(all_element_exprs) {
+            if let Some(cv) = arg.try_downcast_const_val() {
+                *elem = Some(cv);
+            } else {
+                self.cctx.error_non_const_initializer_field(arg);
+                ok = false;
+            }
+        }
+        if !ok {
+            return SemaResult::HandledErr;
+        }
+        Ok(ast_new!(AggregateVal { elements: elements.u() }, Span::ZERO))
     }
 
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
@@ -1436,10 +1582,8 @@ impl Sema {
         let p = p();
         let decl = decl_ptr.as_mut();
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this
-        if let Some(ty_expr) = decl.on_type
-            && is_first_pass
-        {
-            let ty = self.analyze_type(ty_expr.upcast())?;
+        if is_first_pass && let Some(ty_expr) = decl.on_type {
+            let ty = self.analyze_type(ty_expr)?;
             match ty.matchable().as_mut() {
                 TypeEnum::StructDef { fields, consts, .. }
                 | TypeEnum::UnionDef { fields, consts, .. }
@@ -1488,12 +1632,18 @@ impl Sema {
             }
         }
         if let Some(init) = decl.init {
-            self.analyze(init, &decl.var_ty, decl.is_const)?;
+            let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
+            self.analyze(init, &decl.var_ty, decl.is_const || is_static)?;
             check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
             init.as_mut().ty = Some(decl.var_ty.u());
             if decl.is_const && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
                 return cerror2!(init.full_span(), "Cannot evaluate value at compile time");
+            } else if is_static && !init.rep().is_const_val() {
+                return cerror2!(
+                    init.full_span(),
+                    "Currently the initial value of a static must be known at compile time"
+                );
             }
             Ok(())
         } else if decl.var_ty.is_some() {
@@ -1546,6 +1696,7 @@ impl Sema {
         params: &[Ptr<ast::Decl>],
         args: &[Ptr<ast::Ast>],
         close_p_span: Span,
+        is_const: bool,
     ) -> SemaResult<()> {
         // positional args
         let mut pos_idx = 0;
@@ -1558,7 +1709,7 @@ impl Sema {
                     params.len(),
                 );
             };
-            self.analyze_and_finalize_with_known_type(pos_arg, param.var_ty.u(), false)?;
+            self.analyze_and_finalize_with_known_type(pos_arg, param.var_ty.u(), is_const)?;
 
             pos_idx += 1;
         }
@@ -1597,7 +1748,7 @@ impl Sema {
             } else {
                 was_set[param_idx] = true;
             }
-            self.analyze_and_finalize_with_known_type(named_arg.rhs, param.var_ty.u(), false)?;
+            self.analyze_and_finalize_with_known_type(named_arg.rhs, param.var_ty.u(), is_const)?;
         }
 
         // missing args
@@ -1830,7 +1981,7 @@ impl Sema {
         is_mut: bool,
     ) -> SemaResult<[Ptr<ast::Decl>; 2]> {
         let p = p();
-        let elem_ptr_ty = self.alloc(type_new!(PtrTy { pointee: elem_ty.upcast(), is_mut }))?;
+        let elem_ptr_ty = type_new!(PtrTy { pointee: elem_ty.upcast(), is_mut });
         let mut ptr = self.alloc(ast::Decl::new(p.slice_ptr_field_ident, None, Span::ZERO))?;
         ptr.var_ty = Some(elem_ptr_ty.upcast_to_type());
         Ok([ptr, p.slice_len_field])
@@ -1888,7 +2039,7 @@ impl Sema {
     }
 
     #[inline]
-    fn alloc<T: core::fmt::Debug>(&self, val: T) -> SemaResult<Ptr<T>> {
+    fn alloc<T>(&self, val: T) -> SemaResult<Ptr<T>> {
         Ok(self.cctx.alloc.alloc(val)?)
     }
 }

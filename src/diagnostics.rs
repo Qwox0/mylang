@@ -11,30 +11,30 @@ use std::{cmp::Ordering, fmt::Display, io::Write};
 
 pub trait DiagnosticReporter {
     #[track_caller]
-    fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M);
+    fn report(&mut self, severity: DiagnosticSeverity, span: Span, msg: impl Display);
 
     #[track_caller]
-    fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M);
+    fn hint(&mut self, span: Span, msg: impl Display);
 
     fn max_past_severity(&self) -> Option<DiagnosticSeverity>;
 
     #[track_caller]
-    fn error<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+    fn error(&mut self, span: Span, msg: impl Display) {
         self.report(DiagnosticSeverity::Error, span, msg)
     }
 
     #[track_caller]
-    fn error_without_code<M: Display + ?Sized>(&mut self, msg: &M) {
+    fn error_without_code(&mut self, msg: impl Display) {
         self.error(Span::ZERO, msg)
     }
 
     #[track_caller]
-    fn warn<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+    fn warn(&mut self, span: Span, msg: impl Display) {
         self.report(DiagnosticSeverity::Warn, span, msg)
     }
 
     #[track_caller]
-    fn info<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+    fn info(&mut self, span: Span, msg: impl Display) {
         self.report(DiagnosticSeverity::Info, span, msg)
     }
 
@@ -94,6 +94,16 @@ pub trait DiagnosticReporter {
     }
 
     #[track_caller]
+    fn error_unknown_field(&self, field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
+        cerror!(field.span, "no field `{}` on type `{}`", field.text.as_ref(), ty)
+    }
+
+    #[track_caller]
+    fn error_unknown_variant(&self, variant: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
+        cerror!(variant.span, "no variant `{}` on enum type `{}`", variant.text.as_ref(), ty)
+    }
+
+    #[track_caller]
     fn error_cannot_apply_initializer(
         &mut self,
         initializer_kind: InitializerKind,
@@ -114,6 +124,46 @@ pub trait DiagnosticReporter {
                 lhs.ty.u()
             );
         }
+    }
+
+    #[track_caller]
+    fn error_cannot_infer_initializer_lhs(&mut self, initializer: Ptr<ast::Ast>) -> HandledErr {
+        cerror!(initializer.full_span(), "cannot infer struct type");
+        chint!(initializer.span.start(), "consider specifying the type explicitly");
+        HandledErr
+    }
+
+    #[track_caller]
+    fn error_non_const(&mut self, runtimevalue: Ptr<ast::Ast>, msg: impl Display) -> HandledErr {
+        self.error(runtimevalue.full_span(), msg);
+        // TODO: label: not a compile time known value
+        // this help doesn't make sense when `runtimevalue` is a local variable
+        chint!(
+            runtimevalue.full_span(),
+            "help: consider using `#run` to evaluate expression at compile time"
+        );
+        HandledErr
+    }
+
+    #[track_caller]
+    fn error_non_const_initializer_field(&mut self, field_init: Ptr<ast::Ast>) -> HandledErr {
+        self.error_non_const(
+            field_init,
+            "fields of constant struct values must be known at compile time",
+        )
+    }
+
+    #[track_caller]
+    fn error_const_ptr_initializer(&mut self, initializer: Ptr<ast::Ast>) -> HandledErr {
+        cerror!(
+            initializer.full_span(),
+            "cannot initialize a struct behind a pointer at compile time"
+        )
+    }
+
+    #[track_caller]
+    fn error_unimplemented(&mut self, span: Span, what: fmt::Arguments<'_>) {
+        cerror!(span, "{what} is currently not implemented");
     }
 }
 
@@ -141,7 +191,7 @@ pub struct DiagnosticPrinter {
 }
 
 impl DiagnosticReporter for DiagnosticPrinter {
-    fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M) {
+    fn report(&mut self, severity: DiagnosticSeverity, span: Span, msg: impl Display) {
         self.max_past_severity = self.max_past_severity.max(Some(severity));
         let mut stderr = std::io::stderr();
         write!(&mut stderr, "{severity}: {msg}").unwrap();
@@ -156,7 +206,7 @@ impl DiagnosticReporter for DiagnosticPrinter {
         writeln!(&mut stderr).unwrap();
     }
 
-    fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
+    fn hint(&mut self, span: Span, msg: impl Display) {
         display(span)
             .color_code(DiagnosticSeverity::Info.text_color())
             .label(&format!("{msg}"))
@@ -189,14 +239,14 @@ pub struct DiagnosticCollector {
 
 #[cfg(test)]
 impl DiagnosticReporter for DiagnosticCollector {
-    fn report<M: Display + ?Sized>(&mut self, severity: DiagnosticSeverity, span: Span, msg: &M) {
-        self.printer.report(severity, span, msg);
+    fn report(&mut self, severity: DiagnosticSeverity, span: Span, msg: impl Display) {
+        self.printer.report(severity, span, &msg);
         let msg = msg.to_string().into_boxed_str();
         self.diagnostics.push(SavedDiagnosticMessage { severity, span, msg })
     }
 
-    fn hint<M: Display + ?Sized>(&mut self, span: Span, msg: &M) {
-        self.printer.hint(span, msg);
+    fn hint(&mut self, span: Span, msg: impl Display) {
+        self.printer.hint(span, &msg);
         self.diagnostics.push(SavedDiagnosticMessage {
             severity: DiagnosticSeverity::Info,
             span,
@@ -326,3 +376,11 @@ macro_rules! chint {
     };
 }
 pub(crate) use chint;
+
+macro_rules! cunimplemented {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
+        crate::diagnostics::DiagnosticReporter::error_unimplemented(crate::context::ctx_mut(), $span, format_args!($fmt, $($args),*));
+        return crate::diagnostics::HandledErr.into()
+    }};
+}
+pub(crate) use cunimplemented;

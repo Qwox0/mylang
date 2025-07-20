@@ -17,6 +17,7 @@ mod array;
 mod associated_variables;
 mod binop;
 mod call_conv_c;
+mod consts;
 mod defer;
 mod enum_;
 mod for_loop;

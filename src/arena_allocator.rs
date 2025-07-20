@@ -46,6 +46,10 @@ impl Arena {
         let dst = self.alloc_layout(layout)?.cast::<MaybeUninit<T>>();
         Ok(Ptr::from(unsafe { core::slice::from_raw_parts_mut(dst.as_ptr(), len) }))
     }
+
+    pub fn alloc_slice_default<T: Default + Copy>(&self, len: usize) -> Result<Ptr<[T]>, AllocErr> {
+        Ok(Ptr::from(self.0.try_alloc_slice_fill_copy(len, T::default())?))
+    }
 }
 
 impl From<bumpalo::AllocErr> for AllocErr {

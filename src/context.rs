@@ -262,19 +262,16 @@ static mut CTX: Option<CompilationContextInner> = None;
 macro_rules! impl_diagnostic_reporter_for_ctx {
     ($ty:ty) => {
         impl crate::diagnostics::DiagnosticReporter for $ty {
-            fn report<M>(
+            fn report(
                 &mut self,
                 severity: crate::diagnostics::DiagnosticSeverity,
                 span: Span,
-                msg: &M,
-            ) where
-                M: std::fmt::Display + ?Sized,
-            {
+                msg: impl std::fmt::Display,
+            ) {
                 self.diagnostic_reporter.report(severity, span, msg)
             }
 
-            fn hint<M>(&mut self, span: Span, msg: &M)
-            where M: std::fmt::Display + ?Sized {
+            fn hint(&mut self, span: Span, msg: impl std::fmt::Display) {
                 self.diagnostic_reporter.hint(span, msg)
             }
 

@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, BinOpKind, DeclList, DeclListExt, DeclMarkers, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
+        self, Ast, AstEnum, AstKind, BinOpKind, ConstValEnum, DeclList, DeclListExt, DeclMarkers,
+        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::{ctx, primitives},
     display_code::display,
@@ -36,15 +36,13 @@ use inkwell::{
         FloatType, FunctionType, IntType, PointerType, StructType,
     },
     values::{
-        AggregateValue, AnyValue, AnyValueEnum, AsValueRef, BasicMetadataValueEnum, BasicValue,
-        BasicValueEnum, CallSiteValue, FloatValue, FunctionValue, GlobalValue, InstructionValue,
-        IntMathValue, IntValue, PhiValue, PointerValue, StructValue,
+        AggregateValue, AggregateValueEnum, AnyValue, AnyValueEnum, ArrayValue, AsValueRef,
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
+        FunctionValue, GlobalValue, InstructionValue, IntMathValue, IntValue, PhiValue,
+        PointerValue, StructValue,
     },
 };
-use std::{
-    assert_matches::debug_assert_matches, borrow::Cow, collections::HashMap, fmt::Debug,
-    marker::PhantomData, path::Path,
-};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, marker::PhantomData, path::Path};
 
 pub mod error;
 pub mod jit;
@@ -387,7 +385,7 @@ impl<'ctx> Codegen<'ctx> {
                                 (ptr, len)
                             },
                         };
-                        self.build_slice(ptr, len).coerce()
+                        reg(self.build_slice(ptr, len)?)
                     },
                     _ => unreachable_debug(),
                 }
@@ -611,7 +609,12 @@ impl<'ctx> Codegen<'ctx> {
                         let name = self.mangle_symbol(decl);
                         let global = self.module().add_global(ty, None, name.as_ref());
                         if is_static {
-                            global.set_initializer(&ty.const_zero());
+                            global.set_initializer(&match init
+                                .and_then(|i| i.try_downcast_const_val())
+                            {
+                                Some(cv) => self.compile_const_val(cv, var_ty)?.basic_val(),
+                                None => ty.const_zero(),
+                            });
                             if self.cur_fn.is_some() {
                                 // C does this for all `static`s
                                 global.set_linkage(Linkage::Internal);
@@ -873,49 +876,16 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::Empty { .. } => Ok(Symbol::Void),
 
-            AstEnum::IntVal { val, .. } => {
-                match expr.ty.as_mut().u().finalize().matchable().as_ref() {
-                    TypeEnum::IntTy { bits, is_signed, .. } => {
-                        reg(self.int_type(*bits).const_int(expr.int(), *is_signed))
-                    },
-                    TypeEnum::FloatTy { bits, .. } => {
-                        let float = *val as f64;
-                        if float as i64 != *val {
-                            panic!("literal precision loss")
-                        }
-                        reg(self.float_type(*bits).const_float(float))
-                    },
-                    _ => unreachable_debug(),
-                }
+            AstEnum::IntVal { .. }
+            | AstEnum::FloatVal { .. }
+            | AstEnum::BoolVal { .. }
+            | AstEnum::CharVal { .. }
+            | AstEnum::StrVal { .. }
+            | AstEnum::PtrVal { .. }
+            | AstEnum::AggregateVal { .. } => {
+                reg(self.compile_const_val(expr.downcast_const_val(), out_ty)?)
             },
-            AstEnum::FloatVal { val, .. } => {
-                let float_ty = expr.ty.downcast::<ast::FloatTy>();
-                reg(self.float_type(float_ty.bits).const_float(*val))
-            },
-            AstEnum::BoolVal { val, .. } => {
-                debug_assert!(expr.ty == p.bool);
-                reg(self.bool_val(*val))
-            },
-            AstEnum::CharVal { val, .. } => {
-                //debug_assert!(expr.ty == p.char);
-                debug_assert!(expr.ty == p.u8);
-                reg(self.int_type(8).const_int(*val as u8 as u64, false)) // TODO: real char type
-            },
-            // AstEnum::BCharLit { val, .. } => reg(self.int_type(8).const_int(*val as u64, false)),
-            AstEnum::StrVal { text, .. } => {
-                debug_assert!(expr.ty.u().matches_str());
-                let value = replace_escape_chars(&text);
-                let ptr = self.builder.build_global_string_ptr(&value, "")?;
-                let len = self.int_type(64).const_int(value.len() as u64, false);
-                self.build_slice(ptr.as_pointer_value(), len).coerce()
-            },
-            AstEnum::PtrVal { val, .. } => {
-                if *val == 0 {
-                    reg(self.ptr_type().const_null())
-                } else {
-                    todo!("other const ptrs")
-                }
-            },
+
             AstEnum::ImportDirective { .. }
             | AstEnum::ProgramMainDirective { .. }
             | AstEnum::SimpleDirective { .. } => {
@@ -941,6 +911,95 @@ impl<'ctx> Codegen<'ctx> {
                     None => self.compile_fn(f, FnKind::Lambda)?,
                 }))
             },
+        }
+    }
+
+    fn compile_const_val(
+        &mut self,
+        cv: Ptr<ast::ConstVal>,
+        ty: Ptr<ast::Type>,
+    ) -> CodegenResult<CodegenValue<'ctx>> {
+        debug_assert!(ty.is_finalized());
+        use codegen_val as ret;
+        let p = primitives();
+        match cv.matchable().as_ref() {
+            //ConstValEnum::IntVal { val, .. } => match ty.finalize().matchable().as_ref() {
+            ConstValEnum::IntVal { val, .. } => match ty.matchable().as_ref() {
+                TypeEnum::IntTy { bits, is_signed, .. } => {
+                    ret(self.int_type(*bits).const_int(*val as u64, *is_signed))
+                },
+                TypeEnum::FloatTy { bits, .. } => {
+                    let float = *val as f64;
+                    if float as i64 != *val {
+                        panic!("literal precision loss")
+                    }
+                    ret(self.float_type(*bits).const_float(float))
+                },
+                _ => unreachable_debug(),
+            },
+            ConstValEnum::FloatVal { val, .. } => {
+                let float_ty = ty.downcast::<ast::FloatTy>();
+                ret(self.float_type(float_ty.bits).const_float(*val))
+            },
+            ConstValEnum::BoolVal { val, .. } => {
+                debug_assert!(ty == p.bool);
+                ret(self.bool_val(*val))
+            },
+            ConstValEnum::CharVal { val, .. } => {
+                //debug_assert!(expr.ty == p.char);
+                debug_assert!(ty == p.u8);
+                ret(self.int_type(8).const_int(*val as u8 as u64, false)) // TODO: real char type
+            },
+            // ConstValEnum::BCharLit { val, .. } => ret(self.int_type(8).const_int(*val as u64, false)),
+            ConstValEnum::StrVal { text, .. } => {
+                debug_assert!(ty.matches_str());
+                let value = replace_escape_chars(&text);
+                let ptr = self.builder.build_global_string_ptr(&value, "")?;
+                let len = self.int_type(64).const_int(value.len() as u64, false);
+                ret(self.build_slice(ptr.as_pointer_value(), len)?)
+            },
+            ConstValEnum::PtrVal { val, .. } => {
+                debug_assert_eq!(ty.kind, AstKind::PtrTy);
+                if *val == 0 {
+                    ret(self.ptr_type().const_null())
+                } else {
+                    todo!("other const ptrs")
+                }
+            },
+            ConstValEnum::AggregateVal { elements, .. } => {
+                match ty.matchable().as_ref() {
+                    TypeEnum::SimpleTy { .. } => todo!(),
+                    TypeEnum::SliceTy { .. } => todo!(),
+                    TypeEnum::ArrayTy { elem_ty, len, .. } => {
+                        let elem_ty = elem_ty.downcast_type();
+                        let elem_llvm_ty = self.llvm_type(elem_ty).basic_ty();
+                        debug_assert_eq!(elements.len(), len.rep().int());
+                        let mut values = Vec::with_capacity(elements.len());
+                        for e in elements.iter() {
+                            values.push(self.compile_const_val(*e, elem_ty)?.as_value_ref());
+                        }
+                        // `ArrayType::const_array` has a wrong parameter type.
+                        ret(unsafe {
+                            ArrayValue::new_raw_const_array(elem_llvm_ty.as_type_ref(), &values)
+                        })
+                    },
+                    TypeEnum::StructDef { fields, .. } => {
+                        let struct_ty = self.llvm_type(ty).struct_ty();
+                        let mut values = Vec::with_capacity(elements.len());
+                        debug_assert_eq!(fields.len(), elements.len());
+                        for (e, f) in elements.iter().zip(fields.iter()) {
+                            values.push(self.compile_const_val(*e, f.var_ty.u())?.as_value_ref());
+                        }
+                        ret(new_raw_const_struct(struct_ty, &mut values))
+                    },
+                    TypeEnum::UnionDef { .. } => todo!(),
+                    TypeEnum::EnumDef { .. } => todo!(),
+                    TypeEnum::RangeTy { .. } => todo!(),
+                    TypeEnum::OptionTy { .. } => todo!(),
+                    _ => unreachable_debug(),
+                }
+            },
+            _ => todo!(),
         }
     }
 
@@ -2002,10 +2061,10 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         ptr: PointerValue<'ctx>,
         len: IntValue<'ctx>,
-    ) -> CodegenResult<Symbol<'ctx>> {
+    ) -> CodegenResult<AggregateValueEnum<'ctx>> {
         let slice = self.slice_ty().get_undef();
         let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
-        reg(self.builder.build_insert_value(slice, len, 1, "slice")?)
+        Ok(self.builder.build_insert_value(slice, len, 1, "slice")?)
     }
 
     /// # Usage
@@ -2838,6 +2897,11 @@ fn stack_val<'ctx, U>(ptr: PointerValue<'ctx>) -> CodegenResult<Symbol<'ctx>, U>
     Ok(Symbol::Stack(ptr))
 }
 
+#[inline]
+fn codegen_val<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
+    Ok(CodegenValue::new(val.as_value_ref()))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Loop<'ctx> {
     continue_bb: BasicBlock<'ctx>,
@@ -3074,5 +3138,18 @@ enum EnumTagType<'ctx> {
 impl<'ctx> EnumTagType<'ctx> {
     fn sized(self) -> Option<IntType<'ctx>> {
         if let EnumTagType::IntTy(int_ty) = self { Some(int_ty) } else { None }
+    }
+}
+
+fn new_raw_const_struct<'ctx>(
+    struct_ty: StructType<'ctx>,
+    args: &mut [LLVMValueRef],
+) -> StructValue<'ctx> {
+    unsafe {
+        StructValue::new(inkwell::llvm_sys::core::LLVMConstNamedStruct(
+            struct_ty.as_type_ref(),
+            args.as_mut_ptr(),
+            args.len() as u32,
+        ))
     }
 }

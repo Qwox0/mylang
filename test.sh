@@ -23,6 +23,8 @@ cyan="${esc}[0;36m"
 bold_red="${esc}[1;91m"
 bold_green="${esc}[1;92m"
 
+tests="$@"
+
 (set -x
-watchexec "cargo test ${@} -- --nocapture --test-threads 1") | \
+watchexec "cargo test -- $tests --nocapture --test-threads 1") | \
     sed "s/^test \([^ ]*\) \.\.\. \(FAILED\)\?\(ok\)\?/${cyan}TEST: \1${reset} ... ${bold_red}\2${bold_green}\3${reset}\n/"

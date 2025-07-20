@@ -99,7 +99,6 @@ file_test! { named_call_args }
 
 #[test]
 fn error_no_main() {
-    std::env::set_current_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"))).unwrap();
     let out = test_cmd(Command::new("mylang").arg("run").arg("./no_main.mylang"));
     assert!(!out.status.success());
     assert!(out.stderr.contains("Couldn't find the entry point 'main' in 'no_main.mylang'"));
