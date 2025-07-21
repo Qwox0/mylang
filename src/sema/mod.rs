@@ -1511,8 +1511,7 @@ impl Sema {
                 cerror!(f.span, "Duplicate field in named initializer");
                 let (prev, prev_init) =
                     initializer_values.iter().find(|v| v.0.text.as_ref() == f.text.as_ref()).u();
-                let prev_span =
-                    prev_init.map(|init| prev.span.join(init.full_span())).unwrap_or(prev.span);
+                let prev_span = prev.span.maybe_join(prev_init.map(|init| init.full_span()));
                 chint!(prev_span, "first initialization here");
                 on_err!();
             }

@@ -22,7 +22,9 @@ fn good_error_message2() {
         TestSpan::pos(code.len() - 1)
     });
 
-    test_compile_err_raw("test :: -> { 1 ", "expected `}`, got EOF", |code| TestSpan::pos(code.len()));
+    test_compile_err_raw("test :: -> { 1 ", "expected `}`, got EOF", |code| {
+        TestSpan::pos(code.len())
+    });
 
     let code = "
 test :: -> {
@@ -103,8 +105,7 @@ fn sret_no_memcpy() {
         test :: -> MyStruct.{ a = 5, b = 10, c = 15 };";
     let res = jit_run_test_raw::<MyStruct>(code);
     assert_eq!(*res.ok(), MyStruct { a: 5, b: 10, c: 15 });
-    let llvm_module_text = res.module_text().unwrap();
-    assert!(!llvm_module_text.contains("memcpy")); // TODO: implement this
+    assert!(!res.llvm_ir().contains("memcpy")); // TODO: implement this
 }
 
 #[test]

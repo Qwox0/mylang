@@ -9,7 +9,7 @@ use crate::{
 fn struct_method() {
     let code = "
 MyStruct :: struct { val: i64 };
-MyStruct.new :: -> MyStruct.(0);
+pub MyStruct.new :: -> MyStruct.(0);
 MyStruct.inc :: (self: *mut MyStruct) -> self.*.val += 1;
 test :: -> {
     mut a := MyStruct.new();

@@ -123,8 +123,7 @@ if a.inner.c != 12.34 return false;
 true";
     let res = jit_run_test::<bool>(code);
     assert!(res.ok());
-    let stack_allocations =
-        res.module_text().unwrap().lines().filter(|l| l.contains("alloca")).count();
+    let stack_allocations = res.llvm_ir().lines().filter(|l| l.contains("alloca")).count();
     assert_eq!(stack_allocations, 1, "this code should only do one stack allocation");
 }
 

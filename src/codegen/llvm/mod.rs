@@ -1045,13 +1045,13 @@ impl<'ctx> Codegen<'ctx> {
         let mut arg_values_was_initialized = vec![false; arg_values.len()];
 
         macro_rules! set_arg_val {
-            ($idx:expr, $val:expr) => {
+            ($idx:expr, $val:expr) => {{
                 arg_values[$idx as usize] = $val;
                 #[cfg(debug_assertions)]
                 {
                     arg_values_was_initialized[$idx as usize] = true;
                 }
-            };
+            }};
         }
 
         if use_sret {
@@ -1083,9 +1083,10 @@ impl<'ctx> Codegen<'ctx> {
                         set_arg_val!(arg_offset + f_idx, f_val.basic_metadata_val());
                     }
                 },
-                CFfiType::AsPtr | CFfiType::ByValPtr => {
+                CFfiType::ByValPtr | CFfiType::Array => {
                     set_arg_val!(arg_offset, self.build_ptr_to_sym(sym, param.var_ty.u())?.into());
                 },
+                CFfiType::Fn => set_arg_val!(arg_offset, sym.global().as_pointer_value().into()),
                 CFfiType::SmallSimpleEnum { small_int, ffi_int } => {
                     let val = self.sym_as_val_with_llvm_ty(
                         sym,
@@ -1235,7 +1236,7 @@ impl<'ctx> Codegen<'ctx> {
                         param_types.push(p.into());
                     }
                 },
-                CFfiType::AsPtr | CFfiType::ByValPtr => param_types.push(ptr_type),
+                CFfiType::ByValPtr | CFfiType::Fn | CFfiType::Array => param_types.push(ptr_type),
                 CFfiType::SmallSimpleEnum { ffi_int, .. } => param_types.push(ffi_int.into()),
             }
         }
@@ -1276,8 +1277,9 @@ impl<'ctx> Codegen<'ctx> {
             match ffi_ty {
                 CFfiType::Zst => {},
                 CFfiType::Simple(_)
-                | CFfiType::AsPtr
                 | CFfiType::ByValPtr
+                | CFfiType::Fn
+                | CFfiType::Array
                 | CFfiType::SmallSimpleEnum { .. } => {
                     params_iter.next().u().set_name(p.ident.text.as_ref());
                 },
@@ -1350,9 +1352,11 @@ impl<'ctx> Codegen<'ctx> {
                         }
                         Symbol::Stack(ptr)
                     },
-                    CFfiType::AsPtr => reg_sym(param_val_iter.next().u().into_pointer_value()),
                     CFfiType::ByValPtr => {
                         Symbol::Stack(param_val_iter.next().u().into_pointer_value())
+                    },
+                    CFfiType::Fn | CFfiType::Array => {
+                        reg_sym(param_val_iter.next().u().into_pointer_value())
                     },
                     CFfiType::SmallSimpleEnum { ffi_int, small_int } => {
                         let param = param_val_iter.next().u().into_int_value();
@@ -1783,12 +1787,12 @@ impl<'ctx> Codegen<'ctx> {
         let ret = match (ret_sym.basic(), self.c_ffi_type(ret_ty).flatten_simple2(self)) {
             (_, CFfiType::Zst) => None,
             (BasicSymbol::Zst, _) => unreachable_debug(),
-            (BasicSymbol::Val(val), CFfiType::AsPtr | CFfiType::ByValPtr) => {
+            (BasicSymbol::Val(val), CFfiType::ByValPtr | CFfiType::Array) => {
                 let sret_ptr = self.sret_ptr.u();
                 self.build_store(sret_ptr, val.basic_val(), ret_ty.alignment())?;
                 None
             },
-            (BasicSymbol::Ref(ptr), CFfiType::AsPtr | CFfiType::ByValPtr) => {
+            (BasicSymbol::Ref(ptr), CFfiType::ByValPtr | CFfiType::Array) => {
                 let sret_ptr = self.sret_ptr.u();
                 let alignment = ret_ty.alignment() as u32;
                 self.builder.build_memcpy(
@@ -1800,6 +1804,8 @@ impl<'ctx> Codegen<'ctx> {
                 )?;
                 None
             },
+            (BasicSymbol::Val(_), CFfiType::Fn) => unreachable_debug(),
+            (BasicSymbol::Ref(ptr), CFfiType::Fn) => Some(ptr.as_basic_value_enum()),
             (BasicSymbol::Val(val), CFfiType::Simple(llvm_ty)) if ret_ty.is_aggregate() => {
                 let ret = self.build_alloca(llvm_ty, "ret", ret_ty)?;
                 self.build_store(ret, val.basic_val(), ret_ty.alignment())?;
@@ -2384,8 +2390,9 @@ impl<'ctx> Codegen<'ctx> {
         let size = ty.size();
         match ty.matchable().as_ref() {
             _ if size == 0 => CFfiType::Zst,
+            TypeEnum::Fn { .. } => CFfiType::Fn,
+            TypeEnum::ArrayTy { .. } => CFfiType::Array,
             _ if size > 16 => CFfiType::ByValPtr,
-            TypeEnum::ArrayTy { .. } | TypeEnum::Fn { .. } => CFfiType::AsPtr,
             TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => CFfiType::Simple(
                 self.context
                     .struct_type(&[self.int_type(size as u32 * 8).as_basic_type_enum()], false)
@@ -2734,6 +2741,14 @@ impl<'ctx> Symbol<'ctx> {
             Symbol::Function(val) => BasicSymbol::Ref(val.as_global_value().as_pointer_value()),
         }
     }
+
+    fn global(self) -> GlobalValue<'ctx> {
+        match self {
+            Symbol::Global(val) => val,
+            Symbol::Function(val) => val.as_global_value(),
+            _ => unreachable_debug(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2921,10 +2936,14 @@ enum CFfiType<'ctx> {
     Simple(BasicTypeEnum<'ctx>),
     /// never a struct type. struct with 8 < size <= 16 Bytes will be converted to ints or floats
     Simple2([BasicTypeEnum<'ctx>; 2]),
-    /// arrays and functions are always passed as a `ptr` but without the `byval` attribute
-    AsPtr,
-    /// `ptr` with the `byval` attribute
+    /// passed as a `ptr` with the `byval` attribute.
+    /// returned via `sret`.
     ByValPtr,
+    /// functions are always passed and returned as a `ptr` but without the `byval` attribute
+    Fn,
+    /// arrays are always passed as a `ptr` but without the `byval` attribute.
+    /// returned via `sret`.
+    Array,
     /// Any simple enum smaller than [`DEFAULT_C_ENUM_BITS`]
     SmallSimpleEnum {
         ffi_int: IntType<'ctx>,
@@ -2935,7 +2954,8 @@ enum CFfiType<'ctx> {
 impl<'ctx> CFfiType<'ctx> {
     fn into_basic_ret_ty(self, codegen: &Codegen<'ctx>) -> Option<BasicTypeEnum<'ctx>> {
         match self {
-            CFfiType::Zst | CFfiType::AsPtr | CFfiType::ByValPtr => None,
+            CFfiType::Zst | CFfiType::ByValPtr | CFfiType::Array => None,
+            CFfiType::Fn => Some(codegen.ptr_type().as_basic_type_enum()),
             CFfiType::Simple(basic_type_enum) => Some(basic_type_enum),
             CFfiType::Simple2(fields) => {
                 Some(codegen.struct_type_inner(&fields, None, false).as_basic_type_enum())
@@ -2949,8 +2969,9 @@ impl<'ctx> CFfiType<'ctx> {
         match self {
             CFfiType::Zst
             | CFfiType::Simple(_)
-            | CFfiType::AsPtr
             | CFfiType::ByValPtr
+            | CFfiType::Fn
+            | CFfiType::Array
             | CFfiType::SmallSimpleEnum { .. } => self,
             CFfiType::Simple2(fields) => CFfiType::Simple(
                 codegen.struct_type_inner(&fields, None, false).as_basic_type_enum(),
@@ -2962,22 +2983,25 @@ impl<'ctx> CFfiType<'ctx> {
         match self {
             CFfiType::Zst => 0,
             CFfiType::Simple(_)
-            | CFfiType::AsPtr
             | CFfiType::ByValPtr
+            | CFfiType::Fn
+            | CFfiType::Array
             | CFfiType::SmallSimpleEnum { .. } => 1,
             CFfiType::Simple2(_) => 2,
         }
     }
 
     fn do_use_sret(&self) -> bool {
-        matches!(self, CFfiType::ByValPtr | CFfiType::AsPtr)
+        matches!(self, CFfiType::ByValPtr | CFfiType::Array)
     }
 }
 
 fn has_ffi_noundef(ty: Ptr<ast::Type>, c_ffi_ty: CFfiType<'_>) -> bool {
     match c_ffi_ty {
         CFfiType::Zst => false,
-        CFfiType::AsPtr | CFfiType::ByValPtr | CFfiType::SmallSimpleEnum { .. } => true,
+        CFfiType::ByValPtr | CFfiType::Fn | CFfiType::Array | CFfiType::SmallSimpleEnum { .. } => {
+            true
+        },
         CFfiType::Simple(_) | CFfiType::Simple2(_) => ty.is_ffi_noundef(),
     }
 }

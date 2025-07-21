@@ -1,9 +1,9 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
     codegen::llvm::finalize_ty,
-    context::{FilesIndex, primitives},
+    context::{FilesIndex, ctx, primitives},
     diagnostics::{HandledErr, cerror},
-    parser::lexer::Span,
+    parser::{lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     type_::{RangeKind, ty_match},
     util::{UnwrapDebug, panic_debug, then, unreachable_debug},
@@ -814,6 +814,14 @@ impl Ptr<Ast> {
     pub fn can_ignore_yielded_value(self) -> bool {
         self.ty.u().matches_void() || self.kind == AstKind::Call
     }
+
+    pub fn try_to_decl(self) -> Result<OPtr<Decl>, HandledErr> {
+        match self.matchable2() {
+            AstMatch::Decl(decl) => Ok(Some(decl)),
+            AstMatch::Ident(i) => ctx().alloc.alloc(Decl::from_ident(i)).map(Some),
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Ptr<ConstVal> {
@@ -972,7 +980,7 @@ impl Ast {
             | AstEnum::NamedInitializer { lhs, .. }
             | AstEnum::ArrayInitializer { lhs, .. }
             | AstEnum::ArrayInitializerShort { lhs, .. } => {
-                lhs.map(|e| e.full_span().join(span)).unwrap_or(span)
+                span.maybe_join(lhs.map(|e| e.full_span()))
             },
             AstEnum::Dot { lhs, has_lhs, rhs, .. } => {
                 lhs.filter(|_| *has_lhs).map(|l| l.full_span()).unwrap_or(span).join(rhs.span)
@@ -990,11 +998,9 @@ impl Ast {
             AstEnum::BinOp { lhs, rhs, .. }
             | AstEnum::Assign { lhs, rhs, .. }
             | AstEnum::BinOpAssign { lhs, rhs, .. } => lhs.full_span().join(rhs.full_span()),
-            AstEnum::Range { start, end, .. } => {
-                let start = start.map(|s| s.full_span()).unwrap_or(span);
-                let end = end.map(|e| e.full_span()).unwrap_or(span);
-                start.join(end)
-            },
+            AstEnum::Range { start, end, .. } => span
+                .maybe_join(start.map(|s| s.full_span()))
+                .maybe_join(end.map(|s| s.full_span())),
             AstEnum::Decl { is_extern: false, init, .. } => match &init {
                 Some(e) => span.join(e.full_span()),
                 None => span,
@@ -1027,9 +1033,9 @@ impl Ast {
             | AstEnum::OptionTy { inner_ty: i, .. } => self.span.join(i.full_span()),
             AstEnum::StructDef { .. } | AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => span,
             AstEnum::RangeTy { .. } => todo!(),
-            AstEnum::Fn { body, ret_ty_expr, .. } => {
-                span.join(body.or(*ret_ty_expr).u().full_span())
-            },
+            AstEnum::Fn { params, body, ret_ty_expr, .. } => span
+                .maybe_join(params.get(0).map(|p| p.ident.span))
+                .join(body.or(*ret_ty_expr).u().full_span()),
             _ => span,
         }
     }
@@ -1204,8 +1210,12 @@ impl Decl {
                     Err(cerror!(dot.span, "A member declaration requires an associated type name"))
                 },
             },
-            _ => Err(cerror!(lhs.full_span(), "expected variable name")),
+            _ => unexpected_expr(lhs, "a variable name"),
         }
+    }
+
+    pub fn is_lhs_only(&self) -> bool {
+        self.var_ty_expr.is_none() && self.init.is_none()
     }
 
     pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
@@ -1223,7 +1233,7 @@ impl Decl {
 
     pub fn lhs_span(self: Ptr<Decl>) -> Span {
         let name_span = self.ident.span;
-        self.on_type.map(|t| t.full_span().join(name_span)).unwrap_or(name_span)
+        name_span.maybe_join(self.on_type.map(|t| t.full_span()))
     }
 
     pub fn display_lhs(self: Ptr<Decl>) -> impl std::fmt::Display {

@@ -9,6 +9,7 @@ use std::{
     hint::unreachable_unchecked,
     io::{self, Read},
     iter::FusedIterator,
+    mem::MaybeUninit,
     path::Path,
 };
 
@@ -196,12 +197,14 @@ fn test_variant_count_to_tag_size_bits() {
     assert_eq!(variant_count_to_tag_size_bits(257), 9);
 }
 
-pub fn transmute_unchecked<T, U>(val: &T) -> U {
-    let ptr = val as *const T;
+pub fn transmute_unchecked<T, U>(val: T) -> U {
+    let ptr = &val as *const T;
     debug_assert!(ptr.is_aligned());
     let ptr = ptr as *const U;
     debug_assert!(ptr.is_aligned());
-    unsafe { std::ptr::read(ptr) }
+    let u = unsafe { std::ptr::read(ptr) };
+    std::mem::forget(val);
+    u
 }
 
 pub fn read_file_to_buf(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
@@ -280,3 +283,32 @@ impl<I: FusedIterator> IteratorExt for I {
 pub fn is_canonical(path: &Path) -> bool {
     path.canonicalize().is_ok_and(|p| p.as_path() == path)
 }
+
+pub const fn concat_arr_impl<T: Copy, const A: usize, const B: usize, const C: usize>(
+    a: [T; A],
+    b: [T; B],
+) -> [T; C] {
+    const { assert!(A + B == C) };
+
+    let mut result = [const { MaybeUninit::uninit() }; C];
+
+    let mut i = 0;
+    while i < A {
+        result[i].write(a[i]);
+        i += 1;
+    }
+
+    while i < A + B {
+        result[i].write(b[i - A]);
+        i += 1;
+    }
+
+    unsafe { MaybeUninit::array_assume_init(result) }
+}
+
+macro_rules! concat_arr {
+    ($arr1:expr, $arr2:expr $(,)?) => {
+        $crate::util::concat_arr_impl::<_, _, _, { $arr1.len() + $arr2.len() }>($arr1, $arr2)
+    };
+}
+pub(crate) use concat_arr;

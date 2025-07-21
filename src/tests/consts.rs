@@ -30,9 +30,8 @@ test :: -> CONST_STRUCT;
 ";
     let res = jit_run_test_raw::<(&'static str, u64)>(code);
     assert_eq!(*res.ok(), ("Hello World", 3));
-    let mod_text = res.module_text().unwrap();
-    assert!(mod_text.contains("{ { ptr, i64 } { ptr @0, i64 11 }, i64 3 }"));
-    assert!(!mod_text.contains("alloca"));
+    assert!(res.llvm_ir().contains("{ { ptr, i64 } { ptr @0, i64 11 }, i64 3 }"));
+    assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
 
     let code = "
@@ -42,9 +41,8 @@ test :: -> CONST_STRUCT;
 ";
     let res = jit_run_test_raw::<(&'static str, u64)>(code);
     assert_eq!(*res.ok(), ("Hello World", 3));
-    let mod_text = res.module_text().unwrap();
-    assert!(mod_text.contains("{ { ptr, i64 } { ptr @0, i64 11 }, { i64 } { i64 3 } }"));
-    assert!(!mod_text.contains("alloca"));
+    assert!(res.llvm_ir().contains("{ { ptr, i64 } { ptr @0, i64 11 }, { i64 } { i64 3 } }"));
+    assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
 
     let code = "
@@ -55,9 +53,7 @@ test :: -> {
     return CONST_STRUCT;
 }";
     let res = jit_run_test_raw::<(&'static str, u64)>(code);
-    let out = *res.ok();
-    println!("{:?}", out);
-    println!("{}", res.module_text().unwrap());
+    assert_eq!(*res.ok(), ("Hello World", 3));
     drop(res);
 
     let code = "
@@ -80,9 +76,8 @@ test :: -> CONST_ARR;
 ";
     let res = jit_run_test_raw::<[u64; 4]>(code);
     assert_eq!(res.ok(), &[1, 2, 3, 4]);
-    let mod_text = res.module_text().unwrap();
-    assert!(mod_text.contains("[4 x i64] [i64 1, i64 2, i64 3, i64 4]"));
-    assert!(!mod_text.contains("alloca"));
+    assert!(res.llvm_ir().contains("[4 x i64] [i64 1, i64 2, i64 3, i64 4]"));
+    assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
 
     let code = "
@@ -96,11 +91,10 @@ test :: -> {
 }";
     let res = jit_run_test_raw::<[(&'static str, u64); 2]>(code);
     assert_eq!(res.ok(), &[("Hello", 1), ("World", 2)]);
-    let mod_text = res.module_text().unwrap();
-    assert!(mod_text.contains(
+    assert!(res.llvm_ir().contains(
         "[2 x { { ptr, i64 }, i64 }] [{ { ptr, i64 }, i64 } { { ptr, i64 } { ptr @0, i64 5 }, i64 \
          1 }, { { ptr, i64 }, i64 } { { ptr, i64 } { ptr @1, i64 5 }, i64 2 }]"
     ));
-    assert!(!mod_text.contains("alloca"));
+    assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
 }

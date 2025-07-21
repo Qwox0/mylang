@@ -42,22 +42,22 @@ MySumType :: enum {
 
     let code = format!("{typedef}; test :: -> MySumType.Void;");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 0);
 
     let code = format!("{typedef}; test :: -> MySumType.Int(-13);");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 1);
-    assert_eq!(transmute_unchecked::<_, i64>(&out.val), -13);
+    assert_eq!(transmute_unchecked::<_, i64>(out.val), -13);
 
     let code = format!("{typedef}; test :: -> MySumType.Float(-331.5);");
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(out));
     println!("got       : {:?}", out);
-    let val = transmute_unchecked::<_, f64>(&out.val);
+    let val = transmute_unchecked::<_, f64>(out.val);
     assert_eq!(out.tag, 2);
     assert_eq!(val, -331.5);
 
@@ -70,10 +70,10 @@ test :: -> {{
 }}"
     );
     let out = *jit_run_test_raw::<MySumType>(code).ok();
-    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(&out));
+    println!("got bits  : {:016x?}", transmute_unchecked::<_, [u64; 2]>(out));
     println!("got       : {:?}", out);
     assert_eq!(out.tag, 1);
-    assert_eq!(transmute_unchecked::<_, i64>(&out.val), -13);
+    assert_eq!(transmute_unchecked::<_, i64>(out.val), -13);
 }
 
 #[test]
@@ -112,7 +112,7 @@ test :: -> MySumType.B(.{ a = -17, b = 10.123 });";
     assert_eq!(out.tag, 1);
     let InnerA { a, b } = unsafe { out.inner.B };
     assert_eq!(a, -17);
-    assert_eq!(transmute_unchecked::<_, f32>(&b), 10.123);
+    assert_eq!(transmute_unchecked::<_, f32>(b), 10.123);
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn custom_enum_tag_value() {
 fn no_noundef_with_sum_type() {
     let res = jit_run_test::<u16>("enum { A(u8), B, C }.B");
     assert_eq!(*res.ok(), 1);
-    assert!(!res.module_text().unwrap().contains("noundef"));
+    assert!(!res.llvm_ir().contains("noundef"));
 }
 
 #[test]

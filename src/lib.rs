@@ -14,6 +14,7 @@
 #![feature(maybe_uninit_slice)]
 #![feature(arbitrary_self_types)]
 #![feature(impl_trait_in_bindings)]
+#![feature(maybe_uninit_array_assume_init)]
 
 pub mod arena_allocator;
 pub mod ast;

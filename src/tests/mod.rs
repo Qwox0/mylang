@@ -9,7 +9,7 @@ use crate::{
     ptr::Ptr,
     util::IteratorExt,
 };
-use std::{fmt::Display, iter::FusedIterator};
+use std::{cell::OnceCell, fmt::Display, iter::FusedIterator};
 
 mod alignment;
 mod args;
@@ -28,7 +28,6 @@ mod index;
 mod initializer;
 mod logic_binop;
 mod mut_checks;
-mod parse_function;
 mod parse_number_literals;
 mod ptr;
 mod range;
@@ -56,6 +55,7 @@ pub struct JitRunTestResult<RetTy> {
     ret: Option<RetTy>,
     //module: Option<inkwell::module::Module<'static>>,
     backend_mod: Option<BackendModule>,
+    module_text: OnceCell<String>,
 }
 
 impl<RetTy> JitRunTestResult<RetTy> {
@@ -79,10 +79,21 @@ impl<RetTy> JitRunTestResult<RetTy> {
         self.diagnostics().iter().filter(|e| e.severity == DiagnosticSeverity::Warn)
     }
 
-    pub fn module_text(&self) -> Option<String> {
+    fn read_llvm_ir(&self) -> String {
         self.backend_mod
             .as_ref()
-            .map(|o| o.codegen_module().print_to_string().to_string())
+            .unwrap()
+            .codegen_module()
+            .print_to_string()
+            .to_string()
+    }
+
+    pub fn llvm_ir(&self) -> &str {
+        self.module_text.get_or_init(|| self.read_llvm_ir())
+    }
+
+    pub fn take_llvm_ir(&mut self) -> String {
+        self.module_text.take().unwrap_or_else(|| self.read_llvm_ir())
     }
 }
 
@@ -108,7 +119,7 @@ pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<Re
             .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
             .unwrap()
     });
-    JitRunTestResult { ret, ctx, full_code: code, backend_mod }
+    JitRunTestResult { ret, ctx, full_code: code, backend_mod, module_text: OnceCell::new() }
 }
 
 #[track_caller]
@@ -131,7 +142,13 @@ pub fn test_compile_err_raw(
     let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
     ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
     compile_ctx(ctx.0, CompileMode::TestRun);
-    let res = JitRunTestResult::<()> { ret: None, ctx, full_code: code, backend_mod: None };
+    let res = JitRunTestResult::<()> {
+        ret: None,
+        ctx,
+        full_code: code,
+        backend_mod: None,
+        module_text: OnceCell::new(),
+    };
     let err = res
         .errors()
         .one()

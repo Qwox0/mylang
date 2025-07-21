@@ -1,7 +1,9 @@
 use super::lexer::{Token, TokenKind};
 use crate::{
-    diagnostics::{cerror, cerror2, HandledErr},
+    ast,
+    diagnostics::{HandledErr, cerror, cerror2},
     parser::lexer::Span,
+    ptr::Ptr,
     util::{IteratorExt, UnwrapDebug},
 };
 use core::fmt;
@@ -23,6 +25,12 @@ pub fn unexpected_token_expect1<T>(t: Token, expected: impl fmt::Display) -> Par
     cerror2!(t.span, "expected {expected}, got {}", t.kind)
 }
 
+#[track_caller]
+pub fn unexpected_expr<T>(expr: Ptr<ast::Ast>, expected: impl fmt::Display) -> ParseResult<T> {
+    cerror2!(expr.full_span(), "expected {expected}, got an expression")
+}
+
+#[track_caller]
 pub fn expected_token(after_expr_span: Span, expected: &[TokenKind]) -> ParseError {
     cerror!(after_expr_span, "expected {}", format_expected_tokens(expected).u())
 }

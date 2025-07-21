@@ -443,11 +443,8 @@ impl Span {
         Span::new(self.start.min(other.start)..self.end.max(other.end), self.file)
     }
 
-    pub fn multi_join(spans: impl IntoIterator<Item = Span>) -> Option<Span> {
-        let mut iter = spans.into_iter();
-        let first = iter.next();
-        let last = iter.last();
-        first.map(|first| last.map(|last| first.join(last)).unwrap_or(first))
+    pub fn maybe_join(self, other: Option<Span>) -> Span {
+        if let Some(other) = other { self.join(other) } else { self }
     }
 
     pub fn range(&self) -> Range<usize> {

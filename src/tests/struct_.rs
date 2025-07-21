@@ -33,9 +33,9 @@ fn return_local_vs_global_type() {
 MyStruct :: struct { x: i64 };
 test :: -> MyStruct.{ x = 5 };
 ";
-    let res = jit_run_test_raw::<i64>(code);
+    let mut res = jit_run_test_raw::<i64>(code);
     assert_eq!(*res.ok(), 5);
-    let llvm_module_text_global = res.module_text().unwrap();
+    let llvm_module_text_global = res.take_llvm_ir();
     drop(res);
 
     // local
@@ -46,7 +46,7 @@ test :: -> MyStruct.{ x = 5 };
         }";
     let res = jit_run_test_raw::<i64>(code);
     assert_eq!(*res.ok(), 5);
-    let llvm_module_text_local = res.module_text().unwrap();
+    let llvm_module_text_local = res.llvm_ir();
 
     assert_eq!(llvm_module_text_local, llvm_module_text_global);
 }

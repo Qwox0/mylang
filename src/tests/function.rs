@@ -82,9 +82,8 @@ test :: -> i8 {
 };";
     let out = jit_run_test_raw::<i8>(code);
     assert_eq!(*out.ok(), 1);
-    let module_text = out.module_text().unwrap();
-    assert!(module_text.contains("ret i8 1"));
-    assert!(module_text.contains("ret i8 2"));
+    assert!(out.llvm_ir().contains("ret i8 1"));
+    assert!(out.llvm_ir().contains("ret i8 2"));
 }
 
 #[test]
@@ -157,6 +156,19 @@ fn specialize_return_type() {
 }
 
 #[test]
+fn function_currying() {
+    assert_eq!(*jit_run_test_raw::<i64>("f :: -> -> 1; test :: -> f()();").ok(), 1);
+
+    let res = jit_run_test_raw::<i32>("f :: -> -> i32 { 1 }; test :: -> f()();");
+    assert_eq!(*res.ok(), 1);
+    assert!(res.llvm_ir().contains("ret ptr @lambda"));
+    assert!(res.llvm_ir().contains(
+        "%call = call noundef ptr @f()
+  %call1 = call noundef i32 %call()"
+    ));
+}
+
+#[test]
 fn duplicate_parameter() {
     test_compile_err("f :: (a: i32, a: f64) -> {}", "duplicate parameter 'a'", |code| {
         TestSpan::of_nth_substr(code, 1, "a")
@@ -207,7 +219,7 @@ take_lambda :: (f: () -> i8) -> f();
 take_lambda(() -> 10)";
     let out = jit_run_test::<i8>(code);
     assert_eq!(*out.ok(), 10);
-    assert!(out.module_text().unwrap().contains("ret i8 10"));
+    assert!(out.llvm_ir().contains("ret i8 10"));
 }
 
 /// TODO: show more details about the mismatch, like param counts or individual type mismatches
