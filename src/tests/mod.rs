@@ -14,7 +14,7 @@ use std::{cell::OnceCell, fmt::Display, iter::FusedIterator};
 mod alignment;
 mod args;
 mod array;
-mod associated_variables;
+mod associated_consts;
 mod binop;
 mod call_conv_c;
 mod consts;
@@ -256,4 +256,16 @@ impl PartialEq<TestSpan> for Span {
     fn eq(&self, other: &TestSpan) -> bool {
         other == self
     }
+}
+
+/// Checks if `llvm_ir` contains an automatically renamed duplicate of `sym_name`.
+fn has_duplicate_symbol(llvm_ir: &str, mut sym_name: &str) -> bool {
+    if sym_name.ends_with('\"') {
+        sym_name = &sym_name[..sym_name.len() - 1];
+    }
+
+    llvm_ir.match_indices(sym_name).any(|(idx, _)| {
+        llvm_ir.as_bytes()[idx + sym_name.len()] == b'.'
+            && llvm_ir.as_bytes()[idx + sym_name.len() + 1].is_ascii_digit()
+    })
 }

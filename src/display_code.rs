@@ -182,7 +182,7 @@ mod tests {
 macro_rules! debug_expr {
     ($expr:expr) => {{
         let expr = &$expr;
-        print!("\nDEBUG {:?} @ {}", expr.kind, ::std::panic::Location::caller());
+        print!("\nDEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
         if expr.span.file.is_some() {
             println!();
             crate::display_code::display(expr.span)

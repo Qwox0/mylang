@@ -1,7 +1,7 @@
 use super::{jit_run_test, test_compile_err_raw};
 use crate::{
     diagnostics::DiagnosticSeverity,
-    tests::{TestSpan, jit_run_test_raw},
+    tests::{TestSpan, has_duplicate_symbol, jit_run_test_raw},
     util::IteratorExt,
 };
 
@@ -63,7 +63,6 @@ fn error_missing_type_name() {
 }
 
 #[test]
-#[ignore = "unfinished test"]
 fn error_access_static_through_value() {
     let code = "
 MyStruct :: struct { val: i64 };
@@ -84,7 +83,22 @@ test :: -> {
 
     assert_eq!(info.severity, DiagnosticSeverity::Info);
     assert_eq!(info.span, expected_err_span.start());
-    assert_eq!(info.msg.as_ref(), "consider replacing the value with its type 'MyStruct'"); // not implemented
+    //assert_eq!(info.msg.as_ref(), "consider replacing the value with its type 'MyStruct'"); // not implemented
+}
+
+#[test]
+fn error_access_field_without_value() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+    f :: -> val;
+};
+test :: -> MyStruct.f();
+";
+    test_compile_err_raw(code, "unknown identifier `val`", |code| {
+        TestSpan::of_nth_substr(code, 1, "val")
+    });
+    // TODO: add hint?
 }
 
 #[test]
@@ -127,4 +141,70 @@ MyStruct.Inner.Inner2.Inner3 :: struct {};
 MyStruct.Inner.Inner2.NUM :: 10;
 test :: -> MyStruct.Inner.Inner2.NUM;";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+}
+
+#[test]
+fn same_codegen_internal_or_external() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+    new :: (val: i32) -> MyStruct.{ val };
+};
+MyStruct.map :: (self: MyStruct, mapper: i32 -> i32) -> MyStruct.new(mapper(self.val));
+test :: -> MyStruct.new(5).map(x -> x * 2);";
+    let res = jit_run_test_raw::<i64>(code);
+    assert_eq!(*res.ok(), 10);
+
+    // Both methods are mangled
+    debug_assert!(res.llvm_ir().contains("@\"struct{val:i32}.new\""));
+    debug_assert!(!res.llvm_ir().contains("@new"));
+    debug_assert!(res.llvm_ir().contains("@\"struct{val:i32}.map\""));
+    debug_assert!(!res.llvm_ir().contains("@map"));
+
+    // Both mathods are only generated once
+    debug_assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.new\""));
+    debug_assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.map\""));
+}
+
+#[test]
+fn use_static_method_name_in_struct_scope() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+
+    new :: (val: i32) -> MyStruct.{ val };
+    map :: (self: MyStruct, mapper: i32 -> i32) -> new( // `MyStruct.new` not needed
+        mapper(self.val)
+    );
+};
+test :: -> MyStruct.new(5).map(x -> x * 2);";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+
+    let code = "
+MyStruct :: struct {
+    val: i32;
+    new :: (val: i32) -> MyStruct.{ val };
+};
+MyStruct.map :: (self: MyStruct, mapper: i32 -> i32) -> new( // <- Error
+    mapper(self.val)
+);
+test :: -> MyStruct.new(5).map(x -> x * 2);";
+    test_compile_err_raw(code, "unknown identifier `new`", |code| {
+        TestSpan::of_substr(code, "new( // <- Error").start_with_len(3)
+    });
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn compilation_order() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+
+    map :: (self: MyStruct, mapper: i32 -> i32) -> new(mapper(self.val));
+    new :: (val: i32) -> MyStruct.{ val };
+};
+test :: -> MyStruct.new(5).map(x -> x * 2);
+";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
 }

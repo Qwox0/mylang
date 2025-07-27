@@ -4,7 +4,7 @@ use crate::{
         OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::{ctx, primitives},
-    display_code::display,
+    display_code::{debug_expr, display},
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
@@ -410,7 +410,13 @@ impl<'ctx> Codegen<'ctx> {
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
                     let f = dot.rhs.rep().downcast::<ast::Fn>();
-                    let val = *self.fn_table.get(&f).u();
+                    let Some(&val) = self.fn_table.get(&f) else {
+                        println!("Function was not compiled:",);
+                        debug_expr!(f);
+                        println!("Call:",);
+                        debug_expr!(expr);
+                        unreachable_debug();
+                    };
                     let args = std::iter::once(dot.lhs.u()).chain(args.iter().copied());
                     self.compile_call(f, CallFnVal::Direct(val), args, write_target.take())
                 } else if func.ty == p.enum_variant {
@@ -588,8 +594,19 @@ impl<'ctx> Codegen<'ctx> {
                             self.compile_fn(f, FnKind::FnDef(decl))?;
                         }
                     } else if var_ty == p.type_ty {
+                        let ty = init.u().downcast_type();
                         // Ensure that the type is in `type_table`
-                        self.llvm_type(init.u().downcast_type());
+                        self.llvm_type(ty);
+                        if let Some(consts) = ty.get_scope_consts() {
+                            // Alternatively we could compile all associated constants here and
+                            // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
+
+                            for d in consts {
+                                let on_ty = d.as_mut().on_type.get_or_insert(ty.upcast()); // only needed for mangling
+                                debug_assert_eq!(*on_ty, ty.upcast());
+                                self.compile_expr(d.upcast())?;
+                            }
+                        }
                     }
 
                     // compile time values are inlined during sema. We don't have to add those to

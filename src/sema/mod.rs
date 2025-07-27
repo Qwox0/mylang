@@ -279,10 +279,10 @@ impl Sema {
         }
 
         macro_rules! handle_struct_scope {
-            ($scope:ident, $analyze_decl:expr) => {{
+            ($scope:ident, $fields:expr, $analyze_decl:expr) => {{
                 self.open_scope($scope);
                 let mut res = Ok(());
-                for (idx, decl) in $scope.decls.iter().copied().enumerate() {
+                for (idx, decl) in $fields.chain($scope.decls.iter()).copied().enumerate() {
                     let analyze_decl: impl FnOnce(Ptr<ast::Decl>, usize) -> _ = $analyze_decl;
                     match analyze_decl(decl, idx) {
                         Ok(()) => {},
@@ -1021,7 +1021,7 @@ impl Sema {
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::Decl { .. } => {
-                self.analyze_decl(expr.downcast::<ast::Decl>(), is_const)?;
+                self.analyze_decl(expr.downcast::<ast::Decl>(), is_const, false)?;
                 self.cur_scope_pos.inc();
             },
             AstEnum::If { condition, then_body, else_body, .. } => {
@@ -1076,7 +1076,7 @@ impl Sema {
                 self.open_scope(scope);
                 let res = (|| {
                     iter_var.var_ty = Some(elem_ty);
-                    self.analyze_decl(*iter_var, false)?;
+                    self.analyze_decl(*iter_var, false, false)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
                     if !body.can_ignore_yielded_value() {
@@ -1234,6 +1234,8 @@ impl Sema {
                 let fn_ptr = expr.downcast::<ast::Fn>();
                 let fn_hint = ty_hint.and_then(|t| t.try_downcast::<ast::Fn>());
 
+                let mut is_fn_ty = *ty_hint == p.type_ty;
+
                 if let Some(ret) = *ret_ty_expr {
                     *ret_ty = Some(self.analyze_type(ret)?);
                 } else if let Some(fn_hint) = fn_hint {
@@ -1252,7 +1254,7 @@ impl Sema {
                             //debug_assert!(param.var_ty.is_none());
                             param.var_ty = Some(p_hint.var_ty.u());
                         }
-                        self.analyze_decl(*param, false)?;
+                        self.analyze_decl(*param, false, is_fn_ty)?;
                     }
 
                     if let Some(body) = *body {
@@ -1279,7 +1281,7 @@ impl Sema {
                     );
                 }
 
-                let is_fn_ty = *ret_ty == p.type_ty && body.u().kind != AstKind::Block;
+                is_fn_ty = is_fn_ty || (*ret_ty == p.type_ty && body.u().kind != AstKind::Block);
                 expr.ty = Some(if is_fn_ty {
                     *ret_ty_expr = Some(body.u());
                     *ret_ty = Some(body.cv().downcast_type());
@@ -1314,9 +1316,9 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::StructDef { scope, consts, .. } => {
+            AstEnum::StructDef { scope, fields, consts, .. } => {
                 let mut field_names = HashSet::new();
-                handle_struct_scope!(scope, |field, _| {
+                handle_struct_scope!(scope, fields.iter(), |field, _| {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
                         return cerror2!(
@@ -1326,13 +1328,13 @@ impl Sema {
                         );
                     }
                     debug_assert!(field.is_const == consts.contains(&field));
-                    self.var_decl_to_value(field)
+                    self.var_decl_to_value(field, false)
                 })?;
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::UnionDef { scope, consts, .. } => {
+            AstEnum::UnionDef { scope, fields, consts, .. } => {
                 let mut field_names = HashSet::new();
-                handle_struct_scope!(scope, |field, _| {
+                handle_struct_scope!(scope, fields.iter(), |field, _| {
                     let is_duplicate = !field_names.insert(field.ident.text.as_ref());
                     if is_duplicate {
                         return cerror2!(
@@ -1345,7 +1347,7 @@ impl Sema {
                     if let Some(d) = field.init {
                         return err(UnionFieldWithDefaultValue, d.full_span());
                     }
-                    self.var_decl_to_value(field)
+                    self.var_decl_to_value(field, false)
                 })?;
                 expr.ty = Some(p.type_ty);
             },
@@ -1361,7 +1363,7 @@ impl Sema {
                     variants.iter().map(|d| d.ident.text.as_ref()).collect::<Vec<_>>(),
                     scope
                 );
-                handle_struct_scope!(scope, |variant, idx| {
+                handle_struct_scope!(scope, variants.iter(), |variant, idx| {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
                     if is_duplicate {
                         return cerror2!(
@@ -1375,7 +1377,7 @@ impl Sema {
                     }
 
                     let variant_idx = variant.as_mut().init.take();
-                    let _ = self.var_decl_to_value(variant)?;
+                    let _ = self.var_decl_to_value(variant, false)?;
                     variant.as_mut().init = variant_idx;
                     if variant.var_ty != p.void_ty {
                         *is_simple_enum = false;
@@ -1569,15 +1571,23 @@ impl Sema {
 
     /// Returns the [`SemaValue`] repesenting the new variable, not the entire
     /// declaration. This also doesn't insert into `self.symbols`.
-    fn var_decl_to_value(&mut self, decl_ptr: Ptr<ast::Decl>) -> SemaResult<()> {
+    fn var_decl_to_value(
+        &mut self,
+        decl_ptr: Ptr<ast::Decl>,
+        is_fn_ty_param: bool,
+    ) -> SemaResult<()> {
         self.decl_stack.push(decl_ptr);
-        let res = self.var_decl_to_value_inner(decl_ptr);
+        let res = self.var_decl_to_value_inner(decl_ptr, is_fn_ty_param);
         self.decl_stack.pop();
         res
     }
 
     #[inline]
-    fn var_decl_to_value_inner(&mut self, decl_ptr: Ptr<ast::Decl>) -> SemaResult<()> {
+    fn var_decl_to_value_inner(
+        &mut self,
+        decl_ptr: Ptr<ast::Decl>,
+        is_fn_ty_param: bool,
+    ) -> SemaResult<()> {
         let p = p();
         let decl = decl_ptr.as_mut();
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this
@@ -1648,15 +1658,41 @@ impl Sema {
         } else if decl.var_ty.is_some() {
             debug_assert!(!decl.is_const);
             Ok(())
+        } else if is_fn_ty_param {
+            debug_assert!(decl.var_ty_expr.is_none());
+            debug_assert!(decl.init.is_none());
+
+            let ty_name = decl.ident.upcast();
+
+            // The parameter name is changed to prevent `analyze_type` and further analysis from
+            // finding the parameter itself as a type definition.
+            decl.ident = p.ignored_name;
+            decl.var_ty_expr = Some(ty_name);
+            let ty = self.analyze_type(ty_name)?;
+            decl.var_ty = Some(ty);
+            Ok(())
         } else {
-            err(VarDeclNoType, decl_ptr.upcast().full_span())
+            cerror!(
+                decl_ptr.upcast().full_span(),
+                "cannot infer type of `{}`",
+                decl_ptr.ident.text.as_ref()
+            );
+            chint!(decl_ptr.upcast().full_span(), "consider explicitly specifying the type");
+            // TODO: `my_var: /* type */`
+            // TODO: `      ++++++++++++`
+            return SemaResult::HandledErr;
         }
     }
 
-    fn analyze_decl(&mut self, mut decl: Ptr<ast::Decl>, is_const: bool) -> SemaResult<()> {
+    fn analyze_decl(
+        &mut self,
+        mut decl: Ptr<ast::Decl>,
+        is_const: bool,
+        is_fn_ty_param: bool,
+    ) -> SemaResult<()> {
         let p = p();
         let _ = is_const; // TODO: non-toplevel constant contexts?
-        let res = self.var_decl_to_value(decl);
+        let res = self.var_decl_to_value(decl, is_fn_ty_param);
         #[cfg(debug_assertions)]
         if self.cctx.args.debug_types {
             let label = match &res {

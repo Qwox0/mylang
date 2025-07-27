@@ -55,6 +55,7 @@ pub struct Primitives {
     /// about pointee types.
     pub untyped_slice_struct_def: Ptr<ast::StructDef>,
     pub empty_array_ty: Ptr<ast::ArrayTy>,
+    pub ignored_name: Ptr<ast::Ident>,
 }
 
 impl Primitives {
@@ -230,6 +231,7 @@ impl Primitives {
                 init_ty(arr.upcast_to_type());
                 arr
             },
+            ignored_name: ast_new!(Ident { text: Ptr::from_ref("_"), decl: None }),
         })
     }
 }

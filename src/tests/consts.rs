@@ -1,5 +1,6 @@
 use crate::tests::{TestSpan, array::CRetArr, jit_run_test_raw, test_compile_err_raw};
 
+/// more tests about associated constants: [`crate::tests::associated_consts`]
 #[test]
 fn const_on_struct() {
     let code = "

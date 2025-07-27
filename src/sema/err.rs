@@ -14,8 +14,6 @@ use std::{
 #[error("{self:?}")]
 pub enum SemaErrorKind {
     ConstDeclWithoutInit,
-    /// TODO: maybe infer the type from the usage
-    VarDeclNoType,
 
     #[error("MismatchedTypesBinOp (lhs: {lhs_ty}, rhs: {rhs_ty})")]
     MismatchedTypesBinOp {

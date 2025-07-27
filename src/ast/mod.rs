@@ -523,7 +523,6 @@ ast_variants! {
         /// Always contains all fields in the same order as defined.
         // `.[val; N]`: store `val` only once?
         elements: Ptr<[Ptr<ConstVal>]>,
-        //bytes: Ptr<[u8]>
     },
 
     ImportDirective {
@@ -570,42 +569,39 @@ ast_variants! {
 
     /// `struct { a: int, b: String, c: (u8, u32) }`
     StructDef {
-        /// the first [`Self::field_count`] values in [`Scope::decls`] are fields the remaining
-        /// decls are constants.
+        /// [`Scope::decls`] only contains the constants defined within the struct body.
         scope: Scope,
-        /// points to the fields in [`Scope::decls`].
-        // TODO(size): replace with `field_count`
+        // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
+        // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
     },
     /// `union { a: int, b: String, c: (u8, u32) }`
     UnionDef {
-        /// the first [`Self::field_count`] values in [`Scope::decls`] are fields the remaining
-        /// decls are constants.
+        /// [`Scope::decls`] only contains the constants defined within the struct body.
         scope: Scope,
-        /// points to the fields in [`Scope::decls`].
-        // TODO(size): replace with `field_count`
+        // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
+        // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
     },
     /// `enum { A, B(i64) }`
     EnumDef {
         /// simple enum == no associated data
         is_simple_enum: bool,
-        /// the first `variant_tags.len()` values in [`Scope::decls`] are variants the remaining
-        /// decls are constants.
+        /// [`Scope::decls`] only contains the constants defined within the struct body.
         scope: Scope,
-        /// points to the fields in [`Scope::decls`].
-        // TODO(size): replace with `variant_count`
+        // TODO(size): allocate relative to `scope.decls.ptr`; replace with `variant_count`
         variants: Ptr<[Ptr<Decl>]>,
         /// is present after sema of this ast node. always has the same length as `variants`.
         variant_tags: OPtr<[isize]>,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
+        // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
     },
@@ -1071,6 +1067,16 @@ impl Type {
             _ => unreachable_debug(),
         }
     }
+
+    /// For custom types this returns the constants defined inside the scope of the type.
+    pub fn get_scope_consts(&self) -> Option<&[Ptr<Decl>]> {
+        match self.matchable().as_ref() {
+            TypeEnum::StructDef { scope, .. }
+            | TypeEnum::UnionDef { scope, .. }
+            | TypeEnum::EnumDef { scope, .. } => Some(scope.decls.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 impl TypeEnum {
@@ -1320,14 +1326,11 @@ pub struct Scope {
     pub parent: OPtr<Scope>,
     pub pos_in_parent: ScopePos,
     pub decls: DeclList,
-    // Vec is only needed for custom types
-    //pub decls: Vec<Ptr<Decl>>, // nocheckin
     pub kind: ScopeKind,
 }
 
 impl Scope {
     pub fn new(decls: DeclList, kind: ScopeKind) -> Scope {
-        //pub fn new(decls: Vec<Ptr<Decl>>, kind: ScopeKind) -> Scope {
         Scope { parent: None, pos_in_parent: ScopePos::UNSET, decls, kind }
     }
 
@@ -1339,7 +1342,6 @@ impl Scope {
         // TODO: bench copy vs preallocate `stmts.len`
         let decls = stmts.iter().filter_map(|s| s.try_downcast::<Decl>()).collect::<Vec<_>>();
         Ok(Scope::new(alloc.alloc_slice(&decls)?, kind))
-        //Ok(Scope::new(decls, kind))
     }
 
     /// also returns the fields as a [`DeclList`].
@@ -1348,11 +1350,8 @@ impl Scope {
         consts: Vec<Ptr<Decl>>,
         alloc: &Arena, // nocheckin
     ) -> Result<ScopeAndAggregateInfo, AllocErr> {
-        let field_count = fields.len();
-        let mut decls = fields;
-        decls.extend(&consts);
-        let scope = Scope::new(alloc.alloc_slice(&decls)?, ScopeKind::Aggregate);
-        let fields = Ptr::from_ref(scope.decls.get(..field_count).u());
+        let fields = alloc.alloc_slice(&fields)?;
+        let scope = Scope::new(alloc.alloc_slice(&consts)?, ScopeKind::Aggregate);
         Ok(ScopeAndAggregateInfo { scope, fields, consts })
     }
 
