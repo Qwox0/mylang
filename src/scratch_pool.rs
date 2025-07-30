@@ -15,6 +15,19 @@ pub struct ScratchPool<'alloc, T: 'alloc> {
 }
 
 impl<'bump, T: 'bump> ScratchPool<'bump, T> {
+    /// see [`bumpalo::Bump::iter_allocated_chunks`]:
+    /// 1. Every object allocated in this arena has the same alignment, and that
+    ///    alignment is at most 16.
+    /// 2. Every object's size is a multiple of its alignment.
+    /// 3. None of the objects allocated in this arena contain any internal
+    ///    padding.
+    const _ASSERT_NO_PADDING: () = {
+        let alignment = std::mem::align_of::<T>();
+        let size = std::mem::size_of::<T>();
+        assert!(alignment <= 16);
+        assert!(size.is_multiple_of(alignment));
+    };
+
     // /// resets the `scratch_bump`
     // pub fn new(scratch_bump: &'bump mut Bump) -> ScratchPool<T> {
     //     Self::assert_no_padding();
@@ -23,7 +36,6 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
     // }
     #[inline]
     pub fn new() -> ScratchPool<'bump, T> {
-        Self::assert_no_padding();
         ScratchPool { arena: Arena::new(), _marker: PhantomData, len: 0 }
     }
 
@@ -32,20 +44,6 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
         let mut pool = Self::new();
         pool.push(val)?;
         Ok(pool)
-    }
-
-    /// see [`Bump::iter_allocated_chunks`]:
-    /// 1. Every object allocated in this arena has the same alignment, and that
-    ///    alignment is at most 16.
-    /// 2. Every object's size is a multiple of its alignment.
-    /// 3. None of the objects allocated in this arena contain any internal
-    ///    padding.
-    #[inline]
-    fn assert_no_padding() {
-        let alignment = std::mem::align_of::<T>();
-        let size = std::mem::size_of::<T>();
-        debug_assert!(alignment <= 16);
-        debug_assert!(size.is_multiple_of(alignment));
     }
 
     #[inline]

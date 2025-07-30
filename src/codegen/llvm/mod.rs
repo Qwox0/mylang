@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, BinOpKind, ConstValEnum, DeclList, DeclListExt, DeclMarkers,
-        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
+        OptionTypeExt, Scope, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::{ctx, primitives},
     display_code::{debug_expr, display},
@@ -42,7 +42,10 @@ use inkwell::{
         PointerValue, StructValue,
     },
 };
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, marker::PhantomData, path::Path};
+use std::{
+    assert_matches::debug_assert_matches, borrow::Cow, collections::HashMap, fmt::Debug,
+    marker::PhantomData, path::Path,
+};
 
 pub mod error;
 pub mod jit;
@@ -195,8 +198,8 @@ impl<'ctx> Codegen<'ctx> {
                 );
                 Ok(self.get_symbol(decl.u()))
             },
-            AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
-                self.open_scope();
+            AstEnum::Block { stmts, has_trailing_semicolon, scope, .. } => {
+                self.open_scope(scope);
                 let res: CodegenResultAndControlFlow<Symbol> = try {
                     if let Some(last) = stmts.last_mut() {
                         last.ty = Some(out_ty)
@@ -574,92 +577,8 @@ impl<'ctx> Codegen<'ctx> {
                 self.build_store(lhs_ptr, binop_res.basic_val(), arg_ty.alignment())?;
                 Ok(Symbol::Void)
             },
-            AstEnum::Decl {
-                markers, ident, on_type, var_ty, init, is_const, is_extern, ..
-            } => {
-                let decl = expr.downcast::<ast::Decl>();
-                let var_ty = var_ty.u();
-                debug_assert!(var_ty.is_finalized());
-                debug_assert!(init.is_none_or(|init| init.ty == var_ty));
-
-                if *is_const {
-                    if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
-                        debug_assert_eq!(f.upcast(), init.u().rep());
-                        if init.u().kind != AstKind::Fn {
-                            // don't need to compile an alias again
-                            debug_assert!(self.fn_table.contains_key(&f));
-                        } else if *is_extern {
-                            self.compile_prototype(f, FnKind::FnDef(decl));
-                        } else {
-                            self.compile_fn(f, FnKind::FnDef(decl))?;
-                        }
-                    } else if var_ty == p.type_ty {
-                        let ty = init.u().downcast_type();
-                        // Ensure that the type is in `type_table`
-                        self.llvm_type(ty);
-                        if let Some(consts) = ty.get_scope_consts() {
-                            // Alternatively we could compile all associated constants here and
-                            // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
-
-                            for d in consts {
-                                let on_ty = d.as_mut().on_type.get_or_insert(ty.upcast()); // only needed for mangling
-                                debug_assert_eq!(*on_ty, ty.upcast());
-                                self.compile_expr(d.upcast())?;
-                            }
-                        }
-                    }
-
-                    // compile time values are inlined during sema. We don't have to add those to
-                    // the symbol table.
-                } else {
-                    debug_assert_ne!(var_ty, p.type_ty);
-                    debug_assert_ne!(expr.kind, AstKind::Fn);
-                    debug_assert_ne!(expr.rep().kind, AstKind::Fn);
-                    debug_assert_ne!(var_ty.kind, AstKind::Fn);
-                    debug_assert!(on_type.is_none());
-
-                    const ENABLE_NON_MUT_TO_REG: bool = false;
-
-                    let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
-                    let sym = if *is_extern || is_static {
-                        let ty = self.llvm_type(var_ty).basic_ty();
-                        let name = self.mangle_symbol(decl);
-                        let global = self.module().add_global(ty, None, name.as_ref());
-                        if is_static {
-                            global.set_initializer(&match init
-                                .and_then(|i| i.try_downcast_const_val())
-                            {
-                                Some(cv) => self.compile_const_val(cv, var_ty)?.basic_val(),
-                                None => ty.const_zero(),
-                            });
-                            if self.cur_fn.is_some() {
-                                // C does this for all `static`s
-                                global.set_linkage(Linkage::Internal);
-                            }
-                            global.set_constant(
-                                ctx().do_mut_checks && !markers.get(DeclMarkers::IS_MUT_MASK),
-                            );
-                        }
-                        global.set_alignment(var_ty.alignment() as u32);
-                        Symbol::Global(global)
-                    } else if ENABLE_NON_MUT_TO_REG
-                        && let Some(init) = init
-                        && !markers.get(DeclMarkers::IS_MUT_MASK)
-                    {
-                        self.compile_expr(*init)?
-                    } else {
-                        let stack_ptr = self.build_alloca2(var_ty, &ident.text)?;
-                        if let Some(init) = init {
-                            finalize_ty(init.ty.as_mut().u(), var_ty);
-                            let _init =
-                                self.compile_expr_with_write_target(*init, Some(stack_ptr))?;
-                        }
-                        Symbol::Stack(stack_ptr)
-                    };
-
-                    self.symbols.push((ident.decl.u(), sym));
-                }
-
+            AstEnum::Decl { .. } => {
+                self.compile_decl(expr.downcast::<ast::Decl>(), false)?;
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
             },
@@ -1020,6 +939,21 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// needed for indirectly recursive functions, like ...
+    ///
+    /// ```mylang
+    /// a :: -> void b();
+    /// b :: -> void a();
+    /// ```
+    pub fn precompile_scope_decls(&mut self, scope: &Scope) -> CodegenResult<()> {
+        for d in scope.decls.iter().copied() {
+            if d.is_const || d.is_extern || d.markers.get(DeclMarkers::IS_STATIC_MASK) {
+                let _: Option<()> = self.compile_decl(d, true).handle_unreachable()?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_call(
         &mut self,
         f: Ptr<ast::Fn>,
@@ -1266,6 +1200,12 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_prototype(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> (FunctionValue<'ctx>, bool) {
+        if matches!(def, FnKind::FnDef(_))
+            && let Some(&fn_val) = self.fn_table.get(&f)
+        {
+            let ret_type = self.c_ffi_type(f.ret_ty.u());
+            return (fn_val, ret_type.do_use_sret());
+        }
         let name = match def {
             FnKind::FnDef(decl) => self.mangle_symbol(decl),
             FnKind::Lambda => "lambda".into(), // TODO: also mangle lambda (e.g. `my_fn.lambda`)
@@ -1329,7 +1269,7 @@ impl<'ctx> Codegen<'ctx> {
         let outer_return_depth = self.return_depth;
         self.return_depth = 0;
 
-        self.open_scope();
+        self.open_scope(&f.scope);
         let res = try {
             self.symbols.reserve(f.params.len());
 
@@ -2442,10 +2382,12 @@ impl<'ctx> Codegen<'ctx> {
         let mut prev_state = PrevState::None;
         let mut prev_bytes: u32 = 0;
 
-        debug_assert_eq!(
-            std::mem::size_of::<[Option<BasicTypeEnum<'_>>; 2]>(),
-            std::mem::size_of::<[BasicTypeEnum<'_>; 2]>()
-        );
+        const {
+            assert!(
+                std::mem::size_of::<[Option<BasicTypeEnum<'_>>; 2]>()
+                    == std::mem::size_of::<[BasicTypeEnum<'_>; 2]>()
+            );
+        }
 
         macro_rules! push_prev_state_to_new_fields {
             () => {
@@ -2634,7 +2576,8 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap()
     }
 
-    fn open_scope(&mut self) {
+    fn open_scope(&mut self, scope: &Scope) {
+        self.precompile_scope_decls(scope);
         self.symbols.open_scope();
         self.defer_stack.open_scope();
         self.return_depth += 1;
@@ -2681,6 +2624,107 @@ impl<'ctx> Codegen<'ctx> {
     #[inline]
     pub fn module(&self) -> &Module<'ctx> {
         self.module.as_ref().u()
+    }
+
+    fn compile_decl(
+        &mut self,
+        decl: Ptr<ast::Decl>,
+        during_precompile: bool,
+    ) -> CodegenResultAndControlFlow<()> {
+        let p = primitives();
+        let ast::Decl { init, is_const, is_extern, markers, .. } = decl.as_ref();
+        let var_ty = decl.var_ty.u();
+        debug_assert!(var_ty.is_finalized());
+        debug_assert!(init.is_none_or(|init| init.ty == var_ty));
+
+        if *is_const {
+            if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
+                debug_assert_eq!(f.upcast(), init.u().rep());
+                if init.u().kind != AstKind::Fn {
+                    // don't need to compile an alias again
+                    debug_assert!(during_precompile || self.fn_table.contains_key(&f));
+                } else if during_precompile {
+                    self.compile_prototype(f, FnKind::FnDef(decl));
+                } else if !*is_extern {
+                    debug_assert!(
+                        self.fn_table.get(&f).u().get_first_basic_block().is_none(),
+                        "function prototype should have been precompiled",
+                    );
+                    self.compile_fn(f, FnKind::FnDef(decl))?;
+                }
+            } else if var_ty == p.type_ty {
+                let ty = init.u().downcast_type();
+                // Ensure that the type is in `type_table`
+                self.llvm_type(ty);
+                if let Some(ty_scope) = ty.get_scope() {
+                    // Alternatively we could compile all associated constants here and
+                    // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
+
+                    if during_precompile {
+                        for d in ty_scope.decls.iter() {
+                            debug_assert!(d.as_ref().on_type.is_none_or(|t| t == ty.upcast()));
+                            d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
+                        }
+                        self.precompile_scope_decls(ty_scope);
+                    } else {
+                        for d in ty_scope.decls.iter().copied() {
+                            self.compile_decl(d, false)?;
+                        }
+                    }
+                }
+            }
+
+            // compile time values are inlined during sema. We don't have to add those to
+            // the symbol table.
+        } else {
+            debug_assert_ne!(var_ty, p.type_ty);
+            debug_assert_ne!(var_ty.kind, AstKind::Fn);
+            debug_assert!(decl.on_type.is_none());
+
+            const ENABLE_NON_MUT_TO_REG: bool = false;
+
+            let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
+            let sym = if *is_extern || is_static {
+                if !during_precompile {
+                    debug_assert_matches!(self.symbols.get(decl), Some(Symbol::Global(_)));
+                    return Ok(());
+                }
+                let ty = self.llvm_type(var_ty).basic_ty();
+                let name = self.mangle_symbol(decl);
+                let global = self.module().add_global(ty, None, name.as_ref());
+                if is_static {
+                    global.set_initializer(&match init.and_then(|i| i.try_downcast_const_val()) {
+                        Some(cv) => self.compile_const_val(cv, var_ty)?.basic_val(),
+                        None => ty.const_zero(),
+                    });
+                    if self.cur_fn.is_some() {
+                        // C does this for all `static`s
+                        global.set_linkage(Linkage::Internal);
+                    }
+                    global.set_constant(
+                        ctx().do_mut_checks && !markers.get(DeclMarkers::IS_MUT_MASK),
+                    );
+                }
+                global.set_alignment(var_ty.alignment() as u32);
+                Symbol::Global(global)
+            } else if ENABLE_NON_MUT_TO_REG
+                && let Some(init) = init
+                && !markers.get(DeclMarkers::IS_MUT_MASK)
+            {
+                self.compile_expr(*init)?
+            } else {
+                let stack_ptr = self.build_alloca2(var_ty, &decl.ident.text)?;
+                if let Some(init) = decl.init {
+                    finalize_ty(init.as_mut().ty.as_mut().u(), var_ty);
+                    let _init = self.compile_expr_with_write_target(init, Some(stack_ptr))?;
+                }
+                Symbol::Stack(stack_ptr)
+            };
+
+            debug_assert_eq!(decl, decl.ident.decl.u());
+            self.symbols.push((decl, sym));
+        }
+        Ok(())
     }
 }
 

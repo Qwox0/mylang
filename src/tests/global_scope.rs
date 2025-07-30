@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, test_compile_err_raw};
+use crate::tests::{TestSpan, has_duplicate_symbol, jit_run_test_raw, test_compile_err_raw};
 
 #[test]
 fn error_duplicate() {
@@ -29,4 +29,22 @@ fn unexpected_toplevel_expr() {
     test_compile_err_raw(code, "unexpected top level expression", |code| {
         TestSpan::of_substr(code, "1 + 1")
     });
+}
+
+#[test]
+fn order_independent() {
+    let code = "
+test :: -> A;
+A :: 3;";
+    let res = jit_run_test_raw::<i64>(code);
+    assert_eq!(*res.ok(), 3);
+    assert!(!res.llvm_ir().contains("@A"));
+    drop(res);
+
+    let code = "
+test :: -> A;
+static A := 3;";
+    let res = jit_run_test_raw::<i64>(code);
+    assert_eq!(*res.ok(), 3);
+    assert!(!has_duplicate_symbol(res.llvm_ir(), "@A"));
 }

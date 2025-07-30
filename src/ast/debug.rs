@@ -381,7 +381,7 @@ impl DebugAst for Ast {
             },
             //AstEnum::FunctionTy { func, .. } => debug_fn(func.params, func.ret_type, None, lines),
             AstEnum::StructDef { fields, .. } | AstEnum::UnionDef { fields, .. } => {
-                lines.write(if self.kind == AstKind::StructDef { "struct{" } else { "union{" });
+                lines.write(if ptr.kind == AstKind::StructDef { "struct{" } else { "union{" });
                 lines.write_many(
                     fields.iter(),
                     |f, _, b| {

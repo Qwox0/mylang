@@ -53,45 +53,6 @@ test :: -> {
 */
 
 #[test]
-fn return_struct_u2_i64_correctly() {
-    let out = *jit_run_test::<u128>("struct { tag: u2 = 1, val: i64 = -1 }.{}").ok();
-    let out_hex_string = format!("{out:032x}");
-    println!("{out_hex_string}");
-    // expect "ffffffffffffffff______________01"
-    assert!(out_hex_string.starts_with(&"f".repeat(16)));
-    assert!(out_hex_string.ends_with("01"));
-}
-
-#[test]
-#[ignore = "unfinished test"]
-fn return_struct_f64() {
-    let big_float_bits: u64 = 0xEFFFFFFFFFFFFFF3;
-    let big_float = f64::from_bits(big_float_bits);
-
-    #[derive(Debug, Clone, Copy)]
-    struct Out {
-        tag: u8,
-        val: f64,
-    }
-    let code = format!(
-        "
-MySumType :: struct {{
-    tag: u2,
-    val: f64,
-}};
-test :: -> {{
-    retval: MySumType;
-    retval.tag=1;
-    retval.val={big_float};
-    retval
-}};"
-    );
-    let out = *jit_run_test_raw::<Out>(&code).ok();
-    assert_eq!(out.tag, 1);
-    assert_eq!(format!("{:x}", out.val.to_bits()), format!("{:x}", big_float_bits));
-}
-
-#[test]
 #[ignore = "unfinished test"]
 fn sret_no_memcpy() {
     #[derive(Debug, PartialEq)]

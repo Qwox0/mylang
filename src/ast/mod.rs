@@ -727,10 +727,12 @@ impl Ptr<Ast> {
     pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
-        if rep.ty.is_none() {
+        if rep.ty.is_none()
+            && let Some(ty) = self.ty
+        {
             // Currently only needed for displaying replacements (like `ConstVal`s). Maybe can be
             // removed in the future.
-            rep.as_mut().ty = Some(self.ty.u());
+            rep.as_mut().ty = Some(ty);
         }
         self.as_mut().replacement = Some(rep)
     }
@@ -1020,17 +1022,19 @@ impl Ast {
             },
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
 
-            AstEnum::SimpleTy { .. } => todo!(),
-            AstEnum::IntTy { .. } => todo!(),
-            AstEnum::FloatTy { .. } => todo!(),
+            AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => span,
             AstEnum::PtrTy { pointee: i, .. }
             | AstEnum::SliceTy { elem_ty: i, .. }
             | AstEnum::ArrayTy { elem_ty: i, .. }
-            | AstEnum::OptionTy { inner_ty: i, .. } => self.span.join(i.full_span()),
+            | AstEnum::OptionTy { inner_ty: i, .. } => span.join(i.full_span()),
             AstEnum::StructDef { .. } | AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => span,
             AstEnum::RangeTy { .. } => todo!(),
             AstEnum::Fn { params, body, ret_ty_expr, .. } => span
-                .maybe_join(params.get(0).map(|p| p.ident.span))
+                .maybe_join(params.get(0).map(|p| {
+                    Some(p.ident.span)
+                        .filter(|s| *s != Span::ZERO)
+                        .unwrap_or_else(|| p.var_ty_expr.u().full_span()) // for special case: `i32 -> i32`
+                }))
                 .join(body.or(*ret_ty_expr).u().full_span()),
             _ => span,
         }
@@ -1069,11 +1073,11 @@ impl Type {
     }
 
     /// For custom types this returns the constants defined inside the scope of the type.
-    pub fn get_scope_consts(&self) -> Option<&[Ptr<Decl>]> {
+    pub fn get_scope(&self) -> Option<&Scope> {
         match self.matchable().as_ref() {
             TypeEnum::StructDef { scope, .. }
             | TypeEnum::UnionDef { scope, .. }
-            | TypeEnum::EnumDef { scope, .. } => Some(scope.decls.as_ref()),
+            | TypeEnum::EnumDef { scope, .. } => Some(scope),
             _ => None,
         }
     }
@@ -1092,7 +1096,7 @@ impl TypeEnum {
 pub trait OptionAstExt {
     fn is_type(self) -> bool;
 
-    fn cv(self) -> Ptr<ConstVal>;
+    fn downcast_const_val(self) -> Ptr<ConstVal>;
 
     //fn ref_downcast_type(&mut self) -> &mut OPtr<Type>;
 
@@ -1105,7 +1109,7 @@ impl OptionAstExt for Option<Ptr<Ast>> {
         self.map(Ptr::<Ast>::is_type).unwrap_or(false)
     }
 
-    fn cv(self) -> Ptr<ConstVal> {
+    fn downcast_const_val(self) -> Ptr<ConstVal> {
         self.u().downcast_const_val()
     }
 }

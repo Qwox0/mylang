@@ -195,7 +195,6 @@ test :: -> MyStruct.new(5).map(x -> x * 2);";
 }
 
 #[test]
-#[ignore = "not implemented"]
 fn compilation_order() {
     let code = "
 MyStruct :: struct {
@@ -205,6 +204,16 @@ MyStruct :: struct {
     new :: (val: i32) -> MyStruct.{ val };
 };
 test :: -> MyStruct.new(5).map(x -> x * 2);
+_ :: 1; // TODO: remove this
 ";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+}
+
+#[test]
+fn mangle_function_in_anon_struct() {
+    let code = "
+        struct {
+            f :: -> i64 3;
+        }.f()";
+    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
 }

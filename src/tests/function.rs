@@ -133,10 +133,10 @@ fn use_correct_return_type() {
 #[test]
 #[ignore = "not implemented"]
 fn specialize_return_type_to_optional() {
-    let code = "test :: -> {
-        if false return 1;
-        None
-    };";
+    let code = "test :: -> { // return type: `unknown`
+        if false return 1; // return type: `{int_literal}`
+        None // return type: `?{int_literal}`
+    };"; // return type: `?i64`
     assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
 
     let code = "test :: -> {
@@ -249,5 +249,50 @@ ok2 :: -> _ := ok(); // but decls are allowed directly after `->`
 ";
     test_compile_err_raw(code, "expected `;`", |code| {
         TestSpan::of_substr(code, "a :: -> 1").after()
+    });
+}
+
+#[test]
+fn unorderable_functions() {
+    let code = |b_ret_ty| {
+        format!(
+            "
+a :: (x: bool) -> {{
+    if x return b();
+    val: u16 = 10;
+    return val;
+}};
+b :: -> {b_ret_ty} a(false) + 5;
+test :: -> a(true);
+_ :: 1; // TODO: remove this
+        "
+        )
+    };
+    test_compile_err_raw(code(""), "cycle(s) detected:", |_| TestSpan::ZERO);
+    // TODO: "The compiler currently doesn't try to infer return types across multiple indirectly
+    // recursive functions."
+
+    // works with an explicit return type:
+    assert_eq!(*jit_run_test_raw::<u16>(code("u16")).ok(), 15);
+}
+
+#[test]
+fn dont_use_partially_infered_return_type() {
+    let code = "
+a :: -> {
+    if false return 1;
+    pause();
+    a: u8 = 2;
+    return a;
+}
+b :: -> {
+    x: i32 = 1;
+    a() + x
+};
+test :: -> b();
+pause :: -> {};
+        ";
+    test_compile_err_raw(code, "MismatchedTypesBinOp (lhs: u8, rhs: i32)", |code| {
+        TestSpan::of_substr(code, "+")
     });
 }

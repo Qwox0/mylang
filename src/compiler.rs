@@ -20,10 +20,12 @@ use std::{
 };
 
 impl<'ctx> llvm::Codegen<'ctx> {
-    pub fn compile_all(&mut self, stmts: &[Ptr<Ast>], order: &[usize]) {
-        debug_assert_eq!(stmts.len(), order.len());
-        for idx in order {
-            let s = stmts[*idx];
+    pub fn compile_all(&mut self, cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
+        for f in cctx.files.iter() {
+            self.precompile_scope_decls(f.scope.as_ref().u());
+        }
+
+        for s in stmts.iter().copied() {
             self.compile_top_level(s);
         }
     }
@@ -111,7 +113,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Sema #####
 
     let sema_start = Instant::now();
-    let order = sema::analyze(ctx, &stmts);
+    sema::analyze(ctx, &stmts);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -137,7 +139,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     let codegen_start = Instant::now();
     let context = Context::create();
     let mut codegen = llvm::Codegen::new(&context, "dev");
-    codegen.compile_all(&stmts, &order);
+    codegen.compile_all(ctx, &stmts);
     let module = codegen.module.take().u();
     drop(codegen);
     ctx.compile_time.codegen = codegen_start.elapsed();

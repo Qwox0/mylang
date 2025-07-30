@@ -59,9 +59,13 @@ pub struct JitRunTestResult<RetTy> {
 }
 
 impl<RetTy> JitRunTestResult<RetTy> {
+    #[track_caller]
     pub fn ok(&self) -> &RetTy {
         debug_assert_eq!(self.ret.is_some(), !self.ctx.diagnostic_reporter.do_abort_compilation());
-        self.ret.as_ref().unwrap_or_else(|| panic!("Test failed! Expected no errors"))
+        let Some(ret) = self.ret.as_ref() else {
+            panic!("Test failed! Expected no errors")
+        };
+        ret
     }
 
     pub fn diagnostics(&self) -> &[SavedDiagnosticMessage] {
@@ -154,12 +158,7 @@ pub fn test_compile_err_raw(
         .one()
         .unwrap_or_else(|e| panic!("Test failed! Compiler didn't emit exactly one error ({e:?})"));
     debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
-    debug_assert!(
-        err.msg.starts_with(expected_msg_start),
-        "{:?} doesn't start with {:?}",
-        err.msg,
-        expected_msg_start
-    );
+    debug_assert_eq!(err.msg.as_ref(), expected_msg_start, "incorrect compiler error");
     debug_assert_eq!(err.span, expected_span(&res.full_code));
 }
 
@@ -195,6 +194,8 @@ impl TestParseRes {
 pub struct TestSpan(Span);
 
 impl TestSpan {
+    const ZERO: TestSpan = TestSpan(Span::ZERO);
+
     pub fn new(start: usize, end: usize) -> TestSpan {
         TestSpan(Span::new(start..end, None))
     }

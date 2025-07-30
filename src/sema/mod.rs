@@ -4,9 +4,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OptionAstExt,
-        OptionTypeExt, Scope, ScopePos, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg,
-        type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OptionTypeExt,
+        Scope, ScopePos, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, is_pos_arg, type_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives as p},
     diagnostics::{
@@ -18,7 +17,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     type_::{RangeKind, common_type, ty_match},
-    util::{self, UnwrapDebug, panic_debug, then, unreachable_debug},
+    util::{self, UnwrapDebug, then, unreachable_debug},
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
@@ -51,7 +50,7 @@ macro_rules! check_and_set_target {
     }};
 }
 
-pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<usize> {
+pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
     let p = p();
     // validate top level stmts
     for file in cctx.files.iter().copied() {
@@ -90,7 +89,6 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
     let mut sema = Sema::new(cctx, Ptr::from(stmts));
     let mut finished = vec![false; stmts.len()];
     let mut remaining_count = stmts.len();
-    let mut order = Vec::with_capacity(stmts.len());
     while finished.iter().any(std::ops::Not::not) {
         let old_remaining_count = remaining_count;
         debug_assert!(stmts.len() == finished.len());
@@ -99,19 +97,13 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
             debug_assert!(file.scope.as_ref().u().parent.is_some());
             sema.open_scope(file.as_mut().scope.as_mut().u());
             let stmt_range = file.stmt_range.u();
-            for (idx, (s, finished)) in
-                stmts[stmt_range].iter().zip(&mut finished[stmt_range]).enumerate()
-            {
+            for (s, finished) in stmts[stmt_range].iter().zip(&mut finished[stmt_range]) {
                 if *finished {
                     continue;
                 }
                 let res = sema.analyze_top_level(*s);
                 *finished = res != SemaResult::NotFinished;
-                match res {
-                    SemaResult::Ok(_) => order.push(idx + stmt_range.start),
-                    SemaResult::NotFinished => remaining_count += 1,
-                    SemaResult::Err(_) => {},
-                }
+                remaining_count += !*finished as usize;
             }
             debug_assert!(
                 sema.defer_stack.get_cur_scope().is_empty(),
@@ -121,7 +113,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
         }
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
-            eprintln!("cycle(s) detected:");
+            cerror!(Span::ZERO, "cycle(s) detected:");
             for (s, finished) in stmts.iter().zip(finished) {
                 if finished {
                     continue;
@@ -132,11 +124,9 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) -> Vec<us
                     .unwrap_or_else(|| s.full_span());
                 display(span).finish();
             }
-            panic!("cycle detected") // TODO: find location of cycle
+            break;
         }
     }
-
-    order
 }
 
 /// Semantic analyzer
@@ -304,7 +294,7 @@ impl Sema {
                 None if let Some(mut i) = self.try_custom_bitwith_int_type(*text) => {
                     i.span = expr.span;
                     i.ty = Some(p.type_ty);
-                    debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntTy>());
+                    const { debug_assert!(size_of::<ast::Ident>() >= size_of::<ast::IntTy>()) };
                     *expr.cast::<ast::IntTy>().as_mut() = i;
                     // decl is not set. Is this a problem?
                 },
@@ -1236,10 +1226,19 @@ impl Sema {
 
                 let mut is_fn_ty = *ty_hint == p.type_ty;
 
+                let mut has_known_ret = false; // needed because of `NotFinished`. `ret_ty` might get set in a previous try
                 if let Some(ret) = *ret_ty_expr {
                     *ret_ty = Some(self.analyze_type(ret)?);
+                    has_known_ret = true;
                 } else if let Some(fn_hint) = fn_hint {
                     *ret_ty = Some(fn_hint.ret_ty.u());
+                    has_known_ret = true;
+                }
+
+                if !is_fn_ty && has_known_ret {
+                    // Needed for direct or indirect recursion
+                    // TODO: add hint to recommend adding an explicit return type
+                    expr.ty = Some(fn_ptr.upcast_to_type())
                 }
 
                 self.function_stack.push(fn_ptr);
@@ -1262,7 +1261,7 @@ impl Sema {
                         check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span())
                             .finalize();
                     } else {
-                        panic_debug!("this function has already been analyzed as a function type")
+                        //panic_debug!("this function has already been analyzed as a function type")
                     }
                 };
                 self.close_scope();
@@ -1283,8 +1282,9 @@ impl Sema {
 
                 is_fn_ty = is_fn_ty || (*ret_ty == p.type_ty && body.u().kind != AstKind::Block);
                 expr.ty = Some(if is_fn_ty {
-                    *ret_ty_expr = Some(body.u());
-                    *ret_ty = Some(body.cv().downcast_type());
+                    let Some(b) = *body else { return Ok(()) }; // only needed for `NotFinished`
+                    *ret_ty_expr = Some(b);
+                    *ret_ty = Some(b.downcast_type());
                     *body = None;
                     p.type_ty
                 } else {
@@ -1358,11 +1358,6 @@ impl Sema {
                 let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
                 let mut tag = 0;
                 *is_simple_enum = true;
-                println!(
-                    "enum: {:?}: {:x?}",
-                    variants.iter().map(|d| d.ident.text.as_ref()).collect::<Vec<_>>(),
-                    scope
-                );
                 handle_struct_scope!(scope, variants.iter(), |variant, idx| {
                     let is_duplicate = !variant_names.insert(variant.ident.text.as_ref());
                     if is_duplicate {
@@ -1373,7 +1368,7 @@ impl Sema {
                         );
                     }
                     if variant.var_ty_expr.is_none() {
-                        variant.as_mut().var_ty_expr = Some(p.void_ty.upcast());
+                        variant.as_mut().var_ty = Some(p.void_ty);
                     }
 
                     let variant_idx = variant.as_mut().init.take();
@@ -1623,7 +1618,7 @@ impl Sema {
         decl.ty = Some(p.void_ty);
         if let Some(t) = decl.var_ty_expr {
             let ty = self.analyze_type(t)?;
-            debug_assert!(decl.var_ty.is_none_or(|t| t == ty)); // TODO(without `NotFinished`): remove this
+            debug_assert!(decl.var_ty.is_none_or(|t| ty_match(t, ty))); // TODO(without `NotFinished`): remove this
             decl.var_ty = Some(ty);
             if ty == p.never {
                 decl.ty = Some(p.never);
@@ -1642,7 +1637,15 @@ impl Sema {
         }
         if let Some(init) = decl.init {
             let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
-            self.analyze(init, &decl.var_ty, decl.is_const || is_static)?;
+            let res = self.analyze(init, &decl.var_ty, decl.is_const || is_static);
+            if matches!(res, NotFinished)
+                && let Some(ty) = init.ty
+                && decl.var_ty.is_none()
+            {
+                // Needed for indirect recursion
+                decl.var_ty = Some(ty);
+            }
+            res?;
             check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
             init.as_mut().ty = Some(decl.var_ty.u());
             if decl.is_const && !init.rep().is_const_val() {
@@ -1694,7 +1697,7 @@ impl Sema {
         let _ = is_const; // TODO: non-toplevel constant contexts?
         let res = self.var_decl_to_value(decl, is_fn_ty_param);
         #[cfg(debug_assertions)]
-        if self.cctx.args.debug_types {
+        if self.cctx.args.debug_types && decl.ident.span != Span::ZERO {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
                 NotFinished => "not finished".to_string(),
@@ -2033,14 +2036,12 @@ impl Sema {
             var_ty
         } else if self.decl_stack.iter().rfind(|d| **d == sym).is_some() {
             debug_assert!(sym.init.u().replacement.is_none());
-            if let Some(f) = sym.init.u().try_flat_downcast::<ast::Fn>() {
-                f.upcast_to_type()
-            } else {
-                debug_assert!(sym.var_ty.is_none());
-                self.cctx.primitives.type_ty
-                //let var_ty = sym.init.u().downcast_type();
-                //println!("out: {}", var_ty );
-                //var_ty
+            match sym.init.u().matchable2() {
+                AstMatch::Fn(f) => f.upcast_to_type(),
+                AstMatch::StructDef(_) | AstMatch::UnionDef(_) | AstMatch::EnumDef(_) => {
+                    self.cctx.primitives.type_ty
+                },
+                _ => unreachable_debug(),
             }
         } else {
             return NotFinished;

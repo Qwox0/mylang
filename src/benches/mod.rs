@@ -99,13 +99,13 @@ macro_rules! bench_compilation {
         let stmts = $crate::parser::parse_files_in_ctx(ctx.0);
         assert!(!ctx.do_abort_compilation());
 
-        let order = $crate::sema::analyze(ctx.0, &stmts);
+        $crate::sema::analyze(ctx.0, &stmts);
         assert!(!ctx.do_abort_compilation());
 
         $b.iter(|| {
             let context = Context::create();
             let mut codegen = llvm::Codegen::new(&context, "dev");
-            codegen.compile_all(&stmts, &order);
+            codegen.compile_all(ctx.0, &stmts);
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {
