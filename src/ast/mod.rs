@@ -1,10 +1,12 @@
 use crate::{
-    arena_allocator::{AllocErr, Arena},
+    ast::debug::DebugAst,
     codegen::llvm::finalize_ty,
-    context::{FilesIndex, ctx, primitives},
+    context::{FilesIndex, ctx, ctx_mut, primitives},
     diagnostics::{HandledErr, cerror},
+    intern_pool::Symbol,
     parser::{lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
+    scope::Scope,
     type_::{RangeKind, ty_match},
     util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
@@ -44,8 +46,6 @@ macro_rules! inherit_ast {
         }
     };
 }
-use debug::DebugAst;
-pub(crate) use inherit_ast;
 
 inherit_ast! {
     struct Ast {}
@@ -313,7 +313,7 @@ macro_rules! ast_variants {
 
 ast_variants! {
     Ident {
-        text: Ptr<str>,
+        sym: Symbol,
         decl: OPtr<Decl>,
     },
 
@@ -516,7 +516,7 @@ ast_variants! {
     BoolVal { val: bool },
     CharVal { val: char },
     // BCharLit { val: u8 },
-    StrVal { text: Ptr<str> },
+    StrVal { text: Ptr<str> }, // TODO?: add string interning?
     PtrVal { val: u64 },
     /// used for constant `struct` values, `union` values, `enum` values and `array` values
     AggregateVal {
@@ -623,13 +623,12 @@ ast_variants! {
     /// `^ expr.span`
     // Note: for normal functions the following might not be true: `fn.ty.ty == primitives.type_ty`
     Fn {
-        params: DeclList,
+        params_scope: Scope,
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,
         /// if `body == None` this Ast node originated from a function type. Note: normal functions
         /// are also valid [`Type`]s.
         body: OPtr<Ast>,
-        scope: Scope,
     },
 }
 
@@ -644,6 +643,8 @@ inherit_ast! {
 pub trait UpcastToAst: Sized {
     fn upcast(self) -> Ptr<Ast>;
 
+    fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]>;
+
     /// resolve possible replacements of this expression
     fn rep(self) -> Ptr<Ast> {
         self.upcast().rep()
@@ -656,6 +657,10 @@ macro_rules! impl_UpcastToAst {
             fn upcast(self) -> Ptr<Ast> {
                 self.cast()
             }
+
+            fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]> {
+                slice.cast_slice()
+            }
         }
     )* };
 }
@@ -666,6 +671,11 @@ impl<V: AstVariant> UpcastToAst for Ptr<V> {
     fn upcast(self) -> Ptr<Ast> {
         debug_assert_eq!(self.get_kind(), V::KIND);
         self.cast()
+    }
+
+    fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]> {
+        debug_assert!(slice.iter().all(|a| a.get_kind() == V::KIND));
+        slice.cast_slice()
     }
 }
 
@@ -1029,8 +1039,8 @@ impl Ast {
             | AstEnum::OptionTy { inner_ty: i, .. } => span.join(i.full_span()),
             AstEnum::StructDef { .. } | AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => span,
             AstEnum::RangeTy { .. } => todo!(),
-            AstEnum::Fn { params, body, ret_ty_expr, .. } => span
-                .maybe_join(params.get(0).map(|p| {
+            AstEnum::Fn { params_scope, body, ret_ty_expr, .. } => span
+                .maybe_join(params_scope.decls.get(0).map(|p| {
                     Some(p.ident.span)
                         .filter(|s| *s != Span::ZERO)
                         .unwrap_or_else(|| p.var_ty_expr.u().full_span()) // for special case: `i32 -> i32`
@@ -1179,8 +1189,8 @@ impl AstKind {
 
 impl Ident {
     #[inline]
-    pub const fn new(text: Ptr<str>, span: Span) -> Ident {
-        ast_new!(local Ident { span, text, decl: None })
+    pub fn new(text: Ptr<str>, span: Span) -> Ident {
+        ast_new!(local Ident { span, sym: ctx_mut().symbols.get_or_intern(text), decl: None })
     }
 }
 
@@ -1257,11 +1267,16 @@ impl Decl {
                 if let Some(ty) = self.on_type {
                     write!(f, "{}.", ty.to_text(false))?;
                 }
-                write!(f, "{}", self.ident.text.as_ref())
+                write!(f, "{}", self.ident.sym)
             }
         }
 
         DeclLhsDisplay { on_type: self.on_type, ident: self.ident }
+    }
+
+    #[inline]
+    pub fn might_need_precompilation(&self) -> bool {
+        self.is_const || self.is_extern || self.markers.get(DeclMarkers::IS_STATIC_MASK)
     }
 }
 
@@ -1280,121 +1295,11 @@ impl Block {
     }
 }
 
-/// The number of [`Decl`]s before this statement in the current [`Scope`].
-///
-/// ```text
-/// stmt pos=0
-/// decl pos=0
-/// stmt pos=1
-/// stmt pos=1
-/// decl pos=1
-/// stmt pos=2
-/// ```
-///
-/// A [`Decl`] has the same pos as the statement before it because ...
-///
-/// ```mylang
-/// a := a + 1; // the `a` in the init expr shouldn't resolve to this decl.
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ScopePos(pub usize);
-
-impl ScopePos {
-    pub const UNSET: Self = ScopePos(usize::MAX);
-
+impl Fn {
     #[inline]
-    pub fn inc(&mut self) {
-        self.0 += 1;
+    pub fn params(&self) -> DeclList {
+        self.params_scope.decls
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeKind {
-    Root,
-    File,
-    Block,
-    ForLoop,
-    Fn,
-    /// `struct`s, `union`s, `enum`s
-    Aggregate,
-}
-
-impl ScopeKind {
-    pub fn allows_shadowing(self) -> bool {
-        matches!(self, ScopeKind::Block)
-    }
-}
-
-#[derive(Debug)]
-pub struct Scope {
-    pub parent: OPtr<Scope>,
-    pub pos_in_parent: ScopePos,
-    pub decls: DeclList,
-    pub kind: ScopeKind,
-}
-
-impl Scope {
-    pub fn new(decls: DeclList, kind: ScopeKind) -> Scope {
-        Scope { parent: None, pos_in_parent: ScopePos::UNSET, decls, kind }
-    }
-
-    pub fn from_stmts(
-        stmts: &[Ptr<Ast>],
-        kind: ScopeKind,
-        alloc: &Arena, // nocheckin
-    ) -> Result<Scope, AllocErr> {
-        // TODO: bench copy vs preallocate `stmts.len`
-        let decls = stmts.iter().filter_map(|s| s.try_downcast::<Decl>()).collect::<Vec<_>>();
-        Ok(Scope::new(alloc.alloc_slice(&decls)?, kind))
-    }
-
-    /// also returns the fields as a [`DeclList`].
-    pub fn for_aggregate(
-        fields: Vec<Ptr<Decl>>,
-        consts: Vec<Ptr<Decl>>,
-        alloc: &Arena, // nocheckin
-    ) -> Result<ScopeAndAggregateInfo, AllocErr> {
-        let fields = alloc.alloc_slice(&fields)?;
-        let scope = Scope::new(alloc.alloc_slice(&consts)?, ScopeKind::Aggregate);
-        Ok(ScopeAndAggregateInfo { scope, fields, consts })
-    }
-
-    pub fn find_decl_norec(&self, name: &str, cur_pos: ScopePos) -> OPtr<Decl> {
-        linear_search_symbol(&self.decls[..cur_pos.0], name)
-    }
-
-    pub fn find_decl(&self, name: &str, cur_pos: ScopePos) -> OPtr<Decl> {
-        let mut cur_scope = Some(Ptr::from_ref(self));
-        let mut cur_pos = cur_pos;
-        while let Some(scope) = cur_scope {
-            let decls = if scope.kind.allows_shadowing() {
-                &scope.decls[..cur_pos.0]
-            } else {
-                &scope.decls
-            };
-            if let Some(sym) = linear_search_symbol(decls, name) {
-                return Some(sym);
-            }
-            cur_scope = scope.parent;
-            cur_pos = scope.pos_in_parent;
-        }
-        return None;
-    }
-}
-
-pub fn linear_search_symbol(decls: &[Ptr<Decl>], name: &str) -> Option<Ptr<Decl>> {
-    decls
-        .iter()
-        .copied()
-        .rev() // `rev()` because of shadowing
-        .filter(|d| d.on_type.is_none())
-        .find(|d| *d.ident.text == *name)
-}
-
-pub struct ScopeAndAggregateInfo {
-    pub scope: Scope,
-    pub fields: DeclList,
-    pub consts: Vec<Ptr<Decl>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1617,14 +1522,14 @@ impl DeclMarkers {
 pub type DeclList = Ptr<[Ptr<Decl>]>;
 
 pub trait DeclListExt {
-    fn find_field(&self, name: &str) -> Option<(usize, Ptr<Decl>)>;
+    fn find_field(&self, sym: Symbol) -> Option<(usize, Ptr<Decl>)>;
 
     fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_;
 }
 
 impl DeclListExt for [Ptr<Decl>] {
-    fn find_field(&self, name: &str) -> Option<(usize, Ptr<Decl>)> {
-        self.iter().copied().enumerate().find(|(_, d)| *d.ident.text == *name)
+    fn find_field(&self, sym: Symbol) -> Option<(usize, Ptr<Decl>)> {
+        self.iter().copied().enumerate().find(|(_, d)| d.ident.sym == sym)
     }
 
     fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_ {

@@ -45,10 +45,19 @@ test :: -> MyStruct.VAL;";
 fn define_and_use_const_in_struct() {
     let code = "
 MyStruct :: struct {
-    val: i64 = MyStruct.DEFAULT_VAL;
+    val: i64 = DEFAULT_VAL;
     DEFAULT_VAL :: 10;
 };
 test :: -> MyStruct.().val;";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+
+    let code = "
+Stack :: struct {
+    buf: [Stack.SIZE]i64;
+    len: u64,
+};
+Stack.SIZE :: 128;
+test :: -> Stack.().val;";
     assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
 }
 

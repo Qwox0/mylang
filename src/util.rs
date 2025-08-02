@@ -6,6 +6,7 @@ use crate::{
 };
 use core::fmt;
 use std::{
+    hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
     io::{self, Read},
     iter::FusedIterator,
@@ -312,3 +313,10 @@ macro_rules! concat_arr {
     };
 }
 pub(crate) use concat_arr;
+
+pub fn hash_val(h: &impl BuildHasher, val: impl Hash) -> u64 {
+    use std::hash::Hasher;
+    let hasher = &mut h.build_hasher();
+    val.hash(hasher);
+    hasher.finish()
+}

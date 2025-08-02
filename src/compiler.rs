@@ -22,7 +22,7 @@ use std::{
 impl<'ctx> llvm::Codegen<'ctx> {
     pub fn compile_all(&mut self, cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
         for f in cctx.files.iter() {
-            self.precompile_scope_decls(f.scope.as_ref().u());
+            self.precompile_decls(&stmts[f.stmt_range.u()]);
         }
 
         for s in stmts.iter().copied() {
@@ -323,10 +323,10 @@ pub enum CompileResult {
 }
 
 impl CompileResult {
-    pub fn exit_code(self) -> i32 {
+    pub fn exit_code(self, on_err: i32) -> i32 {
         match self {
             CompileResult::Ok => 0,
-            CompileResult::Err => 1,
+            CompileResult::Err => on_err,
             CompileResult::RunErr { err_code } => err_code,
             CompileResult::ModuleForTesting(_) => unreachable_debug(),
         }

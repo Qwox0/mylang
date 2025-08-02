@@ -1,9 +1,5 @@
 use crate::{
-    arena_allocator::{AllocErr, Arena},
-    ast::{self, Scope, ScopeKind, UpcastToAst},
-    parser::lexer::Span,
-    ptr::Ptr,
-    type_::RangeKind,
+    arena_allocator::{AllocErr, Arena}, ast::{self, UpcastToAst}, intern_pool::{InternPool, Symbol}, parser::lexer::Span, ptr::Ptr, scope::{Scope, ScopeKind}, type_::RangeKind
 };
 
 #[derive(Debug)]
@@ -46,6 +42,12 @@ pub struct Primitives {
     pub module: Ptr<ast::Type>,
     pub library: Ptr<ast::Type>,
 
+    // Symbols:
+    pub ptr_sym: Symbol,
+    pub len_sym: Symbol,
+    pub main_sym: Symbol,
+    pub as_sym: Symbol,
+
     // Other:
     /// TODO: remove nil
     pub nil: Ptr<ast::Decl>,
@@ -59,12 +61,20 @@ pub struct Primitives {
 }
 
 impl Primitives {
-    pub fn setup(decls: &mut Vec<Ptr<ast::Decl>>, alloc: &Arena) -> Self {
-        Self::try_setup(decls, alloc).unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
+    pub fn setup(decls: &mut Vec<Ptr<ast::Decl>>, symbols: &mut InternPool, alloc: &Arena) -> Self {
+        Self::try_setup(decls, symbols, alloc).unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
     }
 
-    pub fn try_setup(decls: &mut Vec<Ptr<ast::Decl>>, alloc: &Arena) -> Result<Self, AllocErr> {
+    pub fn try_setup(
+        decls: &mut Vec<Ptr<ast::Decl>>,
+        symbols: &mut InternPool,
+        alloc: &Arena,
+    ) -> Result<Self, AllocErr> {
         decls.reserve(30);
+
+        // SAFETY: no multithreading here :)
+        let symbols = Ptr::from_ref(symbols);
+        let sym = |sym_name: &'static str| symbols.as_mut().get_or_intern(Ptr::from_ref(sym_name));
 
         macro_rules! ast_new {
             ($kind:ident {
@@ -84,8 +94,8 @@ impl Primitives {
             };
         }
 
-        let new_primitive_decl = |decl_name: &str| {
-            let mut ident = ast_new!(Ident { text: Ptr::from_ref(decl_name), decl: None });
+        let new_primitive_decl = |decl_name| {
+            let mut ident = ast_new!(Ident { sym: sym(decl_name), decl: None });
             let mut decl = alloc.alloc(ast::Decl::from_ident(ident))?;
             ident.decl = Some(decl);
             decl.is_const = true;
@@ -205,6 +215,11 @@ impl Primitives {
             module: new_primitive_ty!("{module}", simple_ty, finalized: true),
             library: new_primitive_ty!("{library}", simple_ty, finalized: true),
 
+            ptr_sym: sym("ptr"),
+            len_sym: sym("len"),
+            main_sym: sym("main"),
+            as_sym: sym("as"),
+
             nil: {
                 let decl = new_primitive_decl("nil")?;
                 init_decl(decl, never_ptr_ty, Some(ast_new!(PtrVal { val: 0 }).upcast()));
@@ -216,7 +231,7 @@ impl Primitives {
             untyped_slice_struct_def: {
                 let fields = alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?;
                 let def = ast_new!(StructDef {
-                    scope: Scope::new(fields, ScopeKind::Aggregate),
+                    scope: Scope::new(fields, ScopeKind::Struct),
                     fields,
                     consts: Vec::new()
                 });
@@ -231,14 +246,14 @@ impl Primitives {
                 init_ty(arr.upcast_to_type());
                 arr
             },
-            ignored_name: ast_new!(Ident { text: Ptr::from_ref("_"), decl: None }),
+            ignored_name: ast_new!(Ident { sym: sym("_"), decl: None }),
         })
     }
 }
 
 fn insert_symbol_no_duplicate(decls: &mut Vec<Ptr<ast::Decl>>, decl: Ptr<ast::Decl>) {
-    if decls.iter().any(|d| &*d.ident.text == &*decl.ident.text) {
-        panic!("duplicate primitive name: {}", decl.ident.text.as_ref())
+    if decls.iter().any(|d| d.ident.sym == decl.ident.sym) {
+        panic!("duplicate primitive name: {}", decl.ident.sym)
     }
     decls.push(decl);
 }

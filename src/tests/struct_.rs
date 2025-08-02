@@ -1,5 +1,5 @@
 use super::jit_run_test;
-use crate::tests::jit_run_test_raw;
+use crate::tests::{TestSpan, jit_run_test_raw, test_compile_err_raw};
 
 #[test]
 fn set_field_value() {
@@ -49,4 +49,23 @@ test :: -> MyStruct.{ x = 5 };
     let llvm_module_text_local = res.llvm_ir();
 
     assert_eq!(llvm_module_text_local, llvm_module_text_global);
+}
+
+#[test]
+fn duplicate_field() {
+    let code = "MyStruct :: struct { x: i32, x: i64 };";
+    test_compile_err_raw(code, "duplicate struct field `x`", |code| {
+        TestSpan::of_nth_substr(code, 1, "x")
+    });
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn duplicate_field2() {
+    // TODO: allow field and method with the same name?
+    let code = "MyStruct :: struct { x: i32, x :: (s: *MyStruct) -> s.x; };";
+    jit_run_test_raw::<()>(code).ok();
+
+    let code = "MyStruct :: struct { x: i32 }; MyStruct.x :: (s: *MyStruct) -> s.x;";
+    jit_run_test_raw::<()>(code).ok();
 }

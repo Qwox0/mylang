@@ -180,13 +180,13 @@ fn parse_params_without_types() {
     {
         let res = test_parse("(a, b, c) -> {};").no_error();
         let f = res.stmts.into_iter().expect_one().downcast::<ast::Fn>();
-        assert_eq!(f.params.len(), 3);
+        assert_eq!(f.params().len(), 3);
     }
 
     {
         let res = test_parse("(a, b) -> {};").no_error();
         let f = res.stmts.into_iter().expect_one().downcast::<ast::Fn>();
-        assert_eq!(f.params.len(), 2);
+        assert_eq!(f.params().len(), 2);
     }
 }
 

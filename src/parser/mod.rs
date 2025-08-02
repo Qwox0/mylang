@@ -5,13 +5,14 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, AstMatch, BinOpKind, DeclList, DeclMarkers, Scope,
-        ScopeAndAggregateInfo, ScopeKind, ScopePos, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, AstMatch, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst,
+        ast_new,
     },
     context::{CompilationContextInner, primitives},
     diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
+    scope::{Scope, ScopeAndAggregateInfo, ScopeKind, ScopePos},
     scratch_pool::ScratchPool,
     util::{UnwrapDebug, concat_arr, then, unreachable_debug},
 };
@@ -136,7 +137,7 @@ pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> Vec<Ptr<Ast
         let mut scope =
             Scope::from_stmts(&stmts[stmt_range], ScopeKind::File, &cctx.alloc).unwrap();
         scope.parent = Some(cctx.root_scope);
-        scope.pos_in_parent = ScopePos(cctx.root_scope.decls.len());
+        scope.pos_in_parent = ScopePos(cctx.root_scope.decls.len() as u32);
         file.as_mut().scope = Some(scope);
 
         idx += 1;
@@ -177,7 +178,7 @@ impl Parser {
         Ok(match op {
             FollowingOperator::Dot => {
                 let rhs = self.ident()?;
-                if &*rhs.text == "as" {
+                if rhs.sym == primitives().as_sym {
                     self.tok(TokenKind::OpenParenthesis)?;
                     let target_ty = self.expr()?;
                     let close_p = self.tok(TokenKind::CloseParenthesis)?;
@@ -309,20 +310,22 @@ impl Parser {
 
         Ok(match kind {
             TokenKind::Ident => {
-                expr!(Ident { text: self.advanced().get_text_from_span(span), decl: None }, span)
+                let text = self.advanced().get_text_from_span(span);
+                let sym = self.cctx.symbols.get_or_intern(text);
+                expr!(Ident { sym, decl: None }, span)
             },
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub | Keyword::Static) => {
                 self.var_decl(false)?.upcast()
             },
-            TokenKind::Keyword(Keyword::Struct) => {
+            TokenKind::Keyword(k @ Keyword::Struct) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body()?;
+                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(StructDef { scope, fields, consts }, span.join(close_b.span))
             },
-            TokenKind::Keyword(Keyword::Union) => {
+            TokenKind::Keyword(k @ Keyword::Union) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body()?;
+                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(UnionDef { scope, fields, consts }, span.join(close_b.span))
             },
@@ -355,7 +358,7 @@ impl Parser {
                 );
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 let ScopeAndAggregateInfo { scope, fields, consts } =
-                    Scope::for_aggregate(variants, vec![], &self.cctx.alloc)?;
+                    Scope::for_aggregate(variants, vec![], &self.cctx.alloc, ScopeKind::Enum)?;
                 expr!(
                     EnumDef {
                         scope,
@@ -644,7 +647,7 @@ impl Parser {
             },
             TokenKind::Pound => {
                 let directive_ident = self.advanced().ident()?;
-                let directive_name = directive_ident.text.as_ref();
+                let directive_name = directive_ident.sym.text(); // TODO?: also intern directive_names?
 
                 let mut parse_str_lit_arg = |usage: &str| {
                     let arg = opt!(self, value())?;
@@ -695,7 +698,7 @@ impl Parser {
                         expr!(Empty {}, span.join(directive_ident.span))
                     } else {
                         let main_ident = expr!(
-                            Ident { text: Ptr::from_ref("main"), decl: Some(decl) },
+                            Ident { sym: self.cctx.primitives.main_sym, decl: Some(decl) },
                             decl.ident.span
                         );
                         // not using `set_replacement` because it requires a type and this is just
@@ -816,8 +819,8 @@ impl Parser {
             (None, expr)
         };
         let body = Some(body);
-        let scope = Scope::new(params, ScopeKind::Fn);
-        Ok(ast_new!(Fn { params, ret_ty_expr, ret_ty: None, body, scope }, start_span))
+        let params_scope = Scope::new(params, ScopeKind::Fn);
+        Ok(ast_new!(Fn { params_scope, ret_ty_expr, ret_ty: None, body }, start_span))
     }
 
     fn if_after_cond(
@@ -940,13 +943,15 @@ impl Parser {
     }
 
     /// also returns the field_count
-    fn struct_body(&mut self) -> ParseResult<ScopeAndAggregateInfo> {
+    fn struct_body(&mut self, kind: Keyword) -> ParseResult<ScopeAndAggregateInfo> {
         let mut fields = Vec::new();
         let mut consts = Vec::new();
         parse_in_block!(self, sep = [TokenKind::Semicolon, TokenKind::Comma], in_block = true, {
             let expr = self.expr()?;
             if let Some(decl) = expr.try_downcast::<ast::Decl>() {
-                if decl.is_const {
+                if let Some(on_ty_expr) = decl.on_type {
+                    cerror!(on_ty_expr.full_span(), "currently not supported"); // TODO
+                } else if decl.is_const {
                     consts.push(decl);
                 } else {
                     fields.push(decl);
@@ -956,7 +961,12 @@ impl Parser {
             };
             expr
         });
-        Scope::for_aggregate(fields, consts, &self.cctx.alloc)
+        let kind = match kind {
+            Keyword::Struct => ScopeKind::Struct,
+            Keyword::Union => ScopeKind::Union,
+            _ => unreachable_debug(),
+        };
+        Scope::for_aggregate(fields, consts, &self.cctx.alloc, kind)
     }
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {

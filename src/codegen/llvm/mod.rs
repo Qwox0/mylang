@@ -1,10 +1,11 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, BinOpKind, ConstValEnum, DeclList, DeclListExt, DeclMarkers,
-        OptionTypeExt, Scope, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
+        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
-    context::{ctx, primitives},
+    context::{ctx, ctx_mut, primitives},
     display_code::{debug_expr, display},
+    intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
     ptr::Ptr,
     scoped_stack::ScopedStack,
@@ -198,8 +199,9 @@ impl<'ctx> Codegen<'ctx> {
                 );
                 Ok(self.get_symbol(decl.u()))
             },
-            AstEnum::Block { stmts, has_trailing_semicolon, scope, .. } => {
-                self.open_scope(scope);
+            AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
+                self.precompile_decls(stmts.as_ref());
+                self.open_scope();
                 let res: CodegenResultAndControlFlow<Symbol> = try {
                     if let Some(last) = stmts.last_mut() {
                         last.ty = Some(out_ty)
@@ -294,18 +296,23 @@ impl<'ctx> Codegen<'ctx> {
                     debug_assert_eq!(out_ty.kind, AstKind::EnumDef);
                     debug_assert_eq!(lhs_ty, p.type_ty);
                     let _ = self.llvm_type(enum_def.upcast_to_type());
-                    self.compile_enum_val(enum_def, &rhs.text, None, write_target.take())
+                    self.compile_enum_val(enum_def, rhs.sym, None, write_target.take())
                 } else if let Some(s_def) = lhs_ty.try_downcast_struct_def() {
                     let struct_ty = self.llvm_type(s_def.upcast_to_type()).struct_ty();
                     let struct_sym = self.compile_expr(lhs)?;
-                    let (field_idx, _) = s_def.fields.find_field(&rhs.text).u();
-                    self.build_struct_access(struct_ty, struct_sym, field_idx as u32, &rhs.text)
-                        .coerce()
+                    let (field_idx, _) = s_def.fields.find_field(rhs.sym).u();
+                    self.build_struct_access(
+                        struct_ty,
+                        struct_sym,
+                        field_idx as u32,
+                        rhs.sym.text(),
+                    )
+                    .coerce()
                 } else if let Some(u_def) = lhs_ty.try_downcast::<ast::UnionDef>() {
                     let union_ty = self.type_table[&lhs_ty].struct_ty();
                     let union_sym = self.compile_expr(lhs)?;
                     debug_assert!(!(u_def.fields.len() > 0 && union_ty.count_fields() == 0));
-                    self.build_struct_access(union_ty, union_sym, 0, &rhs.text).coerce()
+                    self.build_struct_access(union_ty, union_sym, 0, rhs.sym.text()).coerce()
                 } else {
                     unreachable_debug()
                 }
@@ -409,7 +416,7 @@ impl<'ctx> Codegen<'ctx> {
                         },
                         _ => unreachable_debug(),
                     };
-                    self.compile_call(f, fn_val, args.iter().copied(), write_target.take())
+                    self.compile_call(f, fn_val, *args, write_target.take())
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
                     let f = dot.rhs.rep().downcast::<ast::Fn>();
@@ -420,7 +427,7 @@ impl<'ctx> Codegen<'ctx> {
                         debug_expr!(expr);
                         unreachable_debug();
                     };
-                    let args = std::iter::once(dot.lhs.u()).chain(args.iter().copied());
+                    let args = std::iter::once(dot.lhs.u()).chain(*args);
                     self.compile_call(f, CallFnVal::Direct(val), args, write_target.take())
                 } else if func.ty == p.enum_variant {
                     let dot = func.downcast::<ast::Dot>();
@@ -429,7 +436,7 @@ impl<'ctx> Codegen<'ctx> {
                     debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty.upcast_to_type());
                     debug_assert!(args.len() <= 1);
                     let data = args.get(0).copied();
-                    self.compile_enum_val(enum_ty, &dot.rhs.text, data, write_target.take())
+                    self.compile_enum_val(enum_ty, dot.rhs.sym, data, write_target.take())
                 } else {
                     unreachable_debug()
                 }
@@ -945,9 +952,9 @@ impl<'ctx> Codegen<'ctx> {
     /// a :: -> void b();
     /// b :: -> void a();
     /// ```
-    pub fn precompile_scope_decls(&mut self, scope: &Scope) -> CodegenResult<()> {
-        for d in scope.decls.iter().copied() {
-            if d.is_const || d.is_extern || d.markers.get(DeclMarkers::IS_STATIC_MASK) {
+    pub fn precompile_decls(&mut self, stmts: &[Ptr<ast::Ast>]) -> CodegenResult<()> {
+        for d in stmts.iter().filter_map(|a| a.try_downcast::<ast::Decl>()) {
+            if d.might_need_precompilation() {
                 let _: Option<()> = self.compile_decl(d, true).handle_unreachable()?;
             }
         }
@@ -974,11 +981,11 @@ impl<'ctx> Codegen<'ctx> {
             None
         };
 
-        let mut arg_ffi_types = Vec::with_capacity(f.params.len());
-        let mut arg_ffi_offsets = Vec::with_capacity(f.params.len());
+        let mut arg_ffi_types = Vec::with_capacity(f.params_scope.decls.len());
+        let mut arg_ffi_offsets = Vec::with_capacity(f.params_scope.decls.len());
         {
             let mut cur_arg_offset = sret_offset;
-            for p in f.params.iter() {
+            for p in f.params_scope.decls.iter() {
                 let c_ffi_ty = self.c_ffi_type(p.var_ty.u());
                 arg_ffi_types.push(c_ffi_ty);
                 arg_ffi_offsets.push(cur_arg_offset);
@@ -1009,7 +1016,7 @@ impl<'ctx> Codegen<'ctx> {
             set_arg_val!(0, ret_val_ptr.u().into());
         }
 
-        for_each_call_arg(f.params, args, |arg, param, p_idx| {
+        for_each_call_arg(f.params(), args, |arg, param, p_idx| {
             let sym = self.compile_expr(arg)?;
             let arg_ty = arg_ffi_types.get(p_idx).u();
             let arg_offset = *arg_ffi_offsets.get(p_idx).u();
@@ -1066,8 +1073,8 @@ impl<'ctx> Codegen<'ctx> {
 
         ret.add_ret_attributes(self, ret_ffi_ty, f);
         let mut cur_ffi_arg_idx = sret_offset;
-        for (param, ffi_ty) in f.params.iter().zip(arg_ffi_types) {
-            cur_ffi_arg_idx += ret.add_param_attributes(self, *param, ffi_ty, cur_ffi_arg_idx);
+        for (param, ffi_ty) in f.params().into_iter().zip(arg_ffi_types) {
+            cur_ffi_arg_idx += ret.add_param_attributes(self, param, ffi_ty, cur_ffi_arg_idx);
         }
 
         let ret = if let CFfiType::SmallSimpleEnum { ffi_int, small_int } = ret_ffi_ty {
@@ -1099,11 +1106,11 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_enum_val(
         &mut self,
         enum_def: Ptr<ast::EnumDef>,
-        variant_name: &str,
+        variant_sym: InternSym,
         data: Option<Ptr<Ast>>,
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        let variant_idx = enum_def.variants.find_field(variant_name).u().0;
+        let variant_idx = enum_def.variants.find_field(variant_sym).u().0;
         let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u();
 
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
@@ -1172,12 +1179,12 @@ impl<'ctx> Codegen<'ctx> {
         let use_sret = ret_type.do_use_sret();
 
         // capacity: A struct param might be flattened into at most two params
-        let mut param_types = Vec::with_capacity(f.params.len() * 2 + use_sret as usize);
+        let mut param_types = Vec::with_capacity(f.params().len() * 2 + use_sret as usize);
         if use_sret {
             param_types.push(ptr_type);
         }
 
-        for p in f.params.iter() {
+        for p in f.params() {
             let var_ty = p.var_ty.u();
             match self.c_ffi_type(var_ty) {
                 CFfiType::Zst => {},
@@ -1226,9 +1233,9 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         let mut cur_ffi_arg_idx = use_sret as u32;
-        for p in f.params.iter() {
+        for p in f.params() {
             let ffi_ty = self.c_ffi_type(p.var_ty.u());
-            cur_ffi_arg_idx += fn_val.add_param_attributes(self, *p, ffi_ty, cur_ffi_arg_idx);
+            cur_ffi_arg_idx += fn_val.add_param_attributes(self, p, ffi_ty, cur_ffi_arg_idx);
 
             #[cfg(debug_assertions)]
             match ffi_ty {
@@ -1238,14 +1245,11 @@ impl<'ctx> Codegen<'ctx> {
                 | CFfiType::Fn
                 | CFfiType::Array
                 | CFfiType::SmallSimpleEnum { .. } => {
-                    params_iter.next().u().set_name(p.ident.text.as_ref());
+                    params_iter.next().u().set_name(p.ident.sym.text());
                 },
                 CFfiType::Simple2(_) => {
                     for f_idx in 0..2 {
-                        params_iter
-                            .next()
-                            .u()
-                            .set_name(&format!("{}.{f_idx}", p.ident.text.as_ref()));
+                        params_iter.next().u().set_name(&format!("{}.{f_idx}", p.ident.sym));
                     }
                 },
             }
@@ -1269,12 +1273,13 @@ impl<'ctx> Codegen<'ctx> {
         let outer_return_depth = self.return_depth;
         self.return_depth = 0;
 
-        self.open_scope(&f.scope);
+        debug_assert!(f.params_scope.decls.iter().all(|d| !d.might_need_precompilation()));
+        self.open_scope();
         let res = try {
-            self.symbols.reserve(f.params.len());
+            self.symbols.reserve(f.params().len());
 
             let mut param_val_iter = func.get_param_iter().skip(use_sret as usize);
-            for param_def in f.params.iter() {
+            for param_def in f.params() {
                 let param_ty = param_def.var_ty.u();
                 let s = match self.c_ffi_type(param_ty) {
                     CFfiType::Zst => {
@@ -1301,7 +1306,7 @@ impl<'ctx> Codegen<'ctx> {
                     CFfiType::Simple2(two_params) => {
                         let ffi_struct = self.struct_type_inner(&two_params, None, false);
                         let param_align = param_ty.alignment();
-                        let ptr = self.build_alloca2(param_ty, param_def.ident.text.as_ref())?;
+                        let ptr = self.build_alloca2(param_ty, param_def.ident.sym.text())?;
                         for f_idx in 0..2 {
                             let f_ptr =
                                 self.builder.build_struct_gep(ffi_struct, ptr, f_idx, "")?;
@@ -1321,11 +1326,11 @@ impl<'ctx> Codegen<'ctx> {
                         reg_sym(self.builder.build_int_truncate(
                             param,
                             small_int,
-                            &param_def.ident.text,
+                            param_def.ident.sym.text(),
                         )?)
                     },
                 };
-                self.symbols.push((*param_def, s));
+                self.symbols.push((param_def, s));
             }
 
             f.body.u().as_mut().ty = Some(f.ret_ty.u());
@@ -1354,19 +1359,19 @@ impl<'ctx> Codegen<'ctx> {
 
     fn mangle_symbol<'n>(&self, decl: Ptr<ast::Decl>) -> Cow<'n, str> {
         if decl.ident.replacement.is_some() {
-            return decl.ident.rep().flat_downcast::<ast::Ident>().text.as_ref().into();
+            return decl.ident.rep().flat_downcast::<ast::Ident>().sym.text().into();
         }
-        let name = decl.ident.text.as_ref();
+        let name = decl.ident.sym;
         if decl.is_extern {
-            name.into()
-        } else if name == "main" {
+            name.text().into()
+        } else if name == primitives().main_sym {
             "_main".into()
         } else if let Some(ty) = decl.on_type {
             format!("{}.{name}", ty.downcast_type()).into() // TODO: use correct type name
         } else if let Some(f) = self.cur_fn {
             format!("{}.{name}", f.get_name().to_str().unwrap()).into()
         } else {
-            name.into()
+            name.text().into()
         }
     }
 
@@ -1385,7 +1390,7 @@ impl<'ctx> Codegen<'ctx> {
                     struct_ty,
                     struct_ptr,
                     f_idx as u32,
-                    &field_def.ident.text,
+                    field_def.ident.sym.text(),
                 )?;
                 finalize_ty(val.as_mut().ty.as_mut().u(), field_def.var_ty.u());
                 self.compile_expr_with_write_target(val, Some(field_ptr))?;
@@ -1404,11 +1409,12 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResultAndControlFlow<()> {
         let mut is_initialized_field = vec![false; fields.len()];
         for (f, init) in values.iter() {
-            let (f_idx, field_def) = fields.find_field(&f.text).u();
+            let (f_idx, field_def) = fields.find_field(f.sym).u();
             is_initialized_field[f_idx] = true;
 
             let field_ptr =
-                self.builder.build_struct_gep(struct_ty, struct_ptr, f_idx as u32, &*f.text)?;
+                self.builder
+                    .build_struct_gep(struct_ty, struct_ptr, f_idx as u32, f.sym.text())?;
 
             match init {
                 Some(init) => {
@@ -1431,7 +1437,7 @@ impl<'ctx> Codegen<'ctx> {
                 struct_ty,
                 struct_ptr,
                 f_idx as u32,
-                &field.ident.text,
+                field.ident.sym.text(),
             )?;
             finalize_ty(field.as_mut().init.as_mut().u().ty.as_mut().u(), field.var_ty.u()); // TODO: don't finalize the types here
             self.compile_expr_with_write_target(field.init.u(), Some(field_ptr))?;
@@ -2576,8 +2582,7 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap()
     }
 
-    fn open_scope(&mut self, scope: &Scope) {
-        self.precompile_scope_decls(scope);
+    fn open_scope(&mut self) {
         self.symbols.open_scope();
         self.defer_stack.open_scope();
         self.return_depth += 1;
@@ -2647,9 +2652,10 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_prototype(f, FnKind::FnDef(decl));
                 } else if !*is_extern {
                     debug_assert!(
-                        self.fn_table.get(&f).u().get_first_basic_block().is_none(),
+                        self.fn_table.get(&f).is_some(),
                         "function prototype should have been precompiled",
                     );
+                    debug_assert!(self.fn_table.get(&f).u().get_first_basic_block().is_none());
                     self.compile_fn(f, FnKind::FnDef(decl))?;
                 }
             } else if var_ty == p.type_ty {
@@ -2661,13 +2667,13 @@ impl<'ctx> Codegen<'ctx> {
                     // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
 
                     if during_precompile {
-                        for d in ty_scope.decls.iter() {
-                            debug_assert!(d.as_ref().on_type.is_none_or(|t| t == ty.upcast()));
+                        for d in ty_scope.decls {
+                            debug_assert!(d.on_type.is_none_or(|t| t.downcast_type() == ty));
                             d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
                         }
-                        self.precompile_scope_decls(ty_scope);
+                        self.precompile_decls(UpcastToAst::upcast_slice(ty_scope.decls).as_ref());
                     } else {
-                        for d in ty_scope.decls.iter().copied() {
+                        for d in ty_scope.decls {
                             self.compile_decl(d, false)?;
                         }
                     }
@@ -2713,7 +2719,7 @@ impl<'ctx> Codegen<'ctx> {
             {
                 self.compile_expr(*init)?
             } else {
-                let stack_ptr = self.build_alloca2(var_ty, &decl.ident.text)?;
+                let stack_ptr = self.build_alloca2(var_ty, decl.ident.sym.text())?;
                 if let Some(init) = decl.init {
                     finalize_ty(init.as_mut().ty.as_mut().u(), var_ty);
                     let _init = self.compile_expr_with_write_target(init, Some(stack_ptr))?;
@@ -3106,7 +3112,7 @@ pub fn for_each_call_arg<'ctx, U>(
     for named_arg in args {
         let named_arg = named_arg.downcast::<ast::Assign>();
         let arg_name = named_arg.lhs.downcast::<ast::Ident>();
-        let (rem_param_idx, param_def) = remaining_params.find_field(&arg_name.text).u();
+        let (rem_param_idx, param_def) = remaining_params.find_field(arg_name.sym).u();
         debug_assert!(!was_set[rem_param_idx]);
         was_set[rem_param_idx] = true;
         f(named_arg.rhs, param_def, pos_idx + rem_param_idx)?

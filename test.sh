@@ -28,5 +28,5 @@ tests="$@"
 (set -x
 watchexec "cargo test --color=always -- $tests --nocapture --test-threads 1") 2>&1 | \
     sed "s/^test \([^ ]*\) \.\.\./${cyan}TEST: \1${reset} .../;\
-        s/\(FAILED\)/${bold_red}\1${reset}/;\
-        s/\(ok\)/${bold_green}\1${reset}\n/"
+        s/\(\<FAILED\>\)/${bold_red}\1${reset}/;\
+        s/\(\<ok\>\)/${bold_green}\1${reset}\n/"

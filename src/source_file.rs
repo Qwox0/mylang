@@ -1,8 +1,8 @@
 use crate::{
     arena_allocator::Arena,
-    ast::Scope,
     parser::lexer::{Code, Span},
     ptr::Ptr,
+    scope::Scope,
 };
 use std::{ops, path::Path, range::Range};
 

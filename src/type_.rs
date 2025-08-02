@@ -133,13 +133,13 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if let Some(lhs) = lhs.try_downcast::<ast::Fn>() {
         if let Some(rhs) = rhs.try_downcast::<ast::Fn>()
-            && lhs.params.len() == rhs.params.len()
+            && lhs.params().len() == rhs.params().len()
             && ty_match(lhs.ret_ty.u(), rhs.ret_ty.u())
             && lhs
-                .params
+                .params()
                 .iter()
                 .map(|p| p.var_ty.u())
-                .zip(rhs.params.iter().map(|p| p.var_ty.u()))
+                .zip(rhs.params().iter().map(|p| p.var_ty.u()))
                 .all(|(g, e)| ty_match(g, e))
         {
             return Lhs; // or Rhs? idk
@@ -249,13 +249,13 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
 
     if let Some(expected_fn) = expected.try_downcast::<ast::Fn>() {
         if let Some(got_fn) = got.try_downcast::<ast::Fn>()
-            && got_fn.params.len() == expected_fn.params.len()
+            && got_fn.params().len() == expected_fn.params().len()
             && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
             && got_fn
-                .params
+                .params()
                 .iter()
                 .map(|p| p.var_ty.u())
-                .zip(expected_fn.params.iter().map(|p| p.var_ty.u()))
+                .zip(expected_fn.params().iter().map(|p| p.var_ty.u()))
                 .all(|(g, e)| ty_match(g, e))
         {
             return true;
@@ -351,8 +351,8 @@ impl Ptr<ast::Type> {
             TypeEnum::RangeTy { elem_ty, .. } => {
                 elem_ty.finalize();
             },
-            TypeEnum::Fn { params, ret_ty, .. } => {
-                debug_assert!(params.iter().all(|p| p.var_ty.u().is_finalized()));
+            TypeEnum::Fn { params_scope, ret_ty, .. } => {
+                debug_assert!(params_scope.decls.iter().all(|p| p.var_ty.u().is_finalized()));
                 debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::Unset => unreachable_debug(),

@@ -55,7 +55,7 @@ impl DebugAst for Ast {
             lines.write("(");
         }
         match ptr.matchable().as_ref() {
-            AstEnum::Ident { text, .. } => lines.write(text.as_ref()),
+            AstEnum::Ident { sym, .. } => lines.write(sym.text()),
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
                 lines.write("{");
                 let len = stmts.len();
@@ -229,7 +229,7 @@ impl DebugAst for Ast {
             },
             AstEnum::Decl { is_extern: true, ident, var_ty, var_ty_expr, .. } => {
                 lines.write("extern ");
-                lines.write(&ident.text);
+                lines.write(ident.sym.text());
                 lines.write(":");
                 if let Some(var_ty) = var_ty {
                     lines.write_tree(var_ty);
@@ -326,7 +326,7 @@ impl DebugAst for Ast {
                     lines.write_many(
                         fields.iter().zip(elements.iter()),
                         |(f, e), _, lines| {
-                            lines.write_fmt(format_args!("{}={e}", f.ident.text.as_ref())).unwrap();
+                            lines.write_fmt(format_args!("{}={e}", f.ident.sym)).unwrap();
                         },
                         ", ",
                     );
@@ -334,9 +334,9 @@ impl DebugAst for Ast {
                 },
                 cv => todo!("debug {cv:?}"),
             },
-            AstEnum::Fn { params, ret_ty, ret_ty_expr, body, .. } => {
+            AstEnum::Fn { params_scope, ret_ty, ret_ty_expr, body, .. } => {
                 lines.write("(");
-                lines.write_many_expr(params, ",");
+                lines.write_many_expr(&params_scope.decls, ",");
                 lines.write(")->");
                 if let Some(ret_type) = ret_ty_expr {
                     lines.write_tree(ret_type);
@@ -356,7 +356,7 @@ impl DebugAst for Ast {
                 }
             },
 
-            AstEnum::SimpleTy { decl, .. } => lines.write(&decl.ident.text),
+            AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),
             AstEnum::IntTy { bits, is_signed, .. } => {
                 lines.write(if *is_signed { "i" } else { "u" });
                 lines.write(&bits.to_string());

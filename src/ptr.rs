@@ -110,6 +110,25 @@ impl<T> Ptr<[T]> {
     pub fn empty_slice() -> Ptr<[T]> {
         Ptr::from(&[] as &[T])
     }
+
+    pub fn cast_slice<U>(self) -> Ptr<[U]> {
+        Ptr::new(unsafe { NonNull::new_unchecked(self.raw() as *mut [U]) })
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        &self[..]
+    }
+}
+
+impl<T> IntoIterator for Ptr<[Ptr<T>]>
+where Ptr<T>: 'static
+{
+    type IntoIter = std::iter::Copied<std::slice::Iter<'static, Ptr<T>>>;
+    type Item = Ptr<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_ref().iter().copied()
+    }
 }
 
 impl<T> Ptr<MaybeUninit<T>> {
@@ -183,12 +202,6 @@ impl<T: ?Sized> std::fmt::Pointer for Ptr<T> {
 impl<T: ?Sized> std::hash::Hash for Ptr<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hash(state);
-    }
-}
-
-impl<T> Ptr<[T]> {
-    pub fn as_slice(&self) -> &[T] {
-        &self[..]
     }
 }
 

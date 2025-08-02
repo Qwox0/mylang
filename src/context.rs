@@ -1,14 +1,16 @@
 use crate::{
     arena_allocator::Arena,
-    ast::{self, Scope, ScopeKind},
+    ast,
     cli::BuildArgs,
     compiler::CompileDurations,
-    diagnostics::{self, HandledErr, cerror, cerror2, chint},
+    diagnostics::{self, cerror, cerror2, chint, HandledErr},
+    intern_pool::{InternPool, Symbol},
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
+    scope::{Scope, ScopeKind},
     sema::primitives::Primitives,
     source_file::SourceFile,
-    util::{UnwrapDebug, is_canonical},
+    util::{is_canonical, UnwrapDebug},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -25,6 +27,8 @@ pub struct CompilationContextInner {
     pub alloc: Arena,
     pub diagnostic_reporter: CtxDiagnosticReporter,
     pub compile_time: CompileDurations,
+
+    pub symbols: InternPool,
 
     pub primitives: Primitives,
     pub root_scope: Ptr<Scope>,
@@ -47,6 +51,7 @@ pub struct CompilationContextInner {
     pub do_mut_checks: bool,
 
     pub args: BuildArgs,
+    pub entry_point: Symbol,
 }
 
 pub type FilesIndex = usize;
@@ -80,9 +85,10 @@ impl Drop for CompilationContext {
 impl CompilationContext {
     pub fn new(args: BuildArgs) -> CompilationContext {
         let alloc = Arena::new();
+        let mut symbols = InternPool::new();
 
         let mut decls = Vec::new();
-        let primitives = Primitives::setup(&mut decls, &alloc);
+        let primitives = Primitives::setup(&mut decls, &mut symbols, &alloc);
         let decls = alloc.alloc_slice(&decls).unwrap();
         let root_scope = alloc.alloc(Scope::new(decls, ScopeKind::Root)).unwrap();
 
@@ -98,10 +104,14 @@ impl CompilationContext {
             compiler_libs_path.display()
         );
 
+        let entry_point_sym = symbols.get_or_intern(Ptr::from_ref(args.entry_point.as_ref()));
+
         let ctx = CompilationContextInner {
             alloc,
             diagnostic_reporter: CtxDiagnosticReporter::default(),
             compile_time: CompileDurations::default(),
+
+            symbols,
 
             primitives,
             root_scope,
@@ -119,6 +129,7 @@ impl CompilationContext {
             do_mut_checks: true,
 
             args,
+            entry_point: entry_point_sym,
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {

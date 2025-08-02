@@ -15,7 +15,7 @@ pub enum Command {
     /// Builds and runs the current project
     Run(BuildArgs),
     Check(BuildArgs),
-    Clean(BuildArgs),
+    Clean {},
 
     /// Opens a REPL
     Repl {},
@@ -43,7 +43,7 @@ pub struct BuildArgs {
 
     /// The name of the first function called by the program
     #[arg(long, default_value = "main")]
-    pub entry_point: String,
+    pub entry_point: Box<str>,
 
     #[arg(long)]
     pub emit_llvm_ir: bool,
@@ -62,6 +62,9 @@ pub struct BuildArgs {
     pub debug_llvm_ir_optimized: bool,
     #[arg(long)]
     pub debug_linker_args: bool,
+
+    #[arg(long, default_value = "1")]
+    pub error_code: i32,
 }
 
 impl Default for BuildArgs {
@@ -70,6 +73,15 @@ impl Default for BuildArgs {
             unreachable!()
         };
         args
+    }
+}
+
+impl Cli {
+    pub fn args(&self) -> Option<&BuildArgs> {
+        match &self.command {
+            Command::Build(args) | Command::Run(args) | Command::Check(args) => Some(args),
+            Command::Clean {} | Command::Repl {} => None,
+        }
     }
 }
 

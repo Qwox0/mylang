@@ -78,7 +78,7 @@ pub trait DiagnosticReporter {
 
     #[track_caller]
     fn error_duplicate_named_arg(&self, arg_name: Ptr<ast::Ident>) {
-        cerror!(arg_name.span, "Parameter '{}' specified multiple times", &arg_name.text);
+        cerror!(arg_name.span, "Parameter '{}' specified multiple times", &arg_name.sym);
     }
 
     #[track_caller]
@@ -95,12 +95,12 @@ pub trait DiagnosticReporter {
 
     #[track_caller]
     fn error_unknown_field(&self, field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
-        cerror!(field.span, "no field `{}` on type `{}`", field.text.as_ref(), ty)
+        cerror!(field.span, "no field `{}` on type `{}`", field.sym, ty)
     }
 
     #[track_caller]
     fn error_unknown_variant(&self, variant: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
-        cerror!(variant.span, "no variant `{}` on enum type `{}`", variant.text.as_ref(), ty)
+        cerror!(variant.span, "no variant `{}` on enum type `{}`", variant.sym, ty)
     }
 
     #[track_caller]
