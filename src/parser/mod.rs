@@ -321,13 +321,19 @@ impl Parser {
                 self.advanced().tok(TokenKind::OpenBrace)?;
                 let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(StructDef { scope, fields, consts }, span.join(close_b.span))
+                expr!(
+                    StructDef { scope, fields, consts, finished_members: 0 },
+                    span.join(close_b.span)
+                )
             },
             TokenKind::Keyword(k @ Keyword::Union) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
                 let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(UnionDef { scope, fields, consts }, span.join(close_b.span))
+                expr!(
+                    UnionDef { scope, fields, consts, finished_members: 0 },
+                    span.join(close_b.span)
+                )
             },
             TokenKind::Keyword(Keyword::Enum) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
@@ -363,10 +369,11 @@ impl Parser {
                     EnumDef {
                         scope,
                         variants: fields,
+                        finished_members: 0,
                         variant_tags: None,
                         consts,
                         is_simple_enum: false,
-                        tag_ty: None
+                        tag_ty: None,
                     },
                     span.join(close_b.span)
                 )

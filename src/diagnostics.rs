@@ -331,7 +331,7 @@ impl fmt::Display for DiagnosticSeverity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct HandledErr;
 
 impl<T, E: From<HandledErr>> From<HandledErr> for Result<T, E> {

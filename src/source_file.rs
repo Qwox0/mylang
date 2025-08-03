@@ -11,7 +11,8 @@ pub struct SourceFile {
     pub path: Ptr<Path>,
     pub code: Ptr<Code>,
 
-    /// This is only [`None`] iff the `code` hasn't been parse yet.
+    /// This is only [`None`] iff the `code` hasn't been parse yet. The start of this range is
+    /// mutated such that this range only ever includes unfinished statements.
     pub stmt_range: Option<Range<usize>>,
     /// not available during parsing
     pub scope: Option<Scope>,

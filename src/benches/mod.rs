@@ -96,16 +96,16 @@ macro_rules! bench_compilation {
         let code = $crate::ptr::Ptr::from_ref(code);
         let ctx = CompilationContext::new($crate::cli::BuildArgs::comp_bench_args());
         ctx.0.set_test_root(code).unwrap();
-        let stmts = $crate::parser::parse_files_in_ctx(ctx.0);
+        let mut stmts = $crate::parser::parse_files_in_ctx(ctx.0);
         assert!(!ctx.do_abort_compilation());
 
-        $crate::sema::analyze(ctx.0, &stmts);
+        $crate::sema::analyze(ctx.0, &mut stmts);
         assert!(!ctx.do_abort_compilation());
 
         $b.iter(|| {
             let context = Context::create();
             let mut codegen = llvm::Codegen::new(&context, "dev");
-            codegen.compile_all(ctx.0, &stmts);
+            codegen.compile_all(&stmts);
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {

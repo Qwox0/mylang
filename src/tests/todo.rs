@@ -282,3 +282,12 @@ test :: -> f((-1).&);";
         |code| TestSpan::of_substr(code, "(-1).&"),
     );
 }
+
+#[test]
+#[ignore = "not implemented"]
+fn fix_enum_parse_error() {
+    let code = "MyEnum :: enum { x: i32, x :: (s: *MyEnum) -> s.*.x; };";
+    test_compile_err_raw(code, "duplicate symbol `x` in struct scope", |code| {
+        TestSpan::of_nth_substr(code, 1, "x")
+    });
+}

@@ -3,7 +3,7 @@ use crate::{
         self, Ast, AstEnum, AstKind, BinOpKind, ConstValEnum, DeclList, DeclListExt, DeclMarkers,
         OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
-    context::{ctx, ctx_mut, primitives},
+    context::{ctx, primitives},
     display_code::{debug_expr, display},
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
@@ -2674,7 +2674,9 @@ impl<'ctx> Codegen<'ctx> {
                         self.precompile_decls(UpcastToAst::upcast_slice(ty_scope.decls).as_ref());
                     } else {
                         for d in ty_scope.decls {
-                            self.compile_decl(d, false)?;
+                            if d.might_need_precompilation() {
+                                self.compile_decl(d, false)?;
+                            }
                         }
                     }
                 }

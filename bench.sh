@@ -24,16 +24,19 @@ cargo build --release
 sha256sum ./mylang-old
 sha256sum ./target/release/mylang
 
-cd "$script_dir/../aoc2024"
+cd "$script_dir"
 
 bench() {
-    sudo ../poop/zig-out/bin/poop "../mylang/mylang-old $*" "../mylang/target/release/mylang $*"
+    sudo ../poop/zig-out/bin/poop "./mylang-old $*" "./target/release/mylang $*"
 }
+
+bench check ./lib/std/bindgen/libclang.mylang --lib
+#bench check ./lib/std/bindgen/libglfw3.mylang --lib
 
 for i in $(seq 1 9); do
     bench check "../aoc2024/day0${i}.mylang"
 done
 
-for i in $(seq 1 9); do
-    bench build "../aoc2024/day0${i}.mylang"
-done
+# for i in $(seq 1 9); do
+#     bench build "../aoc2024/day0${i}.mylang"
+# done

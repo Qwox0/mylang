@@ -57,15 +57,56 @@ fn duplicate_field() {
     test_compile_err_raw(code, "duplicate struct field `x`", |code| {
         TestSpan::of_nth_substr(code, 1, "x")
     });
-}
 
-#[test]
-#[ignore = "not implemented"]
-fn duplicate_field2() {
-    // TODO: allow field and method with the same name?
-    let code = "MyStruct :: struct { x: i32, x :: (s: *MyStruct) -> s.x; };";
-    jit_run_test_raw::<()>(code).ok();
+    // TODO: allow methods with the same name as a field?
+    let code = "MyStruct :: struct { x: i32, x :: (s: *MyStruct) -> s.*.x; };";
+    test_compile_err_raw(code, "duplicate symbol `x` in struct scope", |code| {
+        TestSpan::of_nth_substr(code, 1, "x")
+    });
 
-    let code = "MyStruct :: struct { x: i32 }; MyStruct.x :: (s: *MyStruct) -> s.x;";
-    jit_run_test_raw::<()>(code).ok();
+    let code = "MyStruct :: struct { x: i32 }; MyStruct.x :: (s: *MyStruct) -> s.*.x;";
+    // TODO: better error message
+    test_compile_err_raw(code, "duplicate definition of `struct{x:i32}.x`", |code| {
+        TestSpan::of_substr(code, "MyStruct.x")
+    });
+
+    // union
+    {
+        let code = "MyUnion :: union { x: i32, x: i64 };";
+        test_compile_err_raw(code, "duplicate union field `x`", |code| {
+            TestSpan::of_nth_substr(code, 1, "x")
+        });
+
+        let code = "MyUnion :: union { x: i32, x :: (s: *MyUnion) -> s.*.x; };";
+        test_compile_err_raw(code, "duplicate symbol `x` in union scope", |code| {
+            TestSpan::of_nth_substr(code, 1, "x")
+        });
+
+        let code = "MyUnion :: union { x: i32 }; MyUnion.x :: (s: *MyUnion) -> s.*.x;";
+        // TODO: better error message
+        test_compile_err_raw(code, "duplicate definition of `union{x:i32}.x`", |code| {
+            TestSpan::of_substr(code, "MyUnion.x")
+        });
+    }
+
+    // enum
+    {
+        let code = "MyEnum :: enum { X, X(i64) };";
+        test_compile_err_raw(code, "duplicate enum variant `X`", |code| {
+            TestSpan::of_nth_substr(code, 1, "X")
+        });
+
+        /* TODO: allow consts in enums
+        let code = "MyEnum :: enum { x: i32, x :: (s: *MyEnum) -> s.*.x; };";
+        test_compile_err_raw(code, "duplicate symbol `x` in struct scope", |code| {
+            TestSpan::of_nth_substr(code, 1, "x")
+        });
+        */
+
+        let code = "MyEnum :: enum { X }; MyEnum.X :: (s: *MyEnum) -> s.*.x;";
+        // TODO: better error message
+        test_compile_err_raw(code, "duplicate definition of `enum{X}.X`", |code| {
+            TestSpan::of_substr(code, "MyEnum.X")
+        });
+    }
 }

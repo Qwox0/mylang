@@ -20,10 +20,8 @@ use std::{
 };
 
 impl<'ctx> llvm::Codegen<'ctx> {
-    pub fn compile_all(&mut self, cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
-        for f in cctx.files.iter() {
-            self.precompile_decls(&stmts[f.stmt_range.u()]);
-        }
+    pub fn compile_all(&mut self, stmts: &[Ptr<Ast>]) {
+        self.precompile_decls(&stmts);
 
         for s in stmts.iter().copied() {
             self.compile_top_level(s);
@@ -73,7 +71,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Parsing #####
 
     let parse_start = Instant::now();
-    let stmts = parser::parse_files_in_ctx(ctx);
+    let mut stmts = parser::parse_files_in_ctx(ctx);
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -113,7 +111,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Sema #####
 
     let sema_start = Instant::now();
-    sema::analyze(ctx, &stmts);
+    sema::analyze(ctx, &mut stmts);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -139,7 +137,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     let codegen_start = Instant::now();
     let context = Context::create();
     let mut codegen = llvm::Codegen::new(&context, "dev");
-    codegen.compile_all(ctx, &stmts);
+    codegen.compile_all(&stmts);
     let module = codegen.module.take().u();
     drop(codegen);
     ctx.compile_time.codegen = codegen_start.elapsed();

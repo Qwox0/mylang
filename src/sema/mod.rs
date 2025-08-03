@@ -23,7 +23,7 @@ use crate::{
 };
 pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
 use err::{SemaErrorKind::*, SemaResult::*};
-use std::{collections::HashSet, fmt::Write, iter};
+use std::{fmt::Write, iter};
 
 mod err;
 pub mod primitives;
@@ -52,7 +52,7 @@ macro_rules! check_and_set_target {
     }};
 }
 
-pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
+pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
     let p = p();
     // validate top level stmts
     cctx.root_scope.as_mut().verify_no_duplicates();
@@ -81,24 +81,22 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
         }
     }
 
-    let mut sema = Sema::new(cctx, Ptr::from(stmts));
-    let mut finished = vec![false; stmts.len()];
-    let mut remaining_count = stmts.len();
-    while finished.iter().any(std::ops::Not::not) {
+    let mut sema = Sema::new(cctx);
+    let mut remaining_count = usize::MAX;
+    while remaining_count > 0 {
         let old_remaining_count = remaining_count;
-        debug_assert!(stmts.len() == finished.len());
         remaining_count = 0;
         for file in cctx.files.iter().copied() {
             debug_assert!(file.scope.as_ref().u().parent.is_some());
             sema.open_scope(file.as_mut().scope.as_mut().u());
-            let stmt_range = file.stmt_range.u();
-            for (s, finished) in stmts[stmt_range].iter().zip(&mut finished[stmt_range]) {
-                if *finished {
-                    continue;
-                }
-                let res = sema.analyze_top_level(*s);
-                *finished = res != SemaResult::NotFinished;
-                remaining_count += !*finished as usize;
+            let stmt_range = file.as_mut().stmt_range.as_mut().u();
+            if let NotFinished { remaining } =
+                analyze_scope(&mut stmts[..stmt_range.end], &mut stmt_range.start, |stmt| {
+                    sema.analyze_top_level(stmt)
+                })
+            {
+                //remaining_count += stmt_range.end - stmt_range.start;
+                remaining_count += remaining
             }
             debug_assert!(
                 sema.defer_stack.get_cur_scope().is_empty(),
@@ -109,24 +107,66 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &[Ptr<Ast>]) {
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
             cerror!(Span::ZERO, "cycle(s) detected:");
-            for (s, finished) in stmts.iter().zip(finished) {
-                if finished {
-                    continue;
+            for file in cctx.files.iter().copied() {
+                for s in stmts[file.stmt_range.u()].iter().copied() {
+                    let span = s
+                        .try_downcast::<ast::Decl>()
+                        .map(|d| d.ident.span)
+                        .unwrap_or_else(|| s.full_span());
+                    display(span).finish();
                 }
-                let span = s
-                    .try_downcast::<ast::Decl>()
-                    .map(|d| d.ident.span)
-                    .unwrap_or_else(|| s.full_span());
-                display(span).finish();
             }
             break;
         }
     }
 }
 
+/// 0 1 2 3 4 5 6 7 8 9
+/// . . x|.
+/// 0 1 3 2 4 5 6 7 8 9
+/// . . . x|.
+/// 0 1 3 4 2 5 6 7 8 9
+/// . . . . x|x x .
+/// 0 1 3 4 7 5 6 2 8 9
+/// . . . . . x x x|.
+/// 0 1 3 4 7 8 6 2 5 9
+/// . . . . . . x x x|
+fn analyze_scope<T>(
+    items: &mut [Ptr<T>],
+    finished_count: &mut usize,
+    mut analyze_item: impl FnMut(Ptr<T>) -> SemaResult<()>,
+) -> SemaResult<(), HandledErr> {
+    debug_assert!(*finished_count <= items.len());
+    let mut ok = true;
+    let mut remaining = 0;
+    // index-based loop because `items` is mutated during the loop. In theory an iterator should
+    // also work because only previous/already consumed items are swapped.
+    let mut idx = *finished_count;
+    while let Some(i) = items.get(idx).copied() {
+        let res = analyze_item(i);
+        if !matches!(res, SemaResult::NotFinished { .. }) {
+            items.swap(idx, *finished_count);
+            *finished_count += 1;
+        }
+        match res {
+            Ok(()) => {},
+            NotFinished { remaining: rem } => remaining += rem + 1,
+            Err(e) => {
+                ctx_mut().error2(&e);
+                ok = false;
+            },
+        }
+        idx += 1;
+    }
+    match ok {
+        false => Err(HandledErr),
+        true if remaining > 0 => NotFinished { remaining },
+        true => Ok(()),
+    }
+}
+
 /// Semantic analyzer
 pub struct Sema {
-    stmts: Ptr<[Ptr<Ast>]>,
     function_stack: Vec<Ptr<ast::Fn>>,
     decl_stack: Vec<Ptr<ast::Decl>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
@@ -137,9 +177,8 @@ pub struct Sema {
 }
 
 impl Sema {
-    pub fn new(cctx: Ptr<CompilationContextInner>, stmts: Ptr<[Ptr<Ast>]>) -> Sema {
+    pub fn new(cctx: Ptr<CompilationContextInner>) -> Sema {
         Sema {
-            stmts,
             function_stack: vec![],
             decl_stack: vec![],
             defer_stack: ScopedStack::default(),
@@ -149,15 +188,8 @@ impl Sema {
         }
     }
 
-    pub fn analyze_top_level(&mut self, s: Ptr<Ast>) -> SemaResult<(), ()> {
-        match self.analyze(s, &Some(p().void_ty), true) {
-            Ok(_) => Ok(()),
-            NotFinished => NotFinished,
-            Err(e) => {
-                self.cctx.error2(&e);
-                Err(())
-            },
-        }
+    pub fn analyze_top_level(&mut self, s: Ptr<Ast>) -> SemaResult<()> {
+        self.analyze(s, &Some(p().void_ty), true)
     }
 
     pub fn analyze(
@@ -171,7 +203,7 @@ impl Sema {
         if self.cctx.args.debug_types {
             let label = match &res {
                 Ok(()) => format!("type: {}", expr.ty.u()),
-                NotFinished => "not finished".to_string(),
+                NotFinished { remaining } => format!("not finished (remaining: {remaining})"),
                 Err(e) => format!("err: {}", e.kind),
             };
 
@@ -263,28 +295,6 @@ impl Sema {
             }};
         }
 
-        macro_rules! handle_struct_scope {
-            ($scope:ident, $fields:expr, $analyze_decl:expr) => {{
-                self.open_scope($scope);
-                let mut res = Ok(());
-                for (idx, decl) in $fields.copied().chain($scope.decls.iter().copied()).enumerate()
-                {
-                    let analyze_decl: impl FnOnce(Ptr<ast::Decl>, usize) -> _ = $analyze_decl;
-                    match analyze_decl(decl, idx) {
-                        Ok(()) => {},
-                        NotFinished if !res.is_err() => res = SemaResult::NotFinished,
-                        NotFinished => {},
-                        Err(e) => {
-                            self.cctx.error2(&e);
-                            res = SemaResult::Err(HandledErr);
-                        },
-                    }
-                }
-                self.close_scope();
-                res
-            }};
-        }
-
         match expr.matchable().as_mut() {
             AstEnum::Ident { sym, decl, span, .. } => match self.get_symbol(*sym) {
                 None if let Some(mut i) = self.try_custom_bitwith_int_type(sym.text()) => {
@@ -328,7 +338,9 @@ impl Sema {
                                 // s.ty = s.ty.finalize();
                                 debug_assert!(s.ty.is_some());
                             },
-                            NotFinished => NotFinished::<!, !>?,
+                            NotFinished { remaining } => {
+                                NotFinished::<!, !> { remaining: remaining + stmts.len() - idx }?
+                            },
                             Err(err) => {
                                 self.cctx.error2(&err);
                                 s.as_mut().ty = Some(p.never);
@@ -501,7 +513,7 @@ impl Sema {
                         .scope
                         .as_ref()
                         .u()
-                        .find_decl_unordered(rhs.sym)
+                        .find_decl_norec_unordered(rhs.sym, true)
                     else {
                         return cerror2!(
                             rhs.span,
@@ -511,7 +523,7 @@ impl Sema {
                         );
                     };
                     rhs.decl = Some(s);
-                    let Some(ty) = s.var_ty else { return NotFinished };
+                    let Some(ty) = s.var_ty else { return NotFinished { remaining: 1 } };
                     if let Some(cv) = s.try_const_val() {
                         expr.set_replacement(cv);
                     }
@@ -539,7 +551,7 @@ impl Sema {
                         //
                         // TODO: better handling of missing fields (currently only cycle detection
                         // is triggered)
-                        return NotFinished;
+                        return NotFinished { remaining: 2 };
                     };
                     let ty = field.var_ty.or_not_finished()?;
                     debug_assert!(field.is_const);
@@ -1148,19 +1160,16 @@ impl Sema {
                 debug_assert!(!self.cctx.args.is_lib);
                 let entry_point_sym = self.cctx.entry_point;
                 let root_file = self.cctx.files[self.cctx.root_file_idx.u()];
-                let mut decl_iter = self.stmts[root_file.stmt_range.u()]
-                    .iter()
-                    .filter_map(|a| a.try_downcast::<ast::Decl>());
-                let Some(main) = decl_iter.find(|d| d.ident.sym == entry_point_sym) else {
+                let Some(main) =
+                    root_file.scope.as_ref().u().find_decl_norec_unordered(entry_point_sym, true)
+                else {
                     return cerror2!(
                         root_file.full_span().start(),
-                        "Couldn't find the entry point '{}' in '{}'",
-                        entry_point_sym,
+                        "Couldn't find the entry point '{entry_point_sym}' in '{}'",
                         self.cctx.path_in_proj(&root_file.path).display()
                     );
                 };
-                debug_assert!(decl_iter.all(|d| d.ident.sym != entry_point_sym));
-                let Some(main_ty) = main.var_ty else { return NotFinished };
+                let Some(main_ty) = main.var_ty else { return NotFinished { remaining: 1 } };
                 if main_ty != p.never {
                     let Some(main_fn) = main.var_ty.try_downcast::<ast::Fn>() else {
                         return cerror2!(
@@ -1309,69 +1318,62 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::StructDef { scope, fields, consts, .. } => {
+            AstEnum::StructDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
-                // TODO: remove this duplicate logic
-                let mut field_symbols = HashSet::new();
-                handle_struct_scope!(scope, fields.iter(), |field, _| {
-                    let is_duplicate = !field_symbols.insert(field.ident.sym);
-                    if is_duplicate {
-                        return cerror2!(
-                            field.ident.span,
-                            "duplicate struct field `{}`",
-                            field.ident.sym.text()
-                        );
-                    }
-                    debug_assert!(field.is_const == consts.contains(&field));
-                    self.var_decl_to_value(field, false)
-                })?;
+                self.open_scope(scope);
+                let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
+                    debug_assert!(member.is_const == consts.contains(&member));
+                    self.var_decl_to_value(member, false)
+                });
+                self.close_scope();
+                res?;
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::UnionDef { scope, fields, consts, .. } => {
+            AstEnum::UnionDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
-                let mut field_names = HashSet::new();
-                handle_struct_scope!(scope, fields.iter(), |field, _| {
-                    let is_duplicate = !field_names.insert(field.ident.sym);
-                    if is_duplicate {
-                        return cerror2!(
-                            field.ident.span,
-                            "duplicate union field `{}`",
-                            field.ident.sym.text()
-                        );
+                self.open_scope(scope);
+                let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
+                    debug_assert!(member.is_const == consts.contains(&member));
+                    if !member.is_const
+                        && let Some(d) = member.init
+                    {
+                        return cerror2!(d.full_span(), "union fields cannot have default values");
                     }
-                    debug_assert!(field.is_const == consts.contains(&field));
-                    if let Some(d) = field.init {
-                        return err(UnionFieldWithDefaultValue, d.full_span());
-                    }
-                    self.var_decl_to_value(field, false)
-                })?;
+                    self.var_decl_to_value(member, false)
+                });
+                self.close_scope();
+                res?;
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::EnumDef { scope, variants, variant_tags, is_simple_enum, tag_ty, .. } => {
+            AstEnum::EnumDef {
+                scope,
+                variants,
+                finished_members,
+                variant_tags,
+                is_simple_enum,
+                tag_ty,
+                ..
+            } => {
                 let mut repr_ty = Some(p.int_lit);
                 let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
                 let mut tag = 0;
                 *is_simple_enum = true;
 
                 scope.verify_no_duplicates();
-                let mut variant_names = HashSet::new();
-                handle_struct_scope!(scope, variants.iter(), |variant, idx| {
-                    let is_duplicate = !variant_names.insert(variant.ident.sym);
-                    if is_duplicate {
-                        return cerror2!(
-                            variant.ident.span,
-                            "duplicate enum variant `{}`",
-                            variant.ident.sym.text()
-                        );
+                self.open_scope(scope);
+                let mut idx = 0;
+                let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
+                    if member.is_const {
+                        return Ok(());
                     }
-                    if variant.var_ty_expr.is_none() {
-                        variant.as_mut().var_ty = Some(p.void_ty);
+                    if member.var_ty_expr.is_none() {
+                        member.as_mut().var_ty = Some(p.void_ty);
                     }
 
-                    let variant_idx = variant.as_mut().init.take();
-                    let _ = self.var_decl_to_value(variant, false)?;
-                    variant.as_mut().init = variant_idx;
-                    if variant.var_ty != p.void_ty {
+                    let variant_idx = member.as_mut().init.take();
+                    let _ = self.var_decl_to_value(member, false)?;
+                    member.as_mut().init = variant_idx;
+                    if member.var_ty != p.void_ty {
                         *is_simple_enum = false;
                     }
                     if let Some(variant_idx) = variant_idx {
@@ -1390,12 +1392,15 @@ impl Sema {
                     if !ALLOW_DUPLICATE_TAG
                         && unsafe { used_tags[..idx].assume_init_ref() }.contains(&tag)
                     {
-                        return cerror2!(variant.ident.span, "Duplicate enum variant tag");
+                        return cerror2!(member.ident.span, "Duplicate enum variant tag");
                     }
                     used_tags[idx].write(tag);
                     tag += 1;
+                    idx += 1;
                     Ok(())
-                })?;
+                });
+                self.close_scope();
+                res?;
                 debug_assert_eq!(variants.len(), used_tags.len());
                 *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
 
@@ -1495,7 +1500,7 @@ impl Sema {
             };
         }
         let mut is_initialized_field = vec![false; fields.len()];
-        for (f, init) in initializer_values.as_mut().iter_mut() {
+        for (idx, (f, init)) in initializer_values.as_mut().iter_mut().enumerate() {
             let Some((f_idx, f_decl)) = fields.find_field(f.sym) else {
                 self.cctx.error_unknown_field(*f, struct_ty);
                 on_err!();
@@ -1513,7 +1518,9 @@ impl Sema {
             let init = *init.get_or_insert(f.upcast());
             match self.analyze_and_finalize_with_known_type(init, f_decl.var_ty.u(), is_const) {
                 Ok(()) => {},
-                NotFinished => NotFinished::<!, !>?,
+                NotFinished { remaining } => {
+                    return NotFinished { remaining: remaining + initializer_values.len() - idx };
+                },
                 Err(err) => {
                     self.cctx.error2(&err);
                     on_err!();
@@ -1595,7 +1602,7 @@ impl Sema {
                         // TODO: remove this duplicate logic
                         cerror!(
                             decl_ptr.lhs_span(),
-                            "duplicate definition of {}",
+                            "duplicate definition of `{}`",
                             decl_ptr.display_lhs()
                         );
                         chint!(prev.lhs_span(), "previous definition here");
@@ -1635,7 +1642,7 @@ impl Sema {
         if let Some(init) = decl.init {
             let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
             let res = self.analyze(init, &decl.var_ty, decl.is_const || is_static);
-            if matches!(res, NotFinished)
+            if matches!(res, NotFinished { .. })
                 && let Some(ty) = init.ty
                 && decl.var_ty.is_none()
             {
@@ -1693,7 +1700,7 @@ impl Sema {
         if self.cctx.args.debug_types && decl.ident.span != Span::ZERO {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
-                NotFinished => "not finished".to_string(),
+                NotFinished { remaining } => format!("not finished (remaining: {remaining})"),
                 Err(e) => format!("err: {}", e.kind),
             };
             display(decl.ident.span).label(&label).finish();
@@ -1710,7 +1717,7 @@ impl Sema {
                 */
                 Ok(())
             },
-            NotFinished => NotFinished,
+            NotFinished { remaining } => NotFinished { remaining },
             Ok(()) => {
                 debug_assert!(decl.var_ty.is_some());
                 decl.ident.decl = Some(decl);
@@ -2021,7 +2028,7 @@ impl Sema {
     /// Note: the returned [`ast::Decl`] might not be fully analyzed.
     #[inline]
     fn get_symbol(&self, sym: Symbol) -> OPtr<ast::Decl> {
-        self.cur_scope.find_decl(sym, self.cur_scope_pos)
+        self.cur_scope.find_decl(sym, self.cur_scope_pos, true)
     }
 
     fn get_symbol_var_ty(&self, sym: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::Type>> {
@@ -2037,7 +2044,7 @@ impl Sema {
                 _ => unreachable_debug(),
             }
         } else {
-            return NotFinished;
+            return NotFinished { remaining: 1 };
         })
     }
 
@@ -2112,7 +2119,7 @@ impl<T> OptionSemaExt<T> for Option<T> {
     fn or_not_finished(self) -> SemaResult<T, !> {
         match self {
             Some(t) => Ok(t),
-            None => NotFinished,
+            None => NotFinished { remaining: 1 },
         }
     }
 }

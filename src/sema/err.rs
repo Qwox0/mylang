@@ -7,7 +7,7 @@ use crate::{
 use SemaResult::*;
 use std::{
     convert::Infallible,
-    ops::{FromResidual, Try},
+    ops::{ControlFlow, FromResidual, Try},
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -27,7 +27,6 @@ pub enum SemaErrorKind {
     MissingArg,
 
     CannotInfer,
-    UnionFieldWithDefaultValue,
 
     UnexpectedTopLevelExpr(Ptr<Ast>),
 
@@ -63,7 +62,11 @@ impl From<!> for SemaError {
 pub enum SemaResult<T, E = SemaError> {
     Ok(T),
     //NotFinished(Option<Type>),
-    NotFinished,
+    NotFinished {
+        /// must decrease iff analysis continued. non-zero because [`Ok`] should be used when an
+        /// expression was fully analyzed
+        remaining: usize,
+    },
     Err(E),
 }
 
@@ -76,7 +79,7 @@ impl<T, E> SemaResult<T, E> {
     pub fn map_ok<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U, E> {
         match self {
             Ok(t) => Ok(f(t)),
-            NotFinished => NotFinished,
+            NotFinished { remaining } => NotFinished { remaining },
             Err(err) => Err(err),
         }
     }
@@ -84,7 +87,7 @@ impl<T, E> SemaResult<T, E> {
     pub fn map_err<E2>(self, f: impl FnOnce(E) -> E2) -> SemaResult<T, E2> {
         match self {
             Ok(t) => Ok(t),
-            NotFinished => NotFinished,
+            NotFinished { remaining } => NotFinished { remaining },
             Err(err) => Err(f(err)),
         }
     }
@@ -92,7 +95,7 @@ impl<T, E> SemaResult<T, E> {
     pub fn and_then<U>(self, f: impl FnOnce(T) -> SemaResult<U, E>) -> SemaResult<U, E> {
         match self {
             Ok(t) => f(t),
-            NotFinished => NotFinished,
+            NotFinished { remaining } => NotFinished { remaining },
             Err(err) => Err(err),
         }
     }
@@ -135,11 +138,11 @@ impl<T, E> Try for SemaResult<T, E> {
         Ok(output)
     }
 
-    fn branch(self) -> std::ops::ControlFlow<Self::Residual, Self::Output> {
+    fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
         match self {
-            Ok(ty) => std::ops::ControlFlow::Continue(ty),
-            NotFinished => std::ops::ControlFlow::Break(SemaResult::NotFinished),
-            Err(err) => std::ops::ControlFlow::Break(SemaResult::Err(err)),
+            Ok(ty) => ControlFlow::Continue(ty),
+            NotFinished { remaining } => ControlFlow::Break(SemaResult::NotFinished { remaining }),
+            Err(err) => ControlFlow::Break(SemaResult::Err(err)),
         }
     }
 }
@@ -147,7 +150,7 @@ impl<T, E> Try for SemaResult<T, E> {
 impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
     fn from_residual(residual: SemaResult<!, E>) -> Self {
         match residual {
-            NotFinished => SemaResult::NotFinished,
+            NotFinished { remaining } => SemaResult::NotFinished { remaining },
             Err(err) => SemaResult::Err(err),
         }
     }
@@ -156,7 +159,7 @@ impl<T, E> FromResidual<SemaResult<!, E>> for SemaResult<T, E> {
 impl<T> FromResidual<SemaResult<!, HandledErr>> for SemaResult<T> {
     fn from_residual(residual: SemaResult<!, HandledErr>) -> Self {
         match residual {
-            NotFinished => SemaResult::NotFinished,
+            NotFinished { remaining } => SemaResult::NotFinished { remaining },
             Err(err) => SemaResult::Err(err.into()),
         }
     }
@@ -165,7 +168,7 @@ impl<T> FromResidual<SemaResult<!, HandledErr>> for SemaResult<T> {
 impl<T> FromResidual<SemaResult<!, !>> for SemaResult<T> {
     fn from_residual(residual: SemaResult<!, !>) -> Self {
         match residual {
-            NotFinished => SemaResult::NotFinished,
+            NotFinished { remaining } => SemaResult::NotFinished { remaining },
         }
     }
 }

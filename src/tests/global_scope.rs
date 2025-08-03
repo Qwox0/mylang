@@ -5,7 +5,7 @@ fn error_duplicate() {
     let code = "
     test :: -> 1;
     test :: -> 2;";
-    test_compile_err_raw(code, "Duplicate definition in module scope", |code| {
+    test_compile_err_raw(code, "duplicate definition in file scope", |code| {
         TestSpan::of_nth_substr(code, 1, "test")
     });
 }

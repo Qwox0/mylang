@@ -1,5 +1,11 @@
 use crate::{
-    arena_allocator::{AllocErr, Arena}, ast::{self, UpcastToAst}, intern_pool::{InternPool, Symbol}, parser::lexer::Span, ptr::Ptr, scope::{Scope, ScopeKind}, type_::RangeKind
+    arena_allocator::{AllocErr, Arena},
+    ast::{self, UpcastToAst},
+    intern_pool::{InternPool, Symbol},
+    parser::lexer::Span,
+    ptr::Ptr,
+    scope::{Scope, ScopeKind},
+    type_::RangeKind,
 };
 
 #[derive(Debug)]
@@ -62,7 +68,8 @@ pub struct Primitives {
 
 impl Primitives {
     pub fn setup(decls: &mut Vec<Ptr<ast::Decl>>, symbols: &mut InternPool, alloc: &Arena) -> Self {
-        Self::try_setup(decls, symbols, alloc).unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
+        Self::try_setup(decls, symbols, alloc)
+            .unwrap_or_else(|e| panic!("allocation failed: {e:?}"))
     }
 
     pub fn try_setup(
@@ -233,7 +240,8 @@ impl Primitives {
                 let def = ast_new!(StructDef {
                     scope: Scope::new(fields, ScopeKind::Struct),
                     fields,
-                    consts: Vec::new()
+                    consts: Vec::new(),
+                    finished_members: 2,
                 });
                 init_ty(def.upcast_to_type());
                 def

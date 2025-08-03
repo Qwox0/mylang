@@ -573,6 +573,7 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
+        finished_members: usize,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
@@ -584,6 +585,7 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
+        finished_members: usize,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
@@ -597,6 +599,7 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `variant_count`
         variants: Ptr<[Ptr<Decl>]>,
+        finished_members: usize,
         /// is present after sema of this ast node. always has the same length as `variants`.
         variant_tags: OPtr<[isize]>,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are

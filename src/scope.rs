@@ -5,9 +5,9 @@ use crate::{
     diagnostics::{DiagnosticReporter, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::unreachable_debug,
+    util::{hash_val, unreachable_debug},
 };
-use hashbrown::HashMap;
+use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 
 /// The number of [`Decl`]s before this statement in the current [`Scope`].
 ///
@@ -114,8 +114,11 @@ impl Scope {
         kind: ScopeKind,
     ) -> Result<ScopeAndAggregateInfo, AllocErr> {
         debug_assert!(kind.is_aggregate());
-        let fields = alloc.alloc_slice(&fields)?;
-        let scope = Scope::new(alloc.alloc_slice(&consts)?, kind);
+        let fields = alloc.alloc_slice(&fields)?; // fields are allocated twice because `scope_decls` is rearranged during sema.
+        let scope_decls = alloc.alloc_uninit_slice(fields.len() + consts.len())?;
+        scope_decls.as_mut()[..fields.len()].write_copy_of_slice(&fields);
+        scope_decls.as_mut()[fields.len()..].write_copy_of_slice(&consts);
+        let scope = Scope::new(scope_decls.assume_init(), kind);
         Ok(ScopeAndAggregateInfo { scope, fields, consts })
     }
 
@@ -132,28 +135,34 @@ impl Scope {
         }
     }
 
-    pub fn find_decl_norec(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
+    pub fn find_decl_norec(
+        &self,
+        sym: Symbol,
+        cur_pos: ScopePos,
+        ignore_fields: bool,
+    ) -> OPtr<Decl> {
         #[cfg(debug_assertions)]
         debug_assert!(self.was_checked_for_duplicates);
-        //debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
+        debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
+        let ignore_non_const = ignore_fields && self.kind.is_aggregate();
         if let Some(decls_map) = self.decls_map.as_ref() {
             debug_assert!(ctx().do_abort_compilation() || decls_map.len() == self.decls.len());
-            decls_map.get(sym)
+            decls_map.get(sym, ignore_non_const)
         } else {
             let decls = if self.kind.allows_shadowing() {
                 &self.decls[..cur_pos.0 as usize]
             } else {
                 &self.decls
             };
-            linear_search_symbol(decls, sym, true)
+            linear_search_symbol(decls, sym, self.kind.allows_shadowing(), ignore_non_const)
         }
     }
 
-    pub fn find_decl(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
+    pub fn find_decl(&self, sym: Symbol, cur_pos: ScopePos, ignore_fields: bool) -> OPtr<Decl> {
         let mut cur_scope = Some(Ptr::from_ref(self));
         let mut cur_pos = cur_pos;
         while let Some(scope) = cur_scope {
-            if let Some(sym) = scope.find_decl_norec(sym, cur_pos) {
+            if let Some(sym) = scope.find_decl_norec(sym, cur_pos, ignore_fields) {
                 return Some(sym);
             }
             cur_scope = scope.parent;
@@ -163,19 +172,31 @@ impl Scope {
     }
 
     /// assumes `self` is an unordered scope. see [`ScopeKind::allows_shadowing`].
-    pub fn find_decl_unordered(&self, sym: Symbol) -> OPtr<Decl> {
+    pub fn find_decl_unordered(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
         debug_assert!(!self.kind.allows_shadowing());
-        self.find_decl(sym, ScopePos::UNSET)
+        self.find_decl(sym, ScopePos::UNSET, ignore_fields)
+    }
+
+    /// assumes `self` is an unordered scope. see [`ScopeKind::allows_shadowing`].
+    pub fn find_decl_norec_unordered(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
+        debug_assert!(!self.kind.allows_shadowing());
+        self.find_decl_norec(sym, ScopePos::UNSET, ignore_fields)
     }
 }
 
 /// `reverse` is needed because of shadowing
-fn linear_search_symbol(decls: &[Ptr<Decl>], sym: Symbol, reverse: bool) -> Option<Ptr<Decl>> {
+fn linear_search_symbol(
+    decls: &[Ptr<Decl>],
+    sym: Symbol,
+    reverse: bool,
+    ignore_non_const: bool,
+) -> Option<Ptr<Decl>> {
     debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
+    let mut d = decls.iter().copied().filter(|d| !ignore_non_const || d.is_const);
     if reverse {
-        decls.iter().copied().rfind(|d| d.ident.sym == sym)
+        d.rfind(|d| d.ident.sym == sym)
     } else {
-        decls.iter().copied().find(|d| d.ident.sym == sym)
+        d.find(|d| d.ident.sym == sym)
     }
 }
 
@@ -187,16 +208,40 @@ pub struct ScopeAndAggregateInfo {
 
 #[derive(Debug)]
 pub struct UnorderedDeclMap {
-    map: HashMap<Symbol, Ptr<ast::Decl>>,
+    map: HashMap<Ptr<ast::Decl>, (), ()>,
+    hash_builder: DefaultHashBuilder,
 }
 
 impl UnorderedDeclMap {
+    fn with_capacity(cap: usize) -> UnorderedDeclMap {
+        UnorderedDeclMap {
+            map: HashMap::with_capacity_and_hasher(cap, ()),
+            hash_builder: DefaultHashBuilder::default(),
+        }
+    }
+
     fn len(&self) -> usize {
         self.map.len()
     }
 
-    fn get(&self, sym: Symbol) -> Option<Ptr<Decl>> {
-        self.map.get(&sym).copied()
+    fn try_insert(&mut self, decl: Ptr<ast::Decl>) -> Result<(), Ptr<Decl>> {
+        let hasher = |d: &Ptr<Decl>| hash_val(&self.hash_builder, d.ident.sym);
+        let hash = hasher(&decl);
+        match self.map.raw_entry_mut().from_hash(hash, |d| d.ident.sym == decl.ident.sym) {
+            RawEntryMut::Occupied(val) => Err(*val.get_key_value().0),
+            RawEntryMut::Vacant(slot) => {
+                slot.insert_with_hasher(hash, decl, (), hasher);
+                Ok(())
+            },
+        }
+    }
+
+    fn get(&self, sym: Symbol, ignore_non_const: bool) -> Option<Ptr<Decl>> {
+        let hash = hash_val(&self.hash_builder, sym);
+        self.map
+            .raw_entry()
+            .from_hash(hash, |d| d.ident.sym == sym && (!ignore_non_const || d.is_const))
+            .map(|(d, ())| *d)
     }
 }
 
@@ -208,21 +253,20 @@ fn verify_no_duplicates(
     if decls.len() <= SMALL_SCOPE_MAX_SIZE {
         for (idx, decl) in decls.into_iter().enumerate() {
             debug_assert!(decl.on_type.is_none());
-            if let Some(dup) = linear_search_symbol(&decls[..idx], decl.ident.sym, false) {
+            if let Some(dup) = linear_search_symbol(&decls[..idx], decl.ident.sym, false, false) {
                 error_duplicate_in_unordered_scope(scope_kind, decl, dup);
             }
         }
         None
     } else {
-        let mut map = HashMap::with_capacity(decls.len());
+        let mut map = UnorderedDeclMap::with_capacity(decls.len());
         for decl in decls {
             debug_assert!(decl.on_type.is_none());
-            if let Err(e) = map.try_insert(decl.ident.sym, decl) {
-                let dup = *e.entry.get();
+            if let Err(dup) = map.try_insert(decl) {
                 error_duplicate_in_unordered_scope(scope_kind, decl, dup);
             }
         }
-        Some(UnorderedDeclMap { map })
+        Some(map)
     }
 }
 
@@ -233,15 +277,35 @@ fn error_duplicate_in_unordered_scope(
 ) {
     match scope_kind {
         ScopeKind::Root | ScopeKind::File => {
-            cerror!(decl.ident.span, "Duplicate definition in file scope");
-            chint!(first.ident.span, "First definition here");
+            cerror!(decl.ident.span, "duplicate definition in file scope");
         },
-        ScopeKind::Struct | ScopeKind::Union | ScopeKind::Enum => todo!(),
+        ScopeKind::Struct | ScopeKind::Union | ScopeKind::Enum => {
+            let scope_label = match scope_kind {
+                ScopeKind::Struct => "struct",
+                ScopeKind::Union => "union",
+                ScopeKind::Enum => "enum",
+                _ => unreachable_debug(),
+            };
+            if !decl.might_need_precompilation() && !first.might_need_precompilation() {
+                let item_label = if scope_kind == ScopeKind::Enum { "variant" } else { "field" };
+                cerror!(
+                    decl.ident.span,
+                    "duplicate {scope_label} {item_label} `{}`",
+                    decl.ident.sym
+                );
+            } else {
+                cerror!(
+                    decl.ident.span,
+                    "duplicate symbol `{}` in {scope_label} scope",
+                    decl.ident.sym
+                );
+            }
+        },
         ScopeKind::ForLoop => todo!(),
         ScopeKind::Fn => {
             cerror!(decl.ident.span, "duplicate parameter '{}'", decl.ident.sym);
-            chint!(first.ident.span, "first definition of '{}'", decl.ident.sym);
         },
         ScopeKind::Block => unreachable_debug(),
     }
+    chint!(first.ident.span, "first definition of '{}'", decl.ident.sym);
 }
