@@ -433,7 +433,6 @@ ast_variants! {
     /// otherwise only the start is important
     Decl {
         is_const: bool,
-        is_extern: bool,
         markers: DeclMarkers,
         ident: Ptr<Ident>,
         /// `MyStruct.abc :: /* ... */;`
@@ -445,13 +444,6 @@ ast_variants! {
         init: OPtr<Ast>,
         // init_const_val: OPtr<ConstVal>, // TODO: benchmark this
     },
-    /*
-    Extern {
-        ident: Ptr<Ident>,
-        var_ty_expr: Ptr<Ast>,
-        var_ty: OPtr<Type>,
-    },
-    */
 
     /// `if <cond> <then>` (`else <else>`)
     /// `^^` expr.span
@@ -528,6 +520,14 @@ ast_variants! {
     ImportDirective {
         path: Ptr<StrVal>,
         files_idx: FilesIndex,
+    },
+    ExternDirective {
+        /* TODO: library */
+        decl: OPtr<Decl>,
+    },
+    IntrinsicDirective {
+        intrinsic_name: Ptr<StrVal>,
+        decl: OPtr<Decl>,
     },
     ProgramMainDirective {},
     SimpleDirective {
@@ -1012,12 +1012,9 @@ impl Ast {
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
-            AstEnum::Decl { is_extern: false, init, .. } => match &init {
+            AstEnum::Decl { init, .. } => match &init {
                 Some(e) => span.join(e.full_span()),
                 None => span,
-            },
-            AstEnum::Decl { is_extern: true, var_ty_expr, .. } => {
-                span.join(var_ty_expr.u().full_span())
             },
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
                 let r_span = else_body.unwrap_or(*then_body).full_span();
@@ -1029,11 +1026,14 @@ impl Ast {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
             // AstEnum::Catch { .. } => todo!(),
+            AstEnum::Defer { stmt, .. } => span.join(stmt.full_span()),
             AstEnum::Return { val, .. } => match val {
                 Some(val) => span.join(val.full_span()),
                 None => span,
             },
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
+            AstEnum::ExternDirective { .. } => span,
+            AstEnum::IntrinsicDirective { intrinsic_name, .. } => span.join(intrinsic_name.span),
 
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => span,
             AstEnum::PtrTy { pointee: i, .. }
@@ -1208,7 +1208,6 @@ impl Decl {
         ast_new!(local Decl {
             span,
             is_const: false,
-            is_extern: false,
             markers: DeclMarkers::default(),
             ident,
             on_type: associated_type_expr,
@@ -1279,7 +1278,7 @@ impl Decl {
 
     #[inline]
     pub fn might_need_precompilation(&self) -> bool {
-        self.is_const || self.is_extern || self.markers.get(DeclMarkers::IS_STATIC_MASK)
+        self.is_const || self.markers.get(DeclMarkers::IS_STATIC_MASK)
     }
 }
 

@@ -26,9 +26,9 @@ pub mod lexer;
 pub mod parser_helper;
 
 macro_rules! opt {
-    ($self:expr, $method:ident($($arg:expr),* $(,)?)) => {{
+    ($self:expr, $method:ident($($arg:expr),* $(,)?), $prec:expr) => {{
         let _self: &mut Parser = $self;
-        if _self.lex.peek_or_eof().kind.is_expr_terminator() {
+        if _self.lex.peek_or_eof().kind.is_invalid_start($prec) {
             Ok(None)
         } else {
             _self.$method($($arg),*).map(Some)
@@ -156,7 +156,7 @@ impl Parser {
     }
 
     fn expr_(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
-        let mut lhs = self.value(/*min_precedence*/)?;
+        let mut lhs = self.value(min_precedence)?;
         loop {
             match self.op_chain(lhs, min_precedence) {
                 Ok(node) if node != lhs => lhs = node,
@@ -210,7 +210,7 @@ impl Parser {
                 let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
                 let param = self.alloc(ast::Decl::from_ident(lhs))?;
                 let params = self.alloc_one_val_slice(param)?;
-                self.function_tail(params, span)?.upcast()
+                self.function_tail(params, span, min_precedence)?.upcast()
             },
             FollowingOperator::PostOp(mut op) => {
                 let mut span = span;
@@ -227,7 +227,7 @@ impl Parser {
                 expr!(BinOp { lhs, op, rhs }, span)
             },
             FollowingOperator::Range { is_inclusive } => {
-                let end = opt!(self, expr_(op.precedence()))?;
+                let end = opt!(self, expr_(op.precedence()), min_precedence)?;
                 if is_inclusive && end.is_none() {
                     return cerror2!(span, "an inclusive range must have an end bound");
                 }
@@ -304,8 +304,7 @@ impl Parser {
     }
 
     /// anything which has higher precedence than any operator
-    //pub fn value(&mut self, min_precedence: u8) -> ParseResult<Ptr<Ast>> {
-    fn value(&mut self) -> ParseResult<Ptr<Ast>> {
+    fn value(&mut self, prec: u8) -> ParseResult<Ptr<Ast>> {
         let Token { kind, span } = self.lex.peek_or_eof();
 
         Ok(match kind {
@@ -344,7 +343,9 @@ impl Parser {
                     sep = [TokenKind::Semicolon, TokenKind::Comma],
                     in_block = true,
                     {
-                        let Some(variant_ident) = opt!(self, ident())? else { break };
+                        let Some(variant_ident) = opt!(self, ident(), MIN_PRECEDENCE)? else {
+                            break;
+                        };
                         let ty = then!(
                             self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
                             let ty_expr = self.expr()?;
@@ -379,15 +380,6 @@ impl Parser {
                 )
             },
             TokenKind::Keyword(Keyword::Unsafe) => todo!("unsafe"),
-            TokenKind::Keyword(Keyword::Extern) => {
-                let ident = self.advanced().ident()?;
-                let mut d = self.alloc(ast::Decl::from_ident(ident))?;
-                d.span = span;
-                d.is_extern = true;
-                self.tok(TokenKind::Colon)?;
-                d.var_ty_expr = Some(self.expr()?);
-                d.upcast()
-            },
             TokenKind::Keyword(Keyword::If) => {
                 let condition = self.advanced().expr()?;
                 self.if_after_cond(condition, span, false)?.upcast()
@@ -419,11 +411,11 @@ impl Parser {
                 expr!(While { condition, body, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::Return) => {
-                let val = opt!(self.advanced(), expr())?;
+                let val = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?;
                 expr!(Return { val, parent_fn: None }, span)
             },
             TokenKind::Keyword(Keyword::Break) => {
-                let val = opt!(self.advanced(), expr())?;
+                let val = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?;
                 expr!(Break { val }, span)
             },
             TokenKind::Keyword(Keyword::Continue) => {
@@ -534,7 +526,7 @@ impl Parser {
                 // () -> ...
                 if self.advanced().lex.advance_if_kind(TokenKind::CloseParenthesis) {
                     self.tok(TokenKind::Arrow)?;
-                    return Ok(self.function_tail(Ptr::empty_slice(), span)?.upcast());
+                    return Ok(self.function_tail(Ptr::empty_slice(), span, prec)?.upcast());
                 }
                 let mut first_expr = self.expr()?; // this assumes the parameter syntax is also a valid expression
                 let t = self.lex.next_or_eof();
@@ -573,10 +565,10 @@ impl Parser {
                     },
                     _ => return unexpected_token(t, &EXPECTED_AFTER_PARAM),
                 };
-                self.function_tail(params, span)?.upcast()
+                self.function_tail(params, span, prec)?.upcast()
             },
             TokenKind::OpenBracket => {
-                let len = opt!(self.advanced(), expr())?;
+                let len = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?;
                 self.tok(TokenKind::CloseBracket).inspect_err(|_| {
                     let t = self.lex.peek_or_eof();
                     if matches!(t.kind, TokenKind::Comma | TokenKind::Semicolon) {
@@ -607,7 +599,7 @@ impl Parser {
             },
             TokenKind::Arrow => {
                 self.lex.advance();
-                self.function_tail(Ptr::empty_slice(), span)?.upcast()
+                self.function_tail(Ptr::empty_slice(), span, prec)?.upcast()
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
@@ -626,11 +618,11 @@ impl Parser {
                 expr!(ast::Dot::new(None, rhs, span))
             },
             TokenKind::DotDot => {
-                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
+                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE), prec)?;
                 expr!(Range { start: None, end, is_inclusive: false }, span)
             },
             TokenKind::DotDotEq => {
-                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE))?;
+                let end = opt!(self.advanced(), expr_(RANGE_PRECEDENCE), prec)?;
                 if end.is_none() {
                     return cerror2!(span, "an inclusive range must have an end bound");
                 }
@@ -657,13 +649,11 @@ impl Parser {
                 let directive_name = directive_ident.sym.text(); // TODO?: also intern directive_names?
 
                 let mut parse_str_lit_arg = |usage: &str| {
-                    let arg = opt!(self, value())?;
-                    arg.and_then(Ptr::<Ast>::try_downcast::<ast::StrVal>)
-                        .ok_or_else::<ParseError, _>(|| {
-                            let span =
-                                if let Some(a) = arg { a.full_span() } else { self.lex.pos_span() };
-                            cerror2!(span, "Expected {usage} after the #{directive_name} directive")
-                        })
+                    let arg = opt!(self, value(MAX_PRECEDENCE), MIN_PRECEDENCE)?;
+                    arg.and_then(Ptr::<Ast>::try_downcast::<ast::StrVal>).ok_or_else(|| {
+                        let span = arg.map(|a| a.full_span()).unwrap_or(self.lex.pos_span());
+                        cerror!(span, "Expected {} after the #{directive_name} directive", usage)
+                    })
                 };
 
                 let p = primitives();
@@ -674,6 +664,11 @@ impl Parser {
                     let idx =
                         self.cctx.add_import(&path.text, Some(&self.lex.file.path), path.span)?;
                     expr!(ImportDirective { path, files_idx: idx }, span)
+                } else if directive_name == "extern" {
+                    expr!(ExternDirective { decl: None }, span.join(directive_ident.span))
+                } else if directive_name == "intrinsic" {
+                    let intrinsic_name = parse_str_lit_arg("an intrinsic name")?;
+                    expr!(IntrinsicDirective { intrinsic_name, decl: None }, span)
                 } else if directive_name == "library" {
                     let str_lit = parse_str_lit_arg("a library name")?;
                     self.cctx.add_library(str_lit)?;
@@ -772,7 +767,7 @@ impl Parser {
             }}
         }
 
-        let Some(first_expr) = opt!(self, expr())? else {
+        let Some(first_expr) = opt!(self, expr(), MIN_PRECEDENCE)? else {
             // `.[]`
             return Ok(new_arr_init!(ArrayInitializer { elements: Ptr::empty_slice() }));
         };
@@ -806,11 +801,16 @@ impl Parser {
     }
 
     /// parsing starts after the '->'
-    fn function_tail(&mut self, params: DeclList, start_span: Span) -> ParseResult<Ptr<ast::Fn>> {
-        let expr = self.expr()?;
+    fn function_tail(
+        &mut self,
+        params: DeclList,
+        start_span: Span,
+        min_precedence: u8,
+    ) -> ParseResult<Ptr<ast::Fn>> {
+        let expr = self.expr_(min_precedence)?;
         let between_expr_state = self.lex.get_state();
         let (ret_ty_expr, body) = if expr.kind != AstKind::Block
-            && let Some(body) = opt!(self, expr())?
+            && let Some(body) = opt!(self, expr(), min_precedence)?
             && {
                 debug_assert!(!AstKind::Block.is_allowed_top_level());
                 let is_invalid_body = body.kind.is_allowed_top_level();
@@ -919,7 +919,7 @@ impl Parser {
     ) -> ParseResult<(Ptr<[Ptr<Ast>]>, bool)> {
         let mut has_trailing_sep = false;
         loop {
-            let Some(expr) = opt!(self, expr())? else { break };
+            let Some(expr) = opt!(self, expr(), MIN_PRECEDENCE)? else { break };
             list_pool.push(expr)?;
             has_trailing_sep = self.lex.advance_if_kind(sep);
             if !has_trailing_sep {
@@ -939,7 +939,9 @@ impl Parser {
         allow_ident_only: bool,
     ) -> ParseResult<DeclList> {
         loop {
-            let Some(decl) = opt!(self, var_decl(allow_ident_only))? else { break };
+            let Some(decl) = opt!(self, var_decl(allow_ident_only), MIN_PRECEDENCE)? else {
+                break;
+            };
             list.push(decl)?;
             if !self.lex.advance_if_kind(sep) {
                 break;
@@ -1270,6 +1272,7 @@ impl FollowingOperator {
     }
 }
 
+const MAX_PRECEDENCE: u8 = u8::MAX;
 const DOT_PRECEDENCE: u8 = 24;
 /// must be higher than [`POSTOP_PRECEDENCE`] and lower than [`DOT_PRECEDENCE`] to parse `... |> A.func(...)` correctly
 const PIPE_TARGET_PRECEDENCE: u8 = 23;

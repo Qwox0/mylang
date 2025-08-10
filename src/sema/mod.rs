@@ -68,11 +68,11 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                 continue;
             };
             debug_assert!(!decl.is_const || decl.init.is_some());
-            if !decl.is_const && !decl.is_extern && !decl.markers.get(DeclMarkers::IS_STATIC_MASK) {
+            if !decl.is_const && !decl.markers.get(DeclMarkers::IS_STATIC_MASK) {
                 cerror!(
                     decl.ident.span,
-                    "Global variables must be marked as const (`{0} :: ...`), static (`static {0} \
-                     := ...`) or extern (`extern {0}: ...)",
+                    "Global variables must be marked as const (`{0} :: ...`) or static (`static \
+                     {0} := ...`)",
                     decl.ident.sym
                 );
                 continue;
@@ -310,15 +310,15 @@ impl Sema {
                     *decl = Some(sym);
                     expr.ty = Some(var_ty);
                     if sym.is_const {
-                        expr.set_replacement(sym.const_val());
-                    } else if is_const {
-                        if sym.is_extern {
+                        if sym.init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
                             return cerror2!(
                                 *span,
                                 "the use of extern symbols in constants is currently not \
                                  implemented"
                             );
                         };
+                        expr.set_replacement(sym.const_val());
+                    } else if is_const {
                         return cerror2!(
                             *span,
                             "cannot access a non-constant symbol at compile time"
@@ -1150,6 +1150,37 @@ impl Sema {
             AstEnum::ImportDirective { .. } => {
                 expr.ty = Some(p.module);
             },
+            AstEnum::ExternDirective { decl, .. } => {
+                let ty = self.analyze_extern_directive(expr, decl, *ty_hint)?;
+                if ty.kind != AstKind::Fn && decl.u().is_const {
+                    // TODO: is this correct?
+                    return cerror2!(
+                        decl.u().lhs_span(),
+                        "`#extern` declaration must be a function or marked as `static`"
+                    );
+                }
+                expr.ty = Some(ty);
+            },
+            AstEnum::IntrinsicDirective { intrinsic_name, decl, .. } => {
+                let ty = self.analyze_extern_directive(expr, decl, *ty_hint)?;
+                if !intrinsic_name.text.starts_with("llvm.") {
+                    return cerror2!(
+                        intrinsic_name.span,
+                        "Currently only llvm directives are supported. This directive name does \
+                         not start with \"llvm.\""
+                    );
+                }
+                let Some(f) = ty.try_downcast::<ast::Fn>() else {
+                    // Do non-function intrinsics exist?
+                    self.cctx.error_mismatched_types(
+                        ty.upcast().full_span(),
+                        "function type of intrinsic",
+                        ty,
+                    );
+                    return SemaResult::HandledErr;
+                };
+                expr.ty = Some(f.upcast_to_type())
+            },
             AstEnum::ProgramMainDirective { .. } => {
                 if self.cctx.args.is_lib {
                     return cerror2!(
@@ -1626,17 +1657,6 @@ impl Sema {
             decl.var_ty = Some(ty);
             if ty == p.never {
                 decl.ty = Some(p.never);
-            } else if decl.is_extern
-                && let Some(f) = ty.try_downcast::<ast::Fn>()
-            {
-                // TODO: remove this special case
-                debug_assert!(f.body.is_none());
-                debug_assert!(f.ty == p.type_ty);
-                f.as_mut().ty = Some(f.upcast_to_type());
-                debug_assert!(decl.init.is_none());
-                decl.init = Some(f.upcast());
-                decl.is_const = true;
-                return Ok(());
             }
         }
         if let Some(init) = decl.init {
@@ -1724,6 +1744,41 @@ impl Sema {
                 Ok(())
             },
         }
+    }
+
+    /// Also used for `#intrinsic` directive.
+    fn analyze_extern_directive(
+        &self,
+        directive: Ptr<ast::Ast>,
+        decl_out: &mut OPtr<ast::Decl>,
+        ty_hint: OPtr<ast::Type>,
+    ) -> SemaResult<Ptr<ast::Type>> {
+        let Some(&decl) = self.decl_stack.last().filter(|decl| decl.init == directive) else {
+            return cerror2!(
+                directive.full_span(),
+                "The #{0} directive must be preceeded by a declaration, like `f : (int) -> int : \
+                 #{0}`.",
+                extern_directive_name(directive)
+            );
+        };
+        *decl_out = Some(decl);
+        debug_assert_eq!(decl.var_ty, ty_hint);
+        let Some(ty) = ty_hint else {
+            return cerror2!(
+                decl.lhs_span(),
+                "An #{0} declaration requires an explicit type annotation. like `f : (int) -> int \
+                 : #{0}`",
+                extern_directive_name(directive)
+            );
+        };
+        if decl.on_type.is_some() || !self.function_stack.is_empty() {
+            return cerror2!(
+                decl.lhs_span(),
+                "An #{0} declaration must be in global/file scope.",
+                extern_directive_name(directive)
+            );
+        }
+        Ok(ty)
     }
 
     /// works for function calls and call initializers
@@ -2121,5 +2176,13 @@ impl<T> OptionSemaExt<T> for Option<T> {
             Some(t) => Ok(t),
             None => NotFinished { remaining: 1 },
         }
+    }
+}
+
+fn extern_directive_name(directive: Ptr<ast::Ast>) -> &'static str {
+    match directive.kind {
+        AstKind::ExternDirective => "extern",
+        AstKind::IntrinsicDirective => "intrinsic",
+        _ => unreachable_debug(),
     }
 }

@@ -191,9 +191,13 @@ impl TokenKind {
         )
     }
 
+    /// used by `opt!` to determine whether the expression is present or not.
     #[inline]
-    pub fn is_expr_terminator(self) -> bool {
+    pub fn is_invalid_start(self, prec: u8) -> bool {
         use TokenKind as K;
+        if prec >= super::DECL_TYPE_PRECEDENCE && matches!(self, K::Colon | K::Eq) {
+            return true;
+        }
         match self {
             K::Whitespace => unreachable_debug(),
             K::Keyword(Keyword::Else) | K::CloseParenthesis | K::CloseBracket | K::CloseBrace |
@@ -363,7 +367,6 @@ keywords! {
     Union = "union",
     Enum = "enum",
     Unsafe = "unsafe",
-    Extern = "extern",
     And = "and",
     AndEq = "and=",
     Or = "or",

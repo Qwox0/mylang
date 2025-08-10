@@ -253,7 +253,7 @@ ok2 :: -> _ := ok(); // but decls are allowed directly after `->`
 }
 
 #[test]
-fn unorderable_functions() {
+fn unorderable_indirectly_recursive_functions() {
     let code = |b_ret_ty| {
         format!(
             "

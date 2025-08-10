@@ -4,7 +4,7 @@ use crate::{
     context::primitives,
     parser::lexer::Span,
     ptr::Ptr,
-    util::{self, UnwrapDebug, unreachable_debug},
+    util::{self, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};
 
@@ -186,15 +186,7 @@ impl DebugAst for Ast {
                 lines.write_tree(rhs);
             },
             AstEnum::Decl {
-                is_extern: false,
-                markers,
-                ident,
-                on_type,
-                var_ty,
-                var_ty_expr,
-                init,
-                is_const,
-                ..
+                markers, ident, on_type, var_ty, var_ty_expr, init, is_const, ..
             } => {
                 lines.write(&format!(
                     "{}{}{}{}",
@@ -225,16 +217,6 @@ impl DebugAst for Ast {
                         if *is_const { ":" } else { "=" },
                     ));
                     lines.write_tree(init);
-                }
-            },
-            AstEnum::Decl { is_extern: true, ident, var_ty, var_ty_expr, .. } => {
-                lines.write("extern ");
-                lines.write(ident.sym.text());
-                lines.write(":");
-                if let Some(var_ty) = var_ty {
-                    lines.write_tree(var_ty);
-                } else {
-                    lines.write_tree(&var_ty_expr.u());
                 }
             },
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
@@ -302,6 +284,13 @@ impl DebugAst for Ast {
             AstEnum::ImportDirective { path, .. } => {
                 lines.write("#import ");
                 lines.write_tree(path);
+            },
+            AstEnum::ExternDirective { .. } => {
+                lines.write("#extern");
+            },
+            AstEnum::IntrinsicDirective { intrinsic_name, .. } => {
+                lines.write("#intrinsic ");
+                lines.write_tree(intrinsic_name);
             },
             AstEnum::ProgramMainDirective { span, .. } | AstEnum::SimpleDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());

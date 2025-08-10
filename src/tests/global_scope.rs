@@ -17,8 +17,7 @@ fn error_global_variable() {
     test :: -> var;";
     test_compile_err_raw(
         code,
-        "Global variables must be marked as const (`var :: ...`), static (`static var := ...`) or \
-         extern (`extern var: ...)",
+        "Global variables must be marked as const (`var :: ...`) or static (`static var := ...`)",
         |code| TestSpan::of_substr(code, "var"),
     );
 }

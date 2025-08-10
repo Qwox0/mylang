@@ -67,10 +67,10 @@ pub trait DiagnosticReporter {
     }
 
     #[track_caller]
-    fn error_mismatched_types(
+    fn error_mismatched_types<Expected: fmt::Display>(
         &mut self,
         span: Span,
-        expected: Ptr<ast::Type>,
+        expected: Expected,
         got: Ptr<ast::Type>,
     ) {
         self.error(span, &format_args!("mismatched types: expected {expected}; got {got}"));

@@ -1,6 +1,9 @@
 use crate::{
     diagnostics::DiagnosticSeverity,
-    tests::{TestSpan, jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw},
+    tests::{
+        TestSpan, jit_run_test, jit_run_test_raw, test_compile_err, test_compile_err_raw,
+        test_parse,
+    },
     util::IteratorExt,
 };
 
@@ -73,6 +76,8 @@ fn sret_no_memcpy() {
 #[ignore = "unfinished test"]
 #[allow(unused)]
 fn fix_precedence_range() {
+    test_parse("for x in 1.. do print(x);");
+
     let a = 1..{
         let x = 1;
         x
@@ -285,9 +290,54 @@ test :: -> f((-1).&);";
 
 #[test]
 #[ignore = "not implemented"]
+fn correct_error_span_with_parens() {
+    test_compile_err(
+        "_: []u8 = (-1).&",
+        "mismatched types: expected []u8; got *{signed integer literal}",
+        |code| TestSpan::of_substr(code, "(-1).&"),
+    );
+
+    test_compile_err(
+        "1 + \"\"",
+        "MismatchedTypesBinOp (lhs: {integer literal}, rhs: []u8)",
+        |code| TestSpan::of_substr(code, "+"),
+    );
+
+    test_compile_err(
+        "(1 + \"\")",
+        "MismatchedTypesBinOp (lhs: {integer literal}, rhs: []u8)",
+        |code| TestSpan::of_substr(code, "+"),
+    );
+}
+
+#[test]
+#[ignore = "not implemented"]
 fn fix_enum_parse_error() {
     let code = "MyEnum :: enum { x: i32, x :: (s: *MyEnum) -> s.*.x; };";
     test_compile_err_raw(code, "duplicate symbol `x` in struct scope", |code| {
         TestSpan::of_nth_substr(code, 1, "x")
     });
+}
+
+#[test]
+fn use_intrinsics() {
+    let code = "
+cos : f64 -> f64 : #intrinsic \"llvm.cos.f64\";
+test :: -> cos(10);";
+    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 10.0f64.cos());
+
+    let code = "
+ctz : (u32, is_zero_poison: bool) -> u32 : #intrinsic \"llvm.ctlz.i32\";
+test :: -> ctz(10, true);";
+    assert_eq!(*jit_run_test_raw::<u32>(code).ok(), 10u32.leading_zeros());
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn intrinsics_fix_immarg() {
+    let code = "
+ctz : (u32, is_zero_poison: bool) -> u32 : #intrinsic \"llvm.ctlz.i32\";
+a :: (is_zero_poison: bool) -> ctz(10, is_zero_poison); // not allowed!
+test :: -> a(true);";
+    assert_eq!(*jit_run_test_raw::<u32>(code).ok(), 10u32.leading_zeros());
 }

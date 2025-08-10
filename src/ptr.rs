@@ -114,10 +114,6 @@ impl<T> Ptr<[T]> {
     pub fn cast_slice<U>(self) -> Ptr<[U]> {
         Ptr::new(unsafe { NonNull::new_unchecked(self.raw() as *mut [U]) })
     }
-
-    pub fn as_slice(&self) -> &[T] {
-        &self[..]
-    }
 }
 
 impl<T> IntoIterator for Ptr<[Ptr<T>]>

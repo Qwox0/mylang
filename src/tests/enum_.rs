@@ -1,5 +1,5 @@
-use super::{jit_run_test, test_compile_err, TestSpan};
-use crate::{tests::jit_run_test_raw, util::transmute_unchecked};
+use super::{TestSpan, jit_run_test, test_compile_err};
+use crate::{tests::{jit_run_test_raw, test_parse}, util::{transmute_unchecked, IteratorExt}};
 
 #[test]
 fn basic_enum() {
@@ -204,6 +204,12 @@ fn invalid_tag_ty() {
     test_compile_err(
         "enum { A = \"hello\" }",
         "mismatched types: expected {integer literal}; got []u8",
-        |code| TestSpan::of_substr(code, "\"hello\"")
+        |code| TestSpan::of_substr(code, "\"hello\""),
     );
+}
+
+#[test]
+fn error_expected_ident() {
+    let err = test_parse("E :: enum { += };").errors().expect_one().clone();
+    debug_assert_eq!(err.msg.as_ref(), "expected an identifier, got `+=`"); // we want `expected ident` instead of `expected '}'`
 }

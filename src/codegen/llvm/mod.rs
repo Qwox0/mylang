@@ -835,6 +835,11 @@ impl<'ctx> Codegen<'ctx> {
                 //panic_debug!("directives should have been resolved during sema")
                 Ok(Symbol::Void)
             },
+            AstEnum::ExternDirective { decl, .. } | AstEnum::IntrinsicDirective { decl, .. } => {
+                // TODO: replacing idents with these directive and duplicating the symbol lookup
+                // logic here seems like a bad idea.
+                Ok(self.get_symbol(decl.u()))
+            },
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -1357,14 +1362,28 @@ impl<'ctx> Codegen<'ctx> {
         res
     }
 
+    fn compile_intrinsic(&mut self, intrinsic_name: &str, fn_ty: Ptr<ast::Fn>) -> Symbol<'ctx> {
+        debug_assert!(intrinsic_name.starts_with("llvm."));
+        let ret_ty = self.primitive_ty(fn_ty.ret_ty.u()).basic_ty();
+        let param_types = fn_ty
+            .params()
+            .iter_types()
+            .map(|ty| self.primitive_ty(ty).basic_metadata_ty())
+            .collect::<Vec<_>>();
+        let ty = ret_ty.fn_type(&param_types, false);
+        let fn_val = self.module().add_function(intrinsic_name, ty, None);
+
+        let prev = self.fn_table.insert(fn_ty, fn_val);
+        debug_assert!(prev.is_none());
+        Symbol::Function(fn_val)
+    }
+
     fn mangle_symbol<'n>(&self, decl: Ptr<ast::Decl>) -> Cow<'n, str> {
         if decl.ident.replacement.is_some() {
             return decl.ident.rep().flat_downcast::<ast::Ident>().sym.text().into();
         }
         let name = decl.ident.sym;
-        if decl.is_extern {
-            name.text().into()
-        } else if name == primitives().main_sym {
+        if name == primitives().main_sym {
             "_main".into()
         } else if let Some(ty) = decl.on_type {
             format!("{}.{name}", ty.downcast_type()).into() // TODO: use correct type name
@@ -2499,6 +2518,13 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn primitive_ty(&mut self, ty: Ptr<ast::Type>) -> CodegenType<'ctx> {
+        debug_assert!(ty.is_finalized() && !ty.is_aggregate());
+        let llvm_ty = self.llvm_type(ty);
+        debug_assert_eq!(CFfiType::Simple(llvm_ty.basic_ty()), self.c_ffi_type(ty));
+        llvm_ty
+    }
+
     fn sym_as_val(
         &mut self,
         sym: Symbol<'ctx>,
@@ -2637,20 +2663,32 @@ impl<'ctx> Codegen<'ctx> {
         during_precompile: bool,
     ) -> CodegenResultAndControlFlow<()> {
         let p = primitives();
-        let ast::Decl { init, is_const, is_extern, markers, .. } = decl.as_ref();
+        let ast::Decl { init, is_const, markers, .. } = decl.as_ref();
         let var_ty = decl.var_ty.u();
         debug_assert!(var_ty.is_finalized());
         debug_assert!(init.is_none_or(|init| init.ty == var_ty));
 
         if *is_const {
-            if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
-                debug_assert_eq!(f.upcast(), init.u().rep());
+            if let Some(intrinsic) = init.u().try_downcast::<ast::IntrinsicDirective>() {
+                if during_precompile {
+                    let f = var_ty.downcast::<ast::Fn>();
+                    let sym = self.compile_intrinsic(&intrinsic.intrinsic_name.text, f);
+                    self.symbols.push((decl, sym)); // TODO: seems hacky
+                }
+            } else if init.u().kind == AstKind::ExternDirective {
+                if during_precompile {
+                    let f = var_ty.downcast::<ast::Fn>();
+                    let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
+                    self.symbols.push((decl, Symbol::Function(fn_val))); // TODO: seems hacky
+                }
+            } else if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
+                debug_assert!(f.upcast() == init.u().rep());
                 if init.u().kind != AstKind::Fn {
                     // don't need to compile an alias again
                     debug_assert!(during_precompile || self.fn_table.contains_key(&f));
                 } else if during_precompile {
                     self.compile_prototype(f, FnKind::FnDef(decl));
-                } else if !*is_extern {
+                } else {
                     debug_assert!(
                         self.fn_table.get(&f).is_some(),
                         "function prototype should have been precompiled",
@@ -2692,7 +2730,7 @@ impl<'ctx> Codegen<'ctx> {
             const ENABLE_NON_MUT_TO_REG: bool = false;
 
             let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
-            let sym = if *is_extern || is_static {
+            let sym = if is_static {
                 if !during_precompile {
                     debug_assert_matches!(self.symbols.get(decl), Some(Symbol::Global(_)));
                     return Ok(());
@@ -2700,7 +2738,7 @@ impl<'ctx> Codegen<'ctx> {
                 let ty = self.llvm_type(var_ty).basic_ty();
                 let name = self.mangle_symbol(decl);
                 let global = self.module().add_global(ty, None, name.as_ref());
-                if is_static {
+                if !init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
                     global.set_initializer(&match init.and_then(|i| i.try_downcast_const_val()) {
                         Some(cv) => self.compile_const_val(cv, var_ty)?.basic_val(),
                         None => ty.const_zero(),

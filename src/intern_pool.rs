@@ -8,9 +8,15 @@ use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 use std::hash::Hash;
 
 /// An interned Symbol
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Symbol {
     idx: u32,
+}
+
+impl fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Symbol#{}({:?})", self.idx, self.text())
+    }
 }
 
 impl fmt::Display for Symbol {

@@ -1,5 +1,9 @@
 use super::jit_run_test_raw;
-use crate::tests::{TestSpan, test_compile_err, test_compile_err_raw};
+use crate::{
+    ast::{self, AstKind},
+    tests::{TestSpan, test_compile_err, test_compile_err_raw, test_parse},
+    util::IteratorExt,
+};
 
 #[test]
 fn error_invalid_lhs() {
@@ -63,4 +67,30 @@ fn good_invalid_token_error() {
     test_compile_err_raw("f :: (a: i32 = 1, mut b # i32 = 2) -> {}", err_msg, |code| {
         TestSpan::of_substr(code, "#")
     });
+}
+
+#[test]
+fn parse_colon() {
+    fn test_fn_in_var_ty(code: &str) {
+        let res = test_parse(code).no_error();
+        let cos = res.stmts.iter().expect_one().downcast::<ast::Decl>();
+        assert_eq!(cos.ident.sym.text(), "cos");
+        let var_ty = cos.var_ty_expr.unwrap().downcast::<ast::Fn>();
+        let var_ty_ret = var_ty.body.unwrap().downcast::<ast::Ident>();
+        assert_eq!(var_ty_ret.sym.text(), "f64");
+        assert_eq!(cos.init.unwrap().kind, AstKind::IntrinsicDirective);
+    }
+    test_fn_in_var_ty("cos : f64 -> f64 : #intrinsic \"llvm.cos.f64\";");
+    test_fn_in_var_ty("cos : (f64) -> f64 : #intrinsic \"llvm.cos.f64\";");
+
+    {
+        let res = test_parse("v :: x : i32 : 3;").no_error();
+        let v = res.stmts.iter().expect_one().downcast::<ast::Decl>();
+        assert_eq!(v.ident.sym.text(), "v");
+        assert!(v.var_ty_expr.is_none());
+        let x = v.init.unwrap().downcast::<ast::Decl>();
+        assert_eq!(x.ident.sym.text(), "x");
+        assert_eq!(x.var_ty_expr.unwrap().downcast::<ast::Ident>().sym.text(), "i32");
+        assert_eq!(x.init.unwrap().downcast::<ast::IntVal>().val, 3);
+    }
 }
