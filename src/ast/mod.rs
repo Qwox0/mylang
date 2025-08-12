@@ -1308,6 +1308,14 @@ impl Block {
     }
 }
 
+impl EnumDef {
+    #[cfg(debug_assertions)]
+    pub fn find_variant_ty_for_tag(&self, tag_val: isize) -> Ptr<Type> {
+        let idx = self.variant_tags.u().iter().position(|tag| *tag == tag_val).u();
+        self.variants[idx].var_ty.u()
+    }
+}
+
 impl Fn {
     #[inline]
     pub fn params(&self) -> DeclList {

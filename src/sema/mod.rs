@@ -530,22 +530,9 @@ impl Sema {
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
-                    && let Some((v_idx, variant)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym)
                 {
-                    // enum variant
-                    if variant.var_ty.u() == p.void_ty {
-                        if is_const {
-                            let tag = enum_ty.variant_tags.u()[v_idx] as i64;
-                            let tag = ast_new!(IntVal { val: tag }, Span::ZERO).upcast();
-                            tag.as_mut().ty =
-                                Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
-                            let cv = self.create_aggregate_const_val([tag])?;
-                            expr.set_replacement(cv.upcast());
-                        }
-                        enum_ty.upcast_to_type()
-                    } else {
-                        p.enum_variant
-                    }
+                    self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?
                 } else if lhs_ty == p.type_ty
                     && let TypeEnum::StructDef { consts, .. }
                     | TypeEnum::UnionDef { consts, .. }
@@ -666,15 +653,11 @@ impl Sema {
                     }
                     return err(CannotInfer, expr.full_span());
                 };
-                let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym) else {
+                let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
                     return self.cctx.error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
                 };
                 *lhs = Some(enum_ty.upcast());
-                expr.ty = Some(if variant.var_ty.u() == p.void_ty {
-                    enum_ty.upcast_to_type()
-                } else {
-                    p.enum_variant
-                });
+                expr.ty = Some(self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?)
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
                 let lhs_ty = analyze!(*lhs, None);
@@ -752,27 +735,22 @@ impl Sema {
                 }
             },
             AstEnum::Call { func, args, .. } => {
-                if is_const {
-                    cerror!(expr.full_span(), "Cannot directly call a function in a constant");
-                    chint!(
-                        expr.full_span().start(),
-                        "Consider using the `#run` directive to evaluate the function at compile \
-                         time (currently not implemented): {}",
-                        func.try_flat_downcast::<ast::Ident>()
-                            .map(|i| format!(": `#run {}(...)`", i.sym))
-                            .unwrap_or_default()
-                    );
-                    return SemaResult::HandledErr;
-                }
+                let call = expr.downcast::<ast::Call>();
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
                 expr.ty = Some(if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
+                    if is_const {
+                        return self.cctx.error_const_call(call).into();
+                    }
                     self.validate_call(&f.params(), args, span.end(), false)?;
 
                     debug_assert!(is_finished_or_recursive(f, self));
                     f.ret_ty.unwrap_or(p.unknown_ty)
                 } else if fn_ty == p.method_stub {
+                    if is_const {
+                        return self.cctx.error_const_call(call).into();
+                    }
                     let dot = func.downcast::<ast::Dot>().as_mut();
                     let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
                     let args = std::iter::once(dot.lhs.u())
@@ -783,10 +761,19 @@ impl Sema {
                     debug_assert!(is_finished_or_recursive(fn_ty, self));
                     fn_ty.ret_ty.unwrap_or(p.unknown_ty)
                 } else if fn_ty == p.enum_variant {
-                    let Some(dot) = func.try_downcast::<ast::Dot>() else { unreachable_debug() };
+                    let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(dot.rhs.sym).u().1;
-                    self.validate_call(&[variant], args, span.end(), false)?;
+                    self.validate_call(&[variant], args, span.end(), is_const)?;
+
+                    if is_const {
+                        let tag = dot.upcast().downcast::<ast::IntVal>().upcast();
+                        debug_assert_eq!(args.len(), 1);
+                        let data = args.get(0).u();
+                        let cv = self.create_aggregate_const_val([tag, data])?;
+                        data.rep().as_mut().ty = Some(variant.var_ty.u());
+                        expr.set_replacement(cv.upcast());
+                    }
                     enum_ty.upcast_to_type()
                 } else {
                     cerror!(
@@ -1514,6 +1501,28 @@ impl Sema {
         debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
         expr.as_mut().ty = Some(expected_ty);
         Ok(())
+    }
+
+    pub fn analyze_enum_tag(
+        &mut self,
+        expr: Ptr<Ast>,
+        enum_ty: Ptr<ast::EnumDef>,
+        v_idx: usize,
+        is_const: bool,
+    ) -> SemaResult<Ptr<ast::Type>> {
+        let p = p();
+        if is_const {
+            let tag = enum_ty.variant_tags.u()[v_idx] as i64;
+            let tag = ast_new!(IntVal { val: tag }, Span::ZERO).upcast();
+            tag.as_mut().ty = Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
+            expr.set_replacement(tag);
+        }
+        // enum variant
+        Ok(if enum_ty.variants[v_idx].var_ty.u() == p.void_ty {
+            enum_ty.upcast_to_type()
+        } else {
+            p.enum_variant
+        })
     }
 
     pub fn try_custom_bitwith_int_type(&self, name: &str) -> Option<ast::IntTy> {

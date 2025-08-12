@@ -1,5 +1,8 @@
 use super::{TestSpan, jit_run_test, test_compile_err};
-use crate::{tests::{jit_run_test_raw, test_parse}, util::{transmute_unchecked, IteratorExt}};
+use crate::{
+    tests::{jit_run_test_raw, test_parse},
+    util::{IteratorExt, transmute_unchecked},
+};
 
 #[test]
 fn basic_enum() {
@@ -212,4 +215,50 @@ fn invalid_tag_ty() {
 fn error_expected_ident() {
     let err = test_parse("E :: enum { += };").errors().expect_one().clone();
     debug_assert_eq!(err.msg.as_ref(), "expected an identifier, got `+=`"); // we want `expected ident` instead of `expected '}'`
+}
+
+#[test]
+fn one_variant() {
+    // in local
+    let res = jit_run_test::<()>("a := enum { OneVariant }.OneVariant; a");
+    assert!(res.llvm_ir().contains("define void @test()"));
+    assert!(res.llvm_ir().contains("alloca {}, align 1")); // TODO: allow this?
+    assert!(res.llvm_ir().contains("ret void"));
+    drop(res);
+
+    // in constant
+    let code = "
+MyEnum :: enum { OneVariant };
+CONST : MyEnum : .OneVariant;
+test :: -> CONST;";
+    let res = jit_run_test_raw::<()>(code);
+    assert!(res.llvm_ir().contains("define void @test() {\nentry:\n  ret void")); // empty function
+    assert!(!res.llvm_ir().contains("alloca {}"));
+}
+
+#[test]
+fn one_variant_with_data() {
+    // in local
+    let code = "
+MyEnum :: enum { OneVariant(struct { a := 123, b := 456 }) };
+test :: -> {
+    a: MyEnum = .OneVariant(.{ a=7 });
+    a
+}";
+    let res = jit_run_test_raw::<[i64; 2]>(code);
+    assert_eq!(*res.ok(), [7, 456]);
+    assert!(res.llvm_ir().contains("alloca { {}, { { i64, i64 }, [0 x i8] } }, align 8"));
+    assert!(res.llvm_ir().contains("ret { i128 } %ret"));
+    drop(res);
+
+    // in constant
+    let code = "
+MyEnum :: enum { OneVariant(struct { a := 123, b := 456 }) };
+CONST :: MyEnum.OneVariant(.{ b=7 });
+test :: -> CONST;";
+    let res = jit_run_test_raw::<[i64; 2]>(code);
+    assert_eq!(*res.ok(), [123, 7]);
+    let const_val = "{ {} zeroinitializer, { i64, i64 } { i64 123, i64 7 } }";
+    assert!(res.llvm_ir().contains(const_val));
+    assert!(res.llvm_ir().contains("ret { i128 } %ret"));
 }

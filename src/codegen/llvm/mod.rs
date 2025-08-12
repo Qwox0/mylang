@@ -871,6 +871,13 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     ret(self.float_type(*bits).const_float(float))
                 },
+                TypeEnum::EnumDef { .. } => {
+                    let int_val = cv.downcast::<ast::IntVal>();
+                    let enum_def = ty.downcast::<ast::EnumDef>();
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(enum_def.find_variant_ty_for_tag(*val as isize), p.void_ty);
+                    ret(self.const_enum_val(enum_def, int_val.upcast_to_const_val(), None)?)
+                },
                 _ => unreachable_debug(),
             },
             ConstValEnum::FloatVal { val, .. } => {
@@ -929,10 +936,11 @@ impl<'ctx> Codegen<'ctx> {
                         ret(new_raw_const_struct(struct_ty, &mut values))
                     },
                     TypeEnum::UnionDef { .. } => todo!(),
-                    TypeEnum::EnumDef { .. } => {
-                        let enum_def = ty.downcast::<ast::EnumDef>();
-                        ret(self.const_enum_val(enum_def, elements.get(0).u(), elements.get(1))?)
-                    },
+                    TypeEnum::EnumDef { .. } => ret(self.const_enum_val(
+                        ty.downcast::<ast::EnumDef>(),
+                        elements.get(0).u(),
+                        Some(elements.get(1).u()),
+                    )?),
                     TypeEnum::RangeTy { .. } => todo!(),
                     TypeEnum::OptionTy { .. } => todo!(),
                     _ => unreachable_debug(),
@@ -1099,6 +1107,27 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn enum_tag_val(&self, enum_def: Ptr<ast::EnumDef>, tag_val: i64) -> BasicValueEnum<'ctx> {
+        match self.enum_tag_type(enum_def) {
+            EnumTagType::Zero => panic_debug!("Enum has no variants"),
+            EnumTagType::One { .. } => self.empty_struct_ty.const_zero().as_basic_value_enum(),
+            EnumTagType::IntTy(int_type) => {
+                int_type.const_int(tag_val as u64, tag_val.is_negative()).as_basic_value_enum()
+            },
+        }
+    }
+
+    fn enum_tag_sym(&self, enum_def: Ptr<ast::EnumDef>, tag_val: i64) -> Symbol<'ctx> {
+        match self.enum_tag_type(enum_def) {
+            EnumTagType::Zero => panic_debug!("Enum has no variants"),
+            EnumTagType::One { .. } => Symbol::Void,
+            EnumTagType::IntTy(int_type) => {
+                reg_sym(int_type.const_int(tag_val as u64, tag_val.is_negative()))
+            },
+        }
+    }
+
+    /// [`Self::new_enum_type`]
     fn compile_enum_val(
         &mut self,
         enum_def: Ptr<ast::EnumDef>,
@@ -1107,16 +1136,8 @@ impl<'ctx> Codegen<'ctx> {
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         let variant_idx = enum_def.variants.find_field(variant_sym).u().0;
-        let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u();
-
+        let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u() as i64;
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
-        let tag_ty = match self.enum_tag_type(enum_def) {
-            EnumTagType::Zero => panic_debug!("Enum has no variants"),
-            EnumTagType::One { .. } => None,
-            EnumTagType::IntTy(int_type) => Some(int_type),
-        };
-        let tag_val =
-            tag_ty.map(|tag_ty| tag_ty.const_int(variant_tag as u64, variant_tag.is_negative()));
         if write_target.is_some() || data.is_some() {
             let enum_ptr = if let Some(ptr) = write_target {
                 ptr
@@ -1125,23 +1146,19 @@ impl<'ctx> Codegen<'ctx> {
             };
 
             // set tag
-            if let Some(tag) = tag_val {
-                let tag_ptr = enum_ptr;
-                self.build_store(tag_ptr, tag, enum_alignment(enum_def.variants))?;
-            }
+            let tag_val = self.enum_tag_val(enum_def, variant_tag);
+            self.build_store(enum_ptr, tag_val, enum_alignment(enum_def.variants))?;
 
             // set data
             if let Some(data) = data {
-                let data_idx = tag_val.is_some() as u32;
-                let data_ptr =
-                    self.builder.build_struct_gep(enum_ty, enum_ptr, data_idx, "enum_data")?;
+                let data_ptr = self.builder.build_struct_gep(enum_ty, enum_ptr, 1, "enum_data")?;
                 debug_assert_eq!(data.ty, enum_def.variants[variant_idx].var_ty.u());
                 self.compile_expr_with_write_target(data, Some(data_ptr))?;
             }
 
             stack_val(enum_ptr)
         } else {
-            Ok(tag_val.map(reg_sym).unwrap_or(Symbol::Void))
+            Ok(self.enum_tag_sym(enum_def, variant_tag))
         }
     }
 
@@ -1155,23 +1172,15 @@ impl<'ctx> Codegen<'ctx> {
         let variant_tag = tag.downcast::<ast::IntVal>().val;
 
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
-        let tag_ty = match self.enum_tag_type(enum_def) {
-            EnumTagType::Zero => panic_debug!("Enum has no variants"),
-            EnumTagType::One { .. } => todo!(), // TODO
-            EnumTagType::IntTy(int_type) => int_type,
-        };
-        let tag_val = tag_ty.const_int(variant_tag as u64, variant_tag.is_negative());
+        let tag_val = self.enum_tag_val(enum_def, variant_tag);
 
         let Some(data) = data else {
             return Ok(tag_val.as_basic_value_enum());
         };
 
         #[cfg(debug_assertions)]
-        {
-            // special case: the type of `data` const val is set during sema
-            let idx = enum_def.variant_tags.u().iter().position(|t| *t as i64 == variant_tag).u();
-            debug_assert_eq!(data.ty.u(), enum_def.variants[idx].var_ty.u());
-        }
+        // special case: the type of `data` const val is set during sema
+        debug_assert_eq!(data.ty.u(), enum_def.find_variant_ty_for_tag(variant_tag as isize));
         let data = self.compile_const_val(data, data.ty.u())?;
         let val = enum_ty.const_named_struct(&[tag_val.as_basic_value_enum(), data.basic_val()]);
         Ok(val.as_basic_value_enum())

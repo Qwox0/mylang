@@ -1,5 +1,5 @@
 use crate::{
-    ast::{self, AstKind},
+    ast::{self, AstKind, UpcastToAst},
     display_code::display,
     error::SpannedError,
     parser::lexer::Span,
@@ -105,7 +105,7 @@ pub trait DiagnosticReporter {
 
     #[track_caller]
     fn error_cannot_apply_initializer(
-        &mut self,
+        &self,
         initializer_kind: InitializerKind,
         lhs: Ptr<ast::Ast>,
     ) {
@@ -127,7 +127,7 @@ pub trait DiagnosticReporter {
     }
 
     #[track_caller]
-    fn error_cannot_infer_initializer_lhs(&mut self, initializer: Ptr<ast::Ast>) -> HandledErr {
+    fn error_cannot_infer_initializer_lhs(&self, initializer: Ptr<ast::Ast>) -> HandledErr {
         cerror!(initializer.full_span(), "cannot infer struct type");
         chint!(initializer.span.start(), "consider specifying the type explicitly");
         HandledErr
@@ -154,11 +154,27 @@ pub trait DiagnosticReporter {
     }
 
     #[track_caller]
-    fn error_const_ptr_initializer(&mut self, initializer: Ptr<ast::Ast>) -> HandledErr {
+    fn error_const_ptr_initializer(&self, initializer: Ptr<ast::Ast>) -> HandledErr {
         cerror!(
             initializer.full_span(),
             "cannot initialize a struct behind a pointer at compile time"
         )
+    }
+
+    #[track_caller]
+    fn error_const_call(&self, call: Ptr<ast::Call>) -> HandledErr {
+        let full_span = call.upcast().full_span();
+        cerror!(full_span, "Cannot directly call a function in a constant");
+        chint!(
+            full_span.start(),
+            "Consider using the `#run` directive to evaluate the function at compile time \
+             (currently not implemented): {}",
+            call.func
+                .try_flat_downcast::<ast::Ident>()
+                .map(|i| format!(": `#run {}(...)`", i.sym))
+                .unwrap_or_default()
+        );
+        HandledErr
     }
 
     #[track_caller]
