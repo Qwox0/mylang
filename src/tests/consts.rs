@@ -99,3 +99,31 @@ test :: -> {
     assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
 }
+
+#[test]
+fn codegen_use_constant_aggregate() {
+    // manual stack allocation
+    let code = "
+CONST :: .[7; 10];
+test :: -> {
+    arr := CONST;
+    arr[1]
+}";
+    assert_eq!(*jit_run_test_raw::<i32>(code).ok(), 7);
+
+    // currently uses an automatic stack allocation
+    let code = "
+CONST :: .[7; 10];
+test :: -> CONST[1];";
+    let res = jit_run_test_raw::<i32>(code);
+    assert_eq!(*res.ok(), 7);
+    //assert!(!res.llvm_ir().contains("alloca")); // TODO
+    drop(res);
+
+    // correct codegen for structs (see build_struct_access)
+    let code = "
+MyStruct :: struct { a: i32 };
+CONST :: MyStruct.{ a=7 };
+test :: -> CONST.a;";
+    assert_eq!(*jit_run_test_raw::<i32>(code).ok(), 7);
+}

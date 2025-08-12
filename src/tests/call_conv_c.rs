@@ -154,7 +154,7 @@ fn return_struct_ptr_i64() {
         ptr: *const i64,
         b: i64,
     }
-    let out = *jit_run_test::<Struct>("struct{ptr : *i64 = &100, b : i64 = 200 ,}.{}").ok();
+    let out = *jit_run_test::<Struct>("x := 100; struct{ptr: *i64, b: i64 = 200 }.(&x)").ok();
     let a: i64 = 100;
     let ptr = &a as *const i64;
     assert!(

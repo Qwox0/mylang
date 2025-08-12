@@ -534,7 +534,6 @@ impl Parser {
                     // (expr)
                     TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
                         first_expr.parenthesis_count += 1;
-                        first_expr.span = span.join(t.span);
                         return Ok(first_expr);
                     },
                     // (expr) -> ...

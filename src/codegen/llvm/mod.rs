@@ -1,13 +1,13 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, BinOpKind, ConstValEnum, DeclList, DeclListExt, DeclMarkers,
-        OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclList, DeclListExt,
+        DeclMarkers, OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     context::{ctx, primitives},
     display_code::{debug_expr, display},
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
-    ptr::Ptr,
+    ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     symbol_table::CodegenSymbolTable,
     type_::{RangeKind, enum_alignment, struct_size, ty_match, union_size},
@@ -328,10 +328,11 @@ impl<'ctx> Codegen<'ctx> {
                 let elem_ty = finalize_ty(lhs.ty.u().get_arr_elem_ty_mut(), elem_ty_out);
                 let lhs_sym = self.compile_expr(*lhs)?;
 
-                let (ptr, len) = match lhs.ty.matchable().as_mut() {
+                let lhs_ty = lhs.ty.u();
+                let (ptr, len) = match lhs_ty.matchable().as_mut() {
                     TypeEnum::SliceTy { .. } => self.build_slice_field_access(lhs_sym)?,
                     TypeEnum::ArrayTy { len, .. } => {
-                        let arr_ptr = self.sym_as_arr_ptr_val(lhs_sym);
+                        let arr_ptr = self.build_ptr_to_sym(lhs_sym, lhs_ty)?;
                         let len = self.context.i64_type().const_int(len.int(), false);
                         (arr_ptr, len)
                     },
@@ -435,7 +436,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.llvm_type(enum_ty.upcast_to_type()); // TODO: find a better way to compile anonymous inline types and functions.
                     debug_assert_eq!(dot.lhs.u().downcast_type(), enum_ty.upcast_to_type());
                     debug_assert!(args.len() <= 1);
-                    let data = args.get(0).copied();
+                    let data = args.get(0);
                     self.compile_enum_val(enum_ty, dot.rhs.sym, data, write_target.take())
                 } else {
                     unreachable_debug()
@@ -589,20 +590,6 @@ impl<'ctx> Codegen<'ctx> {
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
             },
-            /*
-            AstEnum::Extern { ident, ty, .. } => {
-                debug_assert!(ty.u().ty == p.type_ty);
-                let sym = if let Some(f) = ty.u().try_downcast::<ast::FunctionTy>() {
-                    Symbol::Function { val: self.compile_prototype(&ident.text, f.func).0 }
-                } else {
-                    let ty = self.llvm_type(ty.u()).basic_ty();
-                    let val = self.module.add_global(ty, None, &ident.text);
-                    Symbol::Global { val }
-                };
-                let _ = self.symbols.insert(ident.text, sym);
-                Ok(Symbol::Void)
-            },
-            */
             AstEnum::If { condition, then_body, else_body, .. } => {
                 let func = self.cur_fn.u();
                 debug_assert!(condition.ty == p.bool);
@@ -679,19 +666,20 @@ impl<'ctx> Codegen<'ctx> {
                 let outer_continue_break_depth = self.continue_break_depth;
                 self.continue_break_depth = 0;
 
-                let source_ty = self.llvm_type(source.ty.u());
+                let source_ty = source.ty.u();
+                let source_llvm_ty = self.llvm_type(source_ty);
                 let source_sym = self.compile_expr(*source)?;
 
-                match source.ty.matchable().as_ref() {
+                match source_ty.matchable().as_ref() {
                     TypeEnum::ArrayTy { len, .. } => {
                         let idx_ty = self.context.i64_type();
                         let len = idx_ty.const_int(len.int(), false);
                         let for_info =
                             self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
 
-                        let arr_ptr = self.sym_as_arr_ptr_val(source_sym);
+                        let arr_ptr = self.build_ptr_to_sym(source_sym, source_ty)?;
                         let iter_var_sym =
-                            Symbol::Stack(self.build_gep(source_ty.arr_ty(), arr_ptr, &[
+                            Symbol::Stack(self.build_gep(source_llvm_ty.arr_ty(), arr_ptr, &[
                                 idx_ty.const_zero(),
                                 for_info.idx_int,
                             ])?);
@@ -715,7 +703,7 @@ impl<'ctx> Codegen<'ctx> {
                     TypeEnum::RangeTy { elem_ty, rkind, .. } if rkind.has_start() => {
                         let i = elem_ty.downcast::<ast::IntTy>();
                         let elem_llvm_ty = self.llvm_type(*elem_ty).int_ty();
-                        let range_ty = source_ty.struct_ty();
+                        let range_ty = source_llvm_ty.struct_ty();
                         let start = self.build_struct_access(range_ty, source_sym, 0, "start")?;
                         let start = self.sym_as_val(start, *elem_ty)?.int_val();
 
@@ -941,7 +929,10 @@ impl<'ctx> Codegen<'ctx> {
                         ret(new_raw_const_struct(struct_ty, &mut values))
                     },
                     TypeEnum::UnionDef { .. } => todo!(),
-                    TypeEnum::EnumDef { .. } => todo!(),
+                    TypeEnum::EnumDef { .. } => {
+                        let enum_def = ty.downcast::<ast::EnumDef>();
+                        ret(self.const_enum_val(enum_def, elements.get(0).u(), elements.get(1))?)
+                    },
                     TypeEnum::RangeTy { .. } => todo!(),
                     TypeEnum::OptionTy { .. } => todo!(),
                     _ => unreachable_debug(),
@@ -1154,6 +1145,38 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Returns [`IntValue`] or [`StructValue`].
+    fn const_enum_val(
+        &mut self,
+        enum_def: Ptr<ast::EnumDef>,
+        tag: Ptr<ast::ConstVal>,
+        data: OPtr<ast::ConstVal>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let variant_tag = tag.downcast::<ast::IntVal>().val;
+
+        let enum_ty = self.type_table[&enum_def.upcast_to_type()].struct_ty();
+        let tag_ty = match self.enum_tag_type(enum_def) {
+            EnumTagType::Zero => panic_debug!("Enum has no variants"),
+            EnumTagType::One { .. } => todo!(), // TODO
+            EnumTagType::IntTy(int_type) => int_type,
+        };
+        let tag_val = tag_ty.const_int(variant_tag as u64, variant_tag.is_negative());
+
+        let Some(data) = data else {
+            return Ok(tag_val.as_basic_value_enum());
+        };
+
+        #[cfg(debug_assertions)]
+        {
+            // special case: the type of `data` const val is set during sema
+            let idx = enum_def.variant_tags.u().iter().position(|t| *t as i64 == variant_tag).u();
+            debug_assert_eq!(data.ty.u(), enum_def.variants[idx].var_ty.u());
+        }
+        let data = self.compile_const_val(data, data.ty.u())?;
+        let val = enum_ty.const_named_struct(&[tag_val.as_basic_value_enum(), data.basic_val()]);
+        Ok(val.as_basic_value_enum())
+    }
+
     fn compile_fn(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> CodegenResult<FunctionValue<'ctx>> {
         debug_assert!(def.is_lamda_or(|d| d.init.is_some_and(|i| i.rep() == f.upcast())));
         let prev_bb = self.builder.get_insert_block();
@@ -1319,12 +1342,10 @@ impl<'ctx> Codegen<'ctx> {
                         }
                         Symbol::Stack(ptr)
                     },
-                    CFfiType::ByValPtr => {
+                    CFfiType::ByValPtr | CFfiType::Array => {
                         Symbol::Stack(param_val_iter.next().u().into_pointer_value())
                     },
-                    CFfiType::Fn | CFfiType::Array => {
-                        reg_sym(param_val_iter.next().u().into_pointer_value())
-                    },
+                    CFfiType::Fn => reg_sym(param_val_iter.next().u().into_pointer_value()),
                     CFfiType::SmallSimpleEnum { ffi_int, small_int } => {
                         let param = param_val_iter.next().u().into_int_value();
                         debug_assert_eq!(param.get_type(), ffi_int);
@@ -2572,15 +2593,6 @@ impl<'ctx> Codegen<'ctx> {
         }))
     }
 
-    fn sym_as_arr_ptr_val(&mut self, sym: Symbol<'ctx>) -> PointerValue<'ctx> {
-        match sym {
-            Symbol::Stack(ptr) => ptr,
-            Symbol::Register(val) => val.ptr_val(),
-            Symbol::Global(_global_value) => todo!(),
-            _ => unreachable_debug(),
-        }
-    }
-
     #[inline]
     fn get_symbol(&self, decl: Ptr<ast::Decl>) -> Symbol<'ctx> {
         *self.symbols.get(decl).u()
@@ -2669,32 +2681,30 @@ impl<'ctx> Codegen<'ctx> {
         debug_assert!(init.is_none_or(|init| init.ty == var_ty));
 
         if *is_const {
-            if let Some(intrinsic) = init.u().try_downcast::<ast::IntrinsicDirective>() {
-                if during_precompile {
-                    let f = var_ty.downcast::<ast::Fn>();
-                    let sym = self.compile_intrinsic(&intrinsic.intrinsic_name.text, f);
-                    self.symbols.push((decl, sym)); // TODO: seems hacky
-                }
-            } else if init.u().kind == AstKind::ExternDirective {
-                if during_precompile {
-                    let f = var_ty.downcast::<ast::Fn>();
-                    let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
-                    self.symbols.push((decl, Symbol::Function(fn_val))); // TODO: seems hacky
-                }
-            } else if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
-                debug_assert!(f.upcast() == init.u().rep());
-                if init.u().kind != AstKind::Fn {
-                    // don't need to compile an alias again
-                    debug_assert!(during_precompile || self.fn_table.contains_key(&f));
-                } else if during_precompile {
-                    self.compile_prototype(f, FnKind::FnDef(decl));
-                } else {
-                    debug_assert!(
-                        self.fn_table.get(&f).is_some(),
-                        "function prototype should have been precompiled",
-                    );
-                    debug_assert!(self.fn_table.get(&f).u().get_first_basic_block().is_none());
-                    self.compile_fn(f, FnKind::FnDef(decl))?;
+            if let Some(f) = var_ty.try_downcast::<ast::Fn>() {
+                // flat!!
+                match init.u().matchable2() {
+                    AstMatch::Fn(f) if during_precompile => {
+                        self.compile_prototype(f, FnKind::FnDef(decl));
+                    },
+                    AstMatch::Fn(f) => {
+                        debug_assert!(
+                            self.fn_table.contains_key(&f),
+                            "function prototype should have been precompiled",
+                        );
+                        debug_assert!(self.fn_table.get(&f).u().get_first_basic_block().is_none());
+                        self.compile_fn(f, FnKind::FnDef(decl))?;
+                    },
+                    AstMatch::ExternDirective(_) if during_precompile => {
+                        let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
+                        self.symbols.push((decl, Symbol::Function(fn_val))); // TODO: seems hacky
+                    },
+                    AstMatch::IntrinsicDirective(intrinsic) if during_precompile => {
+                        let sym = self.compile_intrinsic(&intrinsic.intrinsic_name.text, f);
+                        self.symbols.push((decl, sym)); // TODO: seems hacky
+                    },
+                    AstMatch::ExternDirective(_) | AstMatch::IntrinsicDirective(_) => {},
+                    _ => debug_assert!(during_precompile || self.fn_table.contains_key(&f)), // don't need to compile an alias again
                 }
             } else if var_ty == p.type_ty {
                 let ty = init.u().downcast_type();
@@ -3141,7 +3151,7 @@ pub fn for_each_call_arg<'ctx, U>(
     let mut pos_idx = 0;
     while args.peek().is_some_and(is_pos_arg) {
         let pos_arg = args.next().u();
-        let param_def = *params.get(pos_idx).u();
+        let param_def = params.get(pos_idx).u();
         f(pos_arg, param_def, pos_idx)?;
         pos_idx += 1;
     }

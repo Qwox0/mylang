@@ -289,7 +289,6 @@ test :: -> f((-1).&);";
 }
 
 #[test]
-#[ignore = "not implemented"]
 fn correct_error_span_with_parens() {
     test_compile_err(
         "_: []u8 = (-1).&",

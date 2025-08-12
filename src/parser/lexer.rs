@@ -228,7 +228,7 @@ impl TokenKind {
                 "a block comment"
             },
             TokenKind::Ident => "an identifier",
-            TokenKind::Keyword(keyword) => keyword.as_str(),
+            TokenKind::Keyword(keyword) => keyword.as_display_str(),
             TokenKind::IntLit => "an integer literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::BoolLitTrue => "`true`",
@@ -352,6 +352,12 @@ macro_rules! keywords {
             pub fn as_str(self) -> &'static str {
                 match self {
                     $(Keyword::$enum_variant => $text,)*
+                }
+            }
+
+            pub fn as_display_str(self) -> &'static str {
+                match self {
+                    $(Keyword::$enum_variant => concat!("`", $text, "`"),)*
                 }
             }
         }
@@ -514,7 +520,7 @@ impl Deref for Code {
     }
 }
 
-impl Index<Span> for &Code {
+impl Index<Span> for Code {
     type Output = str;
 
     fn index(&self, span: Span) -> &Self::Output {

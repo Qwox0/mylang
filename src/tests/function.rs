@@ -264,7 +264,6 @@ a :: (x: bool) -> {{
 }};
 b :: -> {b_ret_ty} a(false) + 5;
 test :: -> a(true);
-_ :: 1; // TODO: remove this
         "
         )
     };
@@ -277,7 +276,7 @@ _ :: 1; // TODO: remove this
 }
 
 #[test]
-fn dont_use_partially_infered_return_type() {
+fn dont_use_partially_inferred_return_type() {
     let code = "
 a :: -> {
     if false return 1;

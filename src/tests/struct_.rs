@@ -110,3 +110,13 @@ fn duplicate_field() {
         });
     }
 }
+
+#[test]
+fn use_param_default_in_const() {
+    let code = "
+MyStruct :: struct { arr := .[DEFAULT; 10]; };
+CONST :: MyStruct.();
+DEFAULT :: 7;
+test :: -> CONST.arr[1];";
+    assert_eq!(*jit_run_test_raw::<i32>(code).ok(), 7);
+}

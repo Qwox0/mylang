@@ -41,7 +41,6 @@ test :: -> MyStruct.VAL;";
 }
 
 #[test]
-#[ignore = "not implemented"]
 fn define_and_use_const_in_struct() {
     let code = "
 MyStruct :: struct {
@@ -54,11 +53,11 @@ test :: -> MyStruct.().val;";
     let code = "
 Stack :: struct {
     buf: [Stack.SIZE]i64;
-    len: u64,
+    len: u64 = 0,
 };
-Stack.SIZE :: 128;
-test :: -> Stack.().val;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+Stack.SIZE : u64 : 128;
+test :: -> Stack.(.[10; Stack.SIZE]).buf[127];";
+    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
 }
 
 #[test]

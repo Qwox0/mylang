@@ -741,6 +741,7 @@ impl Ptr<Ast> {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
         if rep.ty.is_none()
+            && rep.span == Span::ZERO
             && let Some(ty) = self.ty
         {
             // Currently only needed for displaying replacements (like `ConstVal`s). Maybe can be
@@ -750,10 +751,12 @@ impl Ptr<Ast> {
         self.as_mut().replacement = Some(rep)
     }
 
+    #[track_caller]
     pub fn downcast<V: AstVariant>(self) -> Ptr<V> {
         self.rep().flat_downcast()
     }
 
+    #[track_caller]
     pub fn flat_downcast<V: AstVariant>(self) -> Ptr<V> {
         debug_assert_eq!(self.kind, V::KIND);
         self.cast()
@@ -769,6 +772,7 @@ impl Ptr<Ast> {
     }
 
     /// downcast to a [`ConstVal`]
+    #[track_caller]
     pub fn downcast_const_val(self) -> Ptr<ConstVal> {
         let p = self.rep();
         debug_assert!(p.is_const_val());
@@ -871,6 +875,7 @@ impl Ptr<ConstVal> {
 
 impl Ptr<Type> {
     /// always behaves like a `flat_downcast`.
+    #[track_caller]
     pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
         debug_assert!(self.replacement.is_none());
         debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
@@ -983,10 +988,7 @@ impl Ast {
     /// Returns a [`Span`] representing the entire expression.
     pub fn full_span(&self) -> Span {
         let span = self.span;
-        if self.parenthesis_count > 0 {
-            return span;
-        }
-        match self.matchable().as_ref() {
+        let full_span = match self.matchable().as_ref() {
             AstEnum::PositionalInitializer { lhs, .. }
             | AstEnum::NamedInitializer { lhs, .. }
             | AstEnum::ArrayInitializer { lhs, .. }
@@ -1050,7 +1052,15 @@ impl Ast {
                 }))
                 .join(body.or(*ret_ty_expr).u().full_span()),
             _ => span,
+        };
+        if self.parenthesis_count > 0
+            && let Some(file) = full_span.file
+        {
+            let start = file.code.0[..full_span.start].rfind('(').u();
+            let end = full_span.end + 1 + file.code.0[full_span.end..].find(')').u();
+            return Span::new(start..end, Some(file));
         }
+        full_span
     }
 }
 
@@ -1242,7 +1252,8 @@ impl Decl {
 
     pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
         let never = primitives().never;
-        if self.ty.u() == never {
+        debug_assert!(self.var_ty.is_some() || self.init.u().kind == AstKind::Fn);
+        if self.var_ty == never {
             return never.upcast();
         }
         debug_assert!(self.is_const);

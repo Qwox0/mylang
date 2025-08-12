@@ -228,7 +228,7 @@ impl Sema {
         let span = expr.span;
 
         if expr.replacement.is_some() {
-            debug_assert!(expr.ty.is_some());
+            expr.ty = Some(expr.rep().ty.u());
             // Does this work in general? Is this needed if NotFinished is removed?
             return Ok(());
         }
@@ -372,11 +372,12 @@ impl Sema {
                     expr.ty = Some(s.upcast_to_type());
 
                     if is_const {
-                        let all_args = args
+                        let all_args = s
+                            .fields
                             .iter()
-                            .copied()
-                            .chain(s.fields[args.len()..].iter().map(|f| f.init.u()));
-                        let cv = self.create_aggregate_const_val(s.fields.len(), all_args)?;
+                            .enumerate()
+                            .map(|(idx, f)| args.get(idx).or(f.init).u());
+                        let cv = self.create_aggregate_const_val(all_args)?;
                         expr.set_replacement(cv.upcast());
                     }
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
@@ -475,8 +476,7 @@ impl Sema {
                 }
 
                 if is_const {
-                    let cv =
-                        self.create_aggregate_const_val(elements.len(), elements.iter().copied())?;
+                    let cv = self.create_aggregate_const_val(*elements)?;
                     expr.set_replacement(cv.upcast());
                 }
             },
@@ -501,7 +501,7 @@ impl Sema {
 
                 if is_const {
                     let len = len.int();
-                    let cv = self.create_aggregate_const_val(len, iter::repeat_n(*val, len))?;
+                    let cv = self.create_aggregate_const_val(iter::repeat_n(*val, len))?;
                     expr.set_replacement(cv.upcast());
                 }
             },
@@ -523,17 +523,25 @@ impl Sema {
                         );
                     };
                     rhs.decl = Some(s);
-                    let Some(ty) = s.var_ty else { return NotFinished { remaining: 1 } };
+                    let ty = self.get_symbol_var_ty(s)?;
                     if let Some(cv) = s.try_const_val() {
                         expr.set_replacement(cv);
                     }
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
-                    && let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((v_idx, variant)) = enum_ty.variants.find_field(rhs.sym)
                 {
                     // enum variant
                     if variant.var_ty.u() == p.void_ty {
+                        if is_const {
+                            let tag = enum_ty.variant_tags.u()[v_idx] as i64;
+                            let tag = ast_new!(IntVal { val: tag }, Span::ZERO).upcast();
+                            tag.as_mut().ty =
+                                Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
+                            let cv = self.create_aggregate_const_val([tag])?;
+                            expr.set_replacement(cv.upcast());
+                        }
                         enum_ty.upcast_to_type()
                     } else {
                         p.enum_variant
@@ -553,7 +561,7 @@ impl Sema {
                         // is triggered)
                         return NotFinished { remaining: 2 };
                     };
-                    let ty = field.var_ty.or_not_finished()?;
+                    let ty = self.get_symbol_var_ty(field)?;
                     debug_assert!(field.is_const);
                     expr.set_replacement(field.const_val());
                     ty
@@ -569,7 +577,7 @@ impl Sema {
                             "automatic dereferencing of pointers is currently not allowed"
                         );
                     }
-                    let ty = field.var_ty.or_not_finished()?;
+                    let ty = self.get_symbol_var_ty(field)?;
                     if is_const {
                         let Some(cv) = lhs.try_downcast_const_val() else {
                             return cerror2!(
@@ -579,7 +587,7 @@ impl Sema {
                             );
                         };
                         let const_field =
-                            *cv.downcast::<ast::AggregateVal>().elements.get(f_idx).u();
+                            cv.downcast::<ast::AggregateVal>().elements.get(f_idx).u();
                         expr.set_replacement(const_field.upcast());
                     }
                     ty
@@ -591,11 +599,12 @@ impl Sema {
                 {
                     debug_assert!(method.is_const);
                     // method access
-                    rhs.ty = Some(method.var_ty.or_not_finished()?);
+                    let method_ty = self.get_symbol_var_ty(method)?;
+                    rhs.ty = Some(method_ty);
                     rhs.upcast().set_replacement(method.const_val());
-                    if method.var_ty.try_downcast::<ast::Fn>().is_some() {
+                    if method_ty.try_downcast::<ast::Fn>().is_some() {
                         p.method_stub
-                    } else if method.var_ty == p.never {
+                    } else if method_ty == p.never {
                         p.never
                     } else {
                         cerror!(
@@ -821,7 +830,13 @@ impl Sema {
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         self.validate_addr_of(is_mut, *operand, expr)?;
                         let pointee = expr_ty.upcast();
-                        debug_assert!(!is_const, "todo: const addr of");
+                        if is_const {
+                            return cerror2!(
+                                expr.full_span(),
+                                "The \"address of\" operator is currently not supported at \
+                                 compile time"
+                            );
+                        }
                         type_new!(PtrTy { pointee, is_mut }).upcast_to_type()
                     },
                     UnaryOpKind::Deref => {
@@ -833,8 +848,13 @@ impl Sema {
                             );
                             return SemaResult::HandledErr;
                         };
-
-                        debug_assert!(!is_const, "todo: const deref");
+                        if is_const {
+                            return cerror2!(
+                                expr.full_span(),
+                                "The \"dereference\" operator is currently not supported at \
+                                 compile time"
+                            );
+                        }
                         ptr_ty.pointee.downcast_type()
                     },
                     UnaryOpKind::Not => {
@@ -1020,7 +1040,7 @@ impl Sema {
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::Decl { on_type, .. } => {
-                self.analyze_decl(expr.downcast::<ast::Decl>(), is_const, false)?;
+                self.analyze_decl(expr.downcast::<ast::Decl>(), is_const, None)?;
                 if on_type.is_none() {
                     self.cur_scope_pos.inc();
                 }
@@ -1079,7 +1099,7 @@ impl Sema {
                 self.open_scope(scope);
                 let res = (|| {
                     iter_var.var_ty = Some(elem_ty);
-                    self.analyze_decl(*iter_var, false, false)?;
+                    self.analyze_decl(*iter_var, false, None)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
                     if !body.can_ignore_yielded_value() {
@@ -1200,9 +1220,9 @@ impl Sema {
                         self.cctx.path_in_proj(&root_file.path).display()
                     );
                 };
-                let Some(main_ty) = main.var_ty else { return NotFinished { remaining: 1 } };
+                let main_ty = self.get_symbol_var_ty(main)?;
                 if main_ty != p.never {
-                    let Some(main_fn) = main.var_ty.try_downcast::<ast::Fn>() else {
+                    let Some(main_fn) = main_ty.try_downcast::<ast::Fn>() else {
                         return cerror2!(
                             main.ident.span,
                             "Expected the entry point to be a function"
@@ -1263,7 +1283,12 @@ impl Sema {
                 self.open_scope(params_scope);
                 let res: SemaResult<()> = try {
                     for (p_idx, param) in params_scope.decls.iter().enumerate() {
-                        assert!(!param.is_const, "todo: const param");
+                        if param.is_const {
+                            return cerror2!(
+                                param.lhs_span(),
+                                "constant function parameters are currently not implemented"
+                            );
+                        }
                         if param.var_ty_expr.is_none()
                             && let Some(fn_hint) = fn_hint
                             && let Some(p_hint) = fn_hint.params().get(p_idx)
@@ -1271,7 +1296,11 @@ impl Sema {
                             //debug_assert!(param.var_ty.is_none()); // TODO: without NotFinished
                             param.as_mut().var_ty = Some(p_hint.var_ty.u());
                         }
-                        self.analyze_decl(*param, false, is_fn_ty)?;
+                        self.analyze_decl(
+                            *param,
+                            false,
+                            then!(is_fn_ty => VarDeclSpecialCase::FnTyParam),
+                        )?;
                     }
 
                     let mut has_known_ret = false; // needed because of `NotFinished`. `ret_ty` might get set in a previous try
@@ -1284,9 +1313,9 @@ impl Sema {
                     }
 
                     if !is_fn_ty && has_known_ret {
-                        // Needed for direct or indirect recursion
-                        // TODO: add hint to recommend adding an explicit return type
-                        expr.ty = Some(fn_ptr.upcast_to_type())
+                        // Needed for indirect recursion. For direct recursion without an explicit
+                        // return type, see `get_symbol_var_ty`
+                        self.allow_unfinished_use(expr, fn_ptr.upcast_to_type());
                     }
 
                     if let Some(body) = *body {
@@ -1294,6 +1323,7 @@ impl Sema {
                         check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span())
                             .finalize();
                     } else {
+                        debug_assert!(is_fn_ty);
                         //panic_debug!("this function has already been analyzed as a function type")
                     }
                 };
@@ -1351,17 +1381,19 @@ impl Sema {
             },
             AstEnum::StructDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
+                self.allow_unfinished_use(expr, p.type_ty);
                 self.open_scope(scope);
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
                     debug_assert!(member.is_const == consts.contains(&member));
-                    self.var_decl_to_value(member, false)
+                    self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))
                 });
                 self.close_scope();
                 res?;
-                expr.ty = Some(p.type_ty);
+                debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::UnionDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
+                self.allow_unfinished_use(expr, p.type_ty);
                 self.open_scope(scope);
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
                     debug_assert!(member.is_const == consts.contains(&member));
@@ -1370,11 +1402,11 @@ impl Sema {
                     {
                         return cerror2!(d.full_span(), "union fields cannot have default values");
                     }
-                    self.var_decl_to_value(member, false)
+                    self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))
                 });
                 self.close_scope();
                 res?;
-                expr.ty = Some(p.type_ty);
+                debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::EnumDef {
                 scope,
@@ -1391,6 +1423,7 @@ impl Sema {
                 *is_simple_enum = true;
 
                 scope.verify_no_duplicates();
+                self.allow_unfinished_use(expr, p.type_ty);
                 self.open_scope(scope);
                 let mut idx = 0;
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
@@ -1402,7 +1435,7 @@ impl Sema {
                     }
 
                     let variant_idx = member.as_mut().init.take();
-                    let _ = self.var_decl_to_value(member, false)?;
+                    let _ = self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))?;
                     member.as_mut().init = variant_idx;
                     if member.var_ty != p.void_ty {
                         *is_simple_enum = false;
@@ -1450,7 +1483,7 @@ impl Sema {
                 } else {
                     repr_ty.downcast::<ast::IntTy>()
                 });
-                expr.ty = Some(p.type_ty);
+                debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::RangeTy { .. } => todo!(),
             AstEnum::OptionTy { inner_ty: ty, .. } => {
@@ -1492,6 +1525,19 @@ impl Sema {
         let bits = name[1..].parse().ok()?;
         debug_assert!(![8, 16, 32, 64, 128].contains(&bits));
         Some(type_new!(local IntTy { bits, is_signed }))
+    }
+
+    /// To allow recursive (or indirectly recursive) functions and types, we need to set the
+    /// `var_ty` of these symbols
+    /// may be recursive directly or indirectly. To allow this
+    fn allow_unfinished_use(&self, expr: Ptr<Ast>, ty: Ptr<ast::Type>) {
+        expr.as_mut().ty = Some(ty);
+        if let Some(decl) = self.decl_stack.last()
+            && decl.init == expr
+            && decl.var_ty.is_none()
+        {
+            decl.as_mut().var_ty = Some(ty);
+        }
     }
 
     pub fn validate_initializer(
@@ -1579,12 +1625,15 @@ impl Sema {
 
     fn create_aggregate_const_val(
         &mut self,
-        expected_elem_count: usize,
-        all_element_exprs: impl IntoIterator<Item = Ptr<ast::Ast>>,
+        all_element_exprs: impl IntoIterator<IntoIter = impl ExactSizeIterator<Item = Ptr<ast::Ast>>>,
     ) -> SemaResult<Ptr<ast::AggregateVal>> {
+        let mut all_element_exprs = all_element_exprs.into_iter();
+        let mut elements = self.cctx.alloc.alloc_slice_default(all_element_exprs.len())?;
         let mut ok = true;
-        let mut elements = self.cctx.alloc.alloc_slice_default(expected_elem_count)?;
-        for (elem, arg) in elements.iter_mut().zip(all_element_exprs) {
+        for (elem, arg) in elements.iter_mut().zip(all_element_exprs.by_ref()) {
+            if arg.ty.is_none() {
+                return NotFinished { remaining: all_element_exprs.count() + 1 };
+            }
             if let Some(cv) = arg.try_downcast_const_val() {
                 *elem = Some(cv);
             } else {
@@ -1603,10 +1652,10 @@ impl Sema {
     fn var_decl_to_value(
         &mut self,
         decl_ptr: Ptr<ast::Decl>,
-        is_fn_ty_param: bool,
+        kind: Option<VarDeclSpecialCase>,
     ) -> SemaResult<()> {
         self.decl_stack.push(decl_ptr);
-        let res = self.var_decl_to_value_inner(decl_ptr, is_fn_ty_param);
+        let res = self.var_decl_to_value_inner(decl_ptr, kind);
         self.decl_stack.pop();
         res
     }
@@ -1615,7 +1664,7 @@ impl Sema {
     fn var_decl_to_value_inner(
         &mut self,
         decl_ptr: Ptr<ast::Decl>,
-        is_fn_ty_param: bool,
+        kind: Option<VarDeclSpecialCase>,
     ) -> SemaResult<()> {
         let p = p();
         let decl = decl_ptr.as_mut();
@@ -1660,32 +1709,28 @@ impl Sema {
             }
         }
         if let Some(init) = decl.init {
+            let is_field = kind == Some(VarDeclSpecialCase::Field);
             let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
-            let res = self.analyze(init, &decl.var_ty, decl.is_const || is_static);
-            if matches!(res, NotFinished { .. })
-                && let Some(ty) = init.ty
-                && decl.var_ty.is_none()
-            {
-                // Needed for indirect recursion
-                decl.var_ty = Some(ty);
-            }
-            res?;
-            check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
-            init.as_mut().ty = Some(decl.var_ty.u());
-            if decl.is_const && !init.rep().is_const_val() {
+            let is_init_const = decl.is_const || is_static || is_field;
+            self.analyze(init, &decl.var_ty, is_init_const)?;
+            let var_ty =
+                check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
+            init.as_mut().ty = Some(var_ty);
+            if is_init_const && var_ty != p.never && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
+                if is_static {
+                    return cerror2!(
+                        init.full_span(),
+                        "Currently the initial value of a static must be known at compile time"
+                    );
+                }
                 return cerror2!(init.full_span(), "Cannot evaluate value at compile time");
-            } else if is_static && !init.rep().is_const_val() {
-                return cerror2!(
-                    init.full_span(),
-                    "Currently the initial value of a static must be known at compile time"
-                );
             }
             Ok(())
         } else if decl.var_ty.is_some() {
             debug_assert!(!decl.is_const);
             Ok(())
-        } else if is_fn_ty_param {
+        } else if kind == Some(VarDeclSpecialCase::FnTyParam) {
             debug_assert!(decl.var_ty_expr.is_none());
             debug_assert!(decl.init.is_none());
 
@@ -1711,11 +1756,11 @@ impl Sema {
         &mut self,
         mut decl: Ptr<ast::Decl>,
         is_const: bool,
-        is_fn_ty_param: bool,
+        kind: Option<VarDeclSpecialCase>,
     ) -> SemaResult<()> {
         let p = p();
         let _ = is_const; // TODO: non-toplevel constant contexts?
-        let res = self.var_decl_to_value(decl, is_fn_ty_param);
+        let res = self.var_decl_to_value(decl, kind);
         #[cfg(debug_assertions)]
         if self.cctx.args.debug_types && decl.ident.span != Span::ZERO {
             let label = match &res {
@@ -1730,11 +1775,11 @@ impl Sema {
                 self.cctx.error2(&err);
                 decl.var_ty = Some(p.never);
                 decl.ty = Some(p.never);
-                /* TODO: make sure the const_val of this decl is also `never`
                 if let Some(init) = decl.init.as_mut() {
-                    init.replacement = Some(p.never.upcast());
+                    // see `tests::ordering::correctly_handle_error_in_later_cycles`
+                    init.ty = Some(p.never);
+                    init.rep().ty = Some(p.never);
                 }
-                */
                 Ok(())
             },
             NotFinished { remaining } => NotFinished { remaining },
@@ -1802,7 +1847,8 @@ impl Sema {
                     params.len(),
                 );
             };
-            self.analyze_and_finalize_with_known_type(pos_arg, param.var_ty.u(), is_const)?;
+            let param_ty = param.var_ty.or_not_finished()?;
+            self.analyze_and_finalize_with_known_type(pos_arg, param_ty, is_const)?;
 
             pos_idx += 1;
         }
@@ -1841,7 +1887,8 @@ impl Sema {
             } else {
                 was_set[param_idx] = true;
             }
-            self.analyze_and_finalize_with_known_type(named_arg.rhs, param.var_ty.u(), is_const)?;
+            let param_ty = param.var_ty.or_not_finished()?;
+            self.analyze_and_finalize_with_known_type(named_arg.rhs, param_ty, is_const)?;
         }
 
         // missing args
@@ -1852,16 +1899,20 @@ impl Sema {
             .filter(|(p, was_set)| !was_set && p.init.is_none())
             .map(|(p, _)| p);
         if let Some(first) = missing_params.next() {
-            fn format_param(mut buf: String, p: Ptr<ast::Decl>) -> String {
-                write!(&mut buf, "`{}: {}`", p.ident.sym, p.var_ty.u()).unwrap();
-                buf
+            let mut missing_params_list = String::new();
+            let mut idx = 0;
+            for p in iter::once(first).chain(missing_params) {
+                if idx != 0 {
+                    write!(&mut missing_params_list, ", ").unwrap();
+                }
+                let param_ty = p.var_ty.or_not_finished()?;
+                write!(&mut missing_params_list, "`{}: {}`", p.ident.sym, param_ty).unwrap();
+                idx += 1;
             }
-            let missing_params_list = missing_params
-                .fold(format_param(String::new(), first), |acc, p| format_param(acc + ", ", p));
             cerror!(
                 close_p_span,
                 "Missing argument{0} for parameter{0} {1}",
-                if missing_params_list.contains(",") { "s" } else { "" },
+                if idx > 1 { "s" } else { "" },
                 missing_params_list
             );
             chint!(first.upcast().full_span(), "parameter defined here");
@@ -2089,15 +2140,18 @@ impl Sema {
     fn get_symbol_var_ty(&self, sym: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::Type>> {
         Ok(if let Some(var_ty) = sym.var_ty {
             var_ty
-        } else if self.decl_stack.iter().rfind(|d| **d == sym).is_some() {
+        } else if sym.is_const
+            && let Some(f) = sym.init.u().try_downcast::<ast::Fn>()
+            && self.decl_stack.iter().rev().any(|d| *d == sym)
+        {
+            // This case is needed for recursive functions without an explicit return type. Those
+            // functions cannot use `allow_unfinished_use` because the return type might change
+            // multiple times during inference and call sites must not use a partially inferred
+            // return type.
+            // TODO: add hint message to recommend adding at least one explicit return type to
+            //       indirectly recursive functions.
             debug_assert!(sym.init.u().replacement.is_none());
-            match sym.init.u().matchable2() {
-                AstMatch::Fn(f) => f.upcast_to_type(),
-                AstMatch::StructDef(_) | AstMatch::UnionDef(_) | AstMatch::EnumDef(_) => {
-                    self.cctx.primitives.type_ty
-                },
-                _ => unreachable_debug(),
-            }
+            f.upcast_to_type()
         } else {
             return NotFinished { remaining: 1 };
         })
@@ -2186,3 +2240,11 @@ fn extern_directive_name(directive: Ptr<ast::Ast>) -> &'static str {
         _ => unreachable_debug(),
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarDeclSpecialCase {
+    FnTyParam,
+    Field,
+}
+
+const _: () = assert!(size_of::<Option<VarDeclSpecialCase>>() == 1);

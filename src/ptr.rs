@@ -116,6 +116,12 @@ impl<T> Ptr<[T]> {
     }
 }
 
+impl<T> Ptr<[Ptr<T>]> {
+    pub fn get(self, idx: usize) -> OPtr<T> {
+        self.as_ref().get(idx).copied()
+    }
+}
+
 impl<T> IntoIterator for Ptr<[Ptr<T>]>
 where Ptr<T>: 'static
 {

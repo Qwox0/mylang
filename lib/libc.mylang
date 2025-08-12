@@ -12,8 +12,8 @@ pub c_double :: f64;
 
 // ===== <assert.h> =====
 
-// extern assert: (cond: bool) -> void;
-// extern __assert: (cond: bool) -> void;
+// assert : (cond: bool) -> void : #extern;
+// __assert : (cond: bool) -> void : #extern;
 
 // ===== <complex.h> =====
 
@@ -44,7 +44,7 @@ pub c_double :: f64;
 
 // ===== <math.h> =====
 
-extern log10: (x: c_double) -> c_double;
+log10 : (x: c_double) -> c_double : #extern;
 
 // ===== <setjmp.h> =====
 
@@ -80,75 +80,72 @@ extern log10: (x: c_double) -> c_double;
 
 pub FILE :: struct { /* empty */ };
 
-// stdin : *FILE : 0;
-// stdout : *FILE : 1;
-// stderr : *FILE : 2;
-
-extern stdin: *FILE;
-extern stdout: *FILE;
-extern stderr: *FILE;
+static stdin : *FILE = #extern;
+static stdout : *FILE = #extern;
+static stderr : *FILE = #extern;
 
 // HACK: use params with default values instead of varargs.
 
-extern printf: (                                fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern fprintf: (stream: *FILE,                 fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern dprintf: (fd: c_int,                     fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern sprintf: (str: *c_char,                  fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern snprintf: (str: *c_char, size: c_size_t, fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
-extern asprintf: (out_str: *mut ?*c_char,       fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int;
+printf : (                                fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+fprintf : (stream: *FILE,                 fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+dprintf : (fd: c_int,                     fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+sprintf : (str: *c_char,                  fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+snprintf : (str: *c_char, size: c_size_t, fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+asprintf : (out_str: *mut ?*c_char,       fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
 
 /// writes a character to stdout
-//extern putchar: (ch: c_int) -> c_int;
-extern putchar: (ch: u8) -> c_int;
+//putchar : (ch: c_int) -> c_int : #extern;
+putchar : (ch: u8) -> c_int : #extern;
 
 /// writes a character string to stdout
-extern puts: (str: *u8) -> c_int;
+puts : (str: *u8) -> c_int : #extern;
 
-extern EOF: c_int;
+static EOF : c_int = #extern;
 
-extern fopen: (pathname: *c_char, mode: *u8) -> ?*FILE;
-extern fopen64: (pathname: *c_char, mode: *u8) -> ?*FILE;
+fopen : (pathname: *c_char, mode: *u8) -> ?*FILE : #extern;
+fopen64 : (pathname: *c_char, mode: *u8) -> ?*FILE : #extern;
 /// 0 == success; EOF == error
-extern fclose: (stream: *FILE) -> c_int;
-extern fcloseall: (stream: *FILE) -> c_int;
-extern ftell: (stream: *FILE) -> c_long;
-extern fseek: (stream: *FILE, offset: c_long, whence: c_int) -> c_int;
+fclose : (stream: *FILE) -> c_int : #extern;
+fcloseall : (stream: *FILE) -> c_int : #extern;
+ftell : (stream: *FILE) -> c_long : #extern;
+fseek : (stream: *FILE, offset: c_long, whence: c_int) -> c_int : #extern;
 
-/*
-extern SEEK_SET: c_int;
-extern SEEK_CUR: c_int;
-extern SEEK_END: c_int;
-*/
 // see <https://github.com/bminor/glibc/blob/3374de90386f1814cec58567248d43a4632b16f0/libio/stdio.h#L110-L112>
 pub SEEK_SET : c_int : 0;
 pub SEEK_CUR : c_int : 1;
 pub SEEK_END : c_int : 2;
 
-extern fread: (data: *any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t;
+fread : (data: *any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
 
 // ===== <stdlib.h> =====
 
-extern malloc: (size: c_size_t) -> ?*any;
-extern free: (ptr: *any) -> void;
+malloc : (size: c_size_t) -> ?*any : #extern;
+free : (ptr: *any) -> void : #extern;
+calloc : (count: c_size_t, size: c_size_t) -> ?*any : #extern;
+realloc : (ptr: ?*any, new_size: c_size_t) -> ?*any : #extern;
+reallocarray : (ptr: ?*any, new_count: c_size_t, new_size: c_size_t) -> ?*any : #extern;
 
-extern exit: (status: c_int) -> never;
+exit : (status: c_int) -> never : #extern;
 
-extern strtol: (string: *c_char, tailptr: **c_char, base: c_int) -> c_long;
-extern atoi: (string: *c_char) -> c_int;
-extern atol: (string: *c_char) -> c_long;
+strtol : (string: *c_char, tailptr: **c_char, base: c_int) -> c_long : #extern;
+atoi : (string: *c_char) -> c_int : #extern;
+atol : (string: *c_char) -> c_long : #extern;
 
 /// <https://www.gnu.org/software/libc/manual/html_node/Array-Sort-Function.html>
-extern qsort: (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *any) -> c_int) -> void;
+qsort : (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *any) -> c_int) -> void : #extern;
 
 // ===== <stdnoreturn.h> =====
 
 
 // ===== <string.h> =====
 
-extern strlen: (str: *c_char) -> c_size_t;
+memcpy : (dest: *any, src: *any, len: c_size_t) -> *any : #extern;
+memset : (ptr: *any, byte: u8, len: c_size_t) -> *any : #extern;
 
-extern memcpy: (dest: *any, src: *any, len: c_size_t) -> *any;
-extern memset: (ptr: *any, byte: u8, len: c_size_t) -> *any;
+strlen : (str: *c_char) -> c_size_t : #extern;
+
+strcmp : (s1: *c_char, s2: *c_char) -> c_int : #extern;
+strncmp : (s1: *c_char, s2: *c_char, len: c_size_t) -> c_int : #extern;
 
 // ===== <tgmath.h> =====
 
