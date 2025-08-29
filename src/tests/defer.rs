@@ -1,4 +1,4 @@
-use crate::tests::{jit_run_test, jit_run_test_raw};
+use crate::tests::{test, test_body};
 
 #[test]
 fn defer_reverse_order() {
@@ -11,7 +11,7 @@ test :: -> {
     }
     var
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 1);
+    test(code).ok(1i64);
 }
 
 /// Semantics of return:
@@ -37,7 +37,7 @@ test :: -> {
     defer var += 1;
     return var;
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 0);
+    test(code).ok(0i64);
 }
 
 #[test]
@@ -60,7 +60,7 @@ inner :: (val: *mut i64) -> {
     defer val.* += 10;
 };
 test:: -> { mut x: i64 = 0; inner(x.&mut); x }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 7);
+    test(code).ok(7i64);
 }
 
 #[test]
@@ -80,7 +80,7 @@ test :: -> {
     inner(&mut x);
     x
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3);
+    test(code).ok(3i64);
 
     let code = "
 test :: -> {
@@ -98,7 +98,7 @@ test :: -> {
     inner(&mut x);
     x
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3);
+    test(code).ok(3i64);
 }
 
 #[test]
@@ -115,7 +115,7 @@ test :: -> {
     }
     x
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 701);
+    test(code).ok(701i64);
 
     let code = "
 test :: -> {
@@ -130,7 +130,7 @@ test :: -> {
     }
     x
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 701);
+    test(code).ok(701i64);
 
     let code = "
 test :: -> {
@@ -145,7 +145,7 @@ test :: -> {
     }
     x
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 301);
+    test(code).ok(301i64);
 }
 
 #[test]
@@ -159,7 +159,7 @@ test :: -> {
     }
     return a;
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 0);
+    test(code).ok(0i64);
 }
 
 #[test]
@@ -169,5 +169,5 @@ mut a := 10;
 defer a = 0;
 mut a := 3;
 a";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
+    test_body(code).ok(3i64);
 }

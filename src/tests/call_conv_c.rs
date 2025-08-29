@@ -12,7 +12,7 @@
 //! { i32, f32 } -> i64
 //! { f32, i32 } -> i64
 
-use crate::tests::{jit_run_test, jit_run_test_raw};
+use crate::tests::{test, test_body};
 
 macro_rules! test_struct_return {
     ($test_name:ident : { $($field:ident : $ty:ty = $val:expr),* $(,)? }) => {
@@ -21,8 +21,8 @@ macro_rules! test_struct_return {
             #[derive(Debug, PartialEq)]
             #[repr(C)]
             struct Struct { $($field: $ty,)* }
-            let res = jit_run_test::<Struct>(concat!("struct{", stringify!($( $field: $ty = $val, )* ), "}.{}"));
-            assert_eq!(*res.ok(), Struct { $( $field : $val ),* });
+            test_body(concat!("struct{", stringify!($( $field: $ty = $val, )* ), "}.{}"))
+                .ok(Struct { $( $field : $val ),* });
         }
     };
 }
@@ -109,7 +109,7 @@ test_struct_return!(return_struct_i64_i64_i64 : {
 
 #[test]
 fn return_struct_u2_i64() {
-    let out = *jit_run_test::<u128>("struct { tag: u2 = 1, val: i64 = -1 }.{}").ok();
+    let out = test_body("struct { tag: u2 = 1, val: i64 = -1 }.{}").get_out::<i128>();
     let out_hex_string = format!("{out:032x}");
     println!("{out_hex_string}");
     // expect "ffffffffffffffff______________01"
@@ -141,7 +141,7 @@ test :: -> {{
     retval
 }};"
     );
-    let out = *jit_run_test_raw::<Out>(&code).ok();
+    let out = test(code).get_out::<Out>();
     assert_eq!(out.tag, 1);
     assert_eq!(format!("{:x}", out.val.to_bits()), format!("{:x}", big_float_bits));
 }
@@ -154,7 +154,7 @@ fn return_struct_ptr_i64() {
         ptr: *const i64,
         b: i64,
     }
-    let out = *jit_run_test::<Struct>("x := 100; struct{ptr: *i64, b: i64 = 200 }.(&x)").ok();
+    let out = test_body("x := 100; struct{ptr: *i64, b: i64 = 200 }.(&x)").get_out::<Struct>();
     let a: i64 = 100;
     let ptr = &a as *const i64;
     assert!(
@@ -182,7 +182,7 @@ fn return_nested_struct() {
     }
 
     let code = "struct { a: i8 = 1, b: struct { a: i8 = 2, b: i16 = 3 } = .{}, c: i32 = 4 }.{}";
-    assert_eq!(*jit_run_test::<Struct>(code).ok(), Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
+    test_body(code).ok(Struct { a: 1, b: Inner { a: 2, b: 3 }, c: 4 });
 }
 
 #[test]
@@ -192,8 +192,7 @@ MyNum :: struct { val: [2]i32 }
 add :: (n: MyNum, other: i64) -> MyNum.(.[n.val[0] + xx other, n.val[1]]);
 pass_through :: (n: MyNum, other: i64) -> add(n, other);
 test :: -> pass_through(.(.[1,2]), 2);";
-    let out = *jit_run_test_raw::<[i32; 2]>(code).ok();
-    assert_eq!(out, [3, 2]);
+    test(code).ok([3i32, 2]);
 }
 
 #[test]
@@ -202,8 +201,7 @@ fn call_by_value_struct_with_many_small_fields() {
 MyStruct :: struct { a: i8, b: i8, c: [6]i8, x: u32 }
 take_struct :: (s: MyStruct) -> s.x;
 test :: -> take_struct(.(0, 10, .[1; 6], 99));";
-    let out = *jit_run_test_raw::<u32>(code).ok();
-    assert_eq!(out, 99);
+    test(code).ok(99u32);
 }
 
 #[test]
@@ -212,8 +210,7 @@ fn call_by_value_i128() {
     let code = "
 take_i128 :: (i: i128) -> i.as(i32);
 test :: -> take_i128(-10);";
-    let res = jit_run_test_raw::<i32>(code);
-    assert_eq!(*res.ok(), -10);
+    let res = test(code).ok(-10i32);
     let param_name_prefix = if cfg!(debug_assertions) { "i." } else { "" };
     assert!(res.llvm_ir().contains(&format!(
         "define i32 @take_i128(i64 %{param_name_prefix}0, i64 %{param_name_prefix}1)"
@@ -226,8 +223,7 @@ fn call_by_value_array() {
     let code = "
 take_array :: (arr: [3]i32) -> arr[1];
 test :: -> take_array(.[1,-2, 0]);";
-    let res = jit_run_test_raw::<i32>(code);
-    assert_eq!(*res.ok(), -2);
+    let res = test(code).ok(-2i32);
     let param_name = if cfg!(debug_assertions) { "arr" } else { "0" };
     assert!(
         res.llvm_ir()
@@ -239,8 +235,7 @@ test :: -> take_array(.[1,-2, 0]);";
 Arr :: struct { arr: [3]i32 }
 take_array :: (arr: Arr) -> arr.arr[1];
 test :: -> take_array(.(.[1,-2, 0]));";
-    let res = jit_run_test_raw::<i32>(code);
-    assert_eq!(*res.ok(), -2);
+    let res = test(code).ok(-2i32);
     let param_name_prefix = if cfg!(debug_assertions) { "arr." } else { "" };
     assert!(res.llvm_ir().contains(&format!(
         "define noundef i32 @take_array(i64 %{param_name_prefix}0, i32 %{param_name_prefix}1)",
@@ -249,7 +244,6 @@ test :: -> take_array(.(.[1,-2, 0]));";
 
 #[test]
 fn enum_size() {
-    let res = jit_run_test::<i32>("enum { A, B, C }.B");
-    assert_eq!(*res.ok(), 1);
+    let res = test_body("enum { A, B, C }.B").ok(1i32);
     assert!(res.llvm_ir().contains(&format!("define noundef i32 @test()")));
 }

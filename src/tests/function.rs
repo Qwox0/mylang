@@ -1,7 +1,6 @@
-use super::{TestSpan, jit_run_test, test_compile_err, test_compile_err_raw};
 use crate::{
     ast,
-    tests::{jit_run_test_raw, test_parse},
+    tests::{TestSpan, substr, test, test_body, test_parse},
     util::IteratorExt,
 };
 
@@ -10,7 +9,7 @@ fn basic_call() {
     let code = "
 my_fn :: (a: i64, b: i64) -> a + b;
 test :: -> my_fn(1, 2);";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3);
+    test(code).ok(3i64);
 }
 
 #[test]
@@ -20,7 +19,7 @@ test :: -> {
     my_fn :: (a: i64, b: i64) -> a + b;
     my_fn(1, 2)
 };";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3);
+    test(code).ok(3i64);
 }
 
 #[test]
@@ -35,14 +34,14 @@ factorial :: (x: i64) -> i64 {
         "rec {factorial_code}
 test :: -> factorial(10);"
     );
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
+    test(code).ok(3628800i64);
 
     // global without `rec`
     let code = format!(
         "{factorial_code}
 test :: -> factorial(10);"
     );
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
+    test(code).ok(3628800i64);
 
     /* TODO
     // local with `rec`
@@ -52,7 +51,7 @@ test :: -> factorial(10);"
     factorial(10)
 }}"
     );
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
+    test_raw(code).expect(3628800i64);
     */
 }
 
@@ -61,16 +60,13 @@ fn recursive_fn_difficult_ret_infer() {
     let code = "
 rec factorial :: (x: i64) -> if x == 0 then 1 else x * factorial(x-1);
 test :: -> factorial(10);";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 3628800);
+    test(code).ok(3628800i64);
 }
 
 #[test]
 fn recursive_fn_cannot_infer_ret_ty() {
-    test_compile_err_raw(
-        "test :: -> test();",
-        "cannot infer the return type of this recursive function",
-        |code| TestSpan::of_substr(code, "test"),
-    );
+    test("test :: -> test();")
+        .error("cannot infer the return type of this recursive function", substr!("test"));
 }
 
 #[test]
@@ -80,8 +76,7 @@ test :: -> i8 {
     if true return 1;
     2
 };";
-    let out = jit_run_test_raw::<i8>(code);
-    assert_eq!(*out.ok(), 1);
+    let out = test(code).ok(1i8);
     assert!(out.llvm_ir().contains("ret i8 1"));
     assert!(out.llvm_ir().contains("ret i8 2"));
 }
@@ -93,7 +88,7 @@ test :: -> struct { ok: bool } {
     if false return .(false);
     .(true)
 };";
-    assert_eq!(*jit_run_test_raw::<bool>(code).ok(), true);
+    test(code).ok(true);
 }
 
 #[test]
@@ -103,7 +98,7 @@ test :: -> struct { ok: bool } {
     if false return .{ ok = false };
     .{ ok = true }
 };";
-    assert_eq!(*jit_run_test_raw::<bool>(code).ok(), true);
+    test(code).ok(true);
 }
 
 #[test]
@@ -111,7 +106,7 @@ fn call_like_method() {
     let code = "
 add :: (l: i64, r: i64) -> l + r;
 test :: -> 123.add(456);";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 123 + 456);
+    test(code).ok(123 + 456i64);
 }
 
 #[test]
@@ -120,14 +115,14 @@ fn use_correct_return_type() {
         if false return 1.0;
         5
     };";
-    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+    test(code).ok(5.0f64);
 
     let code = "test :: -> {
         if false return MyStruct.(1);
         .(5)
     };
     MyStruct :: struct { x: i32 };";
-    assert_eq!(*jit_run_test_raw::<i32>(code).ok(), 5);
+    test(code).ok(5i32);
 }
 
 #[test]
@@ -137,13 +132,13 @@ fn specialize_return_type_to_optional() {
         if false return 1; // return type: `{int_literal}`
         None // return type: `?{int_literal}`
     };"; // return type: `?i64`
-    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+    test(code).ok(5.0f64);
 
     let code = "test :: -> {
         if false return 1;
         Some(5.0)
     };";
-    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+    test(code).ok(5.0f64);
 }
 
 #[test]
@@ -152,15 +147,14 @@ fn specialize_return_type() {
         if false return 1;
         5.0
     };";
-    assert_eq!(*jit_run_test_raw::<f64>(code).ok(), 5.0);
+    test(code).ok(5.0f64);
 }
 
 #[test]
 fn function_currying() {
-    assert_eq!(*jit_run_test_raw::<i64>("f :: -> -> 1; test :: -> f()();").ok(), 1);
+    test("f :: -> -> 1; test :: -> f()();").ok(1i64);
 
-    let res = jit_run_test_raw::<i32>("f :: -> -> i32 { 1 }; test :: -> f()();");
-    assert_eq!(*res.ok(), 1);
+    let res = test("f :: -> -> i32 { 1 }; test :: -> f()();").ok(1i32);
     assert!(res.llvm_ir().contains("ret ptr @lambda"));
     assert!(res.llvm_ir().contains(
         "%call = call noundef ptr @f()
@@ -170,22 +164,20 @@ fn function_currying() {
 
 #[test]
 fn duplicate_parameter() {
-    test_compile_err("f :: (a: i32, a: f64) -> {}", "duplicate parameter 'a'", |code| {
-        TestSpan::of_nth_substr(code, 1, "a")
-    });
+    test_body("f :: (a: i32, a: f64) -> {}").error("duplicate parameter 'a'", substr!("a";skip=1));
 }
 
 #[test]
 fn parse_params_without_types() {
     {
-        let res = test_parse("(a, b, c) -> {};").no_error();
-        let f = res.stmts.into_iter().expect_one().downcast::<ast::Fn>();
+        let res = test_parse("(a, b, c) -> {};");
+        let f = res.stmts().iter().expect_one().downcast::<ast::Fn>();
         assert_eq!(f.params().len(), 3);
     }
 
     {
-        let res = test_parse("(a, b) -> {};").no_error();
-        let f = res.stmts.into_iter().expect_one().downcast::<ast::Fn>();
+        let res = test_parse("(a, b) -> {};");
+        let f = res.stmts().iter().expect_one().downcast::<ast::Fn>();
         assert_eq!(f.params().len(), 2);
     }
 }
@@ -195,12 +187,12 @@ fn lambda() {
     let code = "
 take_lambda :: (f: () -> i64) -> f();
 take_lambda(() -> 10)";
-    assert_eq!(*jit_run_test::<i32>(code).ok(), 10);
+    test_body(code).ok(10i32);
 
     let code = "
 take_lambda :: (f: (x: i32) -> i32) -> f(5);
 take_lambda((x: i32) -> x)";
-    assert_eq!(*jit_run_test::<i32>(code).ok(), 5);
+    test_body(code).ok(5i32);
 }
 
 #[test]
@@ -208,8 +200,7 @@ fn lambda_infer_arg_types() {
     let code = "
 f :: (lambda: (x: i8, y: f32) -> i8) -> lambda(1, 2.3);
 test :: -> f((x, y) -> x + y.as(i8));";
-    let out = jit_run_test_raw::<i8>(code);
-    assert_eq!(*out.ok(), 1 + 2);
+    test(code).ok(1 + 2i8);
 }
 
 #[test]
@@ -217,8 +208,7 @@ fn lambda_infer_ret_type() {
     let code = "
 take_lambda :: (f: () -> i8) -> f();
 take_lambda(() -> 10)";
-    let out = jit_run_test::<i8>(code);
-    assert_eq!(*out.ok(), 10);
+    let out = test_body(code).ok(10i8);
     assert!(out.llvm_ir().contains("ret i8 10"));
 }
 
@@ -228,16 +218,16 @@ fn lambda_type_mismatch() {
     let code = "
 take_lambda :: (f: (x: i32) -> i16) -> f(5);
 take_lambda(() -> 10)";
-    test_compile_err(code, "mismatched types: expected (x:i32)->i16; got ()->i16", |code| {
-        TestSpan::of_substr(code, "() -> 10")
-    });
+    test_body(code)
+        .error("mismatched types: expected (x:i32)->i16; got ()->i16", substr!("() -> 10"));
 
     let code = "
 take_lambda :: (f: (x: i32) -> i32) -> f(5);
 take_lambda((x: f32) -> 10)";
-    test_compile_err(code, "mismatched types: expected (x:i32)->i32; got (x:f32)->i32", |code| {
-        TestSpan::of_substr(code, "(x: f32) -> 10")
-    });
+    test_body(code).error(
+        "mismatched types: expected (x:i32)->i32; got (x:f32)->i32",
+        substr!("(x: f32) -> 10"),
+    );
 }
 
 #[test]
@@ -247,9 +237,7 @@ a :: -> 1
 ok :: -> 1; // decls are not allowed as the second expression after `->`
 ok2 :: -> _ := ok(); // but decls are allowed directly after `->`
 ";
-    test_compile_err_raw(code, "expected `;`", |code| {
-        TestSpan::of_substr(code, "a :: -> 1").after()
-    });
+    test(code).error("expected `;`", substr!("a :: -> 1";.after()));
 }
 
 #[test]
@@ -267,12 +255,12 @@ test :: -> a(true);
         "
         )
     };
-    test_compile_err_raw(code(""), "cycle(s) detected:", |_| TestSpan::ZERO);
+    test(code("")).error("cycle(s) detected:", |_| TestSpan::ZERO);
     // TODO: "The compiler currently doesn't try to infer return types across multiple indirectly
     // recursive functions."
 
     // works with an explicit return type:
-    assert_eq!(*jit_run_test_raw::<u16>(code("u16")).ok(), 15);
+    test(code("u16")).ok(15u16);
 }
 
 #[test]
@@ -291,7 +279,5 @@ b :: -> {
 test :: -> b();
 pause :: -> {};
         ";
-    test_compile_err_raw(code, "MismatchedTypesBinOp (lhs: u8, rhs: i32)", |code| {
-        TestSpan::of_substr(code, "+")
-    });
+    test(code).error("mismatched types (left: u8, right: i32)", substr!("+"));
 }

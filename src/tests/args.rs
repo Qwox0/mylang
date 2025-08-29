@@ -1,23 +1,16 @@
-use super::test_compile_err_raw;
-use crate::tests::TestSpan;
+use crate::tests::{TestSpan, substr, test};
 
 fn test_compile_err_for_call_and_pos_initializer(
     params: &str,
     args: &str,
     expected_msg_start: &str,
-    mut expected_span: impl FnMut(&str) -> TestSpan,
+    expected_span: impl Fn(&str) -> TestSpan,
 ) {
-    test_compile_err_raw(
-        format!("f :: ({params}) -> {{}};\ntest :: -> f({args});"),
-        expected_msg_start,
-        &mut expected_span,
-    );
+    test(format!("f :: ({params}) -> {{}};\ntest :: -> f({args});"))
+        .error(expected_msg_start, &expected_span);
 
-    test_compile_err_raw(
-        format!("T :: struct {{ {params} }};\ntest :: -> T.({args});"),
-        expected_msg_start,
-        &mut expected_span,
-    );
+    test(format!("T :: struct {{ {params} }};\ntest :: -> T.({args});"))
+        .error(expected_msg_start, &expected_span);
 }
 
 #[test]
@@ -26,7 +19,7 @@ fn too_many_args() {
         "a: i32, b: i32",
         "1, 2, 3, 4",
         "Got 4 positional arguments, but expected at most 2 arguments",
-        |code| TestSpan::of_substr(code, "3, 4").start(),
+        substr!("3, 4";.start()),
     );
 }
 
@@ -36,7 +29,7 @@ fn named_arg_conflicts_with_pos_arg() {
         "a: i32, b: i32",
         "1, 2, a=3",
         "Parameter 'a' specified multiple times",
-        |code| TestSpan::of_substr(code, "a=3").start(),
+        substr!("a=3";.start()),
     );
 }
 
@@ -46,7 +39,7 @@ fn duplicate_named_arg() {
         "a: i32, b: i32",
         "1, b=2, b=3",
         "Parameter 'b' specified multiple times",
-        |code| TestSpan::of_substr(code, "b=3").start(),
+        substr!("b=3";.start()),
     );
 }
 
@@ -56,7 +49,7 @@ fn missing_args() {
         "a: i32, b: i32, c: i32",
         "b=5",
         "Missing arguments for parameters `a: i32`, `c: i32`",
-        |code| TestSpan::of_substr(code, "(b=5)").end(),
+        substr!("(b=5)";.end()),
     );
 }
 
@@ -66,6 +59,6 @@ fn unknown_named_param() {
         "a: i32, b: i32",
         "unknown=5",
         "Unknown parameter",
-        |code| TestSpan::of_substr(code, "unknown"),
+        substr!("unknown"),
     );
 }

@@ -1,13 +1,11 @@
-use crate::tests::{TestSpan, has_duplicate_symbol, jit_run_test_raw, test_compile_err_raw};
+use crate::tests::{has_duplicate_symbol, substr, test};
 
 #[test]
 fn error_duplicate() {
     let code = "
     test :: -> 1;
     test :: -> 2;";
-    test_compile_err_raw(code, "duplicate definition in file scope", |code| {
-        TestSpan::of_nth_substr(code, 1, "test")
-    });
+    test(code).error("duplicate definition in file scope", substr!("test";skip=1));
 }
 
 #[test]
@@ -15,19 +13,16 @@ fn error_global_variable() {
     let code = "
     var := 0;
     test :: -> var;";
-    test_compile_err_raw(
-        code,
+    test(code).error(
         "Global variables must be marked as const (`var :: ...`) or static (`static var := ...`)",
-        |code| TestSpan::of_substr(code, "var"),
+        substr!("var"),
     );
 }
 
 #[test]
 fn unexpected_toplevel_expr() {
     let code = "1 + 1;";
-    test_compile_err_raw(code, "unexpected top level expression", |code| {
-        TestSpan::of_substr(code, "1 + 1")
-    });
+    test(code).error("unexpected top level expression", substr!("1 + 1"));
 }
 
 #[test]
@@ -35,15 +30,13 @@ fn order_independent() {
     let code = "
 test :: -> A;
 A :: 3;";
-    let res = jit_run_test_raw::<i64>(code);
-    assert_eq!(*res.ok(), 3);
+    let res = test(code).ok(3i64);
     assert!(!res.llvm_ir().contains("@A"));
     drop(res);
 
     let code = "
 test :: -> A;
 static A := 3;";
-    let res = jit_run_test_raw::<i64>(code);
-    assert_eq!(*res.ok(), 3);
+    let res = test(code).ok(3i64);
     assert!(!has_duplicate_symbol(res.llvm_ir(), "@A"));
 }

@@ -15,6 +15,7 @@
 #![feature(arbitrary_self_types)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_write_slice)]
+#![feature(type_changing_struct_update)]
 
 pub mod arena_allocator;
 pub mod ast;

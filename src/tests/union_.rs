@@ -1,4 +1,4 @@
-use super::jit_run_test;
+use crate::tests::test_body;
 
 #[test]
 fn transmute_with_union_same_size() {
@@ -13,5 +13,5 @@ ok &&= union_val.int == {int};
 ok &&= union_val.float == {float};
 ok"
     );
-    assert!(*jit_run_test::<bool>(&code).ok(), "```{code}\n``` -> expected `true`");
+    test_body(&code).ok(true);
 }

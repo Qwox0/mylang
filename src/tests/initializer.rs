@@ -1,5 +1,4 @@
-use super::test_compile_err;
-use crate::tests::{TestSpan, jit_run_test};
+use crate::tests::{substr, test_body};
 
 #[test]
 fn initializer_on_struct_type() {
@@ -21,7 +20,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    assert!(jit_run_test::<bool>(code).ok());
+    test_body(code).ok(true);
 }
 
 #[test]
@@ -44,7 +43,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    assert!(jit_run_test::<bool>(code).ok());
+    test_body(code).ok(true);
 }
 
 #[test]
@@ -61,7 +60,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    assert!(jit_run_test::<bool>(code).ok());
+    test_body(code).ok(true);
 }
 
 #[test]
@@ -75,7 +74,7 @@ if a.c[0] != 1.0 return false;
 if a.c[1] != 2.0 return false;
 if a.c[2] != 3.0 return false;
 true";
-    assert!(jit_run_test::<bool>(code).ok());
+    test_body(code).ok(true);
 }
 
 #[test]
@@ -98,7 +97,7 @@ ptr.*.c |> for x {
     sum += x;
 };
 sum";
-    assert_eq!(*jit_run_test::<f64>(code).ok(), 10.5);
+    test_body(code).ok(10.5f64);
 }
 
 #[test]
@@ -121,8 +120,7 @@ if a.inner.b[2] != 5 return false;
 if a.inner.b[3] != 7 return false;
 if a.inner.c != 12.34 return false;
 true";
-    let res = jit_run_test::<bool>(code);
-    assert!(res.ok());
+    let res = test_body(code).ok(true);
     let stack_allocations = res.llvm_ir().lines().filter(|l| l.contains("alloca")).count();
     assert_eq!(stack_allocations, 1, "this code should only do one stack allocation");
 }
@@ -139,8 +137,7 @@ fn positional_initializer() {
     let code = "
 Vec3 :: struct { x: f32, y: f32, z: f32 };
 Vec3.(1.0, 0.0, 2.5)";
-    let res = jit_run_test::<Vec3>(code);
-    assert_eq!(*res.ok(), Vec3 { x: 1.0, y: 0.0, z: 2.5 });
+    test_body(code).ok(Vec3 { x: 1.0, y: 0.0, z: 2.5 });
 }
 
 #[test]
@@ -154,12 +151,11 @@ ptr{initializer_code};
 val");
 
     for initializer_code in [".(10)", ".{ x = 10 }"] {
-        assert_eq!(*jit_run_test::<i32>(code("mut", initializer_code)).ok(), 10);
+        test_body(code("mut", initializer_code)).ok(10i32);
 
-        test_compile_err(
-            code("", initializer_code),
+        test_body(code("", initializer_code)).error(
             "Cannot mutate the value behind an immutable pointer",
-            |code| TestSpan::of_substr(code, &format!("ptr{initializer_code}")),
+            substr!(&format!("ptr{initializer_code}")),
         );
     }
 }

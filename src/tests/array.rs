@@ -1,5 +1,5 @@
-use super::{TestSpan, test_compile_err};
-use crate::tests::jit_run_test;
+use super::TestSpan;
+use crate::tests::{substr, test_body};
 
 /// In the C calling convention arrays are always passed as a pointer and can't be returned.
 /// In mylang arrays are also always returned as a (sret) pointer. This helper is needed because
@@ -13,42 +13,35 @@ pub struct CRetArr<T, const LEN: usize> {
 
 #[test]
 fn arr_initializer_with_lhs() {
-    assert_eq!(jit_run_test::<CRetArr<u8, 4>>("u8.[1, 2, 3, 4]").ok().val, [1, 2, 3, 4]);
+    assert_eq!(test_body("u8.[1, 2, 3, 4]").get_out::<CRetArr<u8, 4>>().val, [1, 2, 3, 4]);
 }
 
 /// also tests that the `elem_ty` is still inferred correctly.
 #[test]
 fn arr_initializer_len_mismatch() {
-    test_compile_err(
-        "{ arr: [3]u8 = .[1, 2, 3, 4]; }",
-        "mismatched types: expected [3]u8; got [4]u8",
-        |code| TestSpan::of_substr(code, ".[1, 2, 3, 4]"),
-    );
+    test_body("{ arr: [3]u8 = .[1, 2, 3, 4]; }")
+        .error("mismatched types: expected [3]u8; got [4]u8", substr!(".[1, 2, 3, 4]"));
 }
 
 #[test]
 fn arr_initializer_on_ptr() {
     let code = "{ mut arr: [4]i64; ptr := &mut arr; ptr.[5, 6, 7, 8]; arr }";
-    assert_eq!(jit_run_test::<CRetArr<i64, 4>>(code).ok().val, [5, 6, 7, 8]);
+    assert_eq!(test_body(code).get_out::<CRetArr<i64, 4>>().val, [5, 6, 7, 8]);
 }
 
 #[test]
 fn arr_initializer_on_ptr_len_mismatch() {
-    test_compile_err(
-        "{ mut arr := .[1, 2, 3, 4]; ptr := &mut arr; ptr.[5, 6, 7, 8, 9]; arr }",
+    test_body("{ mut arr := .[1, 2, 3, 4]; ptr := &mut arr; ptr.[5, 6, 7, 8, 9]; arr }").error(
         "Cannot initialize the array behind the pointer `*mut [4]i64` with 5 items",
-        |code| TestSpan::of_substr(code, "ptr.[5, 6, 7, 8, 9]"),
+        substr!("ptr.[5, 6, 7, 8, 9]"),
     );
 }
 
 #[test]
 #[ignore = "not yet implemented"]
 fn arr_initializer_on_slice() {
-    let out = *jit_run_test::<CRetArr<i64, 4>>(
-        "{ arr := .[1, 2, 3, 4]; slice := arr[1..]; slice.[5, 6, 7]; arr }",
-    )
-    .ok();
-    assert_eq!(out.val, [1, 5, 6, 7]);
+    let code = "{ arr := .[1, 2, 3, 4]; slice := arr[1..]; slice.[5, 6, 7]; arr }";
+    assert_eq!(test_body(code).get_out::<CRetArr<i64, 4>>().val, [1, 5, 6, 7]);
 }
 
 #[test]
@@ -60,17 +53,14 @@ fn arr_initializer_on_slice_len_mismatch() {
 
 #[test]
 fn arr_initializer_on_ref_mut_check() {
-    test_compile_err(
-        "{ arr := .[1, 2, 3, 4]; ptr := &arr; ptr.[5, 6, 7, 8]; arr }",
-        "Cannot mutate the value behind an immutable pointer",
-        |code| TestSpan::of_substr(code, "ptr.[5, 6, 7, 8]"),
-    );
+    test_body("{ arr := .[1, 2, 3, 4]; ptr := &arr; ptr.[5, 6, 7, 8]; arr }")
+        .error("Cannot mutate the value behind an immutable pointer", substr!("ptr.[5, 6, 7, 8]"));
 
     /*
     test_compile_err(
         "{ arr := .[1, 2, 3, 4]; slice := arr[1..]; slice.[5, 6, 7]; arr }",
         "TODO",
-        |code| TestSpan::of_substr(code,  "slice.[5, 6, 7]"),
+        substr!("slice.[5, 6, 7]"),
     );
     */
 }
@@ -87,8 +77,7 @@ return .[
     {{ a += 1; 4 }},
 ]");
 
-    test_compile_err(
-        code(".[a, a]"),
+    test_body(code(".[a, a]")).error(
         "mismatched types: expected [2]i64; got [4]{integer literal}",
         |code| {
             let start = code.find(".[").unwrap();
@@ -97,5 +86,5 @@ return .[
         },
     );
 
-    debug_assert_eq!(*jit_run_test::<[i64; 4]>(code(".[a, a, a, a]"),).ok(), [2, 2, 2, 2]);
+    test_body(code(".[a, a, a, a]")).ok([2i64; 4]);
 }

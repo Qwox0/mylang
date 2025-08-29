@@ -1,19 +1,24 @@
-use crate::tests::jit_run_test;
+use crate::tests::{substr, test_body};
 
 #[test]
 fn gt_for_bool() {
-    let code = "true > false";
-    let res = jit_run_test::<bool>(code);
-    assert!(*res.ok(), "`{code}` -> expected `true`");
-    drop(res);
-
-    let code = "true < false";
-    let res = jit_run_test::<bool>(code);
-    assert!(!*res.ok(), "`{code}` -> expected `false`");
+    test_body("true > false").ok(true);
+    test_body("true < false").ok(false);
 }
 
 #[test]
 fn infer_literal_type() {
-    let code = "a: i8 = 3 + 8; a";
-    assert_eq!(*jit_run_test::<i8>(code).ok(), 3 + 8);
+    test_body("a: i8 = 3 + 8; a").ok(3i8 + 8);
+}
+
+#[test]
+fn correct_error_span_with_parens() {
+    test_body("_: []u8 = (-1).&")
+        .error("mismatched types: expected []u8; got *{signed integer literal}", substr!("(-1).&"));
+
+    test_body("1 + \"\"")
+        .error("mismatched types (left: {integer literal}, right: []u8)", substr!("+"));
+
+    test_body("(1 + \"\")")
+        .error("mismatched types (left: {integer literal}, right: []u8)", substr!("+"));
 }

@@ -1,4 +1,4 @@
-use super::jit_run_test;
+use crate::tests::test_body;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -15,7 +15,7 @@ slice: []i32 = array[3..6];
 if slice[0] != 8 || slice[1] != 16 || slice[2] != 32
     return slice[0..0];
 slice";
-    let out = *jit_run_test::<Slice>(code).ok();
+    let out = test_body(code).get_out::<Slice>();
     assert!(!out.ptr.is_null());
     assert_eq!(out.len, 6 - 3);
 }
@@ -29,7 +29,7 @@ slice2: []i32 = slice[0..2];
 if slice2[0] != 2 || slice2[1] != 4
     return slice[0..0];
 slice2";
-    let out = *jit_run_test::<Slice>(code).ok();
+    let out = test_body(code).get_out::<Slice>();
     assert!(!out.ptr.is_null());
     assert_eq!(out.len, 2 - 0);
 }

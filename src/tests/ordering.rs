@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, test_compile_err_raw};
+use crate::tests::{TestSpan, substr, test};
 
 #[test]
 fn error_cycle_in_struct() {
@@ -10,7 +10,7 @@ MyStruct :: struct {
 };
 I :: u64;
 test :: -> MyStruct.NEW.a;";
-    test_compile_err_raw(code, "cycle(s) detected:", |_| TestSpan::ZERO);
+    test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);
 }
 
 #[test]
@@ -20,7 +20,5 @@ MyStruct :: struct { arr := .[7; LEN]; };
 CONST :: MyStruct.();
 LEN :: \"\";
 test :: -> CONST.arr[4];";
-    test_compile_err_raw(code, "mismatched types: expected u64; got []u8", |code| {
-        TestSpan::of_substr(code, "LEN")
-    });
+    test(code).error("mismatched types: expected u64; got []u8", substr!("LEN"));
 }

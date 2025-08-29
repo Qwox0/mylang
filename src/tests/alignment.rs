@@ -1,9 +1,8 @@
-use crate::tests::jit_run_test;
+use crate::tests::test_body;
 
 #[test]
 fn correct_alignment_on_store_instruction() {
-    let res = jit_run_test::<()>("mut a := 1;");
-    debug_assert!(res.ret.is_some());
+    let res = test_body("mut a := 1;").ok(());
     let store_instructions = res
         .llvm_ir()
         .lines()

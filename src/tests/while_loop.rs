@@ -1,4 +1,4 @@
-use crate::tests::jit_run_test;
+use crate::tests::test_body;
 
 #[test]
 fn while_loop_sum_array() {
@@ -16,7 +16,7 @@ while idx < arr_len {{
 }};
 sum"
     );
-    assert_eq!(*jit_run_test::<i64>(code).ok(), array.iter().sum::<i64>());
+    test_body(code).ok(array.iter().sum::<i64>());
 }
 
 #[test]
@@ -27,7 +27,7 @@ mut idx := 0;
 idx < 3 |> while idx += 1;
 idx"
     );
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
+    test_body(code).ok(3i64);
 }
 
 #[test]
@@ -39,7 +39,7 @@ true |> while {
     idx += 1;
 };
 idx";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
+    test_body(code).ok(3i64);
 }
 
 #[test]
@@ -51,7 +51,7 @@ idx < 5 |> while {
     continue;
 };
 idx";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 5);
+    test_body(code).ok(5i64);
 }
 
 #[test]
@@ -64,12 +64,12 @@ while true {
     break;
 };
 idx";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 10);
+    test_body(code).ok(10i64);
 }
 
 #[test]
 fn return_in_while() {
-    assert_eq!(*jit_run_test::<f64>("while true { return 5.0; }; 0.0").ok(), 5.0);
+    test_body("while true { return 5.0; }; 0.0").ok(5.0f64);
 }
 
 #[test]
@@ -80,5 +80,5 @@ mut product := 1;
 while product < 100 do product <<= 1;
 product"
     );
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 128);
+    test_body(code).ok(128i64);
 }

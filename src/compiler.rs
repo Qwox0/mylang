@@ -71,7 +71,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Parsing #####
 
     let parse_start = Instant::now();
-    let mut stmts = parser::parse_files_in_ctx(ctx);
+    let stmts = parser::parse_files_in_ctx(ctx);
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -111,7 +111,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Sema #####
 
     let sema_start = Instant::now();
-    sema::analyze(ctx, &mut stmts);
+    sema::analyze(ctx, stmts);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {

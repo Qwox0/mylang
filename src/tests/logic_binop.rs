@@ -1,4 +1,4 @@
-use crate::tests::jit_run_test;
+use crate::tests::test_body;
 use core::fmt;
 
 #[test]
@@ -6,10 +6,7 @@ fn test_and() {
     for op in ["&&", "and"] {
         for a in [false, true] {
             for b in [false, true] {
-                let code = format!("{a} {op} {b}");
-                let out = *jit_run_test::<bool>(&code).ok();
-                let expected = a && b;
-                assert_eq!(out, expected);
+                test_body(format!("{a} {op} {b}")).ok(a && b);
             }
         }
     }
@@ -20,10 +17,7 @@ fn test_or() {
     for op in ["||", "or"] {
         for a in [false, true] {
             for b in [false, true] {
-                let code = format!("{a} {op} {b}");
-                let out = *jit_run_test::<bool>(&code).ok();
-                let expected = a || b;
-                assert_eq!(out, expected);
+                test_body(format!("{a} {op} {b}")).ok(a || b);
             }
         }
     }
@@ -43,7 +37,6 @@ fn test_short_circuit() {
     tmp == 0
 }}"
             );
-            let out = *jit_run_test::<bool>(code).ok();
             let expected = match op {
                 Op::And | Op::AndWord => {
                     let mut tmp = 0;
@@ -62,7 +55,7 @@ fn test_short_circuit() {
                     tmp == 0
                 },
             };
-            assert!(out == expected, "{a} {op} -> does short circuit? {expected} (got: {out})");
+            test_body(code).ok(expected);
         }
     }
 }

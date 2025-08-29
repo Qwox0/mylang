@@ -1,4 +1,4 @@
-use crate::tests::jit_run_test;
+use crate::tests::test_body;
 
 #[test]
 fn string_lit() {
@@ -17,5 +17,5 @@ if my_string[ 8] != 114 return ERR_BYTE; // 'r'
 if my_string[ 9] != 108 return ERR_BYTE; // 'l'
 if my_string[10] != 100 return ERR_BYTE; // 'd'
 my_string[6]";
-    assert_eq!(*jit_run_test::<u8>(code).ok() as char, 'W');
+    test_body(code).ok(b'W');
 }

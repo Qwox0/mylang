@@ -3,14 +3,14 @@ use crate::{
     ast,
     cli::BuildArgs,
     compiler::CompileDurations,
-    diagnostics::{self, cerror, cerror2, chint, HandledErr},
+    diagnostics::{self, HandledErr, cerror, cerror2, chint},
     intern_pool::{InternPool, Symbol},
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
     scope::{Scope, ScopeKind},
     sema::primitives::Primitives,
     source_file::SourceFile,
-    util::{is_canonical, UnwrapDebug},
+    util::{UnwrapDebug, is_canonical},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -52,6 +52,9 @@ pub struct CompilationContextInner {
 
     pub args: BuildArgs,
     pub entry_point: Symbol,
+
+    // currently only needed for testing
+    pub stmts: Vec<Ptr<ast::Ast>>,
 }
 
 pub type FilesIndex = usize;
@@ -130,6 +133,8 @@ impl CompilationContext {
 
             args,
             entry_point: entry_point_sym,
+
+            stmts: Vec::new(),
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {

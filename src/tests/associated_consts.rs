@@ -1,9 +1,4 @@
-use super::{jit_run_test, test_compile_err_raw};
-use crate::{
-    diagnostics::DiagnosticSeverity,
-    tests::{TestSpan, has_duplicate_symbol, jit_run_test_raw},
-    util::IteratorExt,
-};
+use crate::tests::{has_duplicate_symbol, substr, test, test_body};
 
 #[test]
 fn struct_method() {
@@ -16,7 +11,7 @@ test :: -> {
     a.&mut.inc();
     a.val
 }";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 1);
+    test(code).ok(1i64);
 }
 
 #[test]
@@ -26,7 +21,7 @@ MyStruct :: struct { val: i64 };
 test :: -> MyStruct.new().val;
 MyStruct.new :: -> MyStruct.(MyStruct.DEFAULT_VAL);
 MyStruct.DEFAULT_VAL :: 10;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+    test(code).ok(10i64);
 }
 
 #[test]
@@ -37,7 +32,7 @@ MyStruct :: struct {
     VAL :: 10;
 };
 test :: -> MyStruct.VAL;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+    test(code).ok(10i64);
 }
 
 #[test]
@@ -48,7 +43,7 @@ MyStruct :: struct {
     DEFAULT_VAL :: 10;
 };
 test :: -> MyStruct.().val;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+    test(code).ok(10i64);
 
     let code = "
 Stack :: struct {
@@ -57,17 +52,13 @@ Stack :: struct {
 };
 Stack.SIZE : u64 : 128;
 test :: -> Stack.(.[10; Stack.SIZE]).buf[127];";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+    test(code).ok(10i64);
 }
 
 #[test]
 fn error_missing_type_name() {
-    let code = ".method :: -> {};";
-    let res = jit_run_test::<()>(code);
-    let err = res.errors().expect_one();
-    assert_eq!(err.severity, DiagnosticSeverity::Error);
-    assert_eq!(err.span, TestSpan::pos(res.full_code.find(".").unwrap()));
-    assert_eq!(err.msg.as_ref(), "A member declaration requires an associated type name");
+    test_body(".method :: -> {};")
+        .error("A member declaration requires an associated type name", substr!("."));
 }
 
 #[test]
@@ -79,19 +70,9 @@ test :: -> {
     a := MyStruct.(0);
     a.NUM
 }";
-    let res = jit_run_test::<()>(code);
-    let diagnostics = res.diagnostics();
-    let [error, info] = diagnostics else {
-        panic!("expected 2 diagnostics, got {}", diagnostics.len())
-    };
-    assert_eq!(error.severity, DiagnosticSeverity::Error);
-    let expected_err_span = TestSpan::of_substr(&res.full_code, "a.NUM");
-    assert_eq!(error.span, expected_err_span);
-    assert_eq!(error.msg.as_ref(), "cannot access a static constant through a value");
-
-    assert_eq!(info.severity, DiagnosticSeverity::Info);
-    assert_eq!(info.span, expected_err_span.start());
-    //assert_eq!(info.msg.as_ref(), "consider replacing the value with its type 'MyStruct'"); // not implemented
+    test_body(code)
+        .error("cannot access a static constant through a value", substr!("a.NUM"))
+        .info(None, substr!("a.NUM";.start())); // not implemented: "consider replacing the value with its type 'MyStruct'"
 }
 
 #[test]
@@ -103,9 +84,7 @@ MyStruct :: struct {
 };
 test :: -> MyStruct.f();
 ";
-    test_compile_err_raw(code, "unknown identifier `val`", |code| {
-        TestSpan::of_nth_substr(code, 1, "val")
-    });
+    test(code).error("unknown identifier `val`", substr!("val";skip=1));
     // TODO: add hint?
 }
 
@@ -115,7 +94,7 @@ fn error_access_missing_const() {
     let code = "
 MyStruct :: struct {};
 test :: -> MyStruct.SOME_MISSING_CONST;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+    test(code).ok(10i64);
 }
 
 #[test]
@@ -125,7 +104,7 @@ fn use_associated_const_in_struct_def() {
     MyArr :: struct { arr: [MyArr.LEN]i64 };
     MyArr.LEN :: 10;
     test :: -> {}";
-    jit_run_test_raw::<()>(code).ok();
+    test(code).ok(());
 }
 
 #[test]
@@ -134,9 +113,7 @@ fn allow_associated_const_on_failed_struct() {
     MyArr :: struct { x: error };
     MyArr.NUM :: 10;
     test :: -> {}";
-    test_compile_err_raw(code, "unknown identifier `error`", |code| {
-        TestSpan::of_substr(code, "error")
-    });
+    test(code).error("unknown identifier `error`", substr!("error"));
 }
 
 #[test]
@@ -148,7 +125,7 @@ MyStruct.Inner.Inner2 :: struct {};
 MyStruct.Inner.Inner2.Inner3 :: struct {};
 MyStruct.Inner.Inner2.NUM :: 10;
 test :: -> MyStruct.Inner.Inner2.NUM;";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10)
+    test(code).ok(10i64);
 }
 
 #[test]
@@ -160,8 +137,7 @@ MyStruct :: struct {
 };
 MyStruct.map :: (self: MyStruct, mapper: i32 -> i32) -> MyStruct.new(mapper(self.val));
 test :: -> MyStruct.new(5).map(x -> x * 2);";
-    let res = jit_run_test_raw::<i64>(code);
-    assert_eq!(*res.ok(), 10);
+    let res = test(code).ok(10i64);
 
     // Both methods are mangled
     debug_assert!(res.llvm_ir().contains("@\"struct{val:i32}.new\""));
@@ -186,7 +162,7 @@ MyStruct :: struct {
     );
 };
 test :: -> MyStruct.new(5).map(x -> x * 2);";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+    test(code).ok(10i64);
 
     let code = "
 MyStruct :: struct {
@@ -197,9 +173,7 @@ MyStruct.map :: (self: MyStruct, mapper: i32 -> i32) -> new( // <- Error
     mapper(self.val)
 );
 test :: -> MyStruct.new(5).map(x -> x * 2);";
-    test_compile_err_raw(code, "unknown identifier `new`", |code| {
-        TestSpan::of_substr(code, "new( // <- Error").start_with_len(3)
-    });
+    test(code).error("unknown identifier `new`", substr!("new( // <- Error";.start_with_len(3)));
 }
 
 #[test]
@@ -214,7 +188,7 @@ MyStruct :: struct {
 test :: -> MyStruct.new(5).map(x -> x * 2);
 _ :: 1; // TODO: remove this
 ";
-    assert_eq!(*jit_run_test_raw::<i64>(code).ok(), 10);
+    test(code).ok(10i64);
 }
 
 #[test]
@@ -223,5 +197,5 @@ fn mangle_function_in_anon_struct() {
         struct {
             f :: -> i64 3;
         }.f()";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 3);
+    test_body(code).ok(3i64);
 }

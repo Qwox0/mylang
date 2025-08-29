@@ -1,4 +1,4 @@
-use crate::tests::jit_run_test;
+use crate::tests::test_body;
 
 #[test]
 fn for_loop_sum_array() {
@@ -11,7 +11,7 @@ mut sum := 0;
 }};
 sum"
     );
-    assert_eq!(*jit_run_test::<i64>(code).ok(), array.iter().sum::<i64>());
+    test_body(code).ok(array.iter().sum::<i64>());
 }
 
 #[test]
@@ -24,7 +24,7 @@ for x in arr {
     sum += x;
 };
 sum";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 1 + 2 + 3);
+    test_body(code).ok(1 + 2 + 3i64);
 }
 
 #[test]
@@ -37,12 +37,12 @@ for elem in arr {
     continue;
 };
 x";
-    assert_eq!(*jit_run_test::<i64>(code).ok(), 5);
+    test_body(code).ok(5i64);
 }
 
 #[test]
 fn return_in_for() {
-    assert_eq!(*jit_run_test::<f64>(".[5, 10.0, 15] |> for x { return x; }; 0.0").ok(), 5.0);
+    test_body(".[5, 10.0, 15] |> for x { return x; }; 0.0").ok(5.0f64);
 }
 
 #[test]
@@ -55,11 +55,11 @@ mut product := 1;
 arr |> for x do product *= x;
 product"
     );
-    assert_eq!(*jit_run_test::<i64>(code).ok(), arr.iter().product());
+    test_body(code).ok(arr.iter().product::<i64>());
 }
 
 #[test]
 #[ignore = "unfinished test"]
 fn invalid_source_type() {
-    *jit_run_test::<()>("true |> for _x { break; };").ok()
+    test_body("true |> for _x { break; };").ok(());
 }

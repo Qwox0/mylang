@@ -1,4 +1,3 @@
-use super::{TestSpan, test_compile_err};
 use crate::{
     parser::{
         lexer::{Code, Lexer, Span, Token, TokenKind},
@@ -6,7 +5,7 @@ use crate::{
     },
     ptr::Ptr,
     source_file::SourceFile,
-    tests::jit_run_test,
+    tests::{substr, test_body},
 };
 use std::path::Path;
 
@@ -64,10 +63,16 @@ fn parsed_tokens_eq(code: &str, expected_tokens: impl AsRef<[Token]>) -> bool {
 #[test]
 fn space_after_dot() {
     assert!(parsed_tokens_eq("1.&", [t!(IntLit 0..1), t!(DotAmpersand 1..3)]));
-    assert!(parsed_tokens_eq("1. &", [t!(FloatLit 0..2), /* t!(Whitespace 2..3), */ t!(Ampersand 3..4)]));
+    assert!(parsed_tokens_eq("1. &", [
+        t!(FloatLit 0..2),
+        /* t!(Whitespace 2..3), */ t!(Ampersand 3..4)
+    ]));
 
     assert!(parsed_tokens_eq("1.0", [t!(FloatLit 0..3)]));
-    assert!(parsed_tokens_eq("1. 0", [t!(FloatLit 0..2), /* t!(Whitespace 2..3), */ t!(IntLit 3..4)]));
+    assert!(parsed_tokens_eq("1. 0", [
+        t!(FloatLit 0..2),
+        /* t!(Whitespace 2..3), */ t!(IntLit 3..4)
+    ]));
 
     assert!(parsed_tokens_eq("1.hello()", [
         t!(IntLit 0..1),
@@ -93,23 +98,23 @@ fn space_after_dot() {
 #[test]
 fn different_int_lit_base() {
     assert!(parsed_tokens_eq("0b1", [t!(IntLit 0..3)]));
-    assert_eq!(*jit_run_test::<i64>("0b1").ok(), 0b1);
-    assert_eq!(*jit_run_test::<i64>("0o10").ok(), 8);
-    assert_eq!(*jit_run_test::<i64>("0xAbc").ok(), 0xabc);
+    test_body("0b1").ok(0b1i64);
+    test_body("0o10").ok(8i64);
+    test_body("0xAbc").ok(0xabci64);
 }
 
 #[test]
 #[ignore = "not yet implemented"]
 fn different_float_lit_base() {
     assert!(parsed_tokens_eq("0b0101.0111", [t!(FloatLit 0..11)]));
-    assert_eq!(*jit_run_test::<i64>("0b0101.0111").ok(), 0b1);
-    assert_eq!(*jit_run_test::<i64>("0xAbc").ok(), 0xabc);
+    test_body("0b0101.0111").ok(0b1i64);
+    test_body("0xAbc").ok(0xabci64);
 }
 
 #[test]
 #[ignore = "not yet implemented"]
 fn invalid_literal_digit() {
-    test_compile_err("0b12", "TODO", |code| TestSpan::of_substr(code, "2"));
+    test_body("0b12").error("TODO", substr!("2"));
 }
 
 #[test]

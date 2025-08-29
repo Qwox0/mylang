@@ -4,12 +4,15 @@ use crate::{
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
     context::CompilationContext,
-    diagnostics::{DiagnosticReporter, DiagnosticSeverity, SavedDiagnosticMessage},
+    diagnostics::{DiagnosticReporter, DiagnosticSeverity},
     parser::{self, lexer::Span},
     ptr::Ptr,
-    util::IteratorExt,
 };
-use std::{cell::OnceCell, fmt::Display, iter::FusedIterator};
+use std::{
+    assert_matches::assert_matches,
+    cell::OnceCell,
+    fmt::{self, Display},
+};
 
 mod alignment;
 mod args;
@@ -49,144 +52,199 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     is_lib: true,
 };
 
-pub struct JitRunTestResult<RetTy> {
-    ctx: CompilationContext,
-    full_code: String,
-    //compilation_out: BackendOut,
-    ret: Option<RetTy>,
-    //module: Option<inkwell::module::Module<'static>>,
-    backend_mod: Option<BackendModule>,
-    module_text: OnceCell<String>,
+fn test(code: impl ToString) -> NewTest {
+    NewTest { code: code.to_string() }
 }
 
-impl<RetTy> JitRunTestResult<RetTy> {
+fn test_body(code_body: impl Display) -> NewTest {
+    test(format!("test :: -> {{ {code_body} }};"))
+}
+
+fn test_parse(code: impl ToString) -> TestResult<Parsed> {
+    let res = test(code).prepare();
+    parser::parse_files_in_ctx(res.ctx.ctx.0);
+    TestResult { data: Parsed, ..res }
+}
+
+struct NewTest {
+    code: String,
+}
+
+struct TestCtx {
+    ctx: CompilationContext,
+    diag_idx: usize,
+}
+
+impl Drop for TestCtx {
     #[track_caller]
-    pub fn ok(&self) -> &RetTy {
-        debug_assert_eq!(self.ret.is_some(), !self.ctx.diagnostic_reporter.do_abort_compilation());
-        let Some(ret) = self.ret.as_ref() else {
-            panic!("Test failed! Expected no errors")
-        };
-        ret
-    }
-
-    pub fn diagnostics(&self) -> &[SavedDiagnosticMessage] {
-        self.ctx.diagnostic_reporter.diagnostics.as_slice()
-    }
-
-    pub fn errors(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
-        if self.ret.is_some() {
-            panic!("Test failed! Expected compiler error, but compilation succeded.")
+    fn drop(&mut self) {
+        let unhandled_errors = self.ctx.diagnostic_reporter.diagnostics[self.diag_idx..]
+            .iter()
+            .filter(|diag| diag.severity.aborts_compilation())
+            .count();
+        if unhandled_errors > 0 {
+            panic!("Test failed! Got {unhandled_errors} unexpected compiler errors!");
         }
-        self.diagnostics().iter().filter(|e| e.severity.aborts_compilation())
+    }
+}
+
+struct TestResult<Kind> {
+    ctx: TestCtx,
+    code: String,
+    data: Kind,
+}
+
+struct Parsed;
+struct Ok<RetTy> {
+    ret: RetTy,
+    backend_mod: BackendModule,
+    module_text: OnceCell<String>,
+}
+struct Err;
+
+impl NewTest {
+    fn prepare(self) -> TestResult<()> {
+        let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
+        ctx.0.set_test_root(Ptr::from_ref(self.code.as_ref())).unwrap();
+        TestResult { ctx: TestCtx { ctx, diag_idx: 0 }, code: self.code, data: () }
     }
 
-    pub fn warnings(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
-        self.diagnostics().iter().filter(|e| e.severity == DiagnosticSeverity::Warn)
+    fn compile(self) -> TestResult<CompileResult> {
+        let _self = self.prepare();
+        TestResult { data: compile_ctx(_self.ctx.ctx.0, CompileMode::TestRun), .._self }
     }
 
-    fn read_llvm_ir(&self) -> String {
-        self.backend_mod
-            .as_ref()
-            .unwrap()
+    #[track_caller]
+    fn compile_no_err(self) -> TestResult<BackendModule> {
+        let res = self.compile();
+        let CompileResult::ModuleForTesting(backend_mod) = res.data else {
+            panic!("Test failed! Expected no compiler errors.")
+        };
+        TestResult { data: backend_mod, ..res }
+    }
+
+    #[track_caller]
+    fn _ok<RetTy>(self) -> TestResult<Ok<RetTy>> {
+        let res = self.compile_no_err();
+        let backend_mod = res.data;
+        let ret = backend_mod
             .codegen_module()
-            .print_to_string()
-            .to_string()
+            .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
+            .unwrap();
+        TestResult { data: Ok { ret, backend_mod, module_text: OnceCell::new() }, ..res }
+    }
+
+    #[track_caller]
+    fn ok<RetTy: PartialEq + fmt::Debug>(self, expected: RetTy) -> TestResult<Ok<RetTy>> {
+        let res = self._ok();
+        assert_eq!(res.data.ret, expected);
+        res
+    }
+
+    #[track_caller]
+    fn get_out<RetTy: Copy>(self) -> RetTy {
+        self._ok().data.ret
+    }
+
+    #[track_caller]
+    fn error(self, msg: &str, span: impl FnOnce(&str) -> TestSpan) -> TestResult<Err> {
+        let res = self.compile();
+        assert_matches!(
+            res.data,
+            CompileResult::Err,
+            "Test failed! Expected compiler error, but compilation succeded."
+        );
+        assert!(
+            res.ctx.ctx.diagnostic_reporter.do_abort_compilation(),
+            "Test failed! Expected compiler error, but compilation succeded."
+        );
+        res.error(msg, span)
+    }
+}
+
+impl<RetTy> TestResult<Ok<RetTy>> {
+    fn read_llvm_ir(&self) -> String {
+        self.data.backend_mod.codegen_module().print_to_string().to_string()
     }
 
     pub fn llvm_ir(&self) -> &str {
-        self.module_text.get_or_init(|| self.read_llvm_ir())
+        self.data.module_text.get_or_init(|| self.read_llvm_ir())
     }
 
     pub fn take_llvm_ir(&mut self) -> String {
-        self.module_text.take().unwrap_or_else(|| self.read_llvm_ir())
+        self.data.module_text.take().unwrap_or_else(|| self.read_llvm_ir())
     }
 }
 
-#[track_caller]
-pub fn jit_run_test<'ctx, RetTy>(code: impl Display) -> JitRunTestResult<RetTy> {
-    let code = format!("test :: -> {{ {code} }};");
-    jit_run_test_raw(code)
-}
-
-#[track_caller]
-pub fn jit_run_test_raw<'ctx, RetTy>(code: impl ToString) -> JitRunTestResult<RetTy> {
-    let code = code.to_string();
-    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
-    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
-    let res = compile_ctx(ctx.0, CompileMode::TestRun);
-    let backend_mod = match res {
-        CompileResult::ModuleForTesting(backend_module) => Some(backend_module),
-        CompileResult::Err => None,
-        CompileResult::Ok | CompileResult::RunErr { .. } => unreachable!(),
-    };
-    let ret = backend_mod.as_ref().map(|m| {
-        m.codegen_module()
-            .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
-            .unwrap()
-    });
-    JitRunTestResult { ret, ctx, full_code: code, backend_mod, module_text: OnceCell::new() }
-}
-
-#[track_caller]
-pub fn test_compile_err(
-    code: impl Display,
-    expected_msg_start: &str,
-    expected_span: impl FnOnce(&str) -> TestSpan,
-) {
-    let code = format!("test :: -> {{ {code} }};");
-    test_compile_err_raw(code, expected_msg_start, expected_span)
-}
-
-#[track_caller]
-pub fn test_compile_err_raw(
-    code: impl ToString,
-    expected_msg_start: &str,
-    expected_span: impl FnOnce(&str) -> TestSpan,
-) {
-    let code = code.to_string();
-    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
-    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
-    compile_ctx(ctx.0, CompileMode::TestRun);
-    let res = JitRunTestResult::<()> {
-        ret: None,
-        ctx,
-        full_code: code,
-        backend_mod: None,
-        module_text: OnceCell::new(),
-    };
-    let err = res
-        .errors()
-        .one()
-        .unwrap_or_else(|e| panic!("Test failed! Compiler didn't emit exactly one error ({e:?})"));
-    debug_assert_eq!(err.severity, DiagnosticSeverity::Error);
-    debug_assert_eq!(err.msg.as_ref(), expected_msg_start, "incorrect compiler error");
-    debug_assert_eq!(err.span, expected_span(&res.full_code));
-}
-
-pub fn test_parse(code: &str) -> TestParseRes {
-    let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
-    ctx.0.set_test_root(Ptr::from_ref(code.as_ref())).unwrap();
-    let stmts = parser::parse_files_in_ctx(ctx.0);
-    TestParseRes { ctx, stmts }
-}
-
-pub struct TestParseRes {
-    #[allow(unused)]
-    ctx: CompilationContext,
-    stmts: Vec<Ptr<ast::Ast>>,
-}
-
-impl TestParseRes {
-    pub fn errors(&self) -> impl FusedIterator<Item = &SavedDiagnosticMessage> {
-        self.ctx
-            .diagnostic_reporter
-            .diagnostics
-            .iter()
-            .filter(|e| e.severity.aborts_compilation())
+impl<Res> TestResult<Res> {
+    #[track_caller]
+    fn check_next_diag(
+        &mut self,
+        sev: DiagnosticSeverity,
+        msg: Option<&str>,
+        span: impl FnOnce(&str) -> TestSpan,
+    ) {
+        let ctx = &mut self.ctx;
+        let Some(diag) = ctx.ctx.diagnostic_reporter.diagnostics.get(ctx.diag_idx) else {
+            panic!("Expected at least {} diagnostics", ctx.diag_idx + 1)
+        };
+        ctx.diag_idx += 1;
+        debug_assert_eq!(diag.severity, sev);
+        if let Some(msg) = msg {
+            debug_assert_eq!(diag.msg.as_ref(), msg, "incorrect diagnostic message");
+        }
+        debug_assert_eq!(diag.span, span(&self.code));
     }
 
-    pub fn no_error(self) -> Self {
-        assert!(self.errors().count() == 0);
+    #[track_caller]
+    pub fn error<'m>(
+        mut self,
+        msg: impl Optional<&'m str>,
+        span: impl FnOnce(&str) -> TestSpan,
+    ) -> TestResult<Err> {
+        self.check_next_diag(DiagnosticSeverity::Error, msg.as_option(), span);
+        TestResult { data: Err, ..self }
+    }
+
+    #[track_caller]
+    pub fn warn<'m>(
+        mut self,
+        msg: impl Optional<&'m str>,
+        span: impl FnOnce(&str) -> TestSpan,
+    ) -> Self {
+        self.check_next_diag(DiagnosticSeverity::Warn, msg.as_option(), span);
+        self
+    }
+
+    #[track_caller]
+    pub fn info<'m>(
+        mut self,
+        msg: impl Optional<&'m str>,
+        span: impl FnOnce(&str) -> TestSpan,
+    ) -> Self {
+        self.check_next_diag(DiagnosticSeverity::Info, msg.as_option(), span);
+        self
+    }
+}
+
+impl TestResult<Parsed> {
+    pub fn stmts(&self) -> &[Ptr<ast::Ast>] {
+        &self.ctx.ctx.stmts
+    }
+}
+
+trait Optional<T> {
+    fn as_option(self) -> Option<T>;
+}
+
+impl<T> Optional<T> for T {
+    fn as_option(self) -> Option<T> {
+        Some(self)
+    }
+}
+
+impl<T> Optional<T> for Option<T> {
+    fn as_option(self) -> Option<T> {
         self
     }
 }
@@ -209,11 +267,7 @@ impl TestSpan {
         TestSpan::new(pos, pos + 1)
     }
 
-    pub fn of_substr(str: &str, substr: &str) -> TestSpan {
-        TestSpan::of_nth_substr(str, 0, substr)
-    }
-
-    pub fn of_nth_substr(str: &str, mut n: usize, substr: &str) -> TestSpan {
+    pub fn of_substr(str: &str, substr: &str, mut n: usize) -> TestSpan {
         let mut pos = 0;
         loop {
             let str = &str[pos..];
@@ -271,3 +325,10 @@ fn has_duplicate_symbol(llvm_ir: &str, mut sym_name: &str) -> bool {
             && llvm_ir.as_bytes()[idx + sym_name.len() + 1].is_ascii_digit()
     })
 }
+
+macro_rules! substr {
+    ($substr:expr $(; skip=$skip:expr)? $(; . $method:ident($($arg:expr),*))?) => {
+        &|code: &str| $crate::tests::TestSpan::of_substr(code, $substr, 0 $(+ $skip)?)$(.$method($($arg),*))?
+    };
+}
+pub(self) use substr;
