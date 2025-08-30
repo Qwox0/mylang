@@ -9,9 +9,9 @@ use crate::{
     ptr::Ptr,
 };
 use std::{
-    assert_matches::assert_matches,
     cell::OnceCell,
     fmt::{self, Display},
+    thread,
 };
 
 mod alignment;
@@ -39,6 +39,7 @@ mod slice;
 mod string;
 mod struct_;
 mod todo;
+mod type_joining;
 mod union_;
 mod var_decl;
 mod while_loop;
@@ -78,6 +79,9 @@ struct TestCtx {
 impl Drop for TestCtx {
     #[track_caller]
     fn drop(&mut self) {
+        if thread::panicking() {
+            return; // Test failed already
+        }
         let unhandled_errors = self.ctx.diagnostic_reporter.diagnostics[self.diag_idx..]
             .iter()
             .filter(|diag| diag.severity.aborts_compilation())
@@ -149,15 +153,11 @@ impl NewTest {
     #[track_caller]
     fn error(self, msg: &str, span: impl FnOnce(&str) -> TestSpan) -> TestResult<Err> {
         let res = self.compile();
-        assert_matches!(
-            res.data,
-            CompileResult::Err,
-            "Test failed! Expected compiler error, but compilation succeded."
-        );
-        assert!(
-            res.ctx.ctx.diagnostic_reporter.do_abort_compilation(),
-            "Test failed! Expected compiler error, but compilation succeded."
-        );
+        if !(matches!(res.data, CompileResult::Err)
+            && res.ctx.ctx.diagnostic_reporter.do_abort_compilation())
+        {
+            panic!("Test failed! Expected compiler error, but compilation succeded.")
+        }
         res.error(msg, span)
     }
 }
@@ -189,11 +189,11 @@ impl<Res> TestResult<Res> {
             panic!("Expected at least {} diagnostics", ctx.diag_idx + 1)
         };
         ctx.diag_idx += 1;
-        debug_assert_eq!(diag.severity, sev);
+        assert_eq!(diag.severity, sev);
         if let Some(msg) = msg {
-            debug_assert_eq!(diag.msg.as_ref(), msg, "incorrect diagnostic message");
+            assert_eq!(diag.msg.as_ref(), msg, "incorrect diagnostic message");
         }
-        debug_assert_eq!(diag.span, span(&self.code));
+        assert_eq!(diag.span, span(&self.code));
     }
 
     #[track_caller]

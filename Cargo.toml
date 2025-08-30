@@ -11,3 +11,6 @@ inkwell = { version = "0.6.0", features = ["llvm18-1"] }
 thiserror = "2.0.6"
 unicode-xid = "0.2.4"
 hashbrown = "0.15.4"
+
+# [profile.release]
+# debug = true

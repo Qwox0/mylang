@@ -190,7 +190,7 @@ impl<'ctx> Codegen<'ctx> {
             }};
         }
 
-        match expr.matchable().as_mut() {
+        return match expr.matchable().as_mut() {
             AstEnum::Ident { decl, .. } => {
                 debug_assert!(
                     !decl.u().is_const,
@@ -545,7 +545,7 @@ impl<'ctx> Codegen<'ctx> {
                 reg(range)
             },
             &mut AstEnum::Assign { lhs, rhs, .. } => {
-                debug_assert!(ty_match(lhs.ty.u(), rhs.ty.u()));
+                debug_assert!(ty_match(rhs.ty.u(), lhs.ty.u()));
                 let lhs_sym = self.compile_expr(lhs)?;
                 let stack_ptr = self.build_ptr_to_sym(lhs_sym, lhs.ty.u())?;
                 self.compile_expr_with_write_target(rhs, Some(stack_ptr))?;
@@ -846,7 +846,7 @@ impl<'ctx> Codegen<'ctx> {
                     None => self.compile_fn(f, FnKind::Lambda)?,
                 }))
             },
-        }
+        };
     }
 
     fn compile_const_val(
@@ -901,7 +901,12 @@ impl<'ctx> Codegen<'ctx> {
                 ret(self.build_slice(ptr.as_pointer_value(), len)?)
             },
             ConstValEnum::PtrVal { val, .. } => {
-                debug_assert_eq!(ty.kind, AstKind::PtrTy);
+                #[cfg(debug_assertions)]
+                debug_assert!(match ty.matchable().as_ref() {
+                    TypeEnum::PtrTy { .. } => true,
+                    TypeEnum::OptionTy { inner_ty, .. } => matches!(inner_ty.kind, AstKind::PtrTy),
+                    _ => false,
+                });
                 if *val == 0 {
                     ret(self.ptr_type().const_null())
                 } else {

@@ -68,7 +68,7 @@ CONST_ARR :: u64.[1, 2, 3, 4];
 CONST_ARR2 : [CONST_ARR[3]]u64 : CONST_ARR;
 test :: -> CONST_ARR;
 ";
-    let res = test(code).ok(&[1u64, 2, 3, 4]);
+    let res = test(code).ok([1u64, 2, 3, 4]);
     assert!(res.llvm_ir().contains("[4 x i64] [i64 1, i64 2, i64 3, i64 4]"));
     assert!(!res.llvm_ir().contains("alloca"));
     drop(res);
@@ -106,7 +106,7 @@ test :: -> {
     let code = "
 CONST :: .[7; 10];
 test :: -> CONST[1];";
-    let res = test(code).ok(7i32); //
+    let res = test(code).ok(7i32);
     //assert!(!res.llvm_ir().contains("alloca")); // TODO
     drop(res);
 
@@ -116,4 +116,12 @@ MyStruct :: struct { a: i32 };
 CONST :: MyStruct.{ a=7 };
 test :: -> CONST.a;";
     test(code).ok(7i32);
+}
+
+#[test]
+fn prefer_type_error_over_non_const_error() {
+    test("test :: (len: []u8) -> { .[1; len] }")
+        .error("mismatched types: expected u64; got []u8", substr!("len";skip=1));
+    test("test :: (len: u64) -> { .[1; len] }")
+        .error("Array length must be known at compile time", substr!("len";skip=1));
 }

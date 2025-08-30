@@ -1,6 +1,8 @@
 use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
     context::{ctx, primitives},
+    diagnostics::cerror,
+    parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     util::{
@@ -8,27 +10,19 @@ use crate::{
         unreachable_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
     },
 };
+use std::{convert::Infallible, ops::FromResidual};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommonTypeSelection {
+    Equal,
     Lhs,
     Rhs,
     Mismatch,
 }
 
-impl CommonTypeSelection {
-    #[inline]
-    pub fn flip(self) -> CommonTypeSelection {
-        match self {
-            CommonTypeSelection::Lhs => CommonTypeSelection::Rhs,
-            CommonTypeSelection::Rhs => CommonTypeSelection::Lhs,
-            CommonTypeSelection::Mismatch => CommonTypeSelection::Mismatch,
-        }
-    }
-
-    #[inline]
-    pub fn flip_if(self, cond: bool) -> CommonTypeSelection {
-        if cond { self.flip() } else { self }
+impl FromResidual<Option<Infallible>> for CommonTypeSelection {
+    fn from_residual(_: Option<Infallible>) -> Self {
+        Self::Mismatch
     }
 }
 
@@ -38,16 +32,8 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
     use CommonTypeSelection::*;
     let p = primitives();
 
-    // // Keep this for when NotFinished is removed.
-    //#[cfg(debug_assertions)]
-    //if lhs == p.type_ty || rhs == p.type_ty {
-    //    println!(
-    //        "WARN: checking common_type_impl for primitive `type`. Usually this is not wanted"
-    //    );
-    //}
-
     if lhs == rhs {
-        return Lhs;
+        return Equal;
     }
 
     if is_bottom_type(lhs, p) || rhs == p.any {
@@ -56,43 +42,18 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         return Lhs;
     }
 
-    let swap_inputs = rhs.is_int_lit() || rhs == p.float_lit || rhs.kind == AstKind::OptionTy;
+    let swap_inputs = rhs.kind == AstKind::OptionTy;
     if swap_inputs {
         let tmp = rhs;
         rhs = lhs;
         lhs = tmp;
     }
 
-    if lhs == p.int_lit {
-        debug_assert_ne!(rhs, p.int_lit, "was already checked above");
-        let matches = matches!(rhs.kind, AstKind::IntTy | AstKind::FloatTy)
-            || rhs == p.sint_lit
-            || rhs == p.float_lit;
-        return if matches { Rhs.flip_if(swap_inputs) } else { Mismatch };
-    } else if lhs == p.sint_lit {
-        debug_assert_ne!(rhs, p.sint_lit, "was already checked above");
-        let matches =
-            rhs.is_sint() || rhs.kind == AstKind::FloatTy || rhs == p.int_lit || rhs == p.float_lit;
-        return if matches { Rhs.flip_if(swap_inputs) } else { Mismatch };
-    }
-
-    if lhs == p.float_lit {
-        // Note: float_lit and int_lit match but float_lit and IntTy don't.
-        debug_assert_ne!(rhs, p.float_lit, "was already checked above");
-        return if rhs.kind == AstKind::FloatTy {
-            Rhs.flip_if(swap_inputs)
-        } else if rhs.is_int_lit() {
-            Lhs.flip_if(swap_inputs)
-        } else {
-            Mismatch
-        };
-    }
-
     if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
         let lhs_inner = lhs.inner_ty.downcast_type();
         return match rhs.try_downcast::<ast::OptionTy>() {
             Some(rhs) => common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()),
-            // i32 + ?ilit
+            // ?ilit + i32
             None if rhs.is_non_null() => common_type_impl(lhs_inner, rhs),
             None => Mismatch,
         };
@@ -100,19 +61,64 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     debug_assert!(!swap_inputs);
 
+    if let Some(lhs_num_lvl) = number_subtyping_level(lhs) {
+        let rhs_num_lvl = number_subtyping_level(rhs)?;
+        debug_assert_ne!(lhs, rhs, "was already checked above");
+        return SubtypingLevel::select(lhs_num_lvl, rhs_num_lvl);
+    }
+
+    /// common_type([]T, []mut T) == []T
+    /// common_type([]mut T, []T) == []T
+    /// common_type([][]mut T, []mut []T) == [][]T
+    ///      would require an allocation. => currently an error (TODO)
+    macro_rules! common_mut {
+        ($lhs:ident, $rhs:ident, $child_sel:expr $(,)?) => {{
+            let child_sel = $child_sel;
+            let out_mut = $lhs.is_mut && $rhs.is_mut;
+            match child_sel {
+                Mismatch => Mismatch,
+                Lhs if $lhs.is_mut == out_mut => Lhs,
+                Rhs if $rhs.is_mut == out_mut => Rhs,
+                Lhs | Rhs => {
+                    let sel = if child_sel == Lhs { $lhs } else { $rhs };
+                    let mut copy = unsafe { std::ptr::read(sel.raw()) };
+                    copy.is_mut = out_mut;
+                    let copy = Ptr::from_ref(&copy).upcast_to_type();
+                    cerror!(
+                        Span::ZERO,
+                        "The compiler currently cannot use `{copy}` as the combined type of `{}` \
+                         and `{}`. Consider specifying `{copy}` explicitly.",
+                        $lhs.upcast_to_type(),
+                        $rhs.upcast_to_type(),
+                    );
+                    Mismatch
+                },
+                Equal if $lhs.is_mut == $rhs.is_mut => Equal,
+                Equal if $lhs.is_mut == out_mut => Lhs,
+                Equal => {
+                    debug_assert!($rhs.is_mut == out_mut);
+                    Rhs
+                },
+            }
+        }};
+    }
+
     if let Some(lhs) = lhs.try_downcast::<ast::PtrTy>() {
-        let lhs_pointee = lhs.pointee.downcast_type();
-        if let Some(rhs) = rhs.try_downcast::<ast::PtrTy>() {
-            return common_type_impl(lhs_pointee, rhs.pointee.downcast_type());
-        }
-        return Mismatch;
+        let rhs = rhs.try_downcast::<ast::PtrTy>()?;
+        return common_mut!(
+            lhs,
+            rhs,
+            common_type_impl(lhs.pointee.downcast_type(), rhs.pointee.downcast_type()),
+        );
     }
 
     if let Some(lhs) = lhs.try_downcast::<ast::SliceTy>() {
-        return match rhs.try_downcast::<ast::SliceTy>() {
-            Some(rhs) => common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type()),
-            None => Mismatch,
-        };
+        let rhs = rhs.try_downcast::<ast::SliceTy>()?;
+        return common_mut!(
+            lhs,
+            rhs,
+            common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type()),
+        );
     }
 
     if let Some(lhs) = lhs.try_downcast::<ast::ArrayTy>() {
@@ -133,16 +139,10 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if let Some(lhs) = lhs.try_downcast::<ast::Fn>() {
         if let Some(rhs) = rhs.try_downcast::<ast::Fn>()
-            && lhs.params().len() == rhs.params().len()
-            && ty_match(lhs.ret_ty.u(), rhs.ret_ty.u())
-            && lhs
-                .params()
-                .iter()
-                .map(|p| p.var_ty.u())
-                .zip(rhs.params().iter().map(|p| p.var_ty.u()))
-                .all(|(g, e)| ty_match(g, e))
+            // Currently function types must match exactly (see <https://en.wikipedia.org/wiki/Subtyping#Function_types>)
+            && ty_match(lhs.upcast_to_type(), rhs.upcast_to_type())
         {
-            return Lhs; // or Rhs? idk
+            return Equal;
         }
         return Mismatch;
     }
@@ -153,6 +153,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 /// symmetrical
 pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
     match common_type_impl(lhs, rhs) {
+        CommonTypeSelection::Equal => Some(lhs),
         CommonTypeSelection::Lhs => Some(lhs),
         CommonTypeSelection::Rhs => Some(rhs),
         CommonTypeSelection::Mismatch => None,
@@ -163,11 +164,6 @@ pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> 
 pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     let p = primitives();
 
-    #[cfg(debug_assertions)]
-    if got == p.type_ty || expected == p.type_ty {
-        println!("WARN: checking ty_match for primitive `type`");
-    }
-
     if got == expected {
         return true;
     }
@@ -177,8 +173,6 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     } else if is_bottom_type(expected, p) || got == p.any {
         return false;
     }
-
-    debug_assert!(expected != p.int_lit && expected != p.sint_lit && expected != p.float_lit);
 
     if got == p.int_lit {
         return matches!(expected.kind, AstKind::IntTy | AstKind::FloatTy)
@@ -209,58 +203,44 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return true;
     }
 
-    if let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() {
-        let got_pointee = got_ptr.pointee.downcast_type();
-        if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
-            if ctx().do_mut_checks && expected_ptr.is_mut && !got_ptr.is_mut {
-                return false;
-            }
-            return ty_match(got_pointee, expected_ptr.pointee.downcast_type());
+    if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
+        let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() else { return false };
+        if ctx().do_mut_checks && expected_ptr.is_mut && !got_ptr.is_mut {
+            return false;
         }
-        return false;
+        return ty_match(got_ptr.pointee.downcast_type(), expected_ptr.pointee.downcast_type());
     }
 
-    if let Some(got_slice) = got.try_downcast::<ast::SliceTy>() {
-        return match expected.try_downcast::<ast::SliceTy>() {
-            Some(expected_slice) => {
-                ty_match(got_slice.elem_ty.downcast_type(), expected_slice.elem_ty.downcast_type())
-            },
-            None => false,
-        };
+    if let Some(expected_slice) = expected.try_downcast::<ast::SliceTy>() {
+        let Some(got_slice) = got.try_downcast::<ast::SliceTy>() else { return false };
+        if ctx().do_mut_checks && expected_slice.is_mut && !got_slice.is_mut {
+            return false;
+        }
+        return ty_match(got_slice.elem_ty.downcast_type(), expected_slice.elem_ty.downcast_type());
     }
 
-    if let Some(got_arr) = got.try_downcast::<ast::ArrayTy>() {
-        return match expected.try_downcast::<ast::ArrayTy>() {
-            Some(expected_arr) if got_arr.len.int::<u64>() == expected_arr.len.int::<u64>() => {
-                ty_match(got_arr.elem_ty.downcast_type(), expected_arr.elem_ty.downcast_type())
-            },
-            _ => false,
-        };
+    if let Some(expected_arr) = expected.try_downcast::<ast::ArrayTy>() {
+        let Some(got_arr) = got.try_downcast::<ast::ArrayTy>() else { return false };
+        return got_arr.len.int::<u64>() == expected_arr.len.int::<u64>()
+            && ty_match(got_arr.elem_ty.downcast_type(), expected_arr.elem_ty.downcast_type());
     }
 
-    if let Some(got_range) = got.try_downcast::<ast::RangeTy>() {
-        return match expected.try_downcast::<ast::RangeTy>() {
-            Some(expected_range) if got_range.rkind == expected_range.rkind => {
-                ty_match(got_range.elem_ty, expected_range.elem_ty)
-            },
-            _ => false,
-        };
+    if let Some(expected_range) = expected.try_downcast::<ast::RangeTy>() {
+        let Some(got_range) = got.try_downcast::<ast::RangeTy>() else { return false };
+        return got_range.rkind == expected_range.rkind
+            && ty_match(got_range.elem_ty, expected_range.elem_ty);
     }
 
-    if let Some(expected_fn) = expected.try_downcast::<ast::Fn>() {
-        if let Some(got_fn) = got.try_downcast::<ast::Fn>()
-            && got_fn.params().len() == expected_fn.params().len()
+    if let Some(got_fn) = got.try_downcast::<ast::Fn>() {
+        let Some(expected_fn) = expected.try_downcast::<ast::Fn>() else { return false };
+        return got_fn.params().len() == expected_fn.params().len()
             && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
             && got_fn
                 .params()
                 .iter()
                 .map(|p| p.var_ty.u())
                 .zip(expected_fn.params().iter().map(|p| p.var_ty.u()))
-                .all(|(g, e)| ty_match(g, e))
-        {
-            return true;
-        }
-        return false;
+                .all(|(g, e)| ty_match(g, e));
     }
 
     false
@@ -274,6 +254,49 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
 #[inline]
 pub fn is_bottom_type(ty: Ptr<ast::Type>, p: &Primitives) -> bool {
     ty == p.never || ty == p.unknown_ty
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SubtypingLevel {
+    level: u8,
+    is_leaf: bool,
+}
+
+impl SubtypingLevel {
+    /// `lhs == rhs` => [`CommonTypeSelection::Mismatch`]
+    fn select(lhs: Self, rhs: Self) -> CommonTypeSelection {
+        match lhs.level.cmp(&rhs.level) {
+            std::cmp::Ordering::Less if !lhs.is_leaf => CommonTypeSelection::Rhs,
+            std::cmp::Ordering::Greater if !rhs.is_leaf => CommonTypeSelection::Lhs,
+            _ => CommonTypeSelection::Mismatch,
+        }
+    }
+}
+
+/// # Number subtyping tree
+/// ```rust,ignore
+///                         top
+/// 4 FloatTy
+/// 3  ↖︎- float_lit  IntTy{signed=true}
+/// 2        ↖︎- sint_lit -↗︎           IntTy{signed=false}
+/// 1                    ↖︎- int_lit -↗︎
+///                         bottom
+/// ```
+fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
+    let p = primitives();
+    Some(if ty == p.int_lit {
+        SubtypingLevel { level: 1, is_leaf: false }
+    } else if ty == p.sint_lit {
+        SubtypingLevel { level: 2, is_leaf: false }
+    } else if ty == p.float_lit {
+        SubtypingLevel { level: 3, is_leaf: false }
+    } else if let Some(int_ty) = ty.try_downcast::<ast::IntTy>() {
+        SubtypingLevel { level: 2 + int_ty.is_signed as u8, is_leaf: true }
+    } else if ty.kind == AstKind::FloatTy {
+        SubtypingLevel { level: 4, is_leaf: true }
+    } else {
+        return None;
+    })
 }
 
 const ZST_ALIGNMENT: usize = 1;
@@ -567,6 +590,24 @@ impl RangeKind {
             RangeKind::ToInclusive => "RangeToInclusive",
             RangeKind::Both => "Range",
             RangeKind::BothInclusive => "RangeInclusive",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{cli::BuildArgs, context::CompilationContext};
+
+    #[test]
+    fn number_subtyping() {
+        let _ctx = CompilationContext::new(BuildArgs::default());
+        let p = primitives();
+        assert_eq!(common_type(p.int_lit, p.int_lit), p.int_lit);
+        for supertype in [p.u32, p.sint_lit, p.i32, p.float_lit, p.f32] {
+            assert_eq!(common_type(p.int_lit, supertype), supertype);
+            assert_eq!(common_type(supertype, p.int_lit), supertype);
+            assert_eq!(common_type(supertype, supertype), supertype);
         }
     }
 }

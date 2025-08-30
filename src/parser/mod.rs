@@ -174,7 +174,7 @@ impl Parser {
         };
         self.lex.advance();
 
-        Ok(match op {
+        return Ok(match op {
             FollowingOperator::Dot => {
                 let rhs = self.ident()?;
                 if rhs.sym == primitives().as_sym {
@@ -288,7 +288,7 @@ impl Parser {
             FollowingOperator::Decl(kind) => {
                 self.decl_tail(self.alloc(ast::Decl::from_lhs(lhs)?)?, kind)?.upcast()
             },
-        })
+        });
     }
 
     /// anything which has higher precedence than any operator
@@ -814,7 +814,10 @@ impl Parser {
         };
         let body = Some(body);
         let params_scope = Scope::new(params, ScopeKind::Fn);
-        Ok(ast_new!(Fn { params_scope, ret_ty_expr, ret_ty: None, body }, start_span))
+        Ok(ast_new!(
+            Fn { params_scope, ret_ty_expr, ret_ty: None, body, has_known_ret_ty: false },
+            start_span
+        ))
     }
 
     fn if_after_cond(

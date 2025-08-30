@@ -626,6 +626,8 @@ ast_variants! {
     /// `^ expr.span`
     // Note: for normal functions the following might not be true: `fn.ty.ty == primitives.type_ty`
     Fn {
+        /// set during sema
+        has_known_ret_ty: bool,
         params_scope: Scope,
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,

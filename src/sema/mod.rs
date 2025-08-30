@@ -28,26 +28,35 @@ use std::{fmt::Write, iter};
 mod err;
 pub mod primitives;
 
-/// This is a macro because `err_span` should only be evaluated when an error happens.
-/// ```ignore
-/// fn check_or_set_type(ty: Ptr<ast::Type>, target_ty: &mut OPtr<ast::Type>, err_span: Span) -> SemaResult<()>
-/// ```
-macro_rules! check_and_set_target {
-    ($ty:expr, $target_ty:expr, $err_span:expr $(,)?) => {{
-        let ty: Ptr<ast::Type> = $ty;
-        let target_ty: &mut OPtr<ast::Type> = $target_ty;
-        let common_ty = if let Some(target_ty) = target_ty {
-            match common_type(ty, *target_ty) {
-                Some(t) => t,
-                None => {
-                    ctx_mut().error_mismatched_types($err_span, *target_ty, ty);
-                    return SemaResult::HandledErr;
-                },
+/// [`None`] return value means [`CompilationContextInner::error_mismatched_types`]
+fn check_or_infer_type(
+    ty: Ptr<ast::Type>,
+    target_ty: &mut OPtr<ast::Type>,
+    strict_target: bool,
+) -> Option<()> {
+    if let Some(target_ty) = target_ty {
+        if strict_target {
+            if !ty_match(ty, *target_ty) {
+                return None;
             }
         } else {
-            ty
+            *target_ty = common_type(*target_ty, ty)?;
+        }
+    } else {
+        *target_ty = Some(ty);
+    }
+    Some(())
+}
+
+macro_rules! check_or_infer_target {
+    ($ty:expr, $target_ty:expr, $strict_target:expr, $err_span:expr $(,)?) => {{
+        let strict_target: bool = $strict_target;
+        let ty: Ptr<ast::Type> = $ty;
+        let target_ty: &mut OPtr<ast::Type> = $target_ty;
+        let Some(()) = check_or_infer_type(ty, target_ty, strict_target) else {
+            ctx_mut().error_mismatched_types($err_span, target_ty.u(), ty);
+            return SemaResult::HandledErr;
         };
-        *target_ty = Some(common_ty);
         target_ty.as_mut().u()
     }};
 }
@@ -316,10 +325,12 @@ impl Sema {
                         };
                         expr.set_replacement(sym.const_val());
                     } else if is_const {
+                        /* TODO: move this error
                         return cerror2!(
                             *span,
                             "cannot access a non-constant symbol at compile time"
                         );
+                        */
                     }
                 },
             },
@@ -489,7 +500,8 @@ impl Sema {
 
                 let val_ty = *analyze!(*val, elem_ty);
                 let elem_ty =
-                    check_and_set_target!(val_ty, &mut elem_ty, val.return_val_span()).upcast();
+                    check_or_infer_target!(val_ty, &mut elem_ty, true, val.return_val_span())
+                        .upcast();
                 let arr_ty = type_new!(ArrayTy { len, elem_ty });
                 expr.ty = Some(arr_ty.upcast_to_type());
 
@@ -1131,9 +1143,10 @@ impl Sema {
                 } else {
                     p.void_ty
                 };
-                check_and_set_target!(
+                check_or_infer_target!(
                     val_ty,
                     &mut func.ret_ty,
+                    func.has_known_ret_ty,
                     val.map(|v| v.full_span()).unwrap_or(span)
                 );
             },
@@ -1255,7 +1268,7 @@ impl Sema {
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
             AstEnum::PtrVal { .. } => todo!(),
             AstEnum::AggregateVal { .. } => todo!(),
-            AstEnum::Fn { params_scope, ret_ty_expr, ret_ty, body, .. } => {
+            AstEnum::Fn { params_scope, ret_ty_expr, ret_ty, body, has_known_ret_ty, .. } => {
                 params_scope.verify_no_duplicates();
 
                 let fn_ptr = expr.downcast::<ast::Fn>();
@@ -1287,16 +1300,16 @@ impl Sema {
                         )?;
                     }
 
-                    let mut has_known_ret = false; // needed because of `NotFinished`. `ret_ty` might get set in a previous try
+                    *has_known_ret_ty = false; // needed because of `NotFinished`. `ret_ty` might get set in a previous try
                     if let Some(ret) = *ret_ty_expr {
                         *ret_ty = Some(self.analyze_type(ret)?);
-                        has_known_ret = true;
+                        *has_known_ret_ty = true;
                     } else if let Some(fn_hint) = fn_hint {
                         *ret_ty = Some(fn_hint.ret_ty.u());
-                        has_known_ret = true;
+                        *has_known_ret_ty = true;
                     }
 
-                    if !is_fn_ty && has_known_ret {
+                    if !is_fn_ty && *has_known_ret_ty {
                         // Needed for indirect recursion. For direct recursion without an explicit
                         // return type, see `get_symbol_var_ty`
                         self.allow_unfinished_use(expr, fn_ptr.upcast_to_type());
@@ -1304,8 +1317,13 @@ impl Sema {
 
                     if let Some(body) = *body {
                         self.analyze(body, ret_ty, false)?;
-                        check_and_set_target!(body.ty.u(), ret_ty, body.return_val_span())
-                            .finalize();
+                        check_or_infer_target!(
+                            body.ty.u(),
+                            ret_ty,
+                            *has_known_ret_ty,
+                            body.return_val_span()
+                        )
+                        .finalize();
                     } else {
                         debug_assert!(is_fn_ty);
                         //panic_debug!("this function has already been analyzed as a function type")
@@ -1426,9 +1444,10 @@ impl Sema {
                     }
                     if let Some(variant_idx) = variant_idx {
                         self.analyze(variant_idx, &repr_ty, true)?;
-                        check_and_set_target!(
+                        check_or_infer_target!(
                             variant_idx.ty.u(),
                             &mut repr_ty,
+                            false,
                             variant_idx.full_span()
                         );
                         tag = variant_idx.int();
@@ -1599,7 +1618,8 @@ impl Sema {
             is_initialized_field[f_idx] = true;
 
             let init = *init.get_or_insert(f.upcast());
-            match self.analyze_and_finalize_with_known_type(init, f_decl.var_ty.u(), is_const) {
+            let field_ty = f_decl.var_ty.or_not_finished()?;
+            match self.analyze_and_finalize_with_known_type(init, field_ty, is_const) {
                 Ok(()) => {},
                 NotFinished { remaining } => {
                     return NotFinished { remaining: remaining + initializer_values.len() - idx };
@@ -1726,7 +1746,8 @@ impl Sema {
             let is_init_const = decl.is_const || is_static || is_field;
             self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty =
-                check_and_set_target!(init.ty.u(), &mut decl.var_ty, init.full_span()).finalize();
+                check_or_infer_target!(init.ty.u(), &mut decl.var_ty, true, init.full_span())
+                    .finalize();
             init.as_mut().ty = Some(var_ty);
             if is_init_const && var_ty != p.never && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.

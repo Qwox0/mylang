@@ -233,3 +233,14 @@ a :: (is_zero_poison: bool) -> ctz(10, is_zero_poison); // not allowed!
 test :: -> a(true);";
     test(code).ok(10u32.leading_zeros());
 }
+
+#[test]
+fn prevent_lvalue_cast() {
+    /*
+    let mut a = &mut [1, 2, 3];
+    a as &[i32] = &[3, 2, 1]; // => Error
+    a[1] = 10;
+    */
+    test_body("mut a := .[1,2,3][..]mut; a.as([]i64) = .[3,2,1][..]mut;")
+        .error("Cannot assign a value to an expression of kind 'Cast'", substr!("a.as([]i64)"));
+}
