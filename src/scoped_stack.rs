@@ -41,11 +41,6 @@ impl<T> ScopedStack<T> {
         unsafe { mem::transmute::<&[ScopedStackValue<T>], &[T]>(&self.values[start..]) }
     }
 
-    pub fn get_cur_scope_mut(&mut self) -> &mut [T] {
-        let start = self.values.len() - self.cur_len;
-        unsafe { mem::transmute::<&mut [ScopedStackValue<T>], &mut [T]>(&mut self.values[start..]) }
-    }
-
     /// Iterates over the scopes of the stack in pop order.
     #[inline]
     pub fn iter_scopes(&self) -> ScopedStackScopeIter<'_, T> {
@@ -56,10 +51,6 @@ impl<T> ScopedStack<T> {
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.values.reserve(additional);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.values.len() == 1
     }
 }
 

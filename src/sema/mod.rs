@@ -21,8 +21,8 @@ use crate::{
     type_::{RangeKind, common_type, ty_match},
     util::{self, UnwrapDebug, then, unreachable_debug},
 };
-pub(crate) use err::{SemaError, SemaErrorKind, SemaResult};
-use err::{SemaErrorKind::*, SemaResult::*};
+pub(crate) use err::SemaResult;
+use err::SemaResult::*;
 use std::{fmt::Write, iter};
 
 mod err;
@@ -135,7 +135,7 @@ fn analyze_scope<T>(
     items: &mut [Ptr<T>],
     finished_count: &mut usize,
     mut analyze_item: impl FnMut(Ptr<T>) -> SemaResult<()>,
-) -> SemaResult<(), HandledErr> {
+) -> SemaResult<()> {
     debug_assert!(*finished_count <= items.len());
     let mut ok = true;
     let mut remaining = 0;
@@ -151,10 +151,7 @@ fn analyze_scope<T>(
         match res {
             Ok(()) => {},
             NotFinished { remaining: rem } => remaining += rem + 1,
-            Err(e) => {
-                ctx_mut().error2(&e);
-                ok = false;
-            },
+            Err(HandledErr) => ok = false,
         }
         idx += 1;
     }
@@ -204,7 +201,7 @@ impl Sema {
             let label = match &res {
                 Ok(()) => format!("type: {}", expr.ty.u()),
                 NotFinished { remaining } => format!("not finished (remaining: {remaining})"),
-                Err(e) => format!("err: {}", e.kind),
+                Err(e) => format!("err: {:?}", e),
             };
 
             display(expr.full_span()).label(&label).finish();
@@ -339,12 +336,9 @@ impl Sema {
                                 debug_assert!(s.ty.is_some());
                             },
                             NotFinished { remaining } => {
-                                NotFinished::<!, !> { remaining: remaining + stmts.len() - idx }?
+                                NotFinished::<!> { remaining: remaining + stmts.len() - idx }?
                             },
-                            Err(err) => {
-                                self.cctx.error2(&err);
-                                s.as_mut().ty = Some(p.never);
-                            },
+                            Err(HandledErr) => s.as_mut().ty = Some(p.never),
                         }
                     }
                 };
@@ -651,7 +645,7 @@ impl Sema {
                         expr.ty = Some(p.never);
                         return Ok(());
                     }
-                    return err(CannotInfer, expr.full_span());
+                    return cerror2!(expr.full_span(), "Cannot infer enum type");
                 };
                 let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
                     return self.cctx.error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
@@ -731,7 +725,7 @@ impl Sema {
                     // TODO: check if cast is possible
                     expr.ty = *ty_hint;
                 } else {
-                    return err(SemaErrorKind::CannotInferAutocastTy, expr.full_span());
+                    return cerror2!(expr.full_span(), "Cannot infer target type of autocast");
                 }
             },
             AstEnum::Call { func, args, .. } => {
@@ -874,7 +868,10 @@ impl Sema {
                 let lhs_ty = *analyze!(*lhs, None);
                 let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
                 let Some(mut common_ty) = common_type(rhs_ty, lhs_ty) else {
-                    return err(MismatchedTypesBinOp { lhs_ty, rhs_ty }, expr.span);
+                    return self
+                        .cctx
+                        .error_mismatched_types_binop(expr.span, lhs_ty, rhs_ty)
+                        .into();
                 };
                 // todo: check if binop can be applied to type
                 expr.ty = Some(match op {
@@ -984,10 +981,10 @@ impl Sema {
                         let start_ty = *analyze!(*start, None);
                         let end_ty = *analyze!(*end, Some(start_ty));
                         let Some(common_ty) = common_type(start_ty, end_ty) else {
-                            return err(
-                                MismatchedTypesBinOp { lhs_ty: start_ty, rhs_ty: end_ty },
-                                expr.span,
-                            );
+                            return self
+                                .cctx
+                                .error_mismatched_types_binop(expr.span, start_ty, end_ty)
+                                .into();
                         };
                         (common_ty, kind)
                     },
@@ -1124,7 +1121,7 @@ impl Sema {
             },
             AstEnum::Return { val, parent_fn, .. } => {
                 let Some(mut func) = self.function_stack.last().copied() else {
-                    return err(ReturnNotInAFunction, expr.full_span());
+                    return cerror2!(expr.full_span(), "Cannot use `return` outside of a function");
                 };
                 *parent_fn = Some(func);
                 expr.ty = Some(p.never);
@@ -1566,10 +1563,10 @@ impl Sema {
 
         let mut ok = true;
         macro_rules! on_err {
-            () => {
+            () => {{
                 ok = false;
-                continue
-            };
+                continue;
+            }};
         }
         let mut const_values =
             then!(is_const => self.cctx.alloc.alloc_slice_default(fields.len())?);
@@ -1607,10 +1604,7 @@ impl Sema {
                 NotFinished { remaining } => {
                     return NotFinished { remaining: remaining + initializer_values.len() - idx };
                 },
-                Err(err) => {
-                    self.cctx.error2(&err);
-                    on_err!();
-                },
+                Err(HandledErr) => on_err!(),
             }
             handle_const_val!(f_idx, init);
         }
@@ -1677,6 +1671,16 @@ impl Sema {
     ) -> SemaResult<()> {
         let p = p();
         let decl = decl_ptr.as_mut();
+
+        let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
+        if is_static && decl.is_const {
+            // TODO: I'm not happy that this is possible syntactically
+            return cerror2!(
+                decl.lhs_span(),
+                "cannot mark a declaration as `static` and as const (`::`)"
+            );
+        }
+
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this
         if is_first_pass && let Some(ty_expr) = decl.on_type {
             let ty = self.analyze_type(ty_expr)?;
@@ -1690,9 +1694,9 @@ impl Sema {
                     {
                         // TODO: remove this duplicate logic
                         cerror!(
-                            decl_ptr.lhs_span(),
+                            decl.lhs_span(),
                             "duplicate definition of `{}`",
-                            decl_ptr.display_lhs()
+                            decl.display_lhs()
                         );
                         chint!(prev.lhs_span(), "previous definition here");
                         return SemaResult::HandledErr;
@@ -1719,7 +1723,6 @@ impl Sema {
         }
         if let Some(init) = decl.init {
             let is_field = kind == Some(VarDeclSpecialCase::Field);
-            let is_static = decl.markers.get(DeclMarkers::IS_STATIC_MASK);
             let is_init_const = decl.is_const || is_static || is_field;
             self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty =
@@ -1753,7 +1756,7 @@ impl Sema {
             decl.var_ty = Some(ty);
             Ok(())
         } else {
-            cerror!(decl_ptr.upcast().full_span(), "cannot infer type of `{}`", decl_ptr.ident.sym);
+            cerror!(decl_ptr.upcast().full_span(), "cannot infer type of `{}`", decl.ident.sym);
             chint!(decl_ptr.upcast().full_span(), "consider explicitly specifying the type");
             // TODO: `my_var: /* type */`
             // TODO: `      ++++++++++++`
@@ -1774,14 +1777,16 @@ impl Sema {
         if self.cctx.args.debug_types && decl.ident.span != Span::ZERO {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
-                NotFinished { remaining } => format!("not finished (remaining: {remaining})"),
-                Err(e) => format!("err: {}", e.kind),
+                NotFinished { remaining } => format!(
+                    "not finished (remaining: {remaining}; type: {})",
+                    if let Some(ty) = decl.var_ty { &format!("Some({ty})") } else { "None" }
+                ),
+                Err(e) => format!("err: {:?}", e),
             };
             display(decl.ident.span).label(&label).finish();
         }
         match res {
-            Err(err) => {
-                self.cctx.error2(&err);
+            Err(HandledErr) => {
                 decl.var_ty = Some(p.never);
                 decl.ty = Some(p.never);
                 if let Some(init) = decl.init.as_mut() {
@@ -2197,16 +2202,6 @@ impl Sema {
     }
 }
 
-#[inline]
-pub fn err<T>(kind: SemaErrorKind, span: Span) -> SemaResult<T> {
-    Err(SemaError { kind, span })
-}
-
-#[inline]
-pub fn err_val(kind: SemaErrorKind, span: Span) -> SemaError {
-    SemaError { kind, span }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum MutatedValue {
     Var(Ptr<ast::Ident>),
@@ -2215,26 +2210,16 @@ pub enum MutatedValue {
     None,
 }
 
-impl MutatedValue {
-    pub fn try_get_var(self) -> OPtr<ast::Ident> {
-        match self {
-            MutatedValue::Var(ptr) => Some(ptr),
-            MutatedValue::Ptr(ptr) | MutatedValue::Slice(ptr) => ptr.try_downcast::<ast::Ident>(),
-            MutatedValue::None => None,
-        }
-    }
-}
-
 fn is_finished_or_recursive(f: Ptr<ast::Fn>, _self: &Sema) -> bool {
     f.ret_ty.is_some() || f == *_self.function_stack.last().u() // TODO: check all previous fns
 }
 
 pub trait OptionSemaExt<T> {
-    fn or_not_finished(self) -> SemaResult<T, !>;
+    fn or_not_finished(self) -> SemaResult<T>;
 }
 
 impl<T> OptionSemaExt<T> for Option<T> {
-    fn or_not_finished(self) -> SemaResult<T, !> {
+    fn or_not_finished(self) -> SemaResult<T> {
         match self {
             Some(t) => Ok(t),
             None => NotFinished { remaining: 1 },

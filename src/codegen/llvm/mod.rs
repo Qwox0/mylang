@@ -9,7 +9,6 @@ use crate::{
     literals::replace_escape_chars,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
-    symbol_table::CodegenSymbolTable,
     type_::{RangeKind, enum_alignment, struct_size, ty_match, union_size},
     util::{
         self, UnwrapDebug, forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment,
@@ -65,7 +64,7 @@ pub struct Codegen<'ctx> {
     pub builder: Builder<'ctx>,
     pub module: Option<Module<'ctx>>,
 
-    symbols: CodegenSymbolTable<Symbol<'ctx>>,
+    symbols: CodegenSymbolTable<'ctx>,
     type_table: HashMap<Ptr<ast::Type>, CodegenType<'ctx>>,
     fn_table: HashMap<Ptr<ast::Fn>, FunctionValue<'ctx>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
@@ -2839,6 +2838,15 @@ impl<'ctx> CodegenModuleExt for Module<'ctx> {
     }
 }
 
+type CodegenSymbolTable<'ctx> = ScopedStack<(Ptr<ast::Decl>, Symbol<'ctx>)>;
+
+impl<'ctx> CodegenSymbolTable<'ctx> {
+    pub fn get(&self, name: Ptr<ast::Decl>) -> Option<&Symbol<'ctx>> {
+        // `rev()` because of shadowing
+        Some(&self.iter_scopes().flat_map(|s| s.iter().rev()).find(|(n, _)| *n == name)?.1)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Symbol<'ctx> {
     Void,
@@ -2985,6 +2993,7 @@ impl<'ctx> CodegenType<'ctx> {
         unsafe { FloatType::new(self.inner) }
     }
 
+    #[allow(unused)]
     pub fn ptr_ty(&self) -> PointerType<'ctx> {
         #[cfg(debug_assertions)]
         debug_assert!(self.sema_ty.kind == AstKind::PtrTy);

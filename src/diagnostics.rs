@@ -1,7 +1,6 @@
 use crate::{
     ast::{self, AstKind, UpcastToAst},
     display_code::display,
-    error::SpannedError,
     parser::lexer::Span,
     ptr::Ptr,
     util::UnwrapDebug,
@@ -42,23 +41,6 @@ pub trait DiagnosticReporter {
         self.max_past_severity().is_some_and(DiagnosticSeverity::aborts_compilation)
     }
 
-    #[track_caller]
-    fn report2(&mut self, severity: DiagnosticSeverity, err: &impl SpannedError) {
-        if !err.was_already_handled() {
-            self.report(severity, err.span(), &err.get_text());
-        }
-    }
-
-    #[track_caller]
-    fn error2(&mut self, err: &impl SpannedError) {
-        self.report2(DiagnosticSeverity::Error, err)
-    }
-
-    #[track_caller]
-    fn warn2(&mut self, err: &impl SpannedError) {
-        self.report2(DiagnosticSeverity::Warn, err)
-    }
-
     // some common diagnostics:
 
     #[track_caller]
@@ -68,12 +50,22 @@ pub trait DiagnosticReporter {
 
     #[track_caller]
     fn error_mismatched_types<Expected: fmt::Display>(
-        &mut self,
+        &self,
         span: Span,
         expected: Expected,
         got: Ptr<ast::Type>,
-    ) {
-        self.error(span, &format_args!("mismatched types: expected {expected}; got {got}"));
+    ) -> HandledErr {
+        cerror!(span, "mismatched types: expected {expected}; got {got}")
+    }
+
+    #[track_caller]
+    fn error_mismatched_types_binop(
+        &mut self,
+        span: Span,
+        lhs_ty: Ptr<ast::Type>,
+        rhs_ty: Ptr<ast::Type>,
+    ) -> HandledErr {
+        cerror!(span, "mismatched types (left: {lhs_ty}, right: {rhs_ty})")
     }
 
     #[track_caller]

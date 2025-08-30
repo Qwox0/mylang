@@ -170,6 +170,7 @@ pub enum TokenKind {
     /// `\`
     Backslash,
     /// `
+    #[allow(dead_code)]
     Backtick,
 
     EOF,
@@ -601,11 +602,6 @@ impl Lexer {
         self.next_tok = state.next_tok;
     }
 
-    pub fn advanced(mut self) -> Self {
-        self.advance();
-        self
-    }
-
     #[inline]
     pub fn next_if_kind(&mut self, kind: TokenKind) -> Option<Token> {
         self.next_if(|t| t.kind == kind)
@@ -951,22 +947,6 @@ impl Cursor {
     pub fn advance(&mut self) {
         let offset = self.get_rem().char_indices().next().map(|(idx, _)| idx).unwrap_or_default();
         self.pos += offset + 1;
-    }
-
-    pub fn get_pos(&self) -> usize {
-        self.pos
-    }
-
-    pub unsafe fn set_pos(&mut self, pos: usize) {
-        self.pos = pos;
-    }
-
-    pub fn set_pos_checked(&mut self, pos: usize) -> bool {
-        let is_valid = pos < self.code.len() && self.code.0.is_char_boundary(pos);
-        if is_valid {
-            self.pos = pos;
-        }
-        is_valid
     }
 }
 

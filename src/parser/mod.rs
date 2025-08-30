@@ -5,8 +5,7 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, AstMatch, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst,
-        ast_new,
+        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
     diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
@@ -116,8 +115,8 @@ impl Ptr<Ast> {
     }
 }
 
-pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> Vec<Ptr<Ast>> {
-    let mut stmts = Vec::new();
+pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> &'a mut [Ptr<Ast>] {
+    let mut stmts = &mut cctx.as_mut().stmts;
     // Note: this idx-based loop is needed because `ctx.files` might get mutated while the loop is
     // running.
     let mut idx = 0;
@@ -286,19 +285,8 @@ impl Parser {
                 let rhs = self.expr()?;
                 expr!(BinOpAssign { lhs, op, rhs }, span)
             },
-            FollowingOperator::VarDecl | FollowingOperator::ConstDecl => {
-                let mut d = ast::Decl::from_lhs(lhs)?;
-                d.init = Some(self.expr()?);
-                d.is_const = matches!(op, FollowingOperator::ConstDecl);
-                expr!(d)
-            },
-            FollowingOperator::TypedDecl => {
-                let mut d = ast::Decl::from_lhs(lhs)?;
-                d.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE)?);
-                let eq = self.lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
-                d.init = then!(eq.is_some() => self.expr()?);
-                d.is_const = eq.is_some_and(|t| t.kind == TokenKind::Colon);
-                expr!(d)
+            FollowingOperator::Decl(kind) => {
+                self.decl_tail(self.alloc(ast::Decl::from_lhs(lhs)?)?, kind)?.upcast()
             },
         })
     }
@@ -979,19 +967,18 @@ impl Parser {
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
         let markers = self.decl_markers()?;
-        let decl_no_markers = self.expr()?;
-        let decl = match decl_no_markers.matchable2() {
-            AstMatch::Decl(decl) => decl,
-            AstMatch::Ident(_) | AstMatch::Dot(_) if allow_ident_only => {
-                self.alloc(ast::Decl::from_lhs(decl_no_markers)?)?
-            },
-            AstMatch::Ident(_) | AstMatch::Dot(_) => {
-                return unexpected_token(self.lex.peek_or_eof(), &DECL_TAIL_TOKENS);
-            },
-            _ => unreachable_debug(),
-        };
+        let lhs = self.expr_(ASSIGN_PRECEDENCE)?;
+        let decl = self.alloc(ast::Decl::from_lhs(lhs)?)?;
         decl.as_mut().markers = markers;
-        Ok(decl)
+        let t = self.lex.peek_or_eof();
+        let kind = match t.kind {
+            TokenKind::Colon => DeclTailKind::Typed,
+            TokenKind::ColonEq => DeclTailKind::Var,
+            TokenKind::ColonColon => DeclTailKind::Const,
+            _ if allow_ident_only => return Ok(decl),
+            _ => return unexpected_token(t, &DECL_TAIL_TOKENS),
+        };
+        self.advanced().decl_tail(decl, kind)
     }
 
     fn decl_markers(&mut self) -> ParseResult<DeclMarkers> {
@@ -1032,6 +1019,31 @@ impl Parser {
         Ok(markers)
     }
 
+    /// `mut x : ...`
+    /// `mut x := ...`
+    /// `mut x :: ...`
+    /// `      ^`
+    /// [`FollowingOperator::Decl`]
+    fn decl_tail(
+        &mut self,
+        mut decl: Ptr<ast::Decl>,
+        kind: DeclTailKind,
+    ) -> ParseResult<Ptr<ast::Decl>> {
+        match kind {
+            DeclTailKind::Var | DeclTailKind::Const => {
+                decl.is_const = matches!(kind, DeclTailKind::Const);
+                decl.init = Some(self.expr()?);
+            },
+            DeclTailKind::Typed => {
+                decl.var_ty_expr = Some(self.expr_(DECL_TYPE_PRECEDENCE)?);
+                let eq = self.lex.next_if(|t| matches!(t.kind, TokenKind::Eq | TokenKind::Colon));
+                decl.is_const = eq.is_some_and(|t| t.kind == TokenKind::Colon);
+                decl.init = then!(eq.is_some() => self.expr()?);
+            },
+        }
+        Ok(decl)
+    }
+
     fn ident(&mut self) -> ParseResult<Ptr<ast::Ident>> {
         let t = self.tok(TokenKind::Ident)?;
         self.ident_from_span(t.span)
@@ -1068,7 +1080,6 @@ impl Parser {
             self.lex.advance();
             Ok(t)
         } else {
-            debug_assert!(!expected.contains(&t.kind));
             return unexpected_token(t, expected);
         }
     }
@@ -1166,15 +1177,20 @@ pub enum FollowingOperator {
     /// `  ^^^`
     BinOpAssign(BinOpKind),
 
+    Decl(DeclTailKind),
+}
+
+#[derive(Debug)]
+pub enum DeclTailKind {
     /// `a := b`
     /// `  ^^`
-    VarDecl,
+    Var,
     /// `a :: b`
     /// `  ^^`
-    ConstDecl,
+    Const,
     /// `a: ty = b` or `a: ty : b`
     /// ` ^`         `   ^`
-    TypedDecl,
+    Typed,
 }
 
 impl FollowingOperator {
@@ -1236,9 +1252,9 @@ impl FollowingOperator {
             TokenKind::DotOpenParenthesis => FollowingOperator::PositionalInitializer,
             TokenKind::DotOpenBracket => FollowingOperator::ArrayInitializer,
             TokenKind::DotOpenBrace => FollowingOperator::NamedInitializer,
-            TokenKind::Colon => FollowingOperator::TypedDecl,
-            TokenKind::ColonColon => FollowingOperator::ConstDecl,
-            TokenKind::ColonEq => FollowingOperator::VarDecl,
+            TokenKind::Colon => FollowingOperator::Decl(DeclTailKind::Typed),
+            TokenKind::ColonColon => FollowingOperator::Decl(DeclTailKind::Const),
+            TokenKind::ColonEq => FollowingOperator::Decl(DeclTailKind::Var),
             //TokenKind::Semicolon => todo!("TokenKind::Semicolon"),
             TokenKind::Question => FollowingOperator::PostOp(UnaryOpKind::Try),
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
@@ -1263,10 +1279,9 @@ impl FollowingOperator {
             FollowingOperator::BinOp(k) => k.precedence(),
             FollowingOperator::Range { .. } => RANGE_PRECEDENCE,
             FollowingOperator::Pipe => 4,
-            FollowingOperator::Assign | FollowingOperator::BinOpAssign(_) => 3,
-            FollowingOperator::VarDecl
-            | FollowingOperator::ConstDecl
-            | FollowingOperator::TypedDecl => DECL_TAIL_PRECEDENCE,
+            FollowingOperator::Assign
+            | FollowingOperator::BinOpAssign(_)
+            | FollowingOperator::Decl(_) => ASSIGN_PRECEDENCE,
         }
     }
 }
@@ -1284,10 +1299,12 @@ const RANGE_PRECEDENCE: u8 = 10;
 /// `a: ty = init`
 /// `   ^^`
 /// must be higher than [`FollowingOperator::Assign`]!
-const DECL_TYPE_PRECEDENCE: u8 = 4;
-/// `a: ty = init`
-/// ` ^`
-const DECL_TAIL_PRECEDENCE: u8 = 2;
+const DECL_TYPE_PRECEDENCE: u8 = 3;
+/// `a = 1`
+/// `a := init`
+/// `a : ty = init`
+/// `  ^`
+const ASSIGN_PRECEDENCE: u8 = 2;
 const IF_PRECEDENCE: u8 = 1;
 const MIN_PRECEDENCE: u8 = 0;
 

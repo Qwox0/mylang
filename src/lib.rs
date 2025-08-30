@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), allow(dead_code))]
 #![feature(test)]
 #![feature(try_trait_v2)]
 #![feature(never_type)]
@@ -17,27 +18,25 @@
 #![feature(maybe_uninit_write_slice)]
 #![feature(type_changing_struct_update)]
 
-pub mod arena_allocator;
-pub mod ast;
+mod arena_allocator;
+mod ast;
 pub mod cli;
-pub mod codegen;
+mod codegen;
 pub mod compiler;
-pub mod context;
-pub mod diagnostics;
-pub mod display_code;
-pub mod error;
+mod context;
+mod diagnostics;
+mod display_code;
 mod intern_pool;
-pub mod literals;
-pub mod parser;
-pub mod ptr;
+mod literals;
+mod parser;
+mod ptr;
 mod scope;
-pub mod scoped_stack;
+mod scoped_stack;
 mod scratch_pool;
-pub mod sema;
-pub mod source_file;
-pub mod symbol_table;
-pub mod type_;
-pub mod util;
+mod sema;
+mod source_file;
+mod type_;
+mod util;
 
 #[cfg(test)]
 mod benches;

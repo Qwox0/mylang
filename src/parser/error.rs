@@ -14,6 +14,7 @@ pub type ParseResult<T> = Result<T, ParseError>;
 
 #[track_caller]
 pub fn unexpected_token<T>(t: Token, expected: &[TokenKind]) -> ParseResult<T> {
+    debug_assert!(!expected.contains(&t.kind));
     match format_expected_tokens(expected) {
         Some(expected) => cerror2!(t.span, "expected {expected}, got {}", t.kind),
         None => cerror2!(t.span, "unexpected token: {}", t.kind),

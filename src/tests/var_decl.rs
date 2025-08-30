@@ -14,6 +14,8 @@ fn error_invalid_lhs() {
 
     // The `mut` marker shouln't change the error.
     test_body("{ mut a+b := 1; }").error(err_msg, substr!("a+b"));
+
+    test_body("{ mut a+b; }").error(err_msg, substr!("a+b"));
 }
 
 #[test]
@@ -52,6 +54,13 @@ fn good_invalid_token_error() {
 
     // `mut` marker shouln't change error message
     test("f :: (a: i32 = 1, mut b # i32 = 2) -> {}").error(err_msg, substr!("#"));
+
+    test_body("mut a = 1").error("expected `:`, `:=`, or `::`, got `=`", substr!("="));
+
+    test_body("mut 1").error(
+        "expected an identifier, `mut`, `rec`, `pub`, or `static`, got an integer literal",
+        substr!("1"),
+    );
 }
 
 #[test]

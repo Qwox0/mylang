@@ -1116,32 +1116,10 @@ impl TypeEnum {
     }
 }
 
-pub trait OptionAstExt {
-    fn is_type(self) -> bool;
-
-    fn downcast_const_val(self) -> Ptr<ConstVal>;
-
-    //fn ref_downcast_type(&mut self) -> &mut OPtr<Type>;
-
-    //fn downcast_type_ref(&mut self) -> &mut Ptr<Type>;
-}
-
-impl OptionAstExt for Option<Ptr<Ast>> {
-    #[inline]
-    fn is_type(self) -> bool {
-        self.map(Ptr::<Ast>::is_type).unwrap_or(false)
-    }
-
-    fn downcast_const_val(self) -> Ptr<ConstVal> {
-        self.u().downcast_const_val()
-    }
-}
-
 pub trait OptionTypeExt {
     fn matchable(self) -> Ptr<TypeEnum>;
     fn downcast<V: TypeVariant>(self) -> Ptr<V>;
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V>;
-    fn upcast(self) -> OPtr<Ast>;
 }
 
 impl OptionTypeExt for Option<Ptr<Type>> {
@@ -1161,11 +1139,6 @@ impl OptionTypeExt for Option<Ptr<Type>> {
     #[inline]
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
         self?.try_downcast()
-    }
-
-    #[inline]
-    fn upcast(self) -> OPtr<Ast> {
-        self.map(Ptr::cast)
     }
 }
 
@@ -1264,12 +1237,12 @@ impl Decl {
         then!(self.is_const => self.const_val())
     }
 
-    pub fn lhs_span(self: Ptr<Decl>) -> Span {
+    pub fn lhs_span(&self) -> Span {
         let name_span = self.ident.span;
         name_span.maybe_join(self.on_type.map(|t| t.full_span()))
     }
 
-    pub fn display_lhs(self: Ptr<Decl>) -> impl std::fmt::Display {
+    pub fn display_lhs(&self) -> impl std::fmt::Display {
         struct DeclLhsDisplay {
             on_type: OPtr<Ast>,
             ident: Ptr<Ident>,

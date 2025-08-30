@@ -8,7 +8,6 @@ use core::fmt;
 use std::{
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
-    io::{self, Read},
     iter::FusedIterator,
     mem::MaybeUninit,
     path::Path,
@@ -150,22 +149,6 @@ macro_rules! panic_debug {
 }
 pub(crate) use panic_debug;
 
-pub fn collect_all_result_errors<T, E>(
-    i: impl IntoIterator<Item = Result<T, E>>,
-) -> Result<Vec<T>, Vec<E>> {
-    let iter = i.into_iter();
-    let mut res = Ok(Vec::with_capacity(iter.size_hint().0));
-    for x in iter {
-        match (x, &mut res) {
-            (Ok(t), Ok(ok_list)) => ok_list.push(t),
-            (Ok(_), Err(_)) => continue,
-            (Err(err), Ok(_)) => res = Err(vec![err]),
-            (Err(e), Err(err_list)) => err_list.push(e),
-        }
-    }
-    res
-}
-
 #[inline]
 pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }
@@ -208,11 +191,6 @@ pub fn transmute_unchecked<T, U>(val: T) -> U {
     u
 }
 
-pub fn read_file_to_buf(path: impl AsRef<Path>, buf: &mut String) -> io::Result<()> {
-    std::fs::OpenOptions::new().read(true).open(path)?.read_to_string(buf)?;
-    Ok(())
-}
-
 pub fn is_simple_enum(variants: DeclList) -> bool {
     variants.iter().all(|v| v.var_ty == primitives().void_ty)
 }
@@ -224,13 +202,6 @@ macro_rules! then {
     };
 }
 pub(crate) use then;
-
-pub fn path_parent_n(mut path: &Path, n: usize) -> Option<&Path> {
-    for _ in 0..n {
-        path = path.parent()?
-    }
-    Some(path)
-}
 
 #[derive(Debug)]
 pub enum IteratorOneError {

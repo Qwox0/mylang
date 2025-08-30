@@ -24,7 +24,3 @@ pub fn replace_escape_chars(s: &str) -> String {
         .replace("\\'", "\'")
         .replace("\\\"", "\"")
 }
-
-pub fn parse_str_lit(text: &str) -> String {
-    replace_escape_chars(&text)
-}

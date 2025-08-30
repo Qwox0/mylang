@@ -10,14 +10,10 @@ use std::{
 pub enum CodegenError {
     BuilderError(BuilderError),
     InvalidGeneratedFunction,
-    InvalidCallProduced,
     FunctionLookupError(FunctionLookupError),
     CannotOptimizeModule(LLVMString),
     CannotCompileObjFile(LLVMString),
     CannotCreateJit(LLVMString),
-    CannotMutateRegister,
-
-    AllocErr(bumpalo::AllocErr),
 }
 
 unsafe impl Send for CodegenError {}

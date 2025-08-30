@@ -209,21 +209,6 @@ impl<T: ?Sized> std::hash::Hash for Ptr<T> {
 
 pub type OPtr<T> = Option<Ptr<T>>;
 
-pub trait OPtrExt<T: ?Sized> {
-    fn raw(self) -> *mut T
-    where T: Sized;
-}
-
-impl<T: ?Sized> OPtrExt<T> for OPtr<T> {
-    fn raw(self) -> *mut T
-    where T: Sized {
-        match self {
-            Some(p) => p.raw(),
-            None => std::ptr::null_mut(),
-        }
-    }
-}
-
 impl<T> PartialEq<Ptr<T>> for OPtr<T> {
     #[inline]
     fn eq(&self, other: &Ptr<T>) -> bool {
