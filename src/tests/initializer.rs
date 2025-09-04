@@ -1,4 +1,4 @@
-use crate::tests::{substr, test_body};
+use crate::tests::{substr, test, test_body};
 
 #[test]
 fn initializer_on_struct_type() {
@@ -154,8 +154,34 @@ val");
         test_body(code("mut", initializer_code)).ok(10i32);
 
         test_body(code("", initializer_code)).error(
-            "Cannot mutate the value behind an immutable pointer",
+            "Cannot initialize the value behind `ptr`, because it is an immutable pointer",
             substr!(&format!("ptr{initializer_code}")),
         );
     }
+}
+
+#[test]
+fn error_cannot_initialize_type() {
+    let code = "
+MyStruct :: struct { x: i32 };
+A : [10]MyStruct : .(1);
+B :: [10]MyStruct.(1);
+C : [10]MyStruct : .{ x=1 };
+D :: [10]MyStruct.{ x=1 };";
+    let err = |kind| {
+        format!(
+            "Cannot initialize a value of type `[10]struct{{x:i32}}` using a {kind} initializer"
+        )
+    };
+    let hint = "Consider using an array initializer (`.[...]`) instead";
+    // TODO: also hint that `[10]` must be removed
+    test(code)
+        .error(err("positional"), substr!(".(1)"))
+        .info(hint, substr!(".(1)"))
+        .error(err("positional"), substr!("[10]MyStruct";skip=1))
+        .info(hint, substr!(".(1)";skip=1))
+        .error(err("named"), substr!(".{ x=1 }"))
+        .info(hint, substr!(".{ x=1 }"))
+        .error(err("named"), substr!("[10]MyStruct";skip=3))
+        .info(hint, substr!(".{ x=1 }";skip=1));
 }

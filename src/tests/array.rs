@@ -53,8 +53,10 @@ fn arr_initializer_on_slice_len_mismatch() {
 
 #[test]
 fn arr_initializer_on_ref_mut_check() {
-    test_body("{ arr := .[1, 2, 3, 4]; ptr := &arr; ptr.[5, 6, 7, 8]; arr }")
-        .error("Cannot mutate the value behind an immutable pointer", substr!("ptr.[5, 6, 7, 8]"));
+    test_body("{ arr := .[1, 2, 3, 4]; ptr := &arr; ptr.[5, 6, 7, 8]; arr }").error(
+        "Cannot initialize the value behind `ptr`, because it is an immutable pointer",
+        substr!("ptr.[5, 6, 7, 8]"),
+    );
 
     /*
     test_compile_err(

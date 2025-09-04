@@ -105,7 +105,7 @@ macro_rules! bench_compilation {
         $b.iter(|| {
             let context = Context::create();
             let mut codegen = llvm::Codegen::new(&context, "dev");
-            codegen.compile_all(&stmts);
+            codegen.compile_all(&stmts).unwrap();
         });
     };
     (@body@ $b:expr; $code:expr; $mode:expr) => {

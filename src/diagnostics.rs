@@ -3,7 +3,7 @@ use crate::{
     display_code::display,
     parser::lexer::Span,
     ptr::Ptr,
-    util::UnwrapDebug,
+    util::{UnwrapDebug, unreachable_debug},
 };
 use core::fmt;
 use std::{cmp::Ordering, fmt::Display, io::Write};
@@ -74,18 +74,6 @@ pub trait DiagnosticReporter {
     }
 
     #[track_caller]
-    fn error_mutate_const_ptr(&self, full_span: Span, ptr: Ptr<ast::Ast>) {
-        cerror!(full_span, "Cannot mutate the value behind an immutable pointer");
-        chint!(ptr.full_span(), "The pointer type `{}` is not `mut`", ptr.ty.u());
-    }
-
-    #[track_caller]
-    fn error_mutate_const_slice(&self, full_span: Span, slice: Ptr<ast::Ast>) {
-        cerror!(full_span, "Cannot mutate the elements of an immutable slice");
-        chint!(slice.full_span(), "The slice type `{}` is not `mut`", slice.ty.u());
-    }
-
-    #[track_caller]
     fn error_unknown_field(&self, field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
         cerror!(field.span, "no field `{}` on type `{}`", field.sym, ty)
     }
@@ -98,31 +86,39 @@ pub trait DiagnosticReporter {
     #[track_caller]
     fn error_cannot_apply_initializer(
         &self,
-        initializer_kind: InitializerKind,
-        lhs: Ptr<ast::Ast>,
+        analyzed_lhs: Ptr<ast::Ast>,
+        initializer_expr: Ptr<ast::Ast>,
     ) {
-        if let Some(lhs_ty) = lhs.try_downcast_type() {
-            cerror!(
-                lhs.full_span(),
-                "Cannot initialize a value of type `{lhs_ty}` using {initializer_kind} initializer"
-            );
+        let initializer_kind = initializer_expr.kind.initializer_kind();
+        let lhs_expr = match initializer_expr.matchable().as_ref() {
+            ast::AstEnum::PositionalInitializer { lhs, .. }
+            | ast::AstEnum::NamedInitializer { lhs, .. }
+            | ast::AstEnum::ArrayInitializer { lhs, .. }
+            | ast::AstEnum::ArrayInitializerShort { lhs, .. } => lhs,
+            _ => unreachable_debug(),
+        };
+        let span = lhs_expr.unwrap_or(initializer_expr).full_span();
+        if let Some(lhs_ty) = analyzed_lhs.try_downcast_type() {
+            cerror!(span, "Cannot initialize a value of type `{lhs_ty}` using {initializer_kind}");
             if lhs_ty.kind == AstKind::StructDef {
-                chint!(Span::ZERO, "Consider using a positional initializer (`.(...)`) instead")
+                chint!(
+                    initializer_expr.span,
+                    "Consider using a positional initializer (`.(...)`) or named initializer \
+                     (`.{{...}}`) instead"
+                )
+            } else if lhs_ty.kind == AstKind::ArrayTy {
+                chint!(
+                    initializer_expr.span,
+                    "Consider using an array initializer (`.[...]`) instead"
+                )
             }
         } else {
             cerror!(
-                lhs.full_span(),
-                "Cannot apply {initializer_kind} initializer to a value of type `{}`",
-                lhs.ty.u()
+                span,
+                "Cannot apply {initializer_kind} to a value of type `{}`",
+                analyzed_lhs.ty.u()
             );
         }
-    }
-
-    #[track_caller]
-    fn error_cannot_infer_initializer_lhs(&self, initializer: Ptr<ast::Ast>) -> HandledErr {
-        cerror!(initializer.full_span(), "cannot infer struct type");
-        chint!(initializer.span.start(), "consider specifying the type explicitly");
-        HandledErr
     }
 
     #[track_caller]
@@ -172,23 +168,6 @@ pub trait DiagnosticReporter {
     #[track_caller]
     fn error_unimplemented(&mut self, span: Span, what: fmt::Arguments<'_>) {
         cerror!(span, "{what} is currently not implemented");
-    }
-}
-
-#[derive(PartialEq, Eq)]
-pub enum InitializerKind {
-    Array,
-    Positional,
-    Named,
-}
-
-impl std::fmt::Display for InitializerKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            InitializerKind::Array => "an array",
-            InitializerKind::Positional => "a positional",
-            InitializerKind::Named => "a named",
-        })
     }
 }
 

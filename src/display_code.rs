@@ -182,16 +182,18 @@ mod tests {
 macro_rules! debug_expr {
     ($expr:expr) => {{
         let expr = &$expr;
-        print!("\nDEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
-        if expr.span.file.is_some() {
+        let span = expr.full_span();
+        print!("DEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
+        if span.file.is_some() {
             println!();
-            crate::display_code::display(expr.span)
+            crate::display_code::display(span)
                 //.label(&format!("kind: {:?}", expr.kind))
                 .finish();
         } else {
-            println!(", span: {:?} (no file)", expr.span);
+            println!(", span: {:?} (no file)", span);
         }
-        println!("  {:x?}", expr.as_ref());
+        println!("  ty: {}", expr.ty.display());
+        println!("  {:x?}\n", expr.as_ref());
     }};
 }
 #[allow(unused)]

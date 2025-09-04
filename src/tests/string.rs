@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::{substr, test, test_body};
 
 #[test]
 fn string_lit() {
@@ -18,4 +18,34 @@ if my_string[ 9] != 108 return ERR_BYTE; // 'l'
 if my_string[10] != 100 return ERR_BYTE; // 'd'
 my_string[6]";
     test_body(code).ok(b'W');
+}
+
+/// ```c
+/// static char *a = "Hello World";
+/// static char b[] = "Hello World";
+///
+/// void change_str(char **str) {
+///     (*str)[0] = 'X';
+/// }
+///
+/// int main() {
+///     char *ptr = b;
+///     change_str(&ptr);
+///     printf("%s\n", b);
+///     // change_str(&a); // => SIGSEGV
+///     printf("%s\n", a);
+/// }
+/// ```
+///
+/// ```llvm
+/// @b = internal global [12 x i8] c"Hello World\00", align 1
+/// @a = internal global ptr @.str.1, align 8
+/// @.str.1 = private unnamed_addr constant [12 x i8] c"Hello World\00", align 1
+/// ```
+#[test]
+fn static_string() {
+    test(r#"static text := "Hello World"; test :: -> {}"#).ok(());
+    test(r#"static text: []mut u8 = "Hello World"; test :: -> {}"#)
+        .error("mismatched types: expected []mut u8; got []u8", substr!("\"Hello World\""));
+    // TODO: allow mutation of the string?
 }

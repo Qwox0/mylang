@@ -419,9 +419,7 @@ impl DebugAst for Ast {
     }
 }
 
-impl<V> DebugAst for V
-where Ptr<V>: UpcastToAst
-{
+impl<V: UpcastToAst> DebugAst for V {
     #[inline]
     fn debug_impl(&self, buf: &mut impl DebugAstBuf) {
         Ptr::from_ref(self).upcast().debug_impl(buf)

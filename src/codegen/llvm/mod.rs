@@ -36,10 +36,10 @@ use inkwell::{
         FloatType, FunctionType, IntType, PointerType, StructType,
     },
     values::{
-        AggregateValue, AggregateValueEnum, AnyValue, AnyValueEnum, ArrayValue, AsValueRef,
-        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
-        FunctionValue, GlobalValue, InstructionValue, IntMathValue, IntValue, PhiValue,
-        PointerValue, StructValue,
+        AggregateValue, AnyValue, AnyValueEnum, ArrayValue, AsValueRef, BasicMetadataValueEnum,
+        BasicValue, BasicValueEnum, CallSiteValue, FloatValue, FunctionValue, GlobalValue,
+        InstructionValue, IntMathValue, IntValue, PhiValue, PointerValue, StructValue,
+        UnnamedAddress,
     },
 };
 use std::{
@@ -106,9 +106,10 @@ impl<'ctx> Codegen<'ctx> {
         c
     }
 
-    pub fn compile_top_level(&mut self, stmt: Ptr<Ast>) {
+    pub fn compile_top_level(&mut self, stmt: Ptr<Ast>) -> CodegenResult<()> {
         debug_assert!(stmt.ty.u().matches_void());
-        self.compile_expr(stmt).unwrap();
+        self.compile_expr(stmt).handle_unreachable()?;
+        Ok(())
     }
 
     fn compile_expr(&mut self, expr: Ptr<Ast>) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
@@ -199,7 +200,7 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(self.get_symbol(decl.u()))
             },
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
-                self.precompile_decls(stmts.as_ref());
+                self.precompile_decls(stmts.as_ref())?;
                 self.open_scope();
                 let res: CodegenResultAndControlFlow<Symbol> = try {
                     if let Some(last) = stmts.last_mut() {
@@ -395,7 +396,7 @@ impl<'ctx> Codegen<'ctx> {
                                 (ptr, len)
                             },
                         };
-                        reg(self.build_slice(ptr, len)?)
+                        reg(self.build_slice(ptr, len, false)?)
                     },
                     _ => unreachable_debug(),
                 }
@@ -896,9 +897,9 @@ impl<'ctx> Codegen<'ctx> {
             ConstValEnum::StrVal { text, .. } => {
                 debug_assert!(ty.matches_str());
                 let value = replace_escape_chars(&text);
-                let ptr = self.builder.build_global_string_ptr(&value, "")?;
+                let ptr = self.add_global_const_string(&value)?;
                 let len = self.int_type(64).const_int(value.len() as u64, false);
-                ret(self.build_slice(ptr.as_pointer_value(), len)?)
+                ret(self.build_slice(ptr.as_pointer_value(), len, true)?)
             },
             ConstValEnum::PtrVal { val, .. } => {
                 #[cfg(debug_assertions)]
@@ -1413,7 +1414,10 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn mangle_symbol<'n>(&self, decl: Ptr<ast::Decl>) -> Cow<'n, str> {
-        if decl.ident.replacement.is_some() {
+        if let Some(n) = decl.obj_symbol_name {
+            debug_assert_ne!(decl.ident.sym, primitives().main_sym);
+            return n.text.as_ref().into();
+        } else if decl.ident.replacement.is_some() {
             return decl.ident.rep().flat_downcast::<ast::Ident>().sym.text().into();
         }
         let name = decl.ident.sym;
@@ -2083,10 +2087,18 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         ptr: PointerValue<'ctx>,
         len: IntValue<'ctx>,
-    ) -> CodegenResult<AggregateValueEnum<'ctx>> {
-        let slice = self.slice_ty().get_undef();
-        let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
-        Ok(self.builder.build_insert_value(slice, len, 1, "slice")?)
+        is_const: bool,
+    ) -> CodegenResult<StructValue<'ctx>> {
+        debug_assert!(!is_const || ptr.is_const());
+        debug_assert!(!is_const || len.is_const());
+        Ok(if is_const {
+            self.context
+                .const_struct(&[ptr.as_basic_value_enum(), len.as_basic_value_enum()], false)
+        } else {
+            let slice = self.slice_ty().get_undef();
+            let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
+            self.builder.build_insert_value(slice, len, 1, "slice")?.into_struct_value()
+        })
     }
 
     /// # Usage
@@ -2157,6 +2169,18 @@ impl<'ctx> Codegen<'ctx> {
         // end
         self.builder.position_at_end(end_bb);
         Ok(())
+    }
+
+    /// See `IRBuilderBase::CreateGlobalString` in `llvm/lib/IR/IRBuilder.cpp`
+    fn add_global_const_string(&mut self, str: &str) -> CodegenResult<GlobalValue<'ctx>> {
+        let str_const = self.context.const_string(str.as_bytes(), true);
+        let gv = self.module().add_global(str_const.get_type(), Some(AddressSpace::from(0)), "");
+        gv.set_constant(true);
+        gv.set_linkage(Linkage::Private);
+        gv.set_initializer(&str_const);
+        gv.set_unnamed_address(UnnamedAddress::Global);
+        gv.set_alignment(1);
+        Ok(gv)
     }
 
     fn max_int(&self, int_ty: IntType<'ctx>, is_signed: bool) -> CodegenResult<IntValue<'ctx>> {
@@ -2328,6 +2352,9 @@ impl<'ctx> Codegen<'ctx> {
                 todo!("str_slice_ty")
             } else if ty == p.type_ty {
                 todo!("type_ty")
+            } else if ty == p.any {
+                // TODO: needed for `*any`. Is this correct in general?
+                t!(self.context.void_type())
             } else {
                 panic_debug!("cannot compile type: {ty}");
             };
@@ -2732,7 +2759,7 @@ impl<'ctx> Codegen<'ctx> {
                             debug_assert!(d.on_type.is_none_or(|t| t.downcast_type() == ty));
                             d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
                         }
-                        self.precompile_decls(UpcastToAst::upcast_slice(ty_scope.decls).as_ref());
+                        self.precompile_decls(UpcastToAst::upcast_slice(ty_scope.decls).as_ref())?;
                     } else {
                         for d in ty_scope.decls {
                             if d.might_need_precompilation() {

@@ -788,6 +788,7 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
             default: TokenKind::Backslash,
             '\\' => multiline_string_literal_line(lex),
         },
+        '`' => TokenKind::Backtick,
 
         'b' => maybe_followed_by! {
             default: ident_like(lex, start),

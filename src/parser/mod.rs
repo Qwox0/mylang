@@ -575,7 +575,7 @@ impl Parser {
                 }
             },
             TokenKind::OpenBrace => self.block()?.upcast(),
-            TokenKind::Bang => {
+            TokenKind::Bang | TokenKind::Keyword(Keyword::Not) => {
                 let operand = self.advanced().expr_(PREOP_PRECEDENCE)?;
                 expr!(UnaryOp { op: UnaryOpKind::Not, operand, is_postfix: false }, span)
             },
@@ -672,8 +672,19 @@ impl Parser {
                 else if directive_name == "no_mangle" {
                     return cerror2!(
                         span.join(directive_ident.span),
-                        "#{directive_name} is currently not implemented"
+                        "`#{directive_name}` is currently not implemented"
                     );
+                } else if directive_name == "obj_symbol_name" {
+                    // TODO: check for duplicates?
+                    let name_lit = parse_str_lit_arg("a symbol name")?;
+                    let Some(decl) = self.expr()?.try_downcast::<ast::Decl>() else {
+                        return cerror2!(
+                            span,
+                            "Expected a declaration after #{directive_name} directive"
+                        );
+                    };
+                    decl.as_mut().obj_symbol_name = Some(name_lit);
+                    decl.upcast()
                 } else if directive_name == "__runtime_entry_point" {
                     let func = self.expr()?;
                     let Some(decl) = func.try_downcast::<ast::Decl>() else {

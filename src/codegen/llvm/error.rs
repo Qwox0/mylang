@@ -20,12 +20,16 @@ unsafe impl Send for CodegenError {}
 unsafe impl Sync for CodegenError {}
 
 #[derive(Debug)]
+#[must_use]
 pub enum CodegenResult<T, U = !> {
     Ok(T),
     /// Represents the [`unreachable`](https://llvm.org/docs/LangRef.html#i-unreachable) Terminator
     /// Instruction.
     Unreachable(U),
+    #[cfg(not(debug_assertions))]
     Err(CodegenError),
+    #[cfg(debug_assertions)]
+    Err(anyhow::Error),
 }
 
 pub type CodegenResultAndControlFlow<T> = CodegenResult<T, ()>;
@@ -41,28 +45,19 @@ impl<T, U> CodegenResult<T, U> {
 }
 
 impl<T> CodegenResultAndControlFlow<T> {
-    /// [`Unreachable`] -> [`None`]
-    pub fn unwrap(self) -> Option<T> {
-        match self {
-            Ok(t) => Some(t),
-            Unreachable(_) => None,
-            Err(error) => panic!("Called `unwrap` on CodegenResult::Err: {error:?}"),
-        }
-    }
-
     pub fn do_continue(&self) -> bool {
         matches!(self, Ok(_))
     }
 
-    pub fn handle_unreachable(self) -> Result<Option<T>, CodegenError> {
+    pub fn handle_unreachable(self) -> CodegenResult<Option<T>> {
         match self {
-            Ok(t) => Result::Ok(Some(t)),
-            Unreachable(_) => Result::Ok(None),
-            Err(error) => Result::Err(error),
+            Ok(t) => Ok(Some(t)),
+            Unreachable(_) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
-    pub fn as_do_continue(self) -> Result<bool, CodegenError> {
+    pub fn as_do_continue(self) -> CodegenResult<bool> {
         self.handle_unreachable().map(|t| t.is_some())
     }
 }

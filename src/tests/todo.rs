@@ -244,3 +244,24 @@ fn prevent_lvalue_cast() {
     test_body("mut a := .[1,2,3][..]mut; a.as([]i64) = .[3,2,1][..]mut;")
         .error("Cannot assign a value to an expression of kind 'Cast'", substr!("a.as([]i64)"));
 }
+
+#[test]
+#[ignore = "not implemented"]
+fn autocast_precedence() {
+    let code = "
+A : i64 : 1;
+B : i64 : 2;
+a: u8 = 1;
+b: i16 = 2;
+if (a == xx A && b == xx B) true else false;
+//       xx(              )
+";
+    test_body(code).ok(true);
+}
+
+#[test]
+#[ignore = "not implemented"]
+fn todo_fix_panic() {
+    test_body("struct {}.{};").ok(());
+    //                     ^ problem
+}

@@ -1,9 +1,9 @@
 use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
-    codegen::llvm::{self, CodegenModuleExt},
+    codegen::llvm::{self, CodegenModuleExt, error::CodegenResult},
     context::{CompilationContext, CompilationContextInner},
-    diagnostics::{DiagnosticReporter, HandledErr, cwarn},
+    diagnostics::{DiagnosticReporter, HandledErr, cerror, cwarn},
     parser::{self, lexer::Span},
     ptr::Ptr,
     sema,
@@ -20,12 +20,14 @@ use std::{
 };
 
 impl<'ctx> llvm::Codegen<'ctx> {
-    pub fn compile_all(&mut self, stmts: &[Ptr<Ast>]) {
-        self.precompile_decls(&stmts);
+    pub fn compile_all(&mut self, stmts: &[Ptr<Ast>]) -> CodegenResult<()> {
+        self.precompile_decls(&stmts)?;
 
         for s in stmts.iter().copied() {
-            self.compile_top_level(s);
+            self.compile_top_level(s)?;
         }
+
+        CodegenResult::Ok(())
     }
 }
 
@@ -137,7 +139,10 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     let codegen_start = Instant::now();
     let context = Context::create();
     let mut codegen = llvm::Codegen::new(&context, "dev");
-    codegen.compile_all(&stmts);
+    if let CodegenResult::Err(e) = codegen.compile_all(&stmts) {
+        cerror!(Span::ZERO, "Codegen failed: {e:?}");
+        return CompileResult::Err;
+    };
     let module = codegen.module.take().u();
     drop(codegen);
     ctx.compile_time.codegen = codegen_start.elapsed();

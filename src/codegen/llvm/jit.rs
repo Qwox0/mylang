@@ -1,6 +1,7 @@
 use inkwell::execution_engine::FunctionLookupError;
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum JitError {
     FunctionLookupError(FunctionLookupError),
     MustAddAModuleFirst,

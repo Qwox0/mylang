@@ -151,7 +151,7 @@ impl NewTest {
     }
 
     #[track_caller]
-    fn error(self, msg: &str, span: impl FnOnce(&str) -> TestSpan) -> TestResult<Err> {
+    fn error(self, msg: impl AsRef<str>, span: impl FnOnce(&str) -> TestSpan) -> TestResult<Err> {
         let res = self.compile();
         if !(matches!(res.data, CompileResult::Err)
             && res.ctx.ctx.diagnostic_reporter.do_abort_compilation())
@@ -199,10 +199,10 @@ impl<Res> TestResult<Res> {
     #[track_caller]
     pub fn error<'m>(
         mut self,
-        msg: impl Optional<&'m str>,
+        msg: impl AsRef<str>,
         span: impl FnOnce(&str) -> TestSpan,
     ) -> TestResult<Err> {
-        self.check_next_diag(DiagnosticSeverity::Error, msg.as_option(), span);
+        self.check_next_diag(DiagnosticSeverity::Error, Some(msg.as_ref()), span);
         TestResult { data: Err, ..self }
     }
 
@@ -267,13 +267,15 @@ impl TestSpan {
         TestSpan::new(pos, pos + 1)
     }
 
+    #[track_caller]
     pub fn of_substr(str: &str, substr: &str, mut n: usize) -> TestSpan {
         let mut pos = 0;
         loop {
             let str = &str[pos..];
-            pos += str.find(substr).unwrap_or_else(|| {
+            let Some(start) = str.find(substr) else {
                 panic!("The input text should have at least {} occurrences of {substr:?}", n + 1);
-            });
+            };
+            pos += start;
             if n == 0 {
                 break;
             }

@@ -442,7 +442,7 @@ ast_variants! {
         var_ty: OPtr<Type>,
         /// also used for default value in fn params, struct fields, ...
         init: OPtr<Ast>,
-        // init_const_val: OPtr<ConstVal>, // TODO: benchmark this
+        obj_symbol_name: OPtr<StrVal>,
     },
 
     /// `if <cond> <then>` (`else <else>`)
@@ -646,24 +646,28 @@ inherit_ast! {
 }
 
 pub trait UpcastToAst: Sized {
-    fn upcast(self) -> Ptr<Ast>;
+    fn upcast(self: Ptr<Self>) -> Ptr<Ast>;
 
-    fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]>;
+    fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]>;
 
     /// resolve possible replacements of this expression
-    fn rep(self) -> Ptr<Ast> {
+    fn rep(self: Ptr<Self>) -> Ptr<Ast> {
         self.upcast().rep()
+    }
+
+    fn full_span(&self) -> Span {
+        Ptr::from_ref(self).upcast().full_span()
     }
 }
 
 macro_rules! impl_UpcastToAst {
     ($($name:ty),*) => { $(
-        impl UpcastToAst for Ptr<$name> {
-            fn upcast(self) -> Ptr<Ast> {
+        impl UpcastToAst for $name {
+            fn upcast(self: Ptr<Self>) -> Ptr<Ast> {
                 self.cast()
             }
 
-            fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]> {
+            fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]> {
                 slice.cast_slice()
             }
         }
@@ -672,13 +676,13 @@ macro_rules! impl_UpcastToAst {
 
 impl_UpcastToAst! { AstEnum, ConstVal, Type }
 
-impl<V: AstVariant> UpcastToAst for Ptr<V> {
-    fn upcast(self) -> Ptr<Ast> {
+impl<V: AstVariant> UpcastToAst for V {
+    fn upcast(self: Ptr<V>) -> Ptr<Ast> {
         debug_assert_eq!(self.get_kind(), V::KIND);
         self.cast()
     }
 
-    fn upcast_slice(slice: Ptr<[Self]>) -> Ptr<[Ptr<Ast>]> {
+    fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]> {
         debug_assert!(slice.iter().all(|a| a.get_kind() == V::KIND));
         slice.cast_slice()
     }
@@ -1122,9 +1126,10 @@ pub trait OptionTypeExt {
     fn matchable(self) -> Ptr<TypeEnum>;
     fn downcast<V: TypeVariant>(self) -> Ptr<V>;
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V>;
+    fn display(self) -> impl std::fmt::Display;
 }
 
-impl OptionTypeExt for Option<Ptr<Type>> {
+impl OptionTypeExt for OPtr<Type> {
     #[inline]
     fn matchable(self) -> Ptr<TypeEnum> {
         match self {
@@ -1133,6 +1138,7 @@ impl OptionTypeExt for Option<Ptr<Type>> {
         }
     }
 
+    #[track_caller]
     #[inline]
     fn downcast<V: TypeVariant>(self) -> Ptr<V> {
         self.u().downcast()
@@ -1141,6 +1147,19 @@ impl OptionTypeExt for Option<Ptr<Type>> {
     #[inline]
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
         self?.try_downcast()
+    }
+
+    fn display(self) -> impl std::fmt::Display {
+        struct DisplayOption(OPtr<Type>);
+        impl std::fmt::Display for DisplayOption {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self.0 {
+                    Some(ty) => write!(f, "{ty}"),
+                    None => write!(f, "None"),
+                }
+            }
+        }
+        DisplayOption(self)
     }
 }
 
@@ -1173,6 +1192,15 @@ impl AstKind {
             AstKind::Decl | AstKind::Empty | AstKind::SimpleDirective | AstKind::ImportDirective
         )
     }
+
+    pub fn initializer_kind(self) -> &'static str {
+        match self {
+            AstKind::PositionalInitializer => "a positional initializer",
+            AstKind::NamedInitializer => "a named initializer",
+            AstKind::ArrayInitializer | AstKind::ArrayInitializerShort => "an array initializer",
+            k => panic_debug!("{k:?} is not an initializer kind"),
+        }
+    }
 }
 
 impl Ident {
@@ -1199,6 +1227,7 @@ impl Decl {
             var_ty_expr: None,
             var_ty: None,
             init: None,
+            obj_symbol_name: None,
         })
     }
 
