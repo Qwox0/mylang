@@ -67,6 +67,16 @@ fn test_parse(code: impl ToString) -> TestResult<Parsed> {
     TestResult { data: Parsed, ..res }
 }
 
+fn test_analyzed_struct(struct_code: &str) -> TestResult<Ptr<crate::ast::StructDef>> {
+    let res = test(format!("_ :: {struct_code}")).compile_no_err();
+    let struct_def = res.stmts()[0]
+        .downcast::<crate::ast::Decl>()
+        .init
+        .unwrap()
+        .downcast::<crate::ast::StructDef>();
+    TestResult { data: struct_def, ..res }
+}
+
 struct NewTest {
     code: String,
 }
@@ -225,9 +235,7 @@ impl<Res> TestResult<Res> {
         self.check_next_diag(DiagnosticSeverity::Info, msg.as_option(), span);
         self
     }
-}
 
-impl TestResult<Parsed> {
     pub fn stmts(&self) -> &[Ptr<ast::Ast>] {
         &self.ctx.ctx.stmts
     }

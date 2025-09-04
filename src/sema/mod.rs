@@ -17,7 +17,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopePos},
     scoped_stack::ScopedStack,
-    type_::{RangeKind, common_type, ty_match},
+    type_::{RangeKind, common_type, struct_offset, ty_match},
     util::{self, UnwrapDebug, then, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
@@ -1191,6 +1191,28 @@ impl Sema {
                 }
                 expr.ty = Some(main_ty);
             },
+            AstEnum::SizeOfDirective { type_, .. } => {
+                let size = self.analyze_type(*type_)?.size();
+                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
+                expr.ty = Some(p.int_lit);
+            },
+            AstEnum::SizeOfValDirective { val, .. } => {
+                let size = analyze!(*val, None).size();
+                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
+                expr.ty = Some(p.int_lit);
+            },
+            AstEnum::OffsetOfDirective { type_, field, .. } => {
+                let ty = self.analyze_type(*type_)?;
+                let Some(s_def) = ty.try_downcast_struct_def() else {
+                    return cerror2!(type_.full_span(), "expected struct type");
+                };
+                let Some((f_idx, _)) = s_def.fields.find_field(field.sym) else {
+                    return self.cctx.error_unknown_field(*field, s_def.upcast_to_type()).into();
+                };
+                let offset = struct_offset(&s_def.fields, f_idx);
+                expr.set_replacement(ast_new!(IntVal { val: offset as i64 }, Span::ZERO).upcast());
+                expr.ty = Some(p.int_lit);
+            },
             AstEnum::SimpleDirective { ret_ty, .. } => {
                 expr.ty = Some(*ret_ty);
             },
@@ -1752,8 +1774,8 @@ impl Sema {
             let is_init_const = decl.is_const || is_static || is_field;
             self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty =
-                check_or_infer_target!(init.ty.u(), &mut decl.var_ty, true, init.full_span())
-                    .finalize();
+                check_or_infer_target!(init.ty.u(), &mut decl.var_ty, true, init.full_span());
+            let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
             init.as_mut().ty = Some(var_ty);
             if is_init_const && var_ty != p.never && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.

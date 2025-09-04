@@ -295,6 +295,21 @@ impl DebugAst for Ast {
             AstEnum::ProgramMainDirective { span, .. } | AstEnum::SimpleDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());
             },
+            AstEnum::SizeOfDirective { type_, .. } => {
+                lines.write("#sizeof");
+                lines.write_tree(type_);
+            },
+            AstEnum::SizeOfValDirective { val, .. } => {
+                lines.write("#sizeof_val");
+                lines.write_tree(val);
+            },
+            AstEnum::OffsetOfDirective { type_, field, .. } => {
+                lines.write("#offset_of(");
+                lines.write_tree(type_);
+                lines.write(",");
+                lines.write_tree(field);
+                lines.write(")");
+            },
 
             AstEnum::IntVal { val, .. } => lines.write(&val.to_string()),
             AstEnum::FloatVal { val, .. } => lines.write(&val.to_string()),

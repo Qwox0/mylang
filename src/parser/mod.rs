@@ -667,6 +667,19 @@ impl Parser {
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "program_main" {
                     expr!(ProgramMainDirective {}, span.join(directive_ident.span))
+                } else if directive_name == "sizeof" {
+                    let type_ = self.expr()?;
+                    expr!(SizeOfDirective { type_ }, span.join(directive_ident.span))
+                } else if directive_name == "sizeof_val" {
+                    let val = self.expr()?;
+                    expr!(SizeOfValDirective { val }, span.join(directive_ident.span))
+                } else if directive_name == "offsetof" {
+                    self.tok(TokenKind::OpenParenthesis)?;
+                    let type_ = self.expr()?;
+                    self.tok(TokenKind::Comma)?;
+                    let field = self.ident()?;
+                    self.tok(TokenKind::CloseParenthesis)?;
+                    expr!(OffsetOfDirective { type_, field }, span.join(directive_ident.span))
                 }
                 // annotation directives:
                 else if directive_name == "no_mangle" {

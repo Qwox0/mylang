@@ -1,4 +1,5 @@
-use crate::tests::{substr, test, test_body};
+use crate::tests::{substr, test, test_analyzed_struct, test_body};
+use std::mem::offset_of;
 
 #[test]
 fn set_field_value() {
@@ -98,4 +99,20 @@ CONST :: MyStruct.();
 DEFAULT :: 7;
 test :: -> CONST.arr[1];";
     test(code).ok(7i32);
+}
+
+#[test]
+fn struct_layout() {
+    #[repr(C)]
+    #[rustfmt::skip]
+    struct A { a: i64, b: u8, c: u16 }
+    // layout: `aaaaaaaab_cc____`
+    let res = test_analyzed_struct("struct { a: i64, b: u8, c: u16 }");
+
+    assert_eq!(crate::type_::struct_size(&res.data.fields), std::mem::size_of::<A>());
+    assert_eq!(crate::type_::struct_alignment(&res.data.fields), std::mem::align_of::<A>());
+
+    assert_eq!(crate::type_::struct_offset(&res.data.fields, 0), offset_of!(A, a));
+    assert_eq!(crate::type_::struct_offset(&res.data.fields, 1), offset_of!(A, b));
+    assert_eq!(crate::type_::struct_offset(&res.data.fields, 2), offset_of!(A, c));
 }

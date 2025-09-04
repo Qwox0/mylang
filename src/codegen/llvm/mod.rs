@@ -149,8 +149,6 @@ impl<'ctx> Codegen<'ctx> {
         mut expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        // println!("compile {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
-
         debug_assert!(expr.ty.u().is_finalized());
 
         // Don't use the type of the replacement. because the init type of `_: *u8 = nil;` should
@@ -497,7 +495,7 @@ impl<'ctx> Codegen<'ctx> {
                         EnumTagType::IntTy(int_type) => int_type,
                     };
                     let tag_ty = tag_ty.as_basic_type_enum();
-                    let tag_align = enum_alignment(e.variants);
+                    let tag_align = enum_alignment(&e.variants);
                     let lhs = self.sym_as_val_with_llvm_ty(lhs_sym, tag_ty, tag_align)?.int_val();
                     let rhs = self.sym_as_val_with_llvm_ty(rhs_sym, tag_ty, tag_align)?.int_val();
                     return reg(self.build_int_binop(lhs, rhs, false, op)?);
@@ -828,6 +826,11 @@ impl<'ctx> Codegen<'ctx> {
                 // logic here seems like a bad idea.
                 Ok(self.get_symbol(decl.u()))
             },
+            AstEnum::SizeOfDirective { .. }
+            | AstEnum::SizeOfValDirective { .. }
+            | AstEnum::OffsetOfDirective { .. } => {
+                panic_debug!("{:?} should have been replaced during sema", expr.kind)
+            },
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -839,7 +842,7 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::UnionDef { .. }
             | AstEnum::EnumDef { .. }
             | AstEnum::RangeTy { .. }
-            | AstEnum::OptionTy { .. } => todo!("runtime type"),
+            | AstEnum::OptionTy { .. } => Ok(Symbol::Void),
             AstEnum::Fn { .. } => {
                 let f = expr.downcast::<ast::Fn>();
                 Ok(Symbol::Function(match self.fn_table.get(&f) {
@@ -1152,7 +1155,7 @@ impl<'ctx> Codegen<'ctx> {
 
             // set tag
             let tag_val = self.enum_tag_val(enum_def, variant_tag);
-            self.build_store(enum_ptr, tag_val, enum_alignment(enum_def.variants))?;
+            self.build_store(enum_ptr, tag_val, enum_alignment(&enum_def.variants))?;
 
             // set data
             if let Some(data) = data {
@@ -1558,6 +1561,17 @@ impl<'ctx> Codegen<'ctx> {
         target_ty: Ptr<ast::Type>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         let p = primitives();
+
+        if let Some(ty) = expr.as_mut().ty.as_mut()
+            && !ty.is_finalized()
+        {
+            if ty_match(*ty, target_ty) {
+                finalize_ty(ty, target_ty);
+            } else {
+                ty.finalize();
+            }
+        }
+
         let sym = self.compile_expr(expr)?;
         let expr_ty = expr.ty.u();
 
@@ -1704,7 +1718,7 @@ impl<'ctx> Codegen<'ctx> {
                 EnumTagType::IntTy(int_type) => int_type.as_basic_type_enum(),
             };
             let is_tag_signed = e.tag_ty.u().is_signed;
-            let tag_align = enum_alignment(e.variants);
+            let tag_align = enum_alignment(&e.variants);
             let val = self.sym_as_val_with_llvm_ty(sym, tag_ty, tag_align)?.int_val();
             return reg(self.builder.build_int_cast_sign_flag(
                 val,
@@ -2570,7 +2584,7 @@ impl<'ctx> Codegen<'ctx> {
         // finished the last 8 bytes
         push_prev_state_to_new_fields!();
 
-        debug_assert!(struct_size(fields) <= 16);
+        debug_assert!(struct_size(&fields) <= 16);
 
         match new_fields {
             [None, _] => CFfiType::Zst,
@@ -2717,7 +2731,7 @@ impl<'ctx> Codegen<'ctx> {
         let p = primitives();
         let ast::Decl { init, is_const, markers, .. } = decl.as_ref();
         let var_ty = decl.var_ty.u();
-        debug_assert!(var_ty.is_finalized());
+        debug_assert!(decl.is_const || var_ty.is_finalized());
         debug_assert!(init.is_none_or(|init| init.ty == var_ty));
 
         if *is_const {

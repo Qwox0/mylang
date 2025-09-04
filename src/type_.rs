@@ -6,8 +6,9 @@ use crate::{
     ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     util::{
-        Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_nearest_power_of_two,
-        unreachable_debug, variant_count_to_tag_size_bits, variant_count_to_tag_size_bytes,
+        Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_alignment,
+        round_up_to_nearest_power_of_two, unreachable_debug, variant_count_to_tag_size_bits,
+        variant_count_to_tag_size_bytes,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -405,11 +406,11 @@ impl Ptr<ast::Type> {
                 elem_ty.downcast_type().size() * len.int::<usize>()
             },
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => struct_size(*fields),
+            TypeEnum::StructDef { fields, .. } => struct_size(fields),
             TypeEnum::UnionDef { fields, .. } => union_size(*fields),
             TypeEnum::EnumDef { variants, .. } => aligned_add(
                 variant_count_to_tag_size_bytes(variants.len()) as usize,
-                Layout::new(union_size(*variants), struct_alignment(*variants)),
+                Layout::new(union_size(*variants), struct_alignment(variants)),
             ),
             TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
             TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
@@ -438,9 +439,9 @@ impl Ptr<ast::Type> {
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().alignment(),
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
-                struct_alignment(*fields)
+                struct_alignment(fields)
             },
-            TypeEnum::EnumDef { variants, .. } => enum_alignment(*variants),
+            TypeEnum::EnumDef { variants, .. } => enum_alignment(variants),
             TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { ty, .. } => ty.u().alignment(),
@@ -515,13 +516,36 @@ pub fn int_alignment(bits: u32) -> usize {
 }
 
 #[inline]
-pub fn struct_size(fields: DeclList) -> usize {
-    fields.iter_types().map(Ptr::layout).fold(0, aligned_add)
+pub fn struct_size(fields: &[Ptr<ast::Decl>]) -> usize {
+    struct_layout(fields).size
 }
 
 #[inline]
-pub fn struct_alignment(fields: DeclList) -> usize {
+pub fn struct_alignment(fields: &[Ptr<ast::Decl>]) -> usize {
     fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
+}
+
+pub fn struct_layout(fields: &[Ptr<ast::Decl>]) -> Layout {
+    let l = struct_layout_unaligned(fields);
+    let size = round_up_to_alignment!(l.size, l.align);
+    Layout { size, ..l }
+}
+
+/// doesn't align the [`Layout::size`] to the alignment of the entire struct.
+fn struct_layout_unaligned(fields: &[Ptr<ast::Decl>]) -> Layout {
+    let mut align = ZST_ALIGNMENT;
+    let size = fields
+        .iter_types()
+        .map(Ptr::layout)
+        .inspect(|layout| align = align.max(layout.align))
+        .fold(0, aligned_add);
+    Layout { size, align }
+}
+
+pub fn struct_offset(fields: &[Ptr<ast::Decl>], f_idx: usize) -> usize {
+    let f = fields.get(f_idx).u();
+    let prev_offset = struct_layout_unaligned(&fields[..f_idx]).size;
+    round_up_to_alignment!(prev_offset, f.var_ty.u().alignment())
 }
 
 #[inline]
@@ -530,7 +554,7 @@ pub fn union_size(fields: DeclList) -> usize {
 }
 
 #[inline]
-pub fn enum_alignment(variants: DeclList) -> usize {
+pub fn enum_alignment(variants: &[Ptr<ast::Decl>]) -> usize {
     int_alignment(variant_count_to_tag_size_bits(variants.len())).max(struct_alignment(variants))
 }
 

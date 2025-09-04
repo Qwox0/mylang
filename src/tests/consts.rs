@@ -1,4 +1,4 @@
-use crate::tests::{array::CRetArr, substr, test};
+use crate::tests::{array::CRetArr, substr, test, test_body};
 
 /// more tests about associated constants: [`crate::tests::associated_consts`]
 #[test]
@@ -124,4 +124,46 @@ fn prefer_type_error_over_non_const_error() {
         .error("mismatched types: expected u64; got []u8", substr!("len";skip=1));
     test("test :: (len: u64) -> { .[1; len] }")
         .error("Array length must be known at compile time", substr!("len";skip=1));
+}
+
+#[test]
+fn unfinalized_consts() {
+    let code = "
+MY_INT :: 3;
+a: i64 = MY_INT;
+b: u16 = MY_INT;
+c := MY_INT;
+a + b.as(i64) + c";
+    test_body(code).ok(9i64);
+
+    let code = "
+f :: (x: u16) -> x * 2;
+A :: 5;
+test :: -> f((A + 1).as(u16)); // `finalize_arg_type` during codegen is still valid, as it only
+                               // changes the type of the `A` ident, not the `A` decl.
+test2 :: -> i32 A + 1;
+";
+    let res = test(code).ok(12u16);
+    assert!(res.llvm_ir().contains("@f(i16 noundef 6)"));
+    assert!(res.llvm_ir().contains("ret i32 6"));
+}
+
+#[test]
+fn allow_cast_on_unfinalized_consts() {
+    let code = "
+MY_INT :: 3;
+take_ptr :: (ptr: *any) -> {};
+take_ptr(xx MY_INT.as(i8));";
+    let res = test_body(code).ok(());
+    // `int_lit` -> cast to `i8` -> autocast to `*any`
+    assert!(res.llvm_ir().contains("take_ptr(ptr noundef inttoptr (i8 3 to ptr))"));
+    drop(res);
+
+    let code = "
+MY_INT :: 3;
+take_ptr :: (ptr: *any) -> {};
+take_ptr(xx MY_INT);";
+    let res = test_body(code).ok(());
+    // `int_lit` -> finalize to `i64` -> autocast to `*any`
+    assert!(res.llvm_ir().contains("take_ptr(ptr noundef inttoptr (i64 3 to ptr))"));
 }

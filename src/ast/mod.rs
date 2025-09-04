@@ -534,6 +534,11 @@ ast_variants! {
         ret_ty: Ptr<Type>,
     },
 
+    /// TODO: replace with stdlib functions
+    SizeOfDirective { type_: Ptr<Ast> },
+    SizeOfValDirective { val: Ptr<Ast> },
+    OffsetOfDirective { type_: Ptr<Ast>, field: Ptr<Ident> },
+
     ===== Types =====
 
     /// `void`, `never`, `bool`, `type`
@@ -914,6 +919,11 @@ impl Ptr<Type> {
         }
     }
 
+    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.kind.is_struct_kind() => self.downcast_struct_def())
+    }
+
     pub fn is_int_lit(self) -> bool {
         let p = primitives();
         self == p.int_lit || self == p.sint_lit
@@ -921,11 +931,6 @@ impl Ptr<Type> {
 
     pub fn is_sint(self) -> bool {
         self.try_downcast::<IntTy>().is_some_and(|i| i.is_signed)
-    }
-
-    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
-        debug_assert!(self.replacement.is_none());
-        then!(self.kind.is_struct_kind() => self.downcast_struct_def())
     }
 
     /// Some types (like pointers) are transparent and allow field/method access on its inner type.
@@ -1487,7 +1492,11 @@ impl UnaryOpKind {
             UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                 let pointee = out_ty.downcast::<PtrTy>().pointee.downcast_type();
                 debug_assert!(ty_match(*arg_ty, pointee));
-                *arg_ty = pointee;
+                if pointee != primitives().any {
+                    *arg_ty = pointee;
+                } else {
+                    arg_ty.finalize();
+                }
             },
             UnaryOpKind::Deref => {
                 let pointee = arg_ty.downcast_ref::<PtrTy>().pointee.downcast_type_ref();

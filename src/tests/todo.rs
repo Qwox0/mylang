@@ -265,3 +265,15 @@ fn todo_fix_panic() {
     test_body("struct {}.{};").ok(());
     //                     ^ problem
 }
+
+#[test]
+fn any_ptr_param_codegen() {
+    let code = "
+take_any :: (a: *any) -> {};
+take_any(&1);
+take_any(&struct { a: i32 }.(1));
+A :: struct { a: i32 }.(1);
+take_any(&A);
+";
+    test_body(code).ok(());
+}

@@ -16,7 +16,7 @@ fn cannot_assign_more_general_type() {
 fn can_infer_more_general_return_type() {
     fn t(code: &'static str, expected_ty: &str) {
         let res = test(code).compile_no_err();
-        let test_decl = res.ctx.ctx.stmts.iter().expect_one().downcast::<ast::Decl>();
+        let test_decl = res.stmts().iter().expect_one().downcast::<ast::Decl>();
         let test_fn = test_decl.init.unwrap().downcast::<ast::Fn>();
         assert_eq!(test_fn.ret_ty.unwrap().to_string(), expected_ty)
     }
