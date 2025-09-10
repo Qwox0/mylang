@@ -70,8 +70,8 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
                 if !s.kind.is_allowed_top_level() {
                     cerror!(s.full_span(), "unexpected top level expression");
-                    s.set_replacement(p.never.upcast());
                     s.as_mut().ty = Some(p.never);
+                    s.set_replacement(p.never.upcast());
                 }
                 continue;
             };
@@ -692,14 +692,14 @@ impl Sema {
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
-                expr.ty = Some(if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
+                if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
                     if is_const {
                         return self.cctx.error_const_call(call).into();
                     }
                     self.validate_call(&f.params(), args, span.end(), false)?;
 
                     debug_assert!(is_finished_or_recursive(f, self));
-                    f.ret_ty.unwrap_or(p.unknown_ty)
+                    expr.ty = Some(f.ret_ty.unwrap_or(p.unknown_ty));
                 } else if fn_ty == p.method_stub {
                     if is_const {
                         return self.cctx.error_const_call(call).into();
@@ -712,12 +712,13 @@ impl Sema {
                     self.validate_call(&fn_ty.params(), &args, span.end(), false)?;
 
                     debug_assert!(is_finished_or_recursive(fn_ty, self));
-                    fn_ty.ret_ty.unwrap_or(p.unknown_ty)
+                    expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
                 } else if fn_ty == p.enum_variant {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(dot.rhs.sym).u().1;
                     self.validate_call(&[variant], args, span.end(), is_const)?;
+                    expr.ty = Some(enum_ty.upcast_to_type());
 
                     if is_const {
                         let tag = dot.upcast().downcast::<ast::IntVal>().upcast();
@@ -727,7 +728,6 @@ impl Sema {
                         data.rep().as_mut().ty = Some(variant.var_ty.u());
                         expr.set_replacement(cv.upcast());
                     }
-                    enum_ty.upcast_to_type()
                 } else {
                     cerror!(
                         func.full_span(),
@@ -735,7 +735,7 @@ impl Sema {
                         fn_ty
                     );
                     return SemaResult::HandledErr;
-                });
+                };
             },
             AstEnum::UnaryOp { op, operand, .. } => {
                 let expr_ty;
@@ -1167,6 +1167,7 @@ impl Sema {
                     );
                 };
                 let main_ty = self.get_symbol_var_ty(main)?;
+                expr.ty = Some(main_ty);
                 if main_ty != p.never {
                     let Some(main_fn) = main_ty.try_downcast::<ast::Fn>() else {
                         return cerror2!(
@@ -1189,17 +1190,21 @@ impl Sema {
                     }
                     expr.set_replacement(main.const_val());
                 }
-                expr.ty = Some(main_ty);
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let size = self.analyze_type(*type_)?.size();
-                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
                 expr.ty = Some(p.int_lit);
+                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let size = analyze!(*val, None).size();
-                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
                 expr.ty = Some(p.int_lit);
+                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
+            },
+            AstEnum::AlignOfDirective { type_, .. } => {
+                let align = self.analyze_type(*type_)?.alignment();
+                expr.ty = Some(p.int_lit);
+                expr.set_replacement(ast_new!(IntVal { val: align as i64 }, Span::ZERO).upcast());
             },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
                 let ty = self.analyze_type(*type_)?;
@@ -1210,8 +1215,8 @@ impl Sema {
                     return self.cctx.error_unknown_field(*field, s_def.upcast_to_type()).into();
                 };
                 let offset = struct_offset(&s_def.fields, f_idx);
-                expr.set_replacement(ast_new!(IntVal { val: offset as i64 }, Span::ZERO).upcast());
                 expr.ty = Some(p.int_lit);
+                expr.set_replacement(ast_new!(IntVal { val: offset as i64 }, Span::ZERO).upcast());
             },
             AstEnum::SimpleDirective { ret_ty, .. } => {
                 expr.ty = Some(*ret_ty);

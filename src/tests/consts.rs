@@ -167,3 +167,20 @@ take_ptr(xx MY_INT);";
     // `int_lit` -> finalize to `i64` -> autocast to `*any`
     assert!(res.llvm_ir().contains("take_ptr(ptr noundef inttoptr (i64 3 to ptr))"));
 }
+
+#[test]
+fn fix_llvm_ty_mismatch_for_const_struct_arg() {
+    let code = "
+MyStruct :: struct { val: u8 };
+CONST :: MyStruct.(1);
+take_struct_val :: (val: MyStruct) -> {};
+test :: -> take_struct_val(CONST);";
+    test(code).ok(());
+
+    let code = "
+MyStruct :: struct { val: u8, val2: u8, val3: i64 };
+CONST :: MyStruct.(1, 2, 3);
+take_struct_val :: (val: MyStruct) -> {};
+test :: -> take_struct_val(CONST);";
+    test(code).ok(());
+}

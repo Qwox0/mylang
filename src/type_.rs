@@ -302,26 +302,26 @@ fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
 
 const ZST_ALIGNMENT: usize = 1;
 
-impl Ptr<ast::Type> {
-    pub fn matches_int(self) -> bool {
+impl ast::Type {
+    pub fn matches_int(self: Ptr<Self>) -> bool {
         self.kind == AstKind::IntTy || self == primitives().never
     }
 
-    pub fn matches_bool(self) -> bool {
+    pub fn matches_bool(self: Ptr<Self>) -> bool {
         let p = primitives();
         self == p.bool || self == p.never
     }
 
-    pub fn matches_void(self) -> bool {
+    pub fn matches_void(self: Ptr<Self>) -> bool {
         let p = primitives();
         self == p.void_ty || self == p.never
     }
 
-    pub fn matches_ptr(self) -> bool {
+    pub fn matches_ptr(self: Ptr<Self>) -> bool {
         self.kind == AstKind::PtrTy || self == primitives().never
     }
 
-    pub fn matches_str(self) -> bool {
+    pub fn matches_str(self: Ptr<Self>) -> bool {
         let p = primitives();
         self == p.str_slice_ty
             || self
@@ -349,7 +349,7 @@ impl Ptr<ast::Type> {
 
     /// This might mutate values behind [`Ptr`]s in `self`.
     /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
-    pub fn finalize(&mut self) -> Ptr<ast::Type> {
+    pub fn finalize(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
         let p = primitives();
         debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
         match self.matchable().as_mut() {
@@ -386,7 +386,7 @@ impl Ptr<ast::Type> {
     }
 
     /// size of stack allocation in bytes
-    pub fn size(self) -> usize {
+    pub fn size(self: Ptr<Self>) -> usize {
         const PTR_SIZE: usize = 8;
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
@@ -422,7 +422,7 @@ impl Ptr<ast::Type> {
     }
 
     /// alignment of stack allocation in bytes
-    pub fn alignment(self) -> usize {
+    pub fn alignment(self: Ptr<Self>) -> usize {
         let alignment = match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
@@ -452,11 +452,11 @@ impl Ptr<ast::Type> {
     }
 
     /// Returns `(self.size(), self.alignment())`
-    pub fn layout(self) -> Layout {
+    pub fn layout(self: Ptr<Self>) -> Layout {
         Layout::new(self.size(), self.alignment())
     }
 
-    pub fn is_non_null(self) -> bool {
+    pub fn is_non_null(self: Ptr<Self>) -> bool {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
@@ -466,7 +466,7 @@ impl Ptr<ast::Type> {
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => true,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().is_non_null(),
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => fields.iter_types().any(Ptr::is_non_null),
+            TypeEnum::StructDef { fields, .. } => fields.iter_types().any(ast::Type::is_non_null),
             TypeEnum::UnionDef { .. } => todo!(),
             TypeEnum::EnumDef { .. } => todo!(),
             TypeEnum::RangeTy { .. } => todo!(),
@@ -476,7 +476,7 @@ impl Ptr<ast::Type> {
     }
 
     /// `not is_primitive`
-    pub fn is_aggregate(self) -> bool {
+    pub fn is_aggregate(self: Ptr<Self>) -> bool {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => false,
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
@@ -499,7 +499,7 @@ impl Ptr<ast::Type> {
         }
     }
 
-    pub fn is_ffi_noundef(self) -> bool {
+    pub fn is_ffi_noundef(self: Ptr<Self>) -> bool {
         // arrays are special because they are always passed as a primitive pointer
         !self.is_aggregate() || self.kind == AstKind::ArrayTy
     }
@@ -522,7 +522,7 @@ pub fn struct_size(fields: &[Ptr<ast::Decl>]) -> usize {
 
 #[inline]
 pub fn struct_alignment(fields: &[Ptr<ast::Decl>]) -> usize {
-    fields.iter_types().map(Ptr::alignment).max().unwrap_or(ZST_ALIGNMENT)
+    fields.iter_types().map(ast::Type::alignment).max().unwrap_or(ZST_ALIGNMENT)
 }
 
 pub fn struct_layout(fields: &[Ptr<ast::Decl>]) -> Layout {
@@ -536,7 +536,7 @@ fn struct_layout_unaligned(fields: &[Ptr<ast::Decl>]) -> Layout {
     let mut align = ZST_ALIGNMENT;
     let size = fields
         .iter_types()
-        .map(Ptr::layout)
+        .map(ast::Type::layout)
         .inspect(|layout| align = align.max(layout.align))
         .fold(0, aligned_add);
     Layout { size, align }
@@ -550,7 +550,7 @@ pub fn struct_offset(fields: &[Ptr<ast::Decl>], f_idx: usize) -> usize {
 
 #[inline]
 pub fn union_size(fields: DeclList) -> usize {
-    fields.iter_types().map(Ptr::size).max().unwrap_or(0)
+    fields.iter_types().map(ast::Type::size).max().unwrap_or(0)
 }
 
 #[inline]

@@ -828,6 +828,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::SizeOfDirective { .. }
             | AstEnum::SizeOfValDirective { .. }
+            | AstEnum::AlignOfDirective { .. }
             | AstEnum::OffsetOfDirective { .. } => {
                 panic_debug!("{:?} should have been replaced during sema", expr.kind)
             },
@@ -1032,36 +1033,43 @@ impl<'ctx> Codegen<'ctx> {
             let sym = self.compile_expr(arg)?;
             let arg_ty = arg_ffi_types.get(p_idx).u();
             let arg_offset = *arg_ffi_offsets.get(p_idx).u();
+            debug_assert_eq!(param.var_ty.u().alignment(), arg.ty.u().alignment());
+            let arg_align = param.var_ty.u().alignment();
 
             match arg_ty {
                 CFfiType::Zst => {},
                 CFfiType::Simple(simple_ty) => {
-                    let val = self.sym_as_val_with_llvm_ty(
-                        sym,
-                        *simple_ty,
-                        param.var_ty.u().alignment(),
-                    )?;
+                    let val = if !param.var_ty.u().is_aggregate() {
+                        self.sym_as_val_with_llvm_ty(sym, *simple_ty, arg_align)?
+                    } else {
+                        // Cannot directly pass the `Symbol::Register` because the types might mismatch
+                        // (e.g. sym ty: `{ i32 }`, c_ffi_ty: `i32`
+                        self.sym_as_val_to_llvm_ty(sym, *simple_ty, arg_align)?
+                    };
                     set_arg_val!(arg_offset, val.basic_metadata_val());
                 },
                 CFfiType::Simple2(two_params) => {
+                    let arg_ptr = Symbol::Stack(self.build_ptr_to_sym_with_align(sym, arg_align)?);
                     let ffi_struct = self.struct_type_inner(two_params, None, false);
-                    let field_align = param.var_ty.u().alignment();
                     for (f_idx, f_ty) in two_params.iter().enumerate() {
                         let f_idx = f_idx as u32;
-                        let f_sym = self.build_struct_access(ffi_struct, sym, f_idx, "")?;
-                        let f_val = self.sym_as_val_with_llvm_ty(f_sym, *f_ty, field_align)?;
+                        let f_sym = self.build_struct_access(ffi_struct, arg_ptr, f_idx, "")?;
+                        let f_val = self.sym_as_val_with_llvm_ty(f_sym, *f_ty, arg_align)?;
                         set_arg_val!(arg_offset + f_idx, f_val.basic_metadata_val());
                     }
                 },
                 CFfiType::ByValPtr | CFfiType::Array => {
-                    set_arg_val!(arg_offset, self.build_ptr_to_sym(sym, param.var_ty.u())?.into());
+                    set_arg_val!(
+                        arg_offset,
+                        self.build_ptr_to_sym_with_align(sym, arg_align)?.into()
+                    );
                 },
                 CFfiType::Fn => set_arg_val!(arg_offset, sym.global().as_pointer_value().into()),
                 CFfiType::SmallSimpleEnum { small_int, ffi_int } => {
                     let val = self.sym_as_val_with_llvm_ty(
                         sym,
                         small_int.as_basic_type_enum(),
-                        param.var_ty.u().alignment(),
+                        arg_align,
                     )?;
                     set_arg_val!(
                         arg_offset,
@@ -1339,7 +1347,9 @@ impl<'ctx> Codegen<'ctx> {
                             || param_ty.is_aggregate()
                         {
                             self.position_builder_at_start(func.get_first_basic_block().u());
-                            Symbol::Stack(self.build_alloca_value(param.basic_val(), param_ty)?)
+                            Symbol::Stack(
+                                self.build_alloca_value(param.basic_val(), param_ty.alignment())?,
+                            )
                         } else {
                             debug_assert_eq!(
                                 param.basic_val().get_type(),
@@ -1739,23 +1749,32 @@ impl<'ctx> Codegen<'ctx> {
     /// until the end of the function
     ///
     /// See <https://llvm.org/docs/Frontend/PerformanceTips.html#use-of-allocas>
-    fn build_alloca(
+    fn build_alloca_with_align(
         &self,
         llvm_ty: impl BasicType<'ctx>,
         name: &str,
-        ty: Ptr<ast::Type>,
+        align: usize,
     ) -> CodegenResult<PointerValue<'ctx>> {
         let prev_pos = self.builder.get_insert_block();
         let fn_entry_bb = self.cur_fn.u().get_first_basic_block().u();
         self.position_builder_at_start(fn_entry_bb);
 
         let ptr = self.builder.build_alloca(llvm_ty, name)?;
-        set_alignment(ptr, ty.alignment());
+        set_alignment(ptr, align);
 
         if let Some(prev) = prev_pos {
             self.builder.position_at_end(prev);
         }
         Ok(ptr)
+    }
+
+    fn build_alloca(
+        &self,
+        llvm_ty: impl BasicType<'ctx>,
+        name: &str,
+        ty: Ptr<ast::Type>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        self.build_alloca_with_align(llvm_ty, name, ty.alignment())
     }
 
     fn build_alloca2(
@@ -1769,15 +1788,17 @@ impl<'ctx> Codegen<'ctx> {
 
     fn build_alloca_value(
         &self,
-        val: impl BasicValue<'ctx>,
-        ty: Ptr<ast::Type>,
+        val: BasicValueEnum<'ctx>,
+        align: usize,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        let val = val.as_basic_value_enum();
-        let alloca = self.build_alloca(val.get_type(), "", ty)?;
-        self.build_store(alloca, val, ty.alignment())?;
+        #[cfg(debug_assertions)]
+        println!("INFO: doing stack allocation for register value: {val:?}");
+        let alloca = self.build_alloca_with_align(val.get_type(), "", align)?;
+        self.build_store(alloca, val, align)?;
         Ok(alloca)
     }
 
+    /// `ty` is only needed for [`ast::Type::alignment`]
     fn build_ptr_to_sym(
         &self,
         sym: Symbol<'ctx>,
@@ -1785,12 +1806,20 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<PointerValue<'ctx>> {
         Ok(match sym.basic() {
             BasicSymbol::Ref(ptr_value) => ptr_value,
-            BasicSymbol::Val(val) => {
-                #[cfg(debug_assertions)]
-                println!("INFO: doing stack allocation for register value: {val:?}");
-                self.build_alloca_value(val.basic_val(), ty)?
-            },
+            BasicSymbol::Val(val) => self.build_alloca_value(val.basic_val(), ty.alignment())?,
             BasicSymbol::Zst => panic_debug!("{ty} is not represented as a symbol"),
+        })
+    }
+
+    fn build_ptr_to_sym_with_align(
+        &self,
+        sym: Symbol<'ctx>,
+        align: usize,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        Ok(match sym.basic() {
+            BasicSymbol::Ref(ptr_value) => ptr_value,
+            BasicSymbol::Val(val) => self.build_alloca_value(val.basic_val(), align)?,
+            BasicSymbol::Zst => panic_debug!("a zst is not represented as a symbol"),
         })
     }
 
@@ -1896,6 +1925,7 @@ impl<'ctx> Codegen<'ctx> {
                 stack_val(self.builder.build_struct_gep(struct_ty, ptr, idx, name)?)
             },
             BasicSymbol::Val(val) => {
+                debug_assert_eq!(val.struct_val().get_type(), struct_ty);
                 reg(self.builder.build_extract_value(val.struct_val(), idx, name)?)
             },
             BasicSymbol::Zst => Ok(Symbol::Void),
@@ -2613,6 +2643,7 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// assumes that `sym` has type `llvm_ty`
     fn sym_as_val_with_llvm_ty(
         &mut self,
         sym: Symbol<'ctx>,
@@ -2629,6 +2660,17 @@ impl<'ctx> Codegen<'ctx> {
             },
             BasicSymbol::Zst => panic_debug!("a zst is an invalid value"),
         })
+    }
+
+    /// casts `sym` to type `llvm_ty`, if needed.
+    fn sym_as_val_to_llvm_ty(
+        &mut self,
+        sym: Symbol<'ctx>,
+        llvm_ty: BasicTypeEnum<'ctx>,
+        alignment: usize,
+    ) -> CodegenResult<CodegenValue<'ctx>> {
+        let ptr = self.build_ptr_to_sym_with_align(sym, alignment)?;
+        Ok(CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?.as_value_ref()))
     }
 
     fn sym_as_val_checked(

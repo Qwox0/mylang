@@ -668,14 +668,17 @@ impl Parser {
                 } else if directive_name == "program_main" {
                     expr!(ProgramMainDirective {}, span.join(directive_ident.span))
                 } else if directive_name == "sizeof" {
-                    let type_ = self.expr()?;
+                    let type_ = self.value(MAX_PRECEDENCE)?;
                     expr!(SizeOfDirective { type_ }, span.join(directive_ident.span))
                 } else if directive_name == "sizeof_val" {
-                    let val = self.expr()?;
+                    let val = self.value(MAX_PRECEDENCE)?;
                     expr!(SizeOfValDirective { val }, span.join(directive_ident.span))
+                } else if directive_name == "alignof" {
+                    let type_ = self.value(MAX_PRECEDENCE)?;
+                    expr!(AlignOfDirective { type_ }, span.join(directive_ident.span))
                 } else if directive_name == "offsetof" {
                     self.tok(TokenKind::OpenParenthesis)?;
-                    let type_ = self.expr()?;
+                    let type_ = self.value(MAX_PRECEDENCE)?;
                     self.tok(TokenKind::Comma)?;
                     let field = self.ident()?;
                     self.tok(TokenKind::CloseParenthesis)?;

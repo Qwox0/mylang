@@ -537,6 +537,7 @@ ast_variants! {
     /// TODO: replace with stdlib functions
     SizeOfDirective { type_: Ptr<Ast> },
     SizeOfValDirective { val: Ptr<Ast> },
+    AlignOfDirective { type_: Ptr<Ast> },
     OffsetOfDirective { type_: Ptr<Ast>, field: Ptr<Ident> },
 
     ===== Types =====
@@ -751,13 +752,8 @@ impl Ptr<Ast> {
     pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
-        if rep.ty.is_none()
-            && rep.span == Span::ZERO
-            && let Some(ty) = self.ty
-        {
-            // Currently only needed for displaying replacements (like `ConstVal`s). Maybe can be
-            // removed in the future.
-            rep.as_mut().ty = Some(ty);
+        if rep.ty.is_none() {
+            rep.as_mut().ty = Some(self.ty.u());
         }
         self.as_mut().replacement = Some(rep)
     }

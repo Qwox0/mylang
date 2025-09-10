@@ -303,6 +303,10 @@ impl DebugAst for Ast {
                 lines.write("#sizeof_val");
                 lines.write_tree(val);
             },
+            AstEnum::AlignOfDirective { type_, .. } => {
+                lines.write("#alignof");
+                lines.write_tree(type_);
+            },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
                 lines.write("#offset_of(");
                 lines.write_tree(type_);
