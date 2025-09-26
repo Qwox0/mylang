@@ -278,23 +278,18 @@ impl Sema {
                     let var_ty = self.get_symbol_var_ty(sym)?;
                     *decl = Some(sym);
                     expr.ty = Some(var_ty);
-                    if sym.is_const {
-                        if sym.init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
-                            return cerror2!(
-                                *span,
-                                "the use of extern symbols in constants is currently not \
-                                 implemented"
-                            );
-                        };
-                        expr.set_replacement(sym.const_val());
-                    } else if is_const {
-                        /* TODO: move this error
+                    let is_extern = sym.init.is_some_and(|i| i.kind == AstKind::ExternDirective);
+                    debug_assert!(!is_extern || sym.is_const);
+                    if is_const && is_extern {
                         return cerror2!(
                             *span,
-                            "cannot access a non-constant symbol at compile time"
+                            "the use of extern symbols in constants is currently not implemented"
                         );
-                        */
-                    }
+                    } else if sym.is_const {
+                        expr.set_replacement(sym.const_val());
+                    } else if is_const {
+                        // no const-check here. see `prefer_type_error_over_non_const_error`
+                    };
                 },
             },
             AstEnum::Block { stmts, has_trailing_semicolon, scope, .. } => {
@@ -329,7 +324,7 @@ impl Sema {
                 let lhs = not_never!(self.analyze_initializer_lhs(*lhs, *ty_hint, expr)?);
                 if let Some(s) = lhs.try_downcast::<ast::StructDef>() {
                     // allow slices?
-                    self.validate_call(&s.fields, args, span.end(), is_const)?;
+                    self.validate_call(&s.fields, args, false, span.end(), is_const)?;
                     expr.ty = Some(s.upcast_to_type());
 
                     if is_const {
@@ -350,7 +345,7 @@ impl Sema {
                     if is_const {
                         return self.cctx.error_const_ptr_initializer(expr).into();
                     } else {
-                        self.validate_call(&s.fields, args, span.end(), false)?;
+                        self.validate_call(&s.fields, args, false, span.end(), false)?;
                     }
                 } else {
                     self.cctx.error_cannot_apply_initializer(lhs, expr);
@@ -692,14 +687,20 @@ impl Sema {
                 let ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
                 let fn_ty = *analyze!(*func, ty_hint);
-                if let Some(f) = fn_ty.try_downcast::<ast::Fn>() {
+                if let Some(fn_ty) = fn_ty.try_downcast::<ast::Fn>() {
                     if is_const {
                         return self.cctx.error_const_call(call).into();
                     }
-                    self.validate_call(&f.params(), args, span.end(), false)?;
+                    self.validate_call(
+                        &fn_ty.params(),
+                        args,
+                        fn_ty.has_varargs,
+                        span.end(),
+                        false,
+                    )?;
 
-                    debug_assert!(is_finished_or_recursive(f, self));
-                    expr.ty = Some(f.ret_ty.unwrap_or(p.unknown_ty));
+                    debug_assert!(is_finished_or_recursive(fn_ty, self));
+                    expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
                 } else if fn_ty == p.method_stub {
                     if is_const {
                         return self.cctx.error_const_call(call).into();
@@ -709,7 +710,13 @@ impl Sema {
                     let args = std::iter::once(dot.lhs.u())
                         .chain(args.iter().copied())
                         .collect::<Vec<_>>(); // TODO: bench no allocation
-                    self.validate_call(&fn_ty.params(), &args, span.end(), false)?;
+                    self.validate_call(
+                        &fn_ty.params(),
+                        &args,
+                        fn_ty.has_varargs,
+                        span.end(),
+                        false,
+                    )?;
 
                     debug_assert!(is_finished_or_recursive(fn_ty, self));
                     expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
@@ -717,7 +724,7 @@ impl Sema {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(dot.rhs.sym).u().1;
-                    self.validate_call(&[variant], args, span.end(), is_const)?;
+                    self.validate_call(&[variant], args, false, span.end(), is_const)?;
                     expr.ty = Some(enum_ty.upcast_to_type());
 
                     if is_const {
@@ -1465,8 +1472,8 @@ impl Sema {
                 debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::RangeTy { .. } => todo!(),
-            AstEnum::OptionTy { inner_ty: ty, .. } => {
-                self.analyze_type(*ty)?;
+            AstEnum::OptionTy { inner_ty, .. } => {
+                self.analyze_type(*inner_ty)?;
                 expr.ty = Some(p.type_ty);
             },
         }
@@ -1784,13 +1791,17 @@ impl Sema {
             init.as_mut().ty = Some(var_ty);
             if is_init_const && var_ty != p.never && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
-                if is_static {
-                    return cerror2!(
-                        init.full_span(),
+                let span = init.full_span();
+                return if is_static {
+                    cerror2!(
+                        span,
                         "Currently the initial value of a static must be known at compile time"
-                    );
-                }
-                return cerror2!(init.full_span(), "Cannot evaluate value at compile time");
+                    )
+                } else if init.kind == AstKind::Ident {
+                    cerror2!(span, "Cannot access a non-constant symbol at compile time")
+                } else {
+                    cerror2!(span, "Cannot evaluate value at compile time")
+                };
             }
             Ok(())
         } else if decl.var_ty.is_some() {
@@ -1901,13 +1912,20 @@ impl Sema {
         &mut self,
         params: &[Ptr<ast::Decl>],
         args: &[Ptr<ast::Ast>],
+        allows_varargs: bool,
         close_p_span: Span,
         is_const: bool,
     ) -> SemaResult<()> {
         // positional args
         let mut pos_idx = 0;
         while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
-            let Some(&param) = params.get(pos_idx) else {
+            if let Some(&param) = params.get(pos_idx) {
+                let param_ty = param.var_ty.or_not_finished()?;
+                self.analyze_and_finalize_with_known_type(pos_arg, param_ty, is_const)?;
+            } else if allows_varargs {
+                self.analyze(pos_arg, &None, is_const)?;
+                pos_arg.as_mut().ty.as_mut().u().finalize();
+            } else {
                 let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
                 return cerror2!(
                     pos_arg.full_span(),
@@ -1915,15 +1933,13 @@ impl Sema {
                     params.len(),
                 );
             };
-            let param_ty = param.var_ty.or_not_finished()?;
-            self.analyze_and_finalize_with_known_type(pos_arg, param_ty, is_const)?;
 
             pos_idx += 1;
         }
 
         // named args
         let remaining_args = &args[pos_idx..];
-        let remaining_params = &params[pos_idx..];
+        let remaining_params = params.get(pos_idx..).unwrap_or(&[]);
         let mut was_set = vec![false; remaining_params.len()];
         for &arg in remaining_args {
             if is_pos_arg(&arg) {

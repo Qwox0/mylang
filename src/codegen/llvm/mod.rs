@@ -3,6 +3,7 @@ use crate::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclList, DeclListExt,
         DeclMarkers, OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
+    buffer::{CappedVec, UnorderedInitBuf},
     context::{ctx, primitives},
     display_code::{debug_expr, display},
     intern_pool::Symbol as InternSym,
@@ -415,7 +416,7 @@ impl<'ctx> Codegen<'ctx> {
                         },
                         _ => unreachable_debug(),
                     };
-                    self.compile_call(f, fn_val, *args, write_target.take())
+                    self.compile_call(f, fn_val, args.into_iter(), write_target.take())
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
                     let f = dot.rhs.rep().downcast::<ast::Fn>();
@@ -426,7 +427,28 @@ impl<'ctx> Codegen<'ctx> {
                         debug_expr!(expr);
                         unreachable_debug();
                     };
-                    let args = std::iter::once(dot.lhs.u()).chain(*args);
+
+                    #[derive(Clone)]
+                    struct IterMethodArgs<'a> {
+                        lhs: OPtr<Ast>,
+                        args: std::slice::Iter<'a, Ptr<Ast>>,
+                    }
+
+                    impl Iterator for IterMethodArgs<'_> {
+                        type Item = Ptr<Ast>;
+
+                        fn next(&mut self) -> Option<Self::Item> {
+                            self.lhs.take().or_else(|| self.args.next().copied())
+                        }
+                    }
+
+                    impl ExactSizeIterator for IterMethodArgs<'_> {
+                        fn len(&self) -> usize {
+                            self.lhs.is_some() as usize + self.args.len()
+                        }
+                    }
+
+                    let args = IterMethodArgs { lhs: Some(dot.lhs.u()), args: args.iter() };
                     self.compile_call(f, CallFnVal::Direct(val), args, write_target.take())
                 } else if func.ty == p.enum_variant {
                     let dot = func.downcast::<ast::Dot>();
@@ -978,7 +1000,7 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         f: Ptr<ast::Fn>,
         fn_val: CallFnVal<'ctx>,
-        args: impl IntoIterator<Item = Ptr<Ast>>,
+        args: impl ExactSizeIterator<Item = Ptr<Ast>> + Clone,
         mut write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         let ret_ty = f.ret_ty.u();
@@ -994,95 +1016,100 @@ impl<'ctx> Codegen<'ctx> {
             None
         };
 
-        let mut arg_ffi_types = Vec::with_capacity(f.params_scope.decls.len());
-        let mut arg_ffi_offsets = Vec::with_capacity(f.params_scope.decls.len());
-        {
-            let mut cur_arg_offset = sret_offset;
-            for p in f.params_scope.decls.iter() {
-                let c_ffi_ty = self.c_ffi_type(p.var_ty.u());
-                arg_ffi_types.push(c_ffi_ty);
-                arg_ffi_offsets.push(cur_arg_offset);
-                cur_arg_offset += c_ffi_ty.as_param_count() as u32
+        let (arg_ffi_types, arg_ffi_offsets, llvm_args_count) = {
+            // TODO: bench vs scratch arena
+            let arg_count = args.len().max(f.params().len());
+            let mut types = CappedVec::new(arg_count);
+            let mut offsets = CappedVec::new(arg_count);
+            let mut cur_llvm_arg_offset = sret_offset;
+
+            let param_types = f.params_scope.decls.iter().map(|p| p.var_ty);
+            let vararg_types = args.clone().skip(f.params_scope.decls.len()).map(|a| a.ty);
+            for ty in param_types.chain(vararg_types) {
+                let c_ffi_ty = self.c_ffi_type(ty.u());
+                types.push(c_ffi_ty);
+                offsets.push(cur_llvm_arg_offset);
+                cur_llvm_arg_offset += c_ffi_ty.as_param_count() as u32
             }
-        }
+            debug_assert!(types.is_full() && offsets.is_full());
+            (types.into_boxed_slice(), offsets.into_boxed_slice(), cur_llvm_arg_offset as usize)
+        };
 
-        let args_count = match fn_val {
-            CallFnVal::Direct(val) => val.count_params(),
-            CallFnVal::FnPtr(_, fn_ty) => fn_ty.count_param_types(),
-        } as usize;
-        let mut arg_values = Vec::with_capacity(args_count);
-        unsafe { arg_values.set_len(args_count) };
-        #[cfg(debug_assertions)]
-        let mut arg_values_was_initialized = vec![false; arg_values.len()];
-
-        macro_rules! set_arg_val {
-            ($idx:expr, $val:expr) => {{
-                arg_values[$idx as usize] = $val;
-                #[cfg(debug_assertions)]
-                {
-                    arg_values_was_initialized[$idx as usize] = true;
-                }
-            }};
-        }
+        let mut arg_values = UnorderedInitBuf::new(llvm_args_count);
 
         if use_sret {
-            set_arg_val!(0, ret_val_ptr.u().into());
+            arg_values.set(0, ret_val_ptr.u().into());
         }
 
         for_each_call_arg(f.params(), args, |arg, param, p_idx| {
             let sym = self.compile_expr(arg)?;
+
+            debug_assert!(f.has_varargs || param.is_some());
+            let param_ty = param.map(|p| p.var_ty.u()).unwrap_or(arg.ty.u());
             let arg_ty = arg_ffi_types.get(p_idx).u();
             let arg_offset = *arg_ffi_offsets.get(p_idx).u();
-            debug_assert_eq!(param.var_ty.u().alignment(), arg.ty.u().alignment());
-            let arg_align = param.var_ty.u().alignment();
 
-            match arg_ty {
+            debug_assert_eq!(param_ty.alignment(), arg.ty.u().alignment());
+            let arg_align = param_ty.alignment();
+
+            let arg_offset = arg_offset as usize;
+
+            match *arg_ty {
                 CFfiType::Zst => {},
                 CFfiType::Simple(simple_ty) => {
-                    let val = if !param.var_ty.u().is_aggregate() {
-                        self.sym_as_val_with_llvm_ty(sym, *simple_ty, arg_align)?
+                    let val = if !param_ty.is_aggregate() {
+                        self.sym_as_val_with_llvm_ty(sym, simple_ty, arg_align)?
                     } else {
                         // Cannot directly pass the `Symbol::Register` because the types might mismatch
                         // (e.g. sym ty: `{ i32 }`, c_ffi_ty: `i32`
-                        self.sym_as_val_to_llvm_ty(sym, *simple_ty, arg_align)?
+                        self.sym_as_val_to_llvm_ty(sym, simple_ty, arg_align)?
                     };
-                    set_arg_val!(arg_offset, val.basic_metadata_val());
+                    arg_values.set(arg_offset, val.basic_metadata_val());
                 },
                 CFfiType::Simple2(two_params) => {
                     let arg_ptr = Symbol::Stack(self.build_ptr_to_sym_with_align(sym, arg_align)?);
-                    let ffi_struct = self.struct_type_inner(two_params, None, false);
+                    let ffi_struct = self.struct_type_inner(&two_params, None, false);
                     for (f_idx, f_ty) in two_params.iter().enumerate() {
-                        let f_idx = f_idx as u32;
-                        let f_sym = self.build_struct_access(ffi_struct, arg_ptr, f_idx, "")?;
+                        let f_sym =
+                            self.build_struct_access(ffi_struct, arg_ptr, f_idx as u32, "")?;
                         let f_val = self.sym_as_val_with_llvm_ty(f_sym, *f_ty, arg_align)?;
-                        set_arg_val!(arg_offset + f_idx, f_val.basic_metadata_val());
+                        arg_values.set(arg_offset + f_idx, f_val.basic_metadata_val());
                     }
                 },
                 CFfiType::ByValPtr | CFfiType::Array => {
-                    set_arg_val!(
-                        arg_offset,
-                        self.build_ptr_to_sym_with_align(sym, arg_align)?.into()
-                    );
+                    arg_values
+                        .set(arg_offset, self.build_ptr_to_sym_with_align(sym, arg_align)?.into());
                 },
-                CFfiType::Fn => set_arg_val!(arg_offset, sym.global().as_pointer_value().into()),
+                CFfiType::Fn => arg_values.set(arg_offset, sym.global().as_pointer_value().into()),
                 CFfiType::SmallSimpleEnum { small_int, ffi_int } => {
                     let val = self.sym_as_val_with_llvm_ty(
                         sym,
                         small_int.as_basic_type_enum(),
                         arg_align,
                     )?;
-                    set_arg_val!(
+                    arg_values.set(
                         arg_offset,
-                        self.builder.build_int_z_extend(val.int_val(), *ffi_int, "ret")?.into()
+                        self.builder.build_int_z_extend(val.int_val(), ffi_int, "ret")?.into(),
                     );
                 },
             }
 
             Ok(())
         })?;
-        debug_assert_eq!(arg_values.len(), args_count);
+        let arg_values = arg_values.assume_init();
+
         #[cfg(debug_assertions)]
-        debug_assert!(arg_values_was_initialized.iter().all(|b| *b));
+        {
+            let llvm_param_count = match fn_val {
+                CallFnVal::Direct(val) => val.count_params(),
+                CallFnVal::FnPtr(_, fn_ty) => fn_ty.count_param_types(),
+            } as usize;
+            debug_assert!(if f.has_varargs {
+                llvm_args_count >= llvm_param_count
+            } else {
+                llvm_args_count == llvm_param_count
+            });
+        }
 
         let ret = match fn_val {
             CallFnVal::Direct(val) => self.builder.build_direct_call(val, &arg_values, "call")?,
@@ -1253,8 +1280,8 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         let fn_ty = match ret_type.into_basic_ret_ty(self) {
-            Some(ret_type) => ret_type.fn_type(&param_types, false),
-            None => self.context.void_type().fn_type(&param_types, false),
+            Some(ret_type) => ret_type.fn_type(&param_types, f.has_varargs),
+            None => self.context.void_type().fn_type(&param_types, f.has_varargs),
         };
         (fn_ty, ret_type)
     }
@@ -1452,21 +1479,18 @@ impl<'ctx> Codegen<'ctx> {
         fields: DeclList,
         args: &[Ptr<Ast>],
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        for_each_call_arg(
-            fields,
-            args.iter().copied(),
-            |val: Ptr<Ast>, field_def: Ptr<ast::Decl>, f_idx: usize| {
-                let field_ptr = self.builder.build_struct_gep(
-                    struct_ty,
-                    struct_ptr,
-                    f_idx as u32,
-                    field_def.ident.sym.text(),
-                )?;
-                finalize_ty(val.as_mut().ty.as_mut().u(), field_def.var_ty.u());
-                self.compile_expr_with_write_target(val, Some(field_ptr))?;
-                CodegenResult::Ok(())
-            },
-        )?;
+        for_each_call_arg(fields, args.iter().copied(), |val, field_def, f_idx| {
+            let field_def = field_def.u();
+            let field_ptr = self.builder.build_struct_gep(
+                struct_ty,
+                struct_ptr,
+                f_idx as u32,
+                field_def.ident.sym.text(),
+            )?;
+            finalize_ty(val.as_mut().ty.as_mut().u(), field_def.var_ty.u());
+            self.compile_expr_with_write_target(val, Some(field_ptr))?;
+            CodegenResult::Ok(())
+        })?;
         stack_val(struct_ptr)
     }
 
@@ -1600,12 +1624,14 @@ impl<'ctx> Codegen<'ctx> {
         // TODO: remove this rule
         if let Some(expr_ty) = expr_ty.try_downcast::<ast::OptionTy>() {
             if let Some(target_ty) = target_ty.try_downcast::<ast::OptionTy>()
-                && (expr_ty.inner_ty == target_ty.inner_ty
-                    || (expr_ty.inner_ty.kind == AstKind::PtrTy
-                        && target_ty.inner_ty.kind == AstKind::PtrTy))
+                && (expr_ty.inner_ty.rep() == target_ty.inner_ty.rep()
+                    || (expr_ty.inner_ty.rep().kind == AstKind::PtrTy
+                        && target_ty.inner_ty.rep().kind == AstKind::PtrTy))
             {
                 return Ok(sym);
-            } else if expr_ty.inner_ty.kind == AstKind::PtrTy && target_ty.kind == AstKind::PtrTy {
+            } else if expr_ty.inner_ty.rep().kind == AstKind::PtrTy
+                && target_ty.kind == AstKind::PtrTy
+            {
                 return Ok(sym);
             }
         }
@@ -1626,7 +1652,11 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     self.builder.build_unsigned_int_to_float(int, float_ty, "")?
                 })
-            } else if target_ty.kind == AstKind::PtrTy {
+            } else if target_ty.kind == AstKind::PtrTy
+                || target_ty
+                    .try_downcast::<ast::OptionTy>()
+                    .is_some_and(|opt| opt.inner_ty.rep().kind == AstKind::PtrTy)
+            {
                 reg(self.builder.build_int_to_ptr(int, self.ptr_type(), "")?)
             } else {
                 unreachable_debug()
@@ -1679,7 +1709,7 @@ impl<'ctx> Codegen<'ctx> {
         if (expr_ty.kind == AstKind::PtrTy
             || expr_ty
                 .try_downcast::<ast::OptionTy>()
-                .is_some_and(|opt| opt.inner_ty.kind == AstKind::PtrTy))
+                .is_some_and(|opt| opt.inner_ty.rep().kind == AstKind::PtrTy))
             && let Some(i_ty) = target_ty.try_downcast::<ast::IntTy>()
         {
             let ptr = self.sym_as_val(sym, expr_ty)?.ptr_val();
@@ -1791,8 +1821,6 @@ impl<'ctx> Codegen<'ctx> {
         val: BasicValueEnum<'ctx>,
         align: usize,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        #[cfg(debug_assertions)]
-        println!("INFO: doing stack allocation for register value: {val:?}");
         let alloca = self.build_alloca_with_align(val.get_type(), "", align)?;
         self.build_store(alloca, val, align)?;
         Ok(alloca)
@@ -3202,7 +3230,7 @@ impl<'ctx> CFfiType<'ctx> {
         }
     }
 
-    fn as_param_count(&self) -> usize {
+    fn as_param_count(&self) -> u32 {
         match self {
             CFfiType::Zst => 0,
             CFfiType::Simple(_)
@@ -3245,11 +3273,11 @@ pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> Ptr<ast::
     *ty
 }
 
-/// `f: (value: Ptr<Ast>, param_def: Ptr<ast::Decl>, param_idx: usize) -> CodegenResult<(), U>`
+/// `f: (value: Ptr<Ast>, param_def: OPtr<ast::Decl>, param_idx: usize) -> CodegenResult<(), U>`
 pub fn for_each_call_arg<'ctx, U>(
     params: DeclList,
     args: impl IntoIterator<Item = Ptr<Ast>>,
-    mut f: impl FnMut(Ptr<Ast>, Ptr<ast::Decl>, usize) -> CodegenResult<(), U>,
+    mut f: impl FnMut(Ptr<Ast>, OPtr<ast::Decl>, usize) -> CodegenResult<(), U>,
 ) -> CodegenResult<(), U> {
     let mut args = args.into_iter().peekable();
 
@@ -3257,13 +3285,13 @@ pub fn for_each_call_arg<'ctx, U>(
     let mut pos_idx = 0;
     while args.peek().is_some_and(is_pos_arg) {
         let pos_arg = args.next().u();
-        let param_def = params.get(pos_idx).u();
+        let param_def = params.get(pos_idx);
         f(pos_arg, param_def, pos_idx)?;
         pos_idx += 1;
     }
 
     // named args
-    let remaining_params = &params[pos_idx..];
+    let remaining_params = params.as_ref().get(pos_idx..).unwrap_or(&[]);
     let mut was_set = vec![false; remaining_params.len()];
     for named_arg in args {
         let named_arg = named_arg.downcast::<ast::Assign>();
@@ -3271,13 +3299,13 @@ pub fn for_each_call_arg<'ctx, U>(
         let (rem_param_idx, param_def) = remaining_params.find_field(arg_name.sym).u();
         debug_assert!(!was_set[rem_param_idx]);
         was_set[rem_param_idx] = true;
-        f(named_arg.rhs, param_def, pos_idx + rem_param_idx)?
+        f(named_arg.rhs, Some(param_def), pos_idx + rem_param_idx)?
     }
 
     // default args
     for ((rem_idx, missing_param), was_set) in remaining_params.iter().enumerate().zip(was_set) {
         if !was_set {
-            f(missing_param.init.u(), *missing_param, pos_idx + rem_idx)?
+            f(missing_param.init.u(), Some(*missing_param), pos_idx + rem_idx)?
         }
     }
     Ok(())
@@ -3336,7 +3364,7 @@ trait AddAttribute: Copy {
             _ => {},
         }
 
-        let ffi_param_count = param_ffi_type.as_param_count() as u32;
+        let ffi_param_count = param_ffi_type.as_param_count();
         if has_ffi_noundef(param.var_ty.u(), param_ffi_type) {
             for sub_idx in 0..ffi_param_count {
                 self.add_attribute(AttributeLoc::Param(param_ffi_idx + sub_idx), codegen.noundef);

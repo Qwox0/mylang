@@ -8,6 +8,7 @@ pub c_int :: i32;
 pub c_long :: i64;
 pub c_size_t :: u64;
 pub c_off64_t :: i64;
+pub c_float :: f32;
 pub c_double :: f64;
 
 // ===== <assert.h> =====
@@ -84,14 +85,12 @@ static stdin : *FILE = #extern;
 static stdout : *FILE = #extern;
 static stderr : *FILE = #extern;
 
-// HACK: use params with default values instead of varargs.
-
-printf : (                                fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
-fprintf : (stream: *FILE,                 fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
-dprintf : (fd: c_int,                     fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
-sprintf : (str: *c_char,                  fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
-snprintf : (str: *c_char, size: c_size_t, fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
-asprintf : (out_str: *mut ?*c_char,       fmt: *c_char, a := 0, b := 0, c := 0, d := 0, e := 0) -> c_int : #extern;
+printf : #varargs (                                fmt: *c_char) -> c_int : #extern;
+fprintf : #varargs (stream: *FILE,                 fmt: *c_char) -> c_int : #extern;
+dprintf : #varargs (fd: c_int,                     fmt: *c_char) -> c_int : #extern;
+sprintf : #varargs (str: *c_char,                  fmt: *c_char) -> c_int : #extern;
+snprintf : #varargs (str: *c_char, size: c_size_t, fmt: *c_char) -> c_int : #extern;
+asprintf : #varargs (out_str: *mut ?*c_char,       fmt: *c_char) -> c_int : #extern;
 
 /// writes a character to stdout
 //putchar : (ch: c_int) -> c_int : #extern;

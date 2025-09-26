@@ -9,7 +9,7 @@ test :: -> {
     arr: [MyStruct.MY_CONST]u8 = .[1, 2, 3];
     return arr;
 }";
-    debug_assert_eq!(test(code).get_out::<CRetArr<u8, 3>>().val, [1, 2, 3]);
+    assert_eq!(test(code).get_out::<CRetArr<u8, 3>>().val, [1, 2, 3]);
 
     let code = "
 MyStruct :: struct { field: u8, MY_CONST : u64 : 10 };
@@ -183,4 +183,14 @@ CONST :: MyStruct.(1, 2, 3);
 take_struct_val :: (val: MyStruct) -> {};
 test :: -> take_struct_val(CONST);";
     test(code).ok(());
+}
+
+#[test]
+fn error_use_runtime_var_in_const() {
+    let code = "
+test :: -> {
+    a := 1;
+    A :: a;
+}";
+    test(code).error("Cannot access a non-constant symbol at compile time", substr!("a";skip=1));
 }

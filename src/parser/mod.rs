@@ -8,7 +8,7 @@ use crate::{
         self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
-    diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
+    diagnostics::{cerror, cerror2, chint, cwarn},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeKind, ScopePos},
@@ -108,13 +108,6 @@ macro_rules! parse_in_block {
     }};
 }
 
-impl Ptr<Ast> {
-    pub fn try_to_ident(self) -> Result<Ptr<ast::Ident>, HandledErr> {
-        self.try_downcast::<ast::Ident>()
-            .ok_or_else(|| cerror!(self.full_span(), "expected an identifier, got an expression"))
-    }
-}
-
 pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> &'a mut [Ptr<Ast>] {
     let mut stmts = &mut cctx.as_mut().stmts;
     // Note: this idx-based loop is needed because `ctx.files` might get mutated while the loop is
@@ -206,7 +199,13 @@ impl Parser {
             },
             FollowingOperator::ArrayInitializer => self.parse_array_initializer(Some(lhs), span)?,
             FollowingOperator::SingleArgNoParenFn => {
-                let Ok(lhs) = lhs.try_to_ident() else { panic!("SingleArgFn: unknown rhs") };
+                let Some(lhs) = lhs.try_downcast::<ast::Ident>() else {
+                    return cerror2!(
+                        lhs.full_span(),
+                        "expected parameters, got an expression '{:?}'",
+                        lhs.kind
+                    );
+                };
                 let param = self.alloc(ast::Decl::from_ident(lhs))?;
                 let params = self.alloc_one_val_slice(param)?;
                 self.function_tail(params, span, min_precedence)?.upcast()
@@ -247,7 +246,8 @@ impl Parser {
                         let body = self.expr()?;
 
                         let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                        let scope = Scope::new(self.alloc_slice(&[iter_var])?, ScopeKind::ForLoop);
+                        let scope =
+                            Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
                         expr!(For { source: lhs, iter_var, body, scope, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
@@ -389,7 +389,7 @@ impl Parser {
                 let body = self.expr()?;
 
                 let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                let scope = Scope::new(self.alloc_slice(&[iter_var])?, ScopeKind::ForLoop);
+                let scope = Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
                 expr!(For { source, iter_var, body, scope, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
@@ -585,8 +585,7 @@ impl Parser {
                 expr!(UnaryOp { op: UnaryOpKind::Neg, operand, is_postfix: false }, span)
             },
             TokenKind::Arrow => {
-                self.lex.advance();
-                self.function_tail(Ptr::empty_slice(), span, prec)?.upcast()
+                self.advanced().function_tail(Ptr::empty_slice(), span, prec)?.upcast()
             },
             TokenKind::Asterisk => {
                 // TODO: deref prefix
@@ -685,7 +684,17 @@ impl Parser {
                     expr!(OffsetOfDirective { type_, field }, span.join(directive_ident.span))
                 }
                 // annotation directives:
-                else if directive_name == "no_mangle" {
+                else if directive_name == "varargs" {
+                    let Some(func) = self.expr_(prec)?.try_downcast::<ast::Fn>() else {
+                        return cerror2!(
+                            span,
+                            "Expected a function or a function type after #{directive_name} \
+                             directive"
+                        );
+                    };
+                    func.as_mut().has_varargs = true;
+                    func.upcast()
+                } else if directive_name == "no_mangle" {
                     return cerror2!(
                         span.join(directive_ident.span),
                         "`#{directive_name}` is currently not implemented"
@@ -723,7 +732,9 @@ impl Parser {
                         decl.as_mut().ident.replacement = Some(main_ident);
                         func
                     }
-                } else {
+                }
+                //
+                else {
                     return cerror2!(span.join(directive_ident.span), "Unknown compiler directive");
                 }
             },
@@ -842,7 +853,14 @@ impl Parser {
         let body = Some(body);
         let params_scope = Scope::new(params, ScopeKind::Fn);
         Ok(ast_new!(
-            Fn { params_scope, ret_ty_expr, ret_ty: None, body, has_known_ret_ty: false },
+            Fn {
+                params_scope,
+                ret_ty_expr,
+                ret_ty: None,
+                body,
+                has_known_ret_ty: false,
+                has_varargs: false,
+            },
             start_span
         ))
     }
@@ -1149,8 +1167,7 @@ impl Parser {
 
     #[inline]
     fn alloc_one_val_slice<T>(&self, val: T) -> ParseResult<Ptr<[T]>> {
-        let ptr = self.alloc(val)?;
-        Ok(unsafe { core::slice::from_raw_parts_mut(ptr.as_mut() as *mut T, 1) }.into())
+        self.cctx.alloc.alloc_one_val_slice(val)
     }
 
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {

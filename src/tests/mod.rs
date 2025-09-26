@@ -42,6 +42,7 @@ mod todo;
 mod type_joining;
 mod union_;
 mod var_decl;
+mod vararg;
 mod while_loop;
 
 const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
@@ -109,10 +110,13 @@ struct TestResult<Kind> {
 }
 
 struct Parsed;
-struct Ok<RetTy> {
-    ret: RetTy,
+struct Compiled {
     backend_mod: BackendModule,
     module_text: OnceCell<String>,
+}
+struct Ok<RetTy> {
+    c: Compiled,
+    ret: RetTy,
 }
 struct Err;
 
@@ -129,23 +133,24 @@ impl NewTest {
     }
 
     #[track_caller]
-    fn compile_no_err(self) -> TestResult<BackendModule> {
+    fn compile_no_err(self) -> TestResult<Compiled> {
         let res = self.compile();
         let CompileResult::ModuleForTesting(backend_mod) = res.data else {
             panic!("Test failed! Expected no compiler errors.")
         };
-        TestResult { data: backend_mod, ..res }
+        TestResult { data: Compiled { backend_mod, module_text: OnceCell::new() }, ..res }
     }
 
     #[track_caller]
     fn _ok<RetTy>(self) -> TestResult<Ok<RetTy>> {
         let res = self.compile_no_err();
-        let backend_mod = res.data;
-        let ret = backend_mod
+        let ret = res
+            .data
+            .backend_mod
             .codegen_module()
             .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
             .unwrap();
-        TestResult { data: Ok { ret, backend_mod, module_text: OnceCell::new() }, ..res }
+        TestResult { data: Ok { ret, c: res.data }, ..res }
     }
 
     #[track_caller]
@@ -172,21 +177,22 @@ impl NewTest {
     }
 }
 
-impl<RetTy> TestResult<Ok<RetTy>> {
-    fn read_llvm_ir(&self) -> String {
-        self.data.backend_mod.codegen_module().print_to_string().to_string()
-    }
-
-    pub fn llvm_ir(&self) -> &str {
-        self.data.module_text.get_or_init(|| self.read_llvm_ir())
-    }
-
-    pub fn take_llvm_ir(&mut self) -> String {
-        self.data.module_text.take().unwrap_or_else(|| self.read_llvm_ir())
-    }
-}
-
 impl<Res> TestResult<Res> {
+    fn read_llvm_ir(&self) -> String
+    where Res: AsRef<Compiled> {
+        self.data.as_ref().backend_mod.codegen_module().print_to_string().to_string()
+    }
+
+    pub fn llvm_ir(&self) -> &str
+    where Res: AsRef<Compiled> {
+        self.data.as_ref().module_text.get_or_init(|| self.read_llvm_ir())
+    }
+
+    pub fn take_llvm_ir(&mut self) -> String
+    where Res: AsRef<Compiled> + AsMut<Compiled> {
+        self.data.as_mut().module_text.take().unwrap_or_else(|| self.read_llvm_ir())
+    }
+
     #[track_caller]
     fn check_next_diag(
         &mut self,
@@ -342,3 +348,27 @@ macro_rules! substr {
     };
 }
 pub(self) use substr;
+
+impl AsRef<Compiled> for Compiled {
+    fn as_ref(&self) -> &Compiled {
+        self
+    }
+}
+
+impl AsMut<Compiled> for Compiled {
+    fn as_mut(&mut self) -> &mut Compiled {
+        self
+    }
+}
+
+impl<RetTy> AsRef<Compiled> for Ok<RetTy> {
+    fn as_ref(&self) -> &Compiled {
+        &self.c
+    }
+}
+
+impl<RetTy> AsMut<Compiled> for Ok<RetTy> {
+    fn as_mut(&mut self) -> &mut Compiled {
+        &mut self.c
+    }
+}

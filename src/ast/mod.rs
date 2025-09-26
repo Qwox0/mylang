@@ -634,6 +634,7 @@ ast_variants! {
     Fn {
         /// set during sema
         has_known_ret_ty: bool,
+        has_varargs: bool,
         params_scope: Scope,
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,
@@ -752,9 +753,11 @@ impl Ptr<Ast> {
     pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
+        /*
         if rep.ty.is_none() {
             rep.as_mut().ty = Some(self.ty.u());
         }
+        */
         self.as_mut().replacement = Some(rep)
     }
 
@@ -1257,6 +1260,7 @@ impl Decl {
 
     pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
         let never = primitives().never;
+        debug_assert!(self.is_const);
         debug_assert!(self.var_ty.is_some() || self.init.u().kind == AstKind::Fn);
         if self.var_ty == never {
             return never.upcast();

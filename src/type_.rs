@@ -199,7 +199,7 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     // TODO: remove this rule when implementing option lifting
     if let Some(got_opt) = got.try_downcast::<ast::OptionTy>()
         && expected.kind == AstKind::PtrTy
-        && got_opt.inner_ty.kind == AstKind::PtrTy
+        && got_opt.inner_ty.rep().kind == AstKind::PtrTy
     {
         return true;
     }

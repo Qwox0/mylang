@@ -140,14 +140,14 @@ test :: -> MyStruct.new(5).map(x -> x * 2);";
     let res = test(code).ok(10i64);
 
     // Both methods are mangled
-    debug_assert!(res.llvm_ir().contains("@\"struct{val:i32}.new\""));
-    debug_assert!(!res.llvm_ir().contains("@new"));
-    debug_assert!(res.llvm_ir().contains("@\"struct{val:i32}.map\""));
-    debug_assert!(!res.llvm_ir().contains("@map"));
+    assert!(res.llvm_ir().contains("@\"struct{val:i32}.new\""));
+    assert!(!res.llvm_ir().contains("@new"));
+    assert!(res.llvm_ir().contains("@\"struct{val:i32}.map\""));
+    assert!(!res.llvm_ir().contains("@map"));
 
     // Both mathods are only generated once
-    debug_assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.new\""));
-    debug_assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.map\""));
+    assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.new\""));
+    assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.map\""));
 }
 
 #[test]

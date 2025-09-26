@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 bumpalo = "3.16.0"
 clap = { version = "4.5.4", features = ["derive"] }
-const_for = "0.1.4"
 inkwell = { version = "0.6.0", features = ["llvm18-1"] }
 thiserror = "2.0.6"
 unicode-xid = "0.2.4"

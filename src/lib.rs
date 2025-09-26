@@ -1,3 +1,5 @@
+// Cannot use Rust nightly >= 1.92.0, because of <https://github.com/rust-lang/rust/pull/145838>
+
 #![cfg_attr(not(test), allow(dead_code))]
 #![feature(test)]
 #![feature(try_trait_v2)]
@@ -17,9 +19,11 @@
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_write_slice)]
 #![feature(type_changing_struct_update)]
+#![feature(vec_push_within_capacity)]
 
 mod arena_allocator;
 mod ast;
+mod buffer;
 pub mod cli;
 mod codegen;
 pub mod compiler;

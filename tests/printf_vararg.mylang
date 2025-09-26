@@ -1,0 +1,5 @@
+libc :: #import "libc";
+
+main :: -> {
+    libc.printf("%d; %f; %s\n".ptr, 10, 123.456, "Hello World".ptr);
+}
