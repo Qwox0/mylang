@@ -2,6 +2,7 @@ pub env :: #import "env.mylang";
 pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";
 pub str :: #import "str.mylang";
+pub set :: #import "set.mylang";
 
 libc :: #import "libc";
 

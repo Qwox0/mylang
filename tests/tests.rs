@@ -142,3 +142,9 @@ fn c_ffi_take_array_arg() {
     let out = test_cmd(Command::new("./out/main").current_dir(&dir));
     assert!(out.status.success());
 }
+
+#[test]
+fn set_impl() {
+    let out = test_cmd(mylang(["check", "../lib/std/set.mylang", "--entry-point=test"]));
+    assert!(out.status.success());
+}

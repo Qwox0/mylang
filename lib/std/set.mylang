@@ -1,0 +1,292 @@
+std :: #import "std";
+libc :: #import "libc";
+
+Hash :: u32;
+cstr :: *u8;
+
+paul_larson_hash :: (mut s: cstr, seed: Hash = 0) -> {
+    mut hash := seed;
+    while (s.* != 0) {
+        hash = hash * 101 + s.*.as(Hash);
+        s = (s.as(u64) + 1).as(cstr);
+    }
+    hash
+}
+
+hash :: paul_larson_hash;
+
+// Does not own the stored strings
+StrHashSet :: struct {
+    /// points to `[Entry * slots, Tag * slots]`
+    ///                            ^
+    ptr: ?*mut Tag,
+    /// The number of elements in the set.
+    size: u32,
+    /// The number of elements which can be inserted before `MAX_LOAD_PERCENTAGE` is exceeded.
+    available: u32,
+    /// The mask used to access elements in the buffer. One less than the number of allocated slots.
+    mask: u32,
+
+    pub EMPTY :: StrHashSet.{ ptr=nil, size=0, available=0, mask=!0 };
+
+    MAX_LOAD_PERCENTAGE :: 85;
+    MIN_CAPACITY :: 8;
+
+    /// stores 1 bit to indicate whether a value is present and if present the 7 upper bits of the
+    /// hash.
+    Tag :: struct {
+        val: u8,
+
+        //#assert(#sizeof(Tag) == 1);
+
+        empty :: Tag.(0);
+        deleted :: Tag.(1);
+        //#assert(!empty.is_used());
+        //#assert(!deleted.is_used());
+
+        IS_USED_MASK : u8 : 0b1000_0000;
+
+        is_used :: (tag: Tag) -> (tag.val & IS_USED_MASK) != 0;
+
+        from_hash :: (hash: Hash) -> Tag.((hash >> 8 * #sizeof(Hash) - 7).as(u8) | IS_USED_MASK);
+
+        eq :: (self: Tag, other: Tag) -> self.val == other.val;
+    };
+
+    Entry :: struct { val: ?cstr }
+
+    pub new :: (capacity: u32 = MIN_CAPACITY) -> StrHashSet {
+        StrHashSet.with_slots(capacity_to_slots(capacity))
+    }
+
+    pub with_slots :: (slots: u32) -> {
+        std.assert(is_power_of_two(slots));
+        mask := slots - 1;
+        ptr := std.malloc0(buf_size(slots));
+        std.assert(ptr != nil, "HashMap allocation failed!");
+        ptr := ptr.as(u64) + #sizeof(Entry) * slots.as(u64);
+        available := slots * MAX_LOAD_PERCENTAGE / 100;
+        StrHashSet.{ ptr = xx ptr, size = 0, available, mask }
+    }
+
+    pub free :: (self: StrHashSet) -> {
+        if self.ptr != nil then libc.free(self.&.buf_start());
+    }
+
+    /// Returns the number of slots needed to allow inserting `capacity` items without reallocating.
+    capacity_to_slots :: (capacity: u32) -> ceil_pow_of_2(capacity * 100 / MAX_LOAD_PERCENTAGE + 1);
+
+    buf_start :: (self: *StrHashSet) ->
+        (self.*.ptr.as(u64) - #sizeof(Entry) * self.slots().as(u64)).as(*any);
+
+    buf_size :: (slots: u32) -> {
+        std.assert(is_power_of_two(slots));
+        std.assert(#alignof(Tag) == 1, "no padding needed"); // TODO: `#assert`
+        // #assert(is_power_of_two(#sizeof(Entry)))
+        (#sizeof(Entry) + #sizeof(Tag)) * slots.as(u64)
+    }
+
+    /// The number of elements in the set for which no allocations are guaranteed.
+    pub capacity :: (self: *StrHashSet) -> self.*.size + self.*.available;
+
+    /// The number of allocated slots.
+    /// `capacity * 100 / slots <= MAX_LOAD_PERCENTAGE`
+    pub slots :: (self: *StrHashSet) -> self.*.mask + 1;
+
+    pub reserve :: (self: *mut StrHashSet, additional: u32) -> {
+        if (self.*.available >= additional) return;
+
+        // TODO: overflow check for `+`
+        new_capacity := ceil_pow_of_2(self.*.size + additional).max(MIN_CAPACITY);
+        mut new_set := StrHashSet.new(new_capacity);
+
+        for idx in 0..self.slots() {
+            if !self.tag(idx).*.is_used() continue;
+            val := self.entry(idx).*.val;
+            hash := hash(val);
+            new_idx := new_set.&.get_realloc_index(hash);
+            new_set.&mut.insert_raw(new_idx, hash, val);
+        }
+
+        self.*.free();
+        self.* = new_set;
+    }
+
+    pub insert :: (self: *mut StrHashSet, val: []u8) -> {
+        self.reserve(1);
+        self.insert_assume_capacity(val)
+    }
+
+    pub insert_assume_capacity :: (self: *mut StrHashSet, val: []u8) -> {
+        std.assert(self.*.available > 0);
+        hash := hash(val.ptr);
+        idx := self.get_index_with_hash(val.ptr, hash);
+        self.insert_raw(idx, hash, val.ptr)
+    }
+
+    // TODO: unsafe
+    insert_raw :: (self: *mut StrHashSet, idx: u32, hash: Hash, val: cstr) -> {
+        self.tag(idx).* = Tag.from_hash(hash);
+        old_val := self.entry(idx).*.val;
+        self.entry(idx).*.val = val;
+        self.*.size += 1;
+        self.*.available -= 1;
+        old_val
+    }
+
+    pub contains :: (self: *StrHashSet, val: []u8) -> self.contains_cstr(val.ptr);
+
+    pub contains_cstr :: (self: *StrHashSet, val: cstr) -> {
+        if self.*.size == 0 return false; // TODO: unlikely branch
+        hash := hash(val);
+        idx := self.get_index_with_hash(val, hash);
+        return self.entry(idx).*.val != nil;
+    }
+
+    pub remove :: (self: *mut StrHashSet, val: []u8) -> bool {
+        if self.*.size == 0 return false; // TODO: unlikely branch
+        idx := self.get_index(val);
+        was_present := self.tag(idx).*.is_used();
+        self.tag(idx).* = Tag.deleted;
+        self.entry(idx).*.val = nil;
+        self.*.size -= 1;
+        self.*.available += 1;
+        return was_present
+    }
+
+    pub reset :: (self: *mut StrHashSet) -> {
+        libc.memset(self.buf_start(), 0, buf_size(self.slots()));
+        self.*.available += self.*.size;
+        self.*.size = 0;
+    }
+
+    pub reset_with_free :: (self: *mut StrHashSet) -> {
+        for idx in 0..self.slots() do libc.free(self.entry(idx).*.val);
+        self.reset();
+    }
+
+    get_index :: (self: *StrHashSet, val: []u8) -> {
+        hash := hash(val.ptr);
+        self.get_index_with_hash(val.ptr, hash)
+    }
+
+    get_index_with_hash :: (self: *StrHashSet, val: cstr, hash: Hash) -> {
+        std.assert(self.*.mask != !0);
+        tag := Tag.from_hash(hash);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        mut deleted_tag_idx := self.slots();
+
+        while not self.tag(idx).*.eq(Tag.empty) {
+            if self.tag(idx).*.eq(tag) {
+                if libc.strcmp(val, self.entry(idx).*.val) == 0 return idx;
+            } else if self.tag(idx).*.eq(Tag.deleted) {
+                deleted_tag_idx = idx;
+            }
+            idx = (idx + 1) & mask;
+        }
+
+        if deleted_tag_idx != self.slots() then deleted_tag_idx else idx
+    }
+
+    /// assumes val is not in the set.
+    /// assumes that no deleted items are in the set
+    get_realloc_index :: (self: *StrHashSet, hash: Hash) -> {
+        std.assert(self.*.available > 0);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        while not self.tag(idx).*.eq(Tag.empty) {
+            idx = (idx + 1) & mask;
+        }
+
+        idx
+    }
+
+    tag :: (self: *StrHashSet, idx: u32) -> *mut Tag {
+        std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(u64) + idx.as(u64)).as(*mut Tag)
+    };
+
+    entry :: (self: *StrHashSet, idx: u32) -> *mut Entry {
+        std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(u64) - #sizeof(Entry) * (self.slots() - idx).as(u64)).as(*mut Entry)
+    }
+
+    pub debug :: (self: *StrHashSet) -> {
+        libc.printf("StrHashSet (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask); // nocheckin
+        for idx in 0..self.slots() {
+            tag := self.tag(idx).*;
+            text := if tag.is_used() then self.entry(idx).*.val
+            else if tag.eq(Tag.empty) then "EMPTY".ptr
+            else "DELETED".ptr;
+
+            libc.printf("  \"%s\" (%08b),\n".ptr, text, tag.val);
+        }
+        std.println("}");
+    }
+}
+
+// TODO: move helpers to `std`
+
+clz : (u32, is_zero_poison: bool) -> u32 : #intrinsic "llvm.ctlz.i32";
+
+ceil_pow_of_2 :: (mut x: u32) -> if x <= 1 then 1 else 1 << (32 - clz(x - 1, true));
+
+is_power_of_two :: (x: u32) -> x != 0 && (x & (x - 1)) == 0;
+
+max :: (a: u32, b: u32) -> if a > b then a else b;
+
+test :: -> {
+    std.println("\nTest Set:");
+    mut set := StrHashSet.new();
+    defer set.free();
+    set := &mut set;
+
+    std.assert(set.*.size == 0);
+
+    s1 := "hello world";
+    s2 := std.fmt.format("hello world");
+    defer libc.free(s2.ptr);
+    std.assert(s1.ptr != s2.ptr);
+
+    set.insert(s1);
+
+    std.assert(set.*.size == 1);
+    std.assert(set.contains(s1));
+    std.assert(set.contains(s2));
+    std.assert(!set.contains("not in set"));
+
+    set.insert("asdf");
+    set.insert("xyz");
+    std.assert(set.*.size == 3);
+    set.remove(s1);
+    std.assert(set.*.size == 2);
+    set.insert("hello");
+
+    std.assert(!set.contains(s2));
+
+    set.debug();
+
+    // automatic resizing
+
+    additional_items := set.*.available.as(u64) + 5;
+    free_list := libc.malloc(additional_items * #sizeof(cstr));
+    defer libc.free(free_list);
+    free_list := []mut cstr.{ ptr=xx free_list, len=additional_items };
+
+    libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.slots());
+    libc.printf("inserting %d additional items.\n".ptr, additional_items);
+    for idx in 0..additional_items {
+        str := std.fmt.format("additional item %d", xx idx);
+        free_list[idx] = str.ptr;
+        set.insert(str);
+        libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.slots());
+    }
+    defer for idx in 0..additional_items do libc.free(free_list[idx]);
+
+    set.debug();
+}
