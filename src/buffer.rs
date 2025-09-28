@@ -1,34 +1,38 @@
-use crate::util::UnwrapDebug;
-use std::{mem::MaybeUninit, ops::Deref};
+use crate::ptr::Ptr;
+use std::{
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+};
 
-pub type Buffer<T> = Box<[T]>;
+pub type Buffer<T> = Ptr<[T]>;
 
 /// Can't exceed it's initial capacity.
-pub struct CappedVec<T>(Vec<T>);
-
-impl<T> From<Vec<T>> for CappedVec<T> {
-    fn from(inner: Vec<T>) -> Self {
-        CappedVec(inner)
-    }
+pub struct CappedVec<T> {
+    buf: UnorderedInitBuf<T>,
+    len: usize,
 }
 
 impl<T> CappedVec<T> {
-    pub fn new(capacity: usize) -> Self {
-        CappedVec::from(Vec::with_capacity(capacity))
+    pub fn with_buf(buf: Buffer<MaybeUninit<T>>) -> Self {
+        let buf = UnorderedInitBuf::with_buf(buf);
+        Self { buf, len: 0 }
     }
 
     #[inline]
     pub fn push(&mut self, value: T) {
-        self.0.push_within_capacity(value).ok().u();
+        debug_assert!(!self.is_full());
+        self.buf.set(self.len, value);
+        self.len += 1;
     }
 
     #[inline]
     pub fn is_full(&self) -> bool {
-        self.0.len() == self.0.capacity()
+        self.buf.capacity() == self.len
     }
 
-    pub fn into_boxed_slice(self) -> Buffer<T> {
-        self.0.into_boxed_slice()
+    pub fn into_full_buf(self) -> Buffer<T> {
+        debug_assert!(self.is_full());
+        self.buf.assume_init()
     }
 }
 
@@ -36,16 +40,13 @@ impl<T> Deref for CappedVec<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        self.0.deref()
+        unsafe { self.buf.buf[..self.len].assume_init_ref() }
     }
 }
 
-impl<T> IntoIterator for CappedVec<T> {
-    type IntoIter = <Vec<T> as IntoIterator>::IntoIter;
-    type Item = <Vec<T> as IntoIterator>::Item;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+impl<T> DerefMut for CappedVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.buf.buf[..self.len].assume_init_mut() }
     }
 }
 
@@ -53,23 +54,21 @@ impl<T> IntoIterator for CappedVec<T> {
 pub struct UnorderedInitBuf<T> {
     buf: Buffer<MaybeUninit<T>>,
     #[cfg(debug_assertions)]
-    was_initialized: Buffer<bool>,
+    was_initialized: Box<[bool]>,
 }
 
 impl<T> UnorderedInitBuf<T> {
-    pub fn new(capacity: usize) -> Self {
-        let mut buf = Vec::with_capacity(capacity);
-        unsafe { buf.set_len(capacity) };
+    pub fn with_buf(buf: Buffer<MaybeUninit<T>>) -> Self {
         Self {
-            buf: buf.into_boxed_slice(),
             #[cfg(debug_assertions)]
-            was_initialized: vec![false; capacity].into(),
+            was_initialized: vec![false; buf.len()].into_boxed_slice(),
+            buf,
         }
     }
 
     #[inline]
     pub fn set(&mut self, idx: usize, value: T) {
-        debug_assert!(idx < self.buf.len());
+        debug_assert!(idx < self.buf.len(), "{idx} < {}", self.buf.len());
         *unsafe { self.buf.get_unchecked_mut(idx) } = MaybeUninit::new(value);
         #[cfg(debug_assertions)]
         {
@@ -81,6 +80,10 @@ impl<T> UnorderedInitBuf<T> {
     pub fn assume_init(self) -> Buffer<T> {
         #[cfg(debug_assertions)]
         debug_assert!(self.was_initialized.iter().all(|b| *b));
-        unsafe { self.buf.assume_init() }
+        self.buf.assume_init()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
     }
 }

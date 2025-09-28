@@ -85,7 +85,7 @@ impl<'bump, T: 'bump> ScratchPool<'bump, T> {
         let len = self.get_item_count();
         let layout = Layout::array::<T>(len).unwrap();
         let ptr = target_bump.alloc_layout(layout)?.cast::<T>();
-        let target_slice = unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), len) };
+        let target_slice = unsafe { slice::from_raw_parts_mut(ptr.raw(), len) };
         self.clone_to_slice(target_slice);
         Ok(Ptr::from(target_slice))
     }

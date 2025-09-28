@@ -1,3 +1,4 @@
+use crate::diagnostics::HandledErr;
 use CodegenResult::*;
 use inkwell::{builder::BuilderError, execution_engine::FunctionLookupError, support::LLVMString};
 use std::{
@@ -14,6 +15,8 @@ pub enum CodegenError {
     CannotOptimizeModule(LLVMString),
     CannotCompileObjFile(LLVMString),
     CannotCreateJit(LLVMString),
+
+    HandledErr(HandledErr),
 }
 
 unsafe impl Send for CodegenError {}
@@ -132,5 +135,11 @@ impl From<BuilderError> for CodegenError {
 impl From<FunctionLookupError> for CodegenError {
     fn from(e: FunctionLookupError) -> Self {
         CodegenError::FunctionLookupError(e)
+    }
+}
+
+impl From<HandledErr> for CodegenError {
+    fn from(e: HandledErr) -> Self {
+        CodegenError::HandledErr(e)
     }
 }

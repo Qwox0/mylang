@@ -25,6 +25,7 @@ pub type CtxDiagnosticReporter = diagnostics::DiagnosticCollector;
 
 pub struct CompilationContextInner {
     pub alloc: Arena,
+    pub tmp_alloc: Arena,
     pub diagnostic_reporter: CtxDiagnosticReporter,
     pub compile_time: CompileDurations,
 
@@ -111,6 +112,7 @@ impl CompilationContext {
 
         let ctx = CompilationContextInner {
             alloc,
+            tmp_alloc: Arena::new_scratch(32 * 1024 - Arena::BUMP_OVERHEAD),
             diagnostic_reporter: CtxDiagnosticReporter::default(),
             compile_time: CompileDurations::default(),
 
@@ -319,4 +321,9 @@ pub fn ctx_mut() -> &'static mut CompilationContextInner {
 #[inline]
 pub fn primitives() -> &'static Primitives {
     &ctx().primitives
+}
+
+#[inline]
+pub fn tmp_alloc() -> &'static mut Arena {
+    &mut ctx_mut().tmp_alloc
 }

@@ -192,6 +192,7 @@ macro_rules! debug_expr {
         } else {
             println!(", span: {:?} (no file)", span);
         }
+        use crate::ast::OptionTypeExt;
         println!("  ty: {}", expr.ty.display());
         println!("  {:x?}\n", expr.as_ref());
     }};

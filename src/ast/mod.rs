@@ -655,6 +655,7 @@ inherit_ast! {
 pub trait UpcastToAst: Sized {
     fn upcast(self: Ptr<Self>) -> Ptr<Ast>;
 
+    #[allow(unused)]
     fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]>;
 
     /// resolve possible replacements of this expression
@@ -1558,7 +1559,7 @@ pub type DeclList = Ptr<[Ptr<Decl>]>;
 pub trait DeclListExt {
     fn find_field(&self, sym: Symbol) -> Option<(usize, Ptr<Decl>)>;
 
-    fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_;
+    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + '_;
 }
 
 impl DeclListExt for [Ptr<Decl>] {
@@ -1566,7 +1567,7 @@ impl DeclListExt for [Ptr<Decl>] {
         self.iter().copied().enumerate().find(|(_, d)| d.ident.sym == sym)
     }
 
-    fn iter_types(&self) -> impl DoubleEndedIterator<Item = Ptr<Type>> + '_ {
+    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + '_ {
         self.iter().map(|decl| decl.var_ty.u())
     }
 }

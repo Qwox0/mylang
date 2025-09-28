@@ -2,7 +2,7 @@ use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt, error::CodegenResult},
-    context::{CompilationContext, CompilationContextInner},
+    context::{CompilationContext, CompilationContextInner, tmp_alloc},
     diagnostics::{DiagnosticReporter, HandledErr, cerror, cwarn},
     parser::{self, lexer::Span},
     ptr::Ptr,
@@ -25,6 +25,7 @@ impl<'ctx> llvm::Codegen<'ctx> {
 
         for s in stmts.iter().copied() {
             self.compile_top_level(s)?;
+            tmp_alloc().reset_scratch(s);
         }
 
         CodegenResult::Ok(())
