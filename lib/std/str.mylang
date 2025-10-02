@@ -3,7 +3,7 @@
 std :: #import "std";
 libc :: #import "libc";
 
-pub malloc_str :: (len: u64) -> []u8 {
+pub malloc_str :: (len: u64) -> []mut u8 {
     buffer := std.malloc0(len + 1); // adds a trailing 0 byte for C compatibility.
     if buffer == nil do std.panic("failed to malloc string buffer");
     return .{ ptr = buffer, len };

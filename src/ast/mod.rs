@@ -241,11 +241,25 @@ macro_rules! ast_variants {
         }
 
         impl AstMatch {
-            fn match_(ast: Ptr<Ast>) -> AstMatch {
+            fn match_(ast: Ptr<Ast>) -> Self {
                 match ast.kind {
                     $(AstKind::$name => AstMatch::$name(ast.flat_downcast::<$name>()),)+
                     $(AstKind::$c_name => AstMatch::$c_name(ast.flat_downcast::<$c_name>()),)+
                     $(AstKind::$t_name => AstMatch::$t_name(ast.flat_downcast::<$t_name>()),)+
+                }
+            }
+        }
+
+        pub enum TypeMatch {
+            $($t_name(Ptr<$t_name>),)+
+        }
+
+        impl TypeMatch {
+            fn match_(ast: Ptr<Type>) -> Self {
+                match ast.kind {
+                    $(|AstKind::$name)+
+                    $(|AstKind::$c_name)+ => unreachable_debug(),
+                    $(AstKind::$t_name => TypeMatch::$t_name(ast.downcast::<$t_name>()),)+
                 }
             }
         }
@@ -1084,6 +1098,11 @@ impl Type {
     #[inline]
     pub fn matchable(&self) -> Ptr<TypeEnum> {
         Ptr::from(self).cast()
+    }
+
+    #[inline]
+    pub fn matchable2(&self) -> TypeMatch {
+        TypeMatch::match_(Ptr::<Type>::from_ref(self))
     }
 
     pub fn get_arr_elem_ty(&self) -> Ptr<Type> {

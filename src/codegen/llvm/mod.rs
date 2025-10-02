@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclList, DeclListExt,
-        DeclMarkers, OptionTypeExt, TypeEnum, UnaryOpKind, UpcastToAst, is_pos_arg,
+        DeclMarkers, OptionTypeExt, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     codegen::llvm::bindings::*,
     context::{ctx, primitives, tmp_alloc},
@@ -1064,8 +1064,11 @@ impl<'ctx> Codegen<'ctx> {
         for_each_call_arg(f.params(), args, |arg, param, p_idx| {
             let sym = self.compile_expr(arg)?;
 
-            debug_assert!(f.has_varargs || param.is_some());
-            let param_ty = param.map(|p| p.var_ty.u()).unwrap_or(arg.ty.u());
+            let param_ty = param.map(|p| p.var_ty.u());
+            let is_vararg = param_ty.is_none();
+            debug_assert!(!is_vararg || f.has_varargs);
+            let param_ty = param_ty.unwrap_or(arg.ty.u());
+
             let arg_ty = arg_ffi_types.get(p_idx).u();
             let arg_offset = *arg_ffi_offsets.get(p_idx).u();
 
@@ -1077,7 +1080,20 @@ impl<'ctx> Codegen<'ctx> {
             match *arg_ty {
                 CFfiType::Zst => {},
                 CFfiType::Simple(simple_ty) => {
-                    let val = if !param_ty.is_aggregate() {
+                    let val = if is_vararg
+                        && let Some(f_ty) = param_ty.try_downcast::<ast::FloatTy>()
+                        && f_ty.bits < 64
+                    {
+                        // see <https://stackoverflow.com/a/53712850>
+                        let small_float = self
+                            .sym_as_val_with_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
+                            .float_val();
+                        CodegenValue::new(self.builder.build_float_ext(
+                            small_float,
+                            self.context.f64_type(),
+                            "",
+                        )?)
+                    } else if !param_ty.is_aggregate() {
                         self.sym_as_val_with_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
                     } else {
                         // Cannot directly pass the `Symbol::Register` because the types might mismatch
@@ -1147,7 +1163,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let ret = if let CFfiType::SmallSimpleEnum { ffi_int, small_int } = ret_ffi_ty {
             debug_assert!(!use_sret);
-            let ret = CodegenValue::new(ret.as_value_ref()).int_val();
+            let ret = CodegenValue::new(ret).int_val();
             debug_assert_eq!(ret.get_type(), ffi_int);
             self.builder.build_int_truncate(ret, small_int, "call")?.as_any_value_enum()
         } else {
@@ -1161,7 +1177,7 @@ impl<'ctx> Codegen<'ctx> {
             Ok(Symbol::Void)
         } else if let Some(ret_val_ptr) = ret_val_ptr {
             if !use_sret {
-                let ret = CodegenValue::new(ret.as_value_ref()).basic_val();
+                let ret = CodegenValue::new(ret).basic_val();
                 self.build_store(ret_val_ptr, ret, ret_ty.alignment())?;
             }
             stack_val(ret_val_ptr)
@@ -1393,7 +1409,7 @@ impl<'ctx> Codegen<'ctx> {
                     CFfiType::Simple(simple_ty) => {
                         let param = param_val_iter.next().u();
                         debug_assert_eq!(param.get_type(), simple_ty.basic_ty());
-                        let param = CodegenValue::new(param.as_value_ref());
+                        let param = CodegenValue::new(param);
                         if param_def.markers.get(DeclMarkers::IS_MUT_MASK)
                             || param_ty.is_aggregate()
                         {
@@ -1701,19 +1717,24 @@ impl<'ctx> Codegen<'ctx> {
             });
         }
 
-        if expr_ty.kind == AstKind::FloatTy {
+        if let Some(expr_f_ty) = expr_ty.try_downcast::<ast::FloatTy>() {
             let float = self.sym_as_val(sym, expr_ty)?.float_val();
             let target = self.llvm_type(target_ty);
-            return if let Some(target_i_ty) = target_ty.try_downcast::<ast::IntTy>() {
-                let int_ty = target.int_ty();
-                reg(if target_i_ty.is_signed {
-                    self.builder.build_float_to_signed_int(float, int_ty, "")?
-                } else {
-                    self.builder.build_float_to_unsigned_int(float, int_ty, "")?
-                })
-            } else {
-                unreachable_debug()
-            };
+            match target_ty.matchable2() {
+                TypeMatch::IntTy(target_ty) => {
+                    return reg(if target_ty.is_signed {
+                        self.builder.build_float_to_signed_int(float, target.int_ty(), "")?
+                    } else {
+                        self.builder.build_float_to_unsigned_int(float, target.int_ty(), "")?
+                    });
+                },
+                TypeMatch::FloatTy(target_ty) => {
+                    if expr_f_ty.bits < target_ty.bits {
+                        return reg(self.builder.build_float_ext(float, target.float_ty(), "")?);
+                    }
+                },
+                _ => {},
+            }
         }
 
         /*
@@ -2005,7 +2026,7 @@ impl<'ctx> Codegen<'ctx> {
         op: BinOpKind,
     ) -> CodegenResult<CodegenValue<'ctx>> {
         fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
-            Ok(CodegenValue::new(val.as_value_ref()))
+            Ok(CodegenValue::new(val))
         }
 
         macro_rules! cmp {
@@ -2055,7 +2076,7 @@ impl<'ctx> Codegen<'ctx> {
         op: BinOpKind,
     ) -> CodegenResult<CodegenValue<'ctx>> {
         fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
-            Ok(CodegenValue::new(val.as_value_ref()))
+            Ok(CodegenValue::new(val))
         }
 
         macro_rules! cmp {
@@ -2087,7 +2108,7 @@ impl<'ctx> Codegen<'ctx> {
         op: BinOpKind,
     ) -> CodegenResult<CodegenValue<'ctx>> {
         fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
-            Ok(CodegenValue::new(val.as_value_ref()))
+            Ok(CodegenValue::new(val))
         }
 
         match op {
@@ -2126,7 +2147,7 @@ impl<'ctx> Codegen<'ctx> {
         op: BinOpKind,
     ) -> CodegenResultAndControlFlow<CodegenValue<'ctx>> {
         fn ret<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResultAndControlFlow<CodegenValue<'ctx>> {
-            Ok(CodegenValue::new(val.as_value_ref()))
+            Ok(CodegenValue::new(val))
         }
 
         match op {
@@ -2422,19 +2443,14 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn llvm_type(&mut self, ty: Ptr<ast::Type>) -> CodegenType<'ctx> {
-        macro_rules! t {
-            ($t:expr) => {
-                CodegenType::new($t.as_type_ref())
-            };
-        }
         let p = primitives();
         if ty.kind == AstKind::SimpleTy {
             return if ty == p.void_ty {
-                t!(self.context.void_type())
+                CodegenType::new(self.context.void_type())
             } else if ty == p.never {
                 unreachable_debug()
             } else if ty == p.bool {
-                t!(self.context.bool_type())
+                CodegenType::new(self.context.bool_type())
             } else if ty == p.char {
                 todo!("char ty")
             } else if ty == p.str_slice_ty {
@@ -2443,7 +2459,7 @@ impl<'ctx> Codegen<'ctx> {
                 todo!("type_ty")
             } else if ty == p.any {
                 // TODO: needed for `*any`. Is this correct in general?
-                t!(self.context.void_type())
+                CodegenType::new(self.context.void_type())
             } else {
                 panic_debug!("cannot compile type: {ty}");
             };
@@ -2455,18 +2471,22 @@ impl<'ctx> Codegen<'ctx> {
 
         let llvm_ty = match ty.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => unreachable_debug(),
-            TypeEnum::IntTy { bits, .. } => t!(self.int_type(*bits)),
-            TypeEnum::FloatTy { bits, .. } => t!(self.float_type(*bits)),
-            TypeEnum::PtrTy { .. } => t!(self.ptr_type()),
+            TypeEnum::IntTy { bits, .. } => CodegenType::new(self.int_type(*bits)),
+            TypeEnum::FloatTy { bits, .. } => CodegenType::new(self.float_type(*bits)),
+            TypeEnum::PtrTy { .. } => CodegenType::new(self.ptr_type()),
             TypeEnum::SliceTy { .. } => self.llvm_type(p.untyped_slice_struct_def.upcast_to_type()),
-            TypeEnum::ArrayTy { len, elem_ty, .. } => {
-                t!(self.llvm_type(elem_ty.downcast_type()).basic_ty().array_type(len.int()))
-            },
+            TypeEnum::ArrayTy { len, elem_ty, .. } => CodegenType::new(
+                self.llvm_type(elem_ty.downcast_type()).basic_ty().array_type(len.int()),
+            ),
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => t!(self.new_struct_type(*fields, None)),
-            TypeEnum::UnionDef { fields, .. } => t!(self.new_union_type(*fields, None)),
-            TypeEnum::EnumDef { .. } => t!(self.new_enum_type(ty.downcast(), None)),
-            TypeEnum::RangeTy { .. } => t!(self.range_type(ty.downcast())),
+            TypeEnum::StructDef { fields, .. } => {
+                CodegenType::new(self.new_struct_type(*fields, None))
+            },
+            TypeEnum::UnionDef { fields, .. } => {
+                CodegenType::new(self.new_union_type(*fields, None))
+            },
+            TypeEnum::EnumDef { .. } => CodegenType::new(self.new_enum_type(ty.downcast(), None)),
+            TypeEnum::RangeTy { .. } => CodegenType::new(self.range_type(ty.downcast())),
             TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
                 self.llvm_type(t.downcast_type())
             },
@@ -2484,10 +2504,10 @@ impl<'ctx> Codegen<'ctx> {
                         is_mut: false,
                     })),
                 ]);
-                t!(self.new_enum_type(LLVM_OPTION_VARIANTS, None))
+                CodegenType::new(self.new_enum_type(LLVM_OPTION_VARIANTS, None))
                     */
             },
-            TypeEnum::Fn { .. } => t!(self.ptr_type()),
+            TypeEnum::Fn { .. } => CodegenType::new(self.ptr_type()),
             TypeEnum::Unset => unreachable_debug(),
         };
 
@@ -2516,23 +2536,26 @@ impl<'ctx> Codegen<'ctx> {
                     ffi_int: self.int_type(DEFAULT_C_ENUM_BITS),
                 }
             } else {
-                CFfiType::Simple(CodegenType::new(tag_ty.as_type_ref()))
+                CFfiType::Simple(CodegenType::new(tag_ty))
             };
         }
         let size = ty.size();
-        match ty.matchable().as_ref() {
+        match ty.matchable2() {
             _ if size == 0 => CFfiType::Zst,
-            TypeEnum::Fn { .. } => CFfiType::Fn,
-            TypeEnum::ArrayTy { .. } => CFfiType::Array,
+            TypeMatch::Fn(_) => CFfiType::Fn,
+            TypeMatch::ArrayTy(_) => CFfiType::Array,
             _ if size > 16 => CFfiType::ByValPtr,
-            TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => {
-                CFfiType::Simple(CodegenType::new(
-                    self.context
-                        .struct_type(&[self.int_type(size as u32 * 8).as_basic_type_enum()], false)
-                        .as_type_ref(),
-                ))
+            TypeMatch::UnionDef(_) | TypeMatch::EnumDef(_) => CFfiType::Simple(CodegenType::new(
+                self.context
+                    .struct_type(&[self.int_type(size as u32 * 8).as_basic_type_enum()], false),
+            )),
+            TypeMatch::StructDef(_) => unreachable_debug(),
+            /*
+            TypeMatch::FloatTy(f) if is_vararg && f.bits < 64 => {
+                // see <https://stackoverflow.com/a/53712850>
+                CFfiType::Simple(CodegenType::new(self.context.f64_type()))
             },
-            TypeEnum::StructDef { .. } => unreachable_debug(),
+            */
             _ => CFfiType::Simple(self.llvm_type(ty)),
         }
     }
@@ -2552,8 +2575,7 @@ impl<'ctx> Codegen<'ctx> {
                 if new_fields[1].is_some() {
                     return CFfiType::ByValPtr;
                 }
-                new_fields[new_fields[0].is_some() as usize] =
-                    Some(CodegenType::new($f.as_type_ref()));
+                new_fields[new_fields[0].is_some() as usize] = Some(CodegenType::new($f));
             }};
         }
 
@@ -2700,7 +2722,7 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<CodegenValue<'ctx>> {
         Ok(match sym.basic() {
             BasicSymbol::Ref(ptr) => {
-                CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?.as_value_ref())
+                CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?)
             },
             BasicSymbol::Val(val) => {
                 debug_assert_eq!(val.basic_val().get_type(), llvm_ty);
@@ -2718,7 +2740,7 @@ impl<'ctx> Codegen<'ctx> {
         alignment: usize,
     ) -> CodegenResult<CodegenValue<'ctx>> {
         let ptr = self.build_ptr_to_sym_with_align(sym, alignment)?;
-        Ok(CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?.as_value_ref()))
+        Ok(CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?))
     }
 
     fn sym_as_val_checked(
@@ -2729,10 +2751,10 @@ impl<'ctx> Codegen<'ctx> {
         Ok(Some(match sym {
             Some(Symbol::Stack(ptr)) => {
                 let llvm_ty = self.llvm_type(ty).basic_ty();
-                CodegenValue::new(self.build_load(llvm_ty, ptr, "", ty.alignment())?.as_value_ref())
+                CodegenValue::new(self.build_load(llvm_ty, ptr, "", ty.alignment())?)
             },
             Some(Symbol::Register(val)) => val,
-            Some(Symbol::Global(val)) => CodegenValue::new(val.as_value_ref()),
+            Some(Symbol::Global(val)) => CodegenValue::new(val),
             _ => return Ok(None),
         }))
     }
@@ -3036,13 +3058,13 @@ impl<'ctx> std::fmt::Debug for CodegenValue<'ctx> {
 }
 
 impl<'ctx> CodegenValue<'ctx> {
-    pub fn new(val: *mut LLVMValue) -> CodegenValue<'ctx> {
+    pub fn new<V: AsValueRef>(val: V) -> CodegenValue<'ctx> {
         #[cfg(debug_assertions)]
         unsafe {
-            AnyValueEnum::new(val)
+            AnyValueEnum::new(val.as_value_ref())
         };
 
-        CodegenValue { val, _marker: PhantomData }
+        CodegenValue { val: val.as_value_ref(), _marker: PhantomData }
     }
 
     pub fn int_val(&self) -> IntValue<'ctx> {
@@ -3106,8 +3128,8 @@ pub struct CodegenType<'ctx> {
 }
 
 impl<'ctx> CodegenType<'ctx> {
-    pub fn new(raw: *mut LLVMType) -> CodegenType<'ctx> {
-        CodegenType { inner: raw, _marker: PhantomData }
+    pub fn new<Ty: AsTypeRef>(ty: Ty) -> Self {
+        CodegenType { inner: ty.as_type_ref(), _marker: PhantomData }
     }
 
     pub fn int_ty(&self) -> IntType<'ctx> {
@@ -3191,7 +3213,7 @@ fn reg<'ctx, U>(v: impl AnyValue<'ctx>) -> CodegenResult<Symbol<'ctx>, U> {
 
 #[inline]
 fn reg_sym<'ctx>(v: impl AnyValue<'ctx>) -> Symbol<'ctx> {
-    Symbol::Register(CodegenValue::new(v.as_value_ref()))
+    Symbol::Register(CodegenValue::new(v))
 }
 
 #[inline]
@@ -3201,7 +3223,7 @@ fn stack_val<'ctx, U>(ptr: PointerValue<'ctx>) -> CodegenResult<Symbol<'ctx>, U>
 
 #[inline]
 fn codegen_val<'ctx>(val: impl AnyValue<'ctx>) -> CodegenResult<CodegenValue<'ctx>> {
-    Ok(CodegenValue::new(val.as_value_ref()))
+    Ok(CodegenValue::new(val))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3261,7 +3283,7 @@ impl<'ctx> CFfiType<'ctx> {
             | CFfiType::Array
             | CFfiType::SmallSimpleEnum { .. } => self,
             CFfiType::Simple2(mut fields) => CFfiType::Simple(CodegenType::new(
-                codegen.struct_type_inner(fields.raw(), None, false).as_type_ref(),
+                codegen.struct_type_inner(fields.raw(), None, false),
             )),
         }
     }

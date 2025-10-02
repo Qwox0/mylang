@@ -148,3 +148,11 @@ fn set_impl() {
     let out = test_cmd(mylang(["check", "../lib/std/set.mylang", "--entry-point=set_test"]));
     assert!(out.status.success());
 }
+
+/// see <https://stackoverflow.com/a/53712850>
+#[test]
+fn coerce_vararg_f32_to_f64() {
+    let out = test_cmd(mylang(["run", "c_ffi_coerce_vararg_f32_to_f64.mylang"]));
+    assert!(out.status.success());
+    assert!(out.stdout.contains("12.340000"));
+}

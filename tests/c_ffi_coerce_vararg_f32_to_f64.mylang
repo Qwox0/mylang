@@ -1,0 +1,7 @@
+std :: #import "std";
+libc :: #import "libc";
+
+main :: -> {
+    f : f32 = 12.34;
+    libc.printf("%f\n".ptr, f);
+}

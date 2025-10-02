@@ -114,7 +114,7 @@ pub SEEK_SET : c_int : 0;
 pub SEEK_CUR : c_int : 1;
 pub SEEK_END : c_int : 2;
 
-fread : (data: *any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
+fread : (data: *mut any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
 
 // ===== <stdlib.h> =====
 
