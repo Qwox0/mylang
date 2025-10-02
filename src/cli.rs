@@ -69,9 +69,7 @@ pub struct BuildArgs {
 
 impl Default for BuildArgs {
     fn default() -> Self {
-        let Command::Build(args) = Cli::parse_from(["", "build"]).command else {
-            unreachable!()
-        };
+        let Command::Build(args) = Cli::parse_from(["", "build"]).command else { unreachable!() };
         args
     }
 }
@@ -99,6 +97,7 @@ pub enum OutKind {
 
 impl BuildArgs {
     /// for benchmarks
+    #[track_caller]
     pub fn comp_bench_args() -> Self {
         Self::test_args(TestArgsOptions {
             debug_ast: false,
@@ -114,7 +113,7 @@ impl BuildArgs {
     #[track_caller]
     pub fn test_args(opt: TestArgsOptions) -> Self {
         BuildArgs {
-            path: PathBuf::from(Location::caller().file()),
+            path: PathBuf::from(Location::caller().file()).canonicalize().unwrap(),
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,

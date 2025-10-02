@@ -5,7 +5,9 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
 };
-use std::{alloc::Layout, any::type_name, mem::MaybeUninit};
+#[cfg(debug_assertions)]
+use std::any::type_name;
+use std::{alloc::Layout, mem::MaybeUninit};
 
 #[derive(Debug)]
 pub struct Arena(pub bumpalo::Bump, #[cfg(debug_assertions)] ArenaKind);
@@ -38,15 +40,22 @@ impl Arena {
     pub const BUMP_OVERHEAD: usize = 64;
 
     #[inline]
+    #[rustfmt::skip]
+    #[allow(unused_variables)]
+    fn new_(buf: bumpalo::Bump, kind: ArenaKind) -> Self {
+        Self(buf, #[cfg(debug_assertions)] kind)
+    }
+
+    #[inline]
     pub fn new() -> Self {
-        Self(bumpalo::Bump::new(), ArenaKind::Normal)
+        Self::new_(bumpalo::Bump::new(), ArenaKind::Normal)
     }
 
     #[inline]
     pub fn new_scratch(capacity: usize) -> Self {
         let buf = bumpalo::Bump::with_capacity(capacity);
         //buf.set_allocation_limit(Some(buf.allocated_bytes()));
-        Self(buf, ArenaKind::Scratch)
+        Self::new_(buf, ArenaKind::Scratch)
     }
 
     #[inline]
@@ -118,6 +127,7 @@ impl Arena {
         self.0.reset();
     }
 
+    #[allow(unused_variables)]
     pub fn reset_scratch(&mut self, s: Ptr<ast::Ast>) {
         #[cfg(debug_assertions)]
         debug_assert_eq!(self.1, ArenaKind::Scratch);

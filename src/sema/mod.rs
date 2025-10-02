@@ -574,6 +574,7 @@ impl Sema {
                             && ty_match(lhs.ty.u(), first_param.var_ty.u())
                         {
                             debug_assert!(s.is_const);
+                            rhs.ty = Some(var_ty);
                             rhs.upcast().set_replacement(f.upcast());
                             ty = Some(p.method_stub);
                         } else if var_ty == p.never {

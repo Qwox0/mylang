@@ -277,3 +277,44 @@ take_any(&A);
 ";
     test_body(code).ok(());
 }
+
+#[test]
+#[ignore = "not implemented"]
+fn jit_load_lib() {
+    let code = r##"
+glfw3 :: #import "../../lib/std/bindgen/libglfw3.mylang";
+
+test :: -> {
+    glfw3.init();
+}
+"##;
+    test(code).ok(());
+}
+
+#[test]
+fn set_type_on_replacements() {
+    // needed for some directives
+    let code = "
+test :: -> {
+    _ := #sizeof(i32);
+    pause();
+}
+pause :: -> {}
+";
+    test(code).ok(());
+
+    // causes problems with recursive functions
+    let code = "
+asdf :: (a: i32) -> {
+    if false return asdf(1);
+}
+test :: -> asdf(10);";
+    test(code).ok(());
+
+    let code = "
+asdf :: (a: i32) -> {
+    if false return 1.asdf();
+}
+test :: -> asdf(10);";
+    test(code).ok(());
+}

@@ -121,12 +121,14 @@ struct Ok<RetTy> {
 struct Err;
 
 impl NewTest {
+    #[track_caller]
     fn prepare(self) -> TestResult<()> {
         let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
         ctx.0.set_test_root(Ptr::from_ref(self.code.as_ref())).unwrap();
         TestResult { ctx: TestCtx { ctx, diag_idx: 0 }, code: self.code, data: () }
     }
 
+    #[track_caller]
     fn compile(self) -> TestResult<CompileResult> {
         let _self = self.prepare();
         TestResult { data: compile_ctx(_self.ctx.ctx.0, CompileMode::TestRun), .._self }

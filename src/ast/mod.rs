@@ -754,11 +754,9 @@ impl Ptr<Ast> {
     pub fn set_replacement(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
-        /*
         if rep.ty.is_none() {
             rep.as_mut().ty = Some(self.ty.u());
         }
-        */
         self.as_mut().replacement = Some(rep)
     }
 

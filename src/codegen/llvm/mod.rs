@@ -2964,6 +2964,15 @@ impl<'ctx> CodegenModuleExt for Module<'ctx> {
 
     fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
         let jit = self.create_jit_execution_engine(opt).map_err(CodegenError::CannotCreateJit)?;
+
+        if ctx().libraries.len() > 0 {
+            todo!("jit load libraries")
+
+            // load_library_permanently(Path::new(/* TODO: link to .so */)).unwrap();
+
+            // TODO: Is it possible to load static libraries? <https://stackoverflow.com/questions/2806046/linking-llvm-jit-code-to-static-llvm-libraries>
+        }
+
         Ok(unsafe { jit.get_function::<unsafe extern "C" fn() -> Ret>(fn_name)?.call() })
     }
 }
@@ -2981,7 +2990,6 @@ impl<'ctx> CodegenSymbolTable<'ctx> {
 enum Symbol<'ctx> {
     Void,
     Stack(PointerValue<'ctx>),
-    //Register(AnyValueEnum<'ctx>),
     Register(CodegenValue<'ctx>),
     Global(GlobalValue<'ctx>),
     Function(FunctionValue<'ctx>),

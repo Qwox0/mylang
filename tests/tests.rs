@@ -145,6 +145,6 @@ fn c_ffi_take_array_arg() {
 
 #[test]
 fn set_impl() {
-    let out = test_cmd(mylang(["check", "../lib/std/set.mylang", "--entry-point=test"]));
+    let out = test_cmd(mylang(["check", "../lib/std/set.mylang", "--entry-point=set_test"]));
     assert!(out.status.success());
 }
