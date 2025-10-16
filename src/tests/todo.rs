@@ -318,3 +318,15 @@ asdf :: (a: i32) -> {
 test :: -> asdf(10);";
     test(code).ok(());
 }
+
+#[test]
+#[ignore = "not implemented"]
+fn initializer_after_loop() {
+    let code = "
+MyStruct :: struct { num: i32 };
+test :: -> MyStruct {
+    for _ in 0..1 {}
+    .{ num=5 }
+};";
+    test(code).ok(5i32);
+}

@@ -24,6 +24,7 @@ impl<T> SemaResult<T> {
     pub const HandledErr: SemaResult<T> = Err(HandledErr);
 }
 
+#[allow(unused)]
 impl<T> SemaResult<T> {
     pub fn is_ok(&self) -> bool {
         matches!(self, Ok(_))

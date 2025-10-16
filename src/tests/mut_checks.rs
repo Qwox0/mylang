@@ -1,4 +1,4 @@
-use crate::tests::{substr, test_body};
+use crate::tests::{arr, substr, test_body};
 
 #[test]
 fn mut_checks() {
@@ -56,7 +56,7 @@ fn nested_slice_addrof_op() {
             "{var_mut} arr := .[1,2,3]; ptr := arr[1..]{slice_mut}[0].&{ptr_mut}; ptr.* = 5; arr",
         )
     };
-    test_body(get_code("mut", "mut", "mut")).ok([1i64, 5, 3]);
+    test_body(get_code("mut", "mut", "mut")).ok(arr([1i64, 5, 3]));
     test_body(get_code("", "", "")).error(
         "Cannot assign to `ptr.*`, which is behind the immutable pointer `ptr`",
         substr!("ptr.* = 5"),

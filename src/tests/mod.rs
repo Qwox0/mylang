@@ -19,6 +19,7 @@ mod args;
 mod array;
 mod associated_consts;
 mod binop;
+mod bool;
 mod call_conv_c;
 mod consts;
 mod defer;
@@ -158,6 +159,13 @@ impl NewTest {
     #[track_caller]
     fn ok<RetTy: PartialEq + fmt::Debug>(self, expected: RetTy) -> TestResult<Ok<RetTy>> {
         let res = self._ok();
+        if res.data.ret != expected && is_array::<RetTy>() && std::mem::size_of::<RetTy>() < 16 {
+            println!(
+                "The array type `{}` might cause problems because mylang returns a pointer but \
+                 Rust expectes an array value",
+                std::any::type_name::<RetTy>()
+            );
+        }
         assert_eq!(res.data.ret, expected);
         res
     }
@@ -373,4 +381,35 @@ impl<RetTy> AsMut<Compiled> for Ok<RetTy> {
     fn as_mut(&mut self) -> &mut Compiled {
         &mut self.c
     }
+}
+
+fn is_array<T>() -> bool {
+    matches!(std::any::type_name::<T>().as_bytes(), [b'[', .., b']'])
+}
+
+/// # Arrays
+/// In the C calling convention arrays are always passed as a pointer and can't be returned.
+/// In mylang arrays are also always returned as a (sret) pointer. This helper is needed because
+/// Rust does something else.
+#[derive(Clone, Copy, Eq)]
+#[repr(C)]
+pub struct EnsureSret<T> {
+    pub val: T,
+    __force_sret: [u64; 10],
+}
+
+impl<T: fmt::Debug> fmt::Debug for EnsureSret<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.val.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for EnsureSret<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.val == other.val
+    }
+}
+
+fn arr<T, const LEN: usize>(val: [T; LEN]) -> EnsureSret<[T; LEN]> {
+    EnsureSret { val, __force_sret: [0; 10] }
 }

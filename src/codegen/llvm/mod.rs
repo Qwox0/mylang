@@ -206,7 +206,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.precompile_decls(stmts.as_ref())?;
                 self.open_scope();
                 let res: CodegenResultAndControlFlow<Symbol> = try {
-                    if let Some(last) = stmts.last_mut() {
+                    if !*has_trailing_semicolon && let Some(last) = stmts.last_mut() {
                         last.ty = Some(out_ty)
                     }
                     let mut out = Symbol::Void;
@@ -1679,7 +1679,9 @@ impl<'ctx> Codegen<'ctx> {
         if let Some(i_ty) = expr_ty.try_downcast::<ast::IntTy>() {
             let int = self.sym_as_val(sym, expr_ty)?.int_val();
             let target = self.llvm_type(target_ty);
-            return if target_ty.kind == AstKind::IntTy {
+            return if target_ty.kind == AstKind::IntTy
+                || target_ty.try_downcast::<ast::EnumDef>().is_some_and(|e| e.is_simple_enum)
+            {
                 let rhs_ty = target.int_ty();
                 // The documentation of `build_int_cast_sign_flag` is wrong. The signedness of the
                 // source type, not the target type, is relevant.
@@ -1708,13 +1710,7 @@ impl<'ctx> Codegen<'ctx> {
         {
             let lhs = self.sym_as_val(sym, p.bool)?.bool_val();
             let int_ty = self.llvm_type(i_ty.upcast_to_type()).int_ty();
-            return reg(if i_ty.is_signed {
-                //self.builder.build_int_s_extend_or_bit_cast(int_value, int_type, "")
-                self.builder.build_int_s_extend(lhs, int_ty, "")?
-            } else {
-                //self.builder.build_int_z_extend_or_bit_cast(int_value, int_type, "")
-                self.builder.build_int_z_extend(lhs, int_ty, "")?
-            });
+            return reg(self.builder.build_int_z_extend(lhs, int_ty, "")?);
         }
 
         if let Some(expr_f_ty) = expr_ty.try_downcast::<ast::FloatTy>() {
@@ -2407,9 +2403,8 @@ impl<'ctx> Codegen<'ctx> {
     #[inline]
     fn enum_tag_type(&self, enum_def: Ptr<ast::EnumDef>) -> EnumTagType<'ctx> {
         let tag_bits = enum_def.tag_ty.u().bits;
-        debug_assert_eq!(
-            tag_bits,
-            util::variant_count_to_tag_size_bytes(enum_def.variants.len()) * 8
+        debug_assert!(
+            tag_bits >= util::variant_count_to_tag_size_bytes(enum_def.variants.len()) * 8
         );
         match tag_bits {
             // Note: This condition will be too strict when never variants are filtered out.

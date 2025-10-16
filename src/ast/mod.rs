@@ -1060,6 +1060,11 @@ impl Ast {
             AstEnum::ExternDirective { .. } => span,
             AstEnum::IntrinsicDirective { intrinsic_name, .. } => span.join(intrinsic_name.span),
 
+            AstEnum::SizeOfDirective { type_: e, .. }
+            | AstEnum::SizeOfValDirective { val: e, .. }
+            | AstEnum::AlignOfDirective { type_: e, .. } => span.join(e.full_span()),
+            AstEnum::OffsetOfDirective { field, .. } => span.join(field.span),
+
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => span,
             AstEnum::PtrTy { pointee: i, .. }
             | AstEnum::SliceTy { elem_ty: i, .. }

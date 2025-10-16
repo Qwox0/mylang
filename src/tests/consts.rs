@@ -1,4 +1,4 @@
-use crate::tests::{array::CRetArr, substr, test, test_body};
+use crate::tests::{arr, substr, test, test_body};
 
 /// more tests about associated constants: [`crate::tests::associated_consts`]
 #[test]
@@ -9,7 +9,7 @@ test :: -> {
     arr: [MyStruct.MY_CONST]u8 = .[1, 2, 3];
     return arr;
 }";
-    assert_eq!(test(code).get_out::<CRetArr<u8, 3>>().val, [1, 2, 3]);
+    test(code).ok(arr([1u8, 2, 3]));
 
     let code = "
 MyStruct :: struct { field: u8, MY_CONST : u64 : 10 };

@@ -277,3 +277,13 @@ fn good_error_cannot_apply_initializer_to_type() {
         substr!("A.(1)";.start_with_len(1)),
     );
 }
+
+#[test]
+fn enum_repr_type() {
+    let res = test_body("MyEnum :: enum { A, B = 1000000.as(u32), C }; MyEnum.C").ok(1000001u32);
+    assert!(res.llvm_ir().contains("ret i32 1000001"));
+    drop(res);
+
+    test("MyEnum :: enum { A, B = 1000000.as(u32), C = -1 }")
+        .error("Cannot apply unary operator `-` to type `u32`", substr!("-1"));
+}

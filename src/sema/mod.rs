@@ -242,8 +242,8 @@ impl Sema {
 
         macro_rules! not_never {
             ($expr:expr) => {{
-                let e: Ptr<Ast> = $expr;
-                if e.ty == p.never {
+                let e = $expr;
+                if e == p.never.upcast() || e.ty == p.never {
                     expr.as_mut().ty = Some(p.never);
                     return Ok(());
                 }
@@ -322,22 +322,22 @@ impl Sema {
             },
             AstEnum::PositionalInitializer { lhs, args, .. } => {
                 let lhs = not_never!(self.analyze_initializer_lhs(*lhs, *ty_hint, expr)?);
-                if let Some(s) = lhs.try_downcast::<ast::StructDef>() {
-                    // allow slices?
-                    self.validate_call(&s.fields, args, false, span.end(), is_const)?;
-                    expr.ty = Some(s.upcast_to_type());
+                if let Some(s) = lhs.try_downcast_type()
+                    && s.kind.is_struct_kind()
+                {
+                    let fields = s.downcast_struct_def().fields;
+                    self.validate_call(&fields, args, false, span.end(), is_const)?;
+                    expr.ty = Some(s);
 
                     if is_const {
-                        let all_args = s
-                            .fields
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, f)| args.get(idx).or(f.init).u());
+                        let all_args =
+                            fields.iter().enumerate().map(|(idx, f)| args.get(idx).or(f.init).u());
                         let cv = self.create_aggregate_const_val(all_args)?;
                         expr.set_replacement(cv.upcast());
                     }
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
-                    && let Some(s) = ptr_ty.pointee.try_downcast::<ast::StructDef>()
+                    && let Some(s) = ptr_ty.pointee.try_downcast_type()
+                    && s.kind.is_struct_kind()
                 {
                     self.validate_mutation(MutationKind::Initialize, lhs, expr)?;
                     expr.ty = Some(ptr_ty.upcast_to_type());
@@ -345,7 +345,8 @@ impl Sema {
                     if is_const {
                         return self.cctx.error_const_ptr_initializer(expr).into();
                     } else {
-                        self.validate_call(&s.fields, args, false, span.end(), false)?;
+                        let fields = s.downcast_struct_def().fields;
+                        self.validate_call(&fields, args, false, span.end(), false)?;
                     }
                 } else {
                     self.cctx.error_cannot_apply_initializer(lhs, expr);
@@ -672,6 +673,12 @@ impl Sema {
                 let ty = self.analyze_type(*target_ty)?;
                 analyze!(*operand, Some(ty));
                 // TODO: check if cast is possible
+
+                if is_const {
+                    // TODO: is this always valid?
+                    expr.set_replacement(operand.rep());
+                }
+
                 expr.ty = Some(ty);
             },
             AstEnum::Autocast { operand, .. } => {

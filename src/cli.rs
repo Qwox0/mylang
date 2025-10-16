@@ -1,6 +1,8 @@
 use clap::Parser;
 use std::{panic::Location, path::PathBuf};
 
+use crate::diagnostics::DiagnosticSeverity;
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
@@ -65,6 +67,10 @@ pub struct BuildArgs {
 
     #[arg(long, default_value = "1")]
     pub error_code: i32,
+
+    /// The minimum severity level of diagnostics emitted
+    #[arg(long, default_value = "info")]
+    pub diagnostic_level: DiagnosticSeverity,
 }
 
 impl Default for BuildArgs {

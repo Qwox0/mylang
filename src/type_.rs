@@ -8,7 +8,6 @@ use crate::{
     util::{
         Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_alignment,
         round_up_to_nearest_power_of_two, unreachable_debug, variant_count_to_tag_size_bits,
-        variant_count_to_tag_size_bytes,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -408,8 +407,8 @@ impl ast::Type {
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } => struct_size(fields),
             TypeEnum::UnionDef { fields, .. } => union_size(*fields),
-            TypeEnum::EnumDef { variants, .. } => aligned_add(
-                variant_count_to_tag_size_bytes(variants.len()) as usize,
+            TypeEnum::EnumDef { variants, tag_ty, .. } => aligned_add(
+                int_size(tag_ty.u().bits),
                 Layout::new(union_size(*variants), struct_alignment(variants)),
             ),
             TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
@@ -507,6 +506,9 @@ impl ast::Type {
 
 #[inline]
 pub fn int_size(bits: u32) -> usize {
+    if bits == 0 {
+        return 0;
+    }
     round_up_to_nearest_power_of_two(bits as usize).div_ceil(8)
 }
 

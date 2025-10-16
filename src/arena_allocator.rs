@@ -24,7 +24,9 @@ pub fn handle_alloc_err(e: bumpalo::AllocErr) -> AllocErr {
     cerror!(Span::ZERO, "allocation failed: {e}")
 }
 
+#[cfg(debug_assertions)]
 const DEBUG_SCRATCH: bool = false;
+#[cfg(debug_assertions)]
 const SKIP_ALLOC: bool = false;
 
 macro_rules! debug_scratch {

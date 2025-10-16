@@ -1,19 +1,9 @@
 use super::TestSpan;
-use crate::tests::{substr, test_body};
-
-/// In the C calling convention arrays are always passed as a pointer and can't be returned.
-/// In mylang arrays are also always returned as a (sret) pointer. This helper is needed because
-/// Rust does something else.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct CRetArr<T, const LEN: usize> {
-    pub val: [T; LEN],
-    __force_sret: [u64; 10],
-}
+use crate::tests::{arr, substr, test_body};
 
 #[test]
 fn arr_initializer_with_lhs() {
-    assert_eq!(test_body("u8.[1, 2, 3, 4]").get_out::<CRetArr<u8, 4>>().val, [1, 2, 3, 4]);
+    test_body("u8.[1, 2, 3, 4]").ok(arr([1u8, 2, 3, 4]));
 }
 
 /// also tests that the `elem_ty` is still inferred correctly.
@@ -26,7 +16,7 @@ fn arr_initializer_len_mismatch() {
 #[test]
 fn arr_initializer_on_ptr() {
     let code = "{ mut arr: [4]i64; ptr := &mut arr; ptr.[5, 6, 7, 8]; arr }";
-    assert_eq!(test_body(code).get_out::<CRetArr<i64, 4>>().val, [5, 6, 7, 8]);
+    test_body(code).ok(arr([5i64, 6, 7, 8]));
 }
 
 #[test]
@@ -41,7 +31,7 @@ fn arr_initializer_on_ptr_len_mismatch() {
 #[ignore = "not yet implemented"]
 fn arr_initializer_on_slice() {
     let code = "{ arr := .[1, 2, 3, 4]; slice := arr[1..]; slice.[5, 6, 7]; arr }";
-    assert_eq!(test_body(code).get_out::<CRetArr<i64, 4>>().val, [1, 5, 6, 7]);
+    test_body(code).ok(arr([1i64, 5, 6, 7]));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use crate::{
     ast::{self, AstKind, UpcastToAst},
+    context::ctx,
     display_code::display,
     parser::lexer::Span,
     ptr::Ptr,
@@ -180,6 +181,9 @@ pub struct DiagnosticPrinter {
 impl DiagnosticReporter for DiagnosticPrinter {
     fn report(&mut self, severity: DiagnosticSeverity, span: Span, msg: impl Display) {
         self.max_past_severity = self.max_past_severity.max(Some(severity));
+        if severity < ctx().args.diagnostic_level {
+            return;
+        }
         let mut stderr = std::io::stderr();
         write!(&mut stderr, "{severity}: {msg}").unwrap();
         #[cfg(debug_assertions)]
@@ -255,7 +259,7 @@ pub const COLOR_YELLOW: &str = "\x1b[0;33m";
 pub const COLOR_BOLD_CYAN: &str = "\x1b[1;36m";
 pub const COLOR_CYAN: &str = "\x1b[0;36m";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum DiagnosticSeverity {
     /// Internal error
     Fatal,
