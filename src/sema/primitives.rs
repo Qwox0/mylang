@@ -1,11 +1,10 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
-    ast::{self, UpcastToAst},
+    ast::{self, RangeKind, UpcastToAst},
     intern_pool::{InternPool, Symbol},
     parser::lexer::Span,
     ptr::Ptr,
     scope::{Scope, ScopeKind},
-    type_::RangeKind,
 };
 
 #[derive(Debug)]

@@ -1,7 +1,8 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclList, DeclListExt,
-        DeclMarkers, OptionTypeExt, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, is_pos_arg,
+        DeclMarkers, OptionTypeExt, RangeKind, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst,
+        is_pos_arg,
     },
     codegen::llvm::bindings::*,
     context::{ctx, primitives, tmp_alloc},
@@ -10,7 +11,7 @@ use crate::{
     literals::replace_escape_chars,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
-    type_::{RangeKind, enum_alignment, struct_size, ty_match, union_size},
+    type_::{enum_alignment, struct_size, ty_match, union_size},
     util::{
         self, UnwrapDebug, forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment,
         unreachable_debug,

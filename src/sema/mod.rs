@@ -5,19 +5,18 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OptionTypeExt,
-        TypeEnum, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg, type_new,
+        RangeKind, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg,
+        type_new,
     },
-    context::{CompilationContextInner, ctx_mut, primitives as p},
-    diagnostics::{
-        DiagnosticReporter, HandledErr, cerror, cerror2, chint, cinfo, cunimplemented, cwarn,
-    },
+    context::{CompilationContextInner, primitives as p},
+    diagnostics::{HandledErr, cerror, cerror2, chint, cinfo, common::*, cunimplemented, cwarn},
     display_code::display,
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopePos},
     scoped_stack::ScopedStack,
-    type_::{RangeKind, common_type, struct_offset, ty_match},
+    type_::{common_type, struct_offset, ty_match},
     util::{self, UnwrapDebug, then, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
@@ -53,8 +52,7 @@ macro_rules! check_or_infer_target {
         let ty: Ptr<ast::Type> = $ty;
         let target_ty: &mut OPtr<ast::Type> = $target_ty;
         let Some(()) = check_or_infer_type(ty, target_ty, strict_target) else {
-            ctx_mut().error_mismatched_types($err_span, target_ty.u(), ty);
-            return SemaResult::HandledErr;
+            return error_mismatched_types($err_span, target_ty.u(), ty).into();
         };
         target_ty.as_mut().u()
     }};
@@ -343,14 +341,13 @@ impl Sema {
                     expr.ty = Some(ptr_ty.upcast_to_type());
 
                     if is_const {
-                        return self.cctx.error_const_ptr_initializer(expr).into();
+                        return error_const_ptr_initializer(expr).into();
                     } else {
                         let fields = s.downcast_struct_def().fields;
                         self.validate_call(&fields, args, false, span.end(), false)?;
                     }
                 } else {
-                    self.cctx.error_cannot_apply_initializer(lhs, expr);
-                    return SemaResult::HandledErr;
+                    return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
             AstEnum::NamedInitializer { lhs: lhs_expr, fields: values, .. } => {
@@ -372,14 +369,13 @@ impl Sema {
                 {
                     self.validate_mutation(MutationKind::Initialize, lhs, expr)?;
                     if is_const {
-                        return self.cctx.error_const_ptr_initializer(expr).into();
+                        return error_const_ptr_initializer(expr).into();
                     } else {
                         self.validate_initializer(struct_ty, *values, is_const, span)?;
                         expr.ty = Some(ptr_ty.upcast_to_type());
                     }
                 } else {
-                    self.cctx.error_cannot_apply_initializer(lhs, expr);
-                    return SemaResult::HandledErr;
+                    return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
@@ -403,8 +399,7 @@ impl Sema {
                     self.analyze(elem, &Some(elem_ty), is_const)?;
                     let ty = elem.ty.u();
                     let Some(common_ty) = common_type(ty, elem_ty) else {
-                        self.cctx.error_mismatched_types(elem.full_span(), elem_ty, ty);
-                        return SemaResult::HandledErr;
+                        return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
                     };
                     elem_ty = common_ty;
                 }
@@ -431,8 +426,7 @@ impl Sema {
                 let len = count
                     .try_downcast_const_val()
                     .ok_or_else(|| {
-                        self.cctx
-                            .error_non_const(*count, "Array length must be known at compile time")
+                        error_non_const(*count, "Array length must be known at compile time")
                     })?
                     .upcast();
 
@@ -582,7 +576,7 @@ impl Sema {
                             ty = Some(p.never);
                         }
                     }
-                    ty.ok_or_else(|| self.cctx.error_unknown_field(*rhs, lhs_ty))?
+                    ty.ok_or_else(|| error_unknown_field(*rhs, lhs_ty))?
                 };
                 expr.ty = Some(t);
             },
@@ -602,7 +596,7 @@ impl Sema {
                     return cerror2!(expr.full_span(), "Cannot infer enum type");
                 };
                 let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
-                    return self.cctx.error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
+                    return error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
                 };
                 *lhs = Some(enum_ty.upcast());
                 expr.ty = Some(self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?)
@@ -612,8 +606,7 @@ impl Sema {
                 let (TypeEnum::SliceTy { elem_ty, .. } | TypeEnum::ArrayTy { elem_ty, .. }) =
                     lhs_ty.matchable().as_ref()
                 else {
-                    cerror!(lhs.full_span(), "cannot index into value of type {}", lhs_ty);
-                    return SemaResult::HandledErr;
+                    return cerror2!(lhs.full_span(), "cannot index into value of type {}", lhs_ty);
                 };
                 let elem_ty = elem_ty.downcast_type();
                 let idx_ty = analyze!(*idx, None).finalize();
@@ -664,8 +657,10 @@ impl Sema {
                         }
                     },
                     _ => {
-                        cerror!(idx.full_span(), "Cannot index into array with `{idx_ty}`");
-                        return SemaResult::HandledErr;
+                        return cerror2!(
+                            idx.full_span(),
+                            "Cannot index into array with `{idx_ty}`"
+                        );
                     },
                 }
             },
@@ -697,7 +692,7 @@ impl Sema {
                 let fn_ty = *analyze!(*func, ty_hint);
                 if let Some(fn_ty) = fn_ty.try_downcast::<ast::Fn>() {
                     if is_const {
-                        return self.cctx.error_const_call(call).into();
+                        return error_const_call(call).into();
                     }
                     self.validate_call(
                         &fn_ty.params(),
@@ -711,7 +706,7 @@ impl Sema {
                     expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
                 } else if fn_ty == p.method_stub {
                     if is_const {
-                        return self.cctx.error_const_call(call).into();
+                        return error_const_call(call).into();
                     }
                     let dot = func.downcast::<ast::Dot>().as_mut();
                     let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
@@ -744,12 +739,11 @@ impl Sema {
                         expr.set_replacement(cv.upcast());
                     }
                 } else {
-                    cerror!(
+                    return cerror2!(
                         func.full_span(),
                         "Cannot call value of type '{}'; expected function",
                         fn_ty
                     );
-                    return SemaResult::HandledErr;
                 };
             },
             AstEnum::UnaryOp { op, operand, .. } => {
@@ -799,11 +793,10 @@ impl Sema {
                     UnaryOpKind::Deref => {
                         expr_ty = *analyze!(*operand, None);
                         let Some(ptr_ty) = expr_ty.try_downcast::<ast::PtrTy>() else {
-                            cerror!(
+                            return cerror2!(
                                 expr.full_span(),
                                 "Cannot dereference value of type `{expr_ty}`",
                             );
-                            return SemaResult::HandledErr;
                         };
                         if is_const {
                             return cerror2!(
@@ -844,10 +837,7 @@ impl Sema {
                 let lhs_ty = *analyze!(*lhs, None);
                 let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
                 let Some(mut common_ty) = common_type(rhs_ty, lhs_ty) else {
-                    return self
-                        .cctx
-                        .error_mismatched_types_binop(expr.span, lhs_ty, rhs_ty)
-                        .into();
+                    return error_mismatched_types_binop(expr.span, lhs_ty, rhs_ty).into();
                 };
                 // todo: check if binop can be applied to type
                 expr.ty = Some(match op {
@@ -882,13 +872,13 @@ impl Sema {
                 });
                 if is_const {
                     let lhs = lhs.try_downcast_const_val().ok_or_else(|| {
-                        self.cctx.error_non_const(
+                        error_non_const(
                             *lhs,
                             "Left-hand side of compile time operation not known at compile time",
                         )
                     })?;
                     let rhs = rhs.try_downcast_const_val().ok_or_else(|| {
-                        self.cctx.error_non_const(
+                        error_non_const(
                             *rhs,
                             "Right-hand side of compile time operation not known at compile time",
                         )
@@ -957,9 +947,7 @@ impl Sema {
                         let start_ty = *analyze!(*start, None);
                         let end_ty = *analyze!(*end, Some(start_ty));
                         let Some(common_ty) = common_type(start_ty, end_ty) else {
-                            return self
-                                .cctx
-                                .error_mismatched_types_binop(expr.span, start_ty, end_ty)
+                            return error_mismatched_types_binop(expr.span, start_ty, end_ty)
                                 .into();
                         };
                         (common_ty, kind)
@@ -1063,8 +1051,7 @@ impl Sema {
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
                     if !body.can_ignore_yielded_value() {
-                        self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
-                        return SemaResult::HandledErr;
+                        return error_cannot_yield_from_loop_block(body.return_val_span()).into();
                     }
                     Ok(())
                 })();
@@ -1081,8 +1068,7 @@ impl Sema {
                 let res: SemaResult<()> = try {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
                     if !body.can_ignore_yielded_value() {
-                        self.cctx.error_cannot_yield_from_loop_block(body.return_val_span());
-                        return SemaResult::HandledErr;
+                        return error_cannot_yield_from_loop_block(body.return_val_span()).into();
                     }
                 };
                 //self.close_scope();
@@ -1153,12 +1139,12 @@ impl Sema {
                 }
                 let Some(f) = ty.try_downcast::<ast::Fn>() else {
                     // Do non-function intrinsics exist?
-                    self.cctx.error_mismatched_types(
+                    return error_mismatched_types_custom(
                         ty.upcast().full_span(),
                         "function type of intrinsic",
                         ty,
-                    );
-                    return SemaResult::HandledErr;
+                    )
+                    .into();
                 };
                 expr.ty = Some(f.upcast_to_type())
             },
@@ -1227,7 +1213,7 @@ impl Sema {
                     return cerror2!(type_.full_span(), "expected struct type");
                 };
                 let Some((f_idx, _)) = s_def.fields.find_field(field.sym) else {
-                    return self.cctx.error_unknown_field(*field, s_def.upcast_to_type()).into();
+                    return error_unknown_field(*field, s_def.upcast_to_type()).into();
                 };
                 let offset = struct_offset(&s_def.fields, f_idx);
                 expr.ty = Some(p.int_lit);
@@ -1502,8 +1488,7 @@ impl Sema {
         self.analyze(expr, &Some(expected_ty), is_const)?;
         let expr_ty = expr.ty.u();
         if !ty_match(expr_ty, expected_ty) {
-            self.cctx.error_mismatched_types(expr.full_span(), expected_ty, expr_ty);
-            return SemaResult::HandledErr;
+            return error_mismatched_types(expr.full_span(), expected_ty, expr_ty).into();
         }
         debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
         expr.as_mut().ty = Some(expected_ty);
@@ -1608,8 +1593,7 @@ impl Sema {
             arr_ty.elem_ty.downcast_type()
         } else {
             // TODO: also allow lhs slices?
-            self.cctx.error_cannot_apply_initializer(lhs, initializer_expr);
-            return SemaResult::HandledErr;
+            return error_cannot_apply_initializer(lhs, initializer_expr).into();
         }))
     }
 
@@ -1643,7 +1627,7 @@ impl Sema {
                     if let Some(cv) = $val_expr.try_downcast_const_val() {
                         const_values[$f_idx] = Some(cv);
                     } else {
-                        self.cctx.error_non_const_initializer_field($val_expr);
+                        error_non_const_initializer_field($val_expr);
                         on_err!();
                     }
                 }
@@ -1652,7 +1636,7 @@ impl Sema {
         let mut is_initialized_field = vec![false; fields.len()];
         for (idx, (f, init)) in initializer_values.as_mut().iter_mut().enumerate() {
             let Some((f_idx, f_decl)) = fields.find_field(f.sym) else {
-                self.cctx.error_unknown_field(*f, struct_ty);
+                error_unknown_field(*f, struct_ty);
                 on_err!();
             };
 
@@ -1708,7 +1692,7 @@ impl Sema {
             if let Some(cv) = arg.try_downcast_const_val() {
                 *elem = Some(cv);
             } else {
-                self.cctx.error_non_const_initializer_field(arg);
+                error_non_const_initializer_field(arg);
                 ok = false;
             }
         }
@@ -1962,7 +1946,7 @@ impl Sema {
             };
             let Some((param_idx, param)) = remaining_params.find_field(arg_name.sym) else {
                 if let Some((idx, _)) = params[..pos_idx].find_field(arg_name.sym) {
-                    self.cctx.error_duplicate_named_arg(arg_name);
+                    error_duplicate_named_arg(arg_name);
                     chint!(
                         args[idx].full_span(),
                         "The parameter has already been set by this positional argument"
@@ -1973,7 +1957,7 @@ impl Sema {
                 return SemaResult::HandledErr;
             };
             if was_set[param_idx] {
-                self.cctx.error_duplicate_named_arg(arg_name);
+                error_duplicate_named_arg(arg_name);
                 chint!(remaining_args[param_idx].full_span(), "set here already");
                 return SemaResult::HandledErr;
             } else {
@@ -2228,8 +2212,7 @@ impl Sema {
             if ty == p.never {
                 return Ok(p.never);
             }
-            self.cctx.error_mismatched_types(ty_expr.full_span(), p.type_ty, ty);
-            return SemaResult::HandledErr;
+            return error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into();
         }
         Ok(ty_expr.downcast_type())
     }
@@ -2239,8 +2222,7 @@ impl Sema {
         if ty_match(got_ty, expected_ty) {
             Ok(())
         } else {
-            self.cctx.error_mismatched_types(expr.full_span(), expected_ty, got_ty);
-            SemaResult::HandledErr
+            return error_mismatched_types(expr.full_span(), expected_ty, got_ty).into();
         }
     }
 

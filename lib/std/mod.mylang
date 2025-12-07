@@ -20,6 +20,8 @@ malloc0 :: (size: libc.c_size_t) -> {
     ptr
 }
 
+malloc_buf :: (size: libc.c_size_t) -> []mut u8.(libc.malloc(size), size);
+
 open_file :: (pathname: []u8, mode: []u8) -> *libc.FILE {
     // currently all string slices are 0 terminated, so this should be fine.
     file := libc.fopen(pathname.ptr, mode.ptr);

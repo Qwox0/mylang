@@ -1,13 +1,8 @@
-use crate::{
-    ast::{self, AstKind, UpcastToAst},
-    context::ctx,
-    display_code::display,
-    parser::lexer::Span,
-    ptr::Ptr,
-    util::{UnwrapDebug, unreachable_debug},
-};
+use crate::{context::ctx, display_code::display, parser::lexer::Span};
 use core::fmt;
 use std::{cmp::Ordering, fmt::Display, io::Write};
+
+pub mod common;
 
 pub trait DiagnosticReporter {
     #[track_caller]
@@ -40,135 +35,6 @@ pub trait DiagnosticReporter {
 
     fn do_abort_compilation(&self) -> bool {
         self.max_past_severity().is_some_and(DiagnosticSeverity::aborts_compilation)
-    }
-
-    // some common diagnostics:
-
-    #[track_caller]
-    fn error_cannot_yield_from_loop_block(&mut self, span: Span) {
-        self.error(span, "cannot yield a value from a loop block.");
-    }
-
-    #[track_caller]
-    fn error_mismatched_types<Expected: fmt::Display>(
-        &self,
-        span: Span,
-        expected: Expected,
-        got: Ptr<ast::Type>,
-    ) -> HandledErr {
-        cerror!(span, "mismatched types: expected {expected}; got {got}")
-    }
-
-    #[track_caller]
-    fn error_mismatched_types_binop(
-        &mut self,
-        span: Span,
-        lhs_ty: Ptr<ast::Type>,
-        rhs_ty: Ptr<ast::Type>,
-    ) -> HandledErr {
-        cerror!(span, "mismatched types (left: {lhs_ty}, right: {rhs_ty})")
-    }
-
-    #[track_caller]
-    fn error_duplicate_named_arg(&self, arg_name: Ptr<ast::Ident>) {
-        cerror!(arg_name.span, "Parameter '{}' specified multiple times", &arg_name.sym);
-    }
-
-    #[track_caller]
-    fn error_unknown_field(&self, field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
-        cerror!(field.span, "no field `{}` on type `{}`", field.sym, ty)
-    }
-
-    #[track_caller]
-    fn error_unknown_variant(&self, variant: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
-        cerror!(variant.span, "no variant `{}` on enum type `{}`", variant.sym, ty)
-    }
-
-    #[track_caller]
-    fn error_cannot_apply_initializer(
-        &self,
-        analyzed_lhs: Ptr<ast::Ast>,
-        initializer_expr: Ptr<ast::Ast>,
-    ) {
-        let initializer_kind = initializer_expr.kind.initializer_kind();
-        let lhs_expr = match initializer_expr.matchable().as_ref() {
-            ast::AstEnum::PositionalInitializer { lhs, .. }
-            | ast::AstEnum::NamedInitializer { lhs, .. }
-            | ast::AstEnum::ArrayInitializer { lhs, .. }
-            | ast::AstEnum::ArrayInitializerShort { lhs, .. } => lhs,
-            _ => unreachable_debug(),
-        };
-        let span = lhs_expr.unwrap_or(initializer_expr).full_span();
-        if let Some(lhs_ty) = analyzed_lhs.try_downcast_type() {
-            cerror!(span, "Cannot initialize a value of type `{lhs_ty}` using {initializer_kind}");
-            if lhs_ty.kind == AstKind::StructDef {
-                chint!(
-                    initializer_expr.span,
-                    "Consider using a positional initializer (`.(...)`) or named initializer \
-                     (`.{{...}}`) instead"
-                )
-            } else if lhs_ty.kind == AstKind::ArrayTy {
-                chint!(
-                    initializer_expr.span,
-                    "Consider using an array initializer (`.[...]`) instead"
-                )
-            }
-        } else {
-            cerror!(
-                span,
-                "Cannot apply {initializer_kind} to a value of type `{}`",
-                analyzed_lhs.ty.u()
-            );
-        }
-    }
-
-    #[track_caller]
-    fn error_non_const(&mut self, runtimevalue: Ptr<ast::Ast>, msg: impl Display) -> HandledErr {
-        self.error(runtimevalue.full_span(), msg);
-        // TODO: label: not a compile time known value
-        // this help doesn't make sense when `runtimevalue` is a local variable
-        chint!(
-            runtimevalue.full_span(),
-            "help: consider using `#run` to evaluate expression at compile time"
-        );
-        HandledErr
-    }
-
-    #[track_caller]
-    fn error_non_const_initializer_field(&mut self, field_init: Ptr<ast::Ast>) -> HandledErr {
-        self.error_non_const(
-            field_init,
-            "fields of constant struct values must be known at compile time",
-        )
-    }
-
-    #[track_caller]
-    fn error_const_ptr_initializer(&self, initializer: Ptr<ast::Ast>) -> HandledErr {
-        cerror!(
-            initializer.full_span(),
-            "cannot initialize a struct behind a pointer at compile time"
-        )
-    }
-
-    #[track_caller]
-    fn error_const_call(&self, call: Ptr<ast::Call>) -> HandledErr {
-        let full_span = call.upcast().full_span();
-        cerror!(full_span, "Cannot directly call a function in a constant");
-        chint!(
-            full_span.start(),
-            "Consider using the `#run` directive to evaluate the function at compile time \
-             (currently not implemented): {}",
-            call.func
-                .try_flat_downcast::<ast::Ident>()
-                .map(|i| format!(": `#run {}(...)`", i.sym))
-                .unwrap_or_default()
-        );
-        HandledErr
-    }
-
-    #[track_caller]
-    fn error_unimplemented(&mut self, span: Span, what: fmt::Arguments<'_>) {
-        cerror!(span, "{what} is currently not implemented");
     }
 }
 
@@ -369,9 +235,8 @@ macro_rules! chint {
 pub(crate) use chint;
 
 macro_rules! cunimplemented {
-    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
-        crate::diagnostics::DiagnosticReporter::error_unimplemented(crate::context::ctx_mut(), $span, format_args!($fmt, $($args),*));
-        return crate::diagnostics::HandledErr.into()
-    }};
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
+        return crate::diagnostics::common::error_unimplemented($span, format_args!($fmt, $($args),*)).into()
+    };
 }
 pub(crate) use cunimplemented;

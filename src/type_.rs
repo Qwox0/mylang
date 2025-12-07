@@ -1,5 +1,5 @@
 use crate::{
-    ast::{self, AstKind, DeclList, DeclListExt, TypeEnum},
+    ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum},
     context::{ctx, primitives},
     diagnostics::cerror,
     parser::lexer::Span,
@@ -558,66 +558,6 @@ pub fn union_size(fields: DeclList) -> usize {
 #[inline]
 pub fn enum_alignment(variants: &[Ptr<ast::Decl>]) -> usize {
     int_alignment(variant_count_to_tag_size_bits(variants.len())).max(struct_alignment(variants))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RangeKind {
-    /// `..`
-    Full,
-    /// `start..`
-    From,
-    /// `..end`
-    To,
-    /// `..=end`
-    ToInclusive,
-    /// `start..end`
-    Both,
-    /// `start..=end`
-    BothInclusive,
-}
-
-impl RangeKind {
-    pub fn get_field_count(self) -> usize {
-        match self {
-            RangeKind::Full => 0,
-            RangeKind::From | RangeKind::To | RangeKind::ToInclusive => 1,
-            RangeKind::Both | RangeKind::BothInclusive => 2,
-        }
-    }
-
-    pub fn has_start(self) -> bool {
-        match self {
-            RangeKind::Full | RangeKind::To | RangeKind::ToInclusive => false,
-            RangeKind::From | RangeKind::Both | RangeKind::BothInclusive => true,
-        }
-    }
-
-    pub fn has_end(self) -> bool {
-        match self {
-            RangeKind::Full | RangeKind::From => false,
-            RangeKind::To | RangeKind::ToInclusive | RangeKind::Both | RangeKind::BothInclusive => {
-                true
-            },
-        }
-    }
-
-    pub fn is_inclusive(self) -> bool {
-        match self {
-            RangeKind::Full | RangeKind::From | RangeKind::To | RangeKind::Both => false,
-            RangeKind::ToInclusive | RangeKind::BothInclusive => true,
-        }
-    }
-
-    pub fn type_name(self) -> &'static str {
-        match self {
-            RangeKind::Full => "RangeFull",
-            RangeKind::From => "RangeFrom",
-            RangeKind::To => "RangeTo",
-            RangeKind::ToInclusive => "RangeToInclusive",
-            RangeKind::Both => "Range",
-            RangeKind::BothInclusive => "RangeInclusive",
-        }
-    }
 }
 
 #[cfg(test)]

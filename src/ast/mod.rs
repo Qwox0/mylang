@@ -7,7 +7,7 @@ use crate::{
     parser::{lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     scope::Scope,
-    type_::{RangeKind, ty_match},
+    type_::ty_match,
     util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 use core::fmt;
@@ -1549,6 +1549,66 @@ impl UnaryOpKind {
 impl fmt::Display for UnaryOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_text())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeKind {
+    /// `..`
+    Full,
+    /// `start..`
+    From,
+    /// `..end`
+    To,
+    /// `..=end`
+    ToInclusive,
+    /// `start..end`
+    Both,
+    /// `start..=end`
+    BothInclusive,
+}
+
+impl RangeKind {
+    pub fn get_field_count(self) -> usize {
+        match self {
+            RangeKind::Full => 0,
+            RangeKind::From | RangeKind::To | RangeKind::ToInclusive => 1,
+            RangeKind::Both | RangeKind::BothInclusive => 2,
+        }
+    }
+
+    pub fn has_start(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::To | RangeKind::ToInclusive => false,
+            RangeKind::From | RangeKind::Both | RangeKind::BothInclusive => true,
+        }
+    }
+
+    pub fn has_end(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::From => false,
+            RangeKind::To | RangeKind::ToInclusive | RangeKind::Both | RangeKind::BothInclusive => {
+                true
+            },
+        }
+    }
+
+    pub fn is_inclusive(self) -> bool {
+        match self {
+            RangeKind::Full | RangeKind::From | RangeKind::To | RangeKind::Both => false,
+            RangeKind::ToInclusive | RangeKind::BothInclusive => true,
+        }
+    }
+
+    pub fn type_name(self) -> &'static str {
+        match self {
+            RangeKind::Full => "RangeFull",
+            RangeKind::From => "RangeFrom",
+            RangeKind::To => "RangeTo",
+            RangeKind::ToInclusive => "RangeToInclusive",
+            RangeKind::Both => "Range",
+            RangeKind::BothInclusive => "RangeInclusive",
+        }
     }
 }
 
