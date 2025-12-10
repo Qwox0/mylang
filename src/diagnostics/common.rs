@@ -18,8 +18,7 @@ pub fn error_mismatched_types(
     expected: Ptr<ast::Type>,
     got: Ptr<ast::Type>,
 ) -> HandledErr {
-    // TODO: error_mismatched_types_custom(span, format_args!("`{expected}`"), got)
-    error_mismatched_types_custom(span, format_args!("{expected}"), got)
+    error_mismatched_types_custom(span, format_args!("`{expected}`"), got)
 }
 
 #[track_caller]
@@ -28,8 +27,7 @@ pub fn error_mismatched_types_custom(
     expected: impl fmt::Display,
     got: Ptr<ast::Type>,
 ) -> HandledErr {
-    // TODO: cerror!(span, "mismatched types: expected {expected}; got `{got}`")
-    cerror!(span, "mismatched types: expected {expected}; got {got}")
+    cerror!(span, "mismatched types: expected {expected}; got `{got}`")
 }
 
 #[track_caller]
@@ -38,8 +36,7 @@ pub fn error_mismatched_types_binop(
     lhs_ty: Ptr<ast::Type>,
     rhs_ty: Ptr<ast::Type>,
 ) -> HandledErr {
-    // TODO: cerror!(span, "mismatched types (left: `{lhs_ty}`, right: `{rhs_ty}`)")
-    cerror!(span, "mismatched types (left: {lhs_ty}, right: {rhs_ty})")
+    cerror!(span, "mismatched types (left: `{lhs_ty}`, right: `{rhs_ty}`)")
 }
 
 #[track_caller]

@@ -202,7 +202,7 @@ test :: -> MyEnum.B.as(i64);";
 #[test]
 fn invalid_tag_ty() {
     test_body("enum { A = \"hello\" }")
-        .error("mismatched types: expected {integer literal}; got []u8", substr!("\"hello\""));
+        .error("mismatched types: expected `{integer literal}`; got `[]u8`", substr!("\"hello\""));
 }
 
 #[test]
@@ -257,23 +257,26 @@ test :: -> CONST;";
 
 #[test]
 fn good_error_message3() {
-    test_body("A :: enum { B }; x := 1; A.B.(1);").error(
-        "Cannot apply a positional initializer to a value of type `enum{B}`",
-        substr!("A.B"),
-    );
+    test_body("A :: enum { B }; x := 1; A.B.(1);")
+        .error("Cannot apply a positional initializer to a value of type `A`", substr!("A.B"));
 }
 
 #[test]
 fn good_error_message4() {
     test("A :: enum { B }; test :: -> A { .B.(1) };")
         .error("Cannot infer enum type", substr!(".B.(1)";.start_with_len(2)));
+
+    test("A :: enum { B }; test :: -> A { .B(1) };").error(
+        "Cannot call value of type 'A'; expected function",
+        substr!(".B(1)";.start_with_len(2)),
+    );
 }
 
 #[test]
 fn good_error_cannot_apply_initializer_to_type() {
     // TODO: better error
     test("A :: enum { B }; test :: -> A.(1);").error(
-        "Cannot initialize a value of type `enum{B}` using a positional initializer",
+        "Cannot initialize a value of type `A` using a positional initializer",
         substr!("A.(1)";.start_with_len(1)),
     );
 }

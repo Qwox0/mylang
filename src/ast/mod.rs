@@ -1090,6 +1090,10 @@ impl Ast {
         }
         full_span
     }
+
+    pub fn is_custom_type(&self) -> bool {
+        matches!(self.kind, AstKind::StructDef | AstKind::UnionDef | AstKind::EnumDef) // TODO: add `| AstKind::Fn`?
+    }
 }
 
 impl ConstVal {

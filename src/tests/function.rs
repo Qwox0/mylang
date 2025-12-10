@@ -219,13 +219,13 @@ fn lambda_type_mismatch() {
 take_lambda :: (f: (x: i32) -> i16) -> f(5);
 take_lambda(() -> 10)";
     test_body(code)
-        .error("mismatched types: expected (x:i32)->i16; got ()->i16", substr!("() -> 10"));
+        .error("mismatched types: expected `(x:i32)->i16`; got `()->i16`", substr!("() -> 10"));
 
     let code = "
 take_lambda :: (f: (x: i32) -> i32) -> f(5);
 take_lambda((x: f32) -> 10)";
     test_body(code).error(
-        "mismatched types: expected (x:i32)->i32; got (x:f32)->i32",
+        "mismatched types: expected `(x:i32)->i32`; got `(x:f32)->i32`",
         substr!("(x: f32) -> 10"),
     );
 }
@@ -279,5 +279,5 @@ b :: -> {
 test :: -> b();
 pause :: -> {};
         ";
-    test(code).error("mismatched types (left: u8, right: i32)", substr!("+"));
+    test(code).error("mismatched types (left: `u8`, right: `i32`)", substr!("+"));
 }

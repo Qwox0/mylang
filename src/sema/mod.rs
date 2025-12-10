@@ -1666,7 +1666,11 @@ impl Sema {
         {
             let field = fields[f_idx];
             let Some(init) = field.init else {
-                cerror!(initializer_span, "missing field `{}` in initializer", field.ident.sym);
+                cerror!(
+                    initializer_span,
+                    "missing field `{}` in initializer of `{struct_ty}`",
+                    field.ident.sym
+                );
                 on_err!();
             };
             handle_const_val!(f_idx, init);
@@ -1774,6 +1778,12 @@ impl Sema {
             }
         }
         if let Some(init) = decl.init {
+            if init.is_custom_type() {
+                let ty = init.downcast_type();
+                let _old = crate::context::ctx_mut().ty_names.insert(ty, decl.ident.sym);
+                //debug_assert!(old.is_none());
+            }
+
             let is_field = kind == Some(VarDeclSpecialCase::Field);
             let is_init_const = decl.is_const || is_static || is_field;
             self.analyze(init, &decl.var_ty, is_init_const)?;

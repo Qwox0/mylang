@@ -139,15 +139,18 @@ MyStruct.map :: (self: MyStruct, mapper: i32 -> i32) -> MyStruct.new(mapper(self
 test :: -> MyStruct.new(5).map(x -> x * 2);";
     let res = test(code).ok(10i64);
 
+    let new_mangled = "@MyStruct.new";
+    let map_mangled = "@MyStruct.map";
+
     // Both methods are mangled
-    assert!(res.llvm_ir().contains("@\"struct{val:i32}.new\""));
+    assert!(res.llvm_ir().contains(new_mangled));
     assert!(!res.llvm_ir().contains("@new"));
-    assert!(res.llvm_ir().contains("@\"struct{val:i32}.map\""));
+    assert!(res.llvm_ir().contains(map_mangled));
     assert!(!res.llvm_ir().contains("@map"));
 
     // Both mathods are only generated once
-    assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.new\""));
-    assert!(!has_duplicate_symbol(res.llvm_ir(), "@\"struct{val:i32}.map\""));
+    assert!(!has_duplicate_symbol(res.llvm_ir(), new_mangled));
+    assert!(!has_duplicate_symbol(res.llvm_ir(), map_mangled));
 }
 
 #[test]

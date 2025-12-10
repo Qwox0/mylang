@@ -17,7 +17,7 @@ test :: -> {
     arr: [MyStruct.MY_CONST]u8 = .[1, 2, 3];
     return arr;
 }";
-    test(code).error("mismatched types: expected [10]u8; got [3]u8", substr!(".[1, 2, 3]"));
+    test(code).error("mismatched types: expected `[10]u8`; got `[3]u8`", substr!(".[1, 2, 3]"));
 }
 
 #[test]
@@ -58,7 +58,7 @@ CONST_STRUCT :: MyStruct.(\"Hello World\", .(10));
 test :: -> {
     arr: [CONST_STRUCT.inner.number]u8 = .[1, 2, 3];
 }";
-    test(code).error("mismatched types: expected [10]u8; got [3]u8", substr!(".[1, 2, 3]"));
+    test(code).error("mismatched types: expected `[10]u8`; got `[3]u8`", substr!(".[1, 2, 3]"));
 }
 
 #[test]
@@ -121,7 +121,7 @@ test :: -> CONST.a;";
 #[test]
 fn prefer_type_error_over_non_const_error() {
     test("test :: (len: []u8) -> { .[1; len] }")
-        .error("mismatched types: expected u64; got []u8", substr!("len";skip=1));
+        .error("mismatched types: expected `u64`; got `[]u8`", substr!("len";skip=1));
     test("test :: (len: u64) -> { .[1; len] }")
         .error("Array length must be known at compile time", substr!("len";skip=1));
 }

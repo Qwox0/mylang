@@ -56,6 +56,8 @@ pub struct CompilationContextInner {
 
     // currently only needed for testing
     pub stmts: Vec<Ptr<ast::Ast>>,
+
+    pub ty_names: HashMap<Ptr<ast::Type>, Symbol>,
 }
 
 pub type FilesIndex = usize;
@@ -137,6 +139,8 @@ impl CompilationContext {
             entry_point: entry_point_sym,
 
             stmts: Vec::new(),
+
+            ty_names: HashMap::new(),
         };
         #[allow(static_mut_refs)]
         let ctx: &'static _ = unsafe {

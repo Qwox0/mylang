@@ -60,7 +60,7 @@ fn duplicate_field() {
 
     let code = "MyStruct :: struct { x: i32 }; MyStruct.x :: (s: *MyStruct) -> s.*.x;";
     // TODO: better error message
-    test(code).error("duplicate definition of `struct{x:i32}.x`", substr!("MyStruct.x"));
+    test(code).error("duplicate definition of `MyStruct.x`", substr!("MyStruct.x"));
 
     // union
     {
@@ -72,7 +72,7 @@ fn duplicate_field() {
 
         let code = "MyUnion :: union { x: i32 }; MyUnion.x :: (s: *MyUnion) -> s.*.x;";
         // TODO: better error message
-        test(code).error("duplicate definition of `union{x:i32}.x`", substr!("MyUnion.x"));
+        test(code).error("duplicate definition of `MyUnion.x`", substr!("MyUnion.x"));
     }
 
     // enum
@@ -85,9 +85,9 @@ fn duplicate_field() {
         test_raw(code).one_err("duplicate symbol `x` in struct scope", substr!("x";skip=1));
         */
 
-        let code = "MyEnum :: enum { X }; MyEnum.X :: (s: *MyEnum) -> s.*.x;";
+        let code = "MyEnum :: enum { X }; MyEnum.X :: (s: *MyEnum) -> s.*.as(u8);";
         // TODO: better error message
-        test(code).error("duplicate definition of `enum{X}.X`", substr!("MyEnum.X"));
+        test(code).error("duplicate definition of `MyEnum.X`", substr!("MyEnum.X"));
     }
 }
 

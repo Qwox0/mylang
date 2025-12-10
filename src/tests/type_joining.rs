@@ -9,7 +9,7 @@ use crate::{
 #[test]
 fn cannot_assign_more_general_type() {
     test("test :: (str: []u8) -> a: []mut u8 = str;")
-        .error("mismatched types: expected []mut u8; got []u8", substr!("str";skip=1));
+        .error("mismatched types: expected `[]mut u8`; got `[]u8`", substr!("str";skip=1));
 }
 
 #[test]
@@ -37,12 +37,12 @@ fn error_no_allocation_in_common_type() {
              `[]mut []u8`. Consider specifying `[][]u8` explicitly.",
             |_| TestSpan::ZERO,
         )
-        .error("mismatched types: expected [][]mut u8; got []mut []u8", substr!("s2";skip=1)); // always emit another error message?
+        .error("mismatched types: expected `[][]mut u8`; got `[]mut []u8`", substr!("s2";skip=1)); // always emit another error message?
     test("test :: (s1: [][]mut u8, s2: []mut []u8) -> { return s2; s1 }")
         .error(
             "The compiler currently cannot use `[][]u8` as the combined type of `[]mut []u8` and \
              `[][]mut u8`. Consider specifying `[][]u8` explicitly.",
             |_| TestSpan::ZERO,
         )
-        .error("mismatched types: expected []mut []u8; got [][]mut u8", substr!("s1";skip=1)); // always emit another error message?
+        .error("mismatched types: expected `[]mut []u8`; got `[][]mut u8`", substr!("s1";skip=1)); // always emit another error message?
 }

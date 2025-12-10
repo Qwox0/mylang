@@ -95,7 +95,7 @@ num"
     };
     test_body(get_code("mut")).ok(5i64);
     test_body(get_code(""))
-        .error("mismatched types: expected *mut i64; got *i64", substr!("num.&"));
+        .error("mismatched types: expected `*mut i64`; got `*i64`", substr!("num.&"));
 }
 
 #[test]
@@ -193,7 +193,7 @@ x";
             "Cannot initialize the value behind `ptr`, because it is an immutable pointer",
             substr!("ptr.{ a = 3 }"),
         )
-        .info("The pointer type `*struct{a:i32}` is not `mut`", substr!("ptr";skip=1));
+        .info("The pointer type `*MyStruct` is not `mut`", substr!("ptr";skip=1));
 
     let code = "
 MyStruct :: struct { a: i32 };
@@ -207,7 +207,7 @@ x";
              pointer",
             substr!("ptr.*.*.*.*.{ a = 3 }"),
         )
-        .info("The pointer type `**mut *mut struct{a:i32}` is not `mut`", substr!("ptr.*.*"));
+        .info("The pointer type `**mut *mut MyStruct` is not `mut`", substr!("ptr.*.*"));
 }
 
 #[test]

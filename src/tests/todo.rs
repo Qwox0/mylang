@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, substr, test, test_body, test_parse};
+use crate::tests::{TestSpan, arr, substr, test, test_body, test_parse};
 
 #[test]
 #[ignore = "unfinished test"]
@@ -200,8 +200,10 @@ fn incorrect_signedness_of_int_lit() {
     let code = "
 f :: (p: *u32) -> p.*;
 test :: -> f((-1).&);";
-    test(code)
-        .error("mismatched types: expected *u32; got *{signed integer literal}", substr!("(-1).&"));
+    test(code).error(
+        "mismatched types: expected `*u32`; got `*{signed integer literal}`",
+        substr!("(-1).&"),
+    );
 }
 
 #[test]

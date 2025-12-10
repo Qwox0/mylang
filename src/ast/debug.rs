@@ -1,7 +1,7 @@
 use super::{DeclMarkers, HasAstKind, OptionTypeExt};
 use crate::{
     ast::{self, Ast, AstEnum, AstKind, TypeEnum, UnaryOpKind, UpcastToAst},
-    context::primitives,
+    context::{ctx, primitives},
     parser::lexer::Span,
     ptr::Ptr,
     util::{self, unreachable_debug},
@@ -42,6 +42,14 @@ impl DebugAst for Ast {
     #[inline]
     fn debug_impl(&self, lines: &mut impl DebugAstBuf) {
         let mut ptr = Ptr::from_ref(self);
+
+        if let Some(ty) = ptr.try_downcast_type_by_kind()
+            && let Some(&name) = ctx().ty_names.get(&ty)
+        {
+            lines.write(name.text());
+            return;
+        }
+
         let ty = ptr.ty;
         if ptr.replacement.is_some() {
             let rep = ptr.rep();

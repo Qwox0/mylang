@@ -13,12 +13,14 @@ fn infer_literal_type() {
 
 #[test]
 fn correct_error_span_with_parens() {
-    test_body("_: []u8 = (-1).&")
-        .error("mismatched types: expected []u8; got *{signed integer literal}", substr!("(-1).&"));
+    test_body("_: []u8 = (-1).&").error(
+        "mismatched types: expected `[]u8`; got `*{signed integer literal}`",
+        substr!("(-1).&"),
+    );
 
     test_body("1 + \"\"")
-        .error("mismatched types (left: {integer literal}, right: []u8)", substr!("+"));
+        .error("mismatched types (left: `{integer literal}`, right: `[]u8`)", substr!("+"));
 
     test_body("(1 + \"\")")
-        .error("mismatched types (left: {integer literal}, right: []u8)", substr!("+"));
+        .error("mismatched types (left: `{integer literal}`, right: `[]u8`)", substr!("+"));
 }

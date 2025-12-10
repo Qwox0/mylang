@@ -10,7 +10,7 @@ fn arr_initializer_with_lhs() {
 #[test]
 fn arr_initializer_len_mismatch() {
     test_body("{ arr: [3]u8 = .[1, 2, 3, 4]; }")
-        .error("mismatched types: expected [3]u8; got [4]u8", substr!(".[1, 2, 3, 4]"));
+        .error("mismatched types: expected `[3]u8`; got `[4]u8`", substr!(".[1, 2, 3, 4]"));
 }
 
 #[test]
@@ -70,7 +70,7 @@ return .[
 ]");
 
     test_body(code(".[a, a]")).error(
-        "mismatched types: expected [2]i64; got [4]{integer literal}",
+        "mismatched types: expected `[2]i64`; got `[4]{integer literal}`",
         |code| {
             let start = code.find(".[").unwrap();
             let end = code.rfind("]").unwrap() + 1;

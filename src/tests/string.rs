@@ -46,6 +46,6 @@ my_string[6]";
 fn static_string() {
     test(r#"static text := "Hello World"; test :: -> {}"#).ok(());
     test(r#"static text: []mut u8 = "Hello World"; test :: -> {}"#)
-        .error("mismatched types: expected []mut u8; got []u8", substr!("\"Hello World\""));
+        .error("mismatched types: expected `[]mut u8`; got `[]u8`", substr!("\"Hello World\""));
     // TODO: allow mutation of the string?
 }

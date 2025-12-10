@@ -169,9 +169,7 @@ B :: [10]MyStruct.(1);
 C : [10]MyStruct : .{ x=1 };
 D :: [10]MyStruct.{ x=1 };";
     let err = |kind| {
-        format!(
-            "Cannot initialize a value of type `[10]struct{{x:i32}}` using a {kind} initializer"
-        )
+        format!("Cannot initialize a value of type `[10]MyStruct` using a {kind} initializer")
     };
     let hint = "Consider using an array initializer (`.[...]`) instead";
     // TODO: also hint that `[10]` must be removed
