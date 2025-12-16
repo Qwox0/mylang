@@ -36,6 +36,13 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         return Equal;
     }
 
+    if lhs == p.err_ty {
+        return Lhs;
+    }
+    if rhs == p.err_ty {
+        return Rhs;
+    }
+
     if is_bottom_type(lhs, p) || rhs == p.any {
         return Rhs;
     } else if is_bottom_type(rhs, p) || lhs == p.any {
@@ -168,6 +175,10 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return true;
     }
 
+    if got == p.err_ty || expected == p.err_ty {
+        return true;
+    }
+
     if is_bottom_type(got, p) || expected == p.any {
         return true;
     } else if is_bottom_type(expected, p) || got == p.any {
@@ -253,7 +264,7 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
 /// `ty_match(i32, {weak})` -> `false`
 #[inline]
 pub fn is_bottom_type(ty: Ptr<ast::Type>, p: &Primitives) -> bool {
-    ty == p.never || ty == p.unknown_ty
+    ty == p.never || ty == p.rec_ret_ty
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -501,6 +512,13 @@ impl ast::Type {
     pub fn is_ffi_noundef(self: Ptr<Self>) -> bool {
         // arrays are special because they are always passed as a primitive pointer
         !self.is_aggregate() || self.kind == AstKind::ArrayTy
+    }
+
+    /// `func(arg)`
+    ///  ^^^^ never => out = never
+    pub fn propagates_out(self: Ptr<Self>) -> bool {
+        let p = primitives();
+        self == p.never || self == p.err_ty
     }
 }
 

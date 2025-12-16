@@ -38,11 +38,17 @@ pub struct Primitives {
     pub full_range: Ptr<ast::Type>,
 
     // internal Types:
-    pub unknown_ty: Ptr<ast::Type>,
+    pub err_ty: Ptr<ast::Type>,
+    /// return type of a recursive function when the real return type is still unknown
+    pub rec_ret_ty: Ptr<ast::Type>,
+    // /// a type which hasn't been infered yet.
+    //pub unknown_ty: Ptr<ast::Type>,
     pub int_lit: Ptr<ast::Type>,
     pub sint_lit: Ptr<ast::Type>,
     pub float_lit: Ptr<ast::Type>,
     pub method_stub: Ptr<ast::Type>,
+    /// `MyEnum.VarA(value)`
+    /// `^^^^^^^^^^^`
     pub enum_variant: Ptr<ast::Type>,
     pub module: Ptr<ast::Type>,
     pub library: Ptr<ast::Type>,
@@ -212,7 +218,9 @@ impl Primitives {
                 elem_ty: void_ty
             }),
 
-            unknown_ty: new_primitive_ty!("{unknown_ty}", simple_ty, finalized: true),
+            err_ty: new_primitive_ty!("{error}", simple_ty, finalized: true),
+            //unknown_ty: new_primitive_ty!("{unknown}", simple_ty, finalized: false),
+            rec_ret_ty: new_primitive_ty!("{recursive return ty}", simple_ty, finalized: false),
             int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),
             sint_lit: new_primitive_ty!("{signed integer literal}", simple_ty, finalized: false),
             float_lit: new_primitive_ty!("{float literal}", simple_ty, finalized: false),

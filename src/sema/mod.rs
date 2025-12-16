@@ -68,8 +68,8 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
                 if !s.kind.is_allowed_top_level() {
                     cerror!(s.full_span(), "unexpected top level expression");
-                    s.as_mut().ty = Some(p.never);
-                    s.set_replacement(p.never.upcast());
+                    s.as_mut().ty = Some(p.err_ty);
+                    s.set_replacement(p.err_ty.upcast());
                 }
                 continue;
             };
@@ -238,17 +238,6 @@ impl Sema {
 
         let p = p();
 
-        macro_rules! not_never {
-            ($expr:expr) => {{
-                let e = $expr;
-                if e == p.never.upcast() || e.ty == p.never {
-                    expr.as_mut().ty = Some(p.never);
-                    return Ok(());
-                }
-                e
-            }};
-        }
-
         /// Like [`Sema::analyze`] but returns on error and never
         macro_rules! analyze {
             ($expr:expr, $ty_hint:expr) => {
@@ -257,7 +246,10 @@ impl Sema {
             ($expr:expr, $ty_hint:expr, $is_const:expr) => {{
                 let e: Ptr<Ast> = $expr;
                 self.analyze(e, &$ty_hint, $is_const)?;
-                not_never!(e);
+                if e.ty.u().propagates_out() {
+                    expr.as_mut().ty = Some(e.ty.u());
+                    return Ok(());
+                }
                 e.as_mut().ty.as_mut().u()
             }};
         }
@@ -305,21 +297,21 @@ impl Sema {
                             NotFinished { remaining } => {
                                 NotFinished::<!> { remaining: remaining + stmts.len() - idx }?
                             },
-                            Err(HandledErr) => s.as_mut().ty = Some(p.never),
+                            Err(HandledErr) => s.as_mut().ty = Some(p.err_ty),
                         }
                     }
                 };
                 self.close_scope();
                 res?;
                 let last_ty = stmts.last().map(|s| s.ty.u()).unwrap_or(p.void_ty);
-                expr.ty = Some(if !*has_trailing_semicolon || last_ty == p.never {
+                expr.ty = Some(if !*has_trailing_semicolon || last_ty.propagates_out() {
                     last_ty
                 } else {
                     p.void_ty
                 })
             },
             AstEnum::PositionalInitializer { lhs, args, .. } => {
-                let lhs = not_never!(self.analyze_initializer_lhs(*lhs, *ty_hint, expr)?);
+                let lhs = self.analyze_initializer_lhs(*lhs, *ty_hint, expr)?;
                 if let Some(s) = lhs.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
@@ -346,12 +338,15 @@ impl Sema {
                         let fields = s.downcast_struct_def().fields;
                         self.validate_call(&fields, args, false, span.end(), false)?;
                     }
+                } else if lhs.ty.u().propagates_out() {
+                    expr.ty = Some(lhs.ty.u());
+                    return Ok(());
                 } else {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
             AstEnum::NamedInitializer { lhs: lhs_expr, fields: values, .. } => {
-                let lhs = not_never!(self.analyze_initializer_lhs(*lhs_expr, *ty_hint, expr)?);
+                let lhs = self.analyze_initializer_lhs(*lhs_expr, *ty_hint, expr)?;
                 if let Some(struct_ty) = lhs.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
@@ -374,6 +369,9 @@ impl Sema {
                         self.validate_initializer(struct_ty, *values, is_const, span)?;
                         expr.ty = Some(ptr_ty.upcast_to_type());
                     }
+                } else if lhs.ty.u().propagates_out() {
+                    expr.ty = Some(lhs.ty.u());
+                    return Ok(());
                 } else {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
@@ -532,8 +530,8 @@ impl Sema {
                     rhs.upcast().set_replacement(method.const_val());
                     if method_ty.try_downcast::<ast::Fn>().is_some() {
                         p.method_stub
-                    } else if method_ty == p.never {
-                        p.never
+                    } else if method_ty.propagates_out() {
+                        method_ty
                     } else {
                         cerror!(
                             expr.full_span(),
@@ -572,8 +570,8 @@ impl Sema {
                             rhs.ty = Some(var_ty);
                             rhs.upcast().set_replacement(f.upcast());
                             ty = Some(p.method_stub);
-                        } else if var_ty == p.never {
-                            ty = Some(p.never);
+                        } else if var_ty.propagates_out() {
+                            ty = Some(var_ty);
                         }
                     }
                     ty.ok_or_else(|| error_unknown_field(*rhs, lhs_ty))?
@@ -589,8 +587,10 @@ impl Sema {
                 }
                 // `.<ident>` must be an enum
                 let Some(enum_ty) = ty_hint.try_downcast::<ast::EnumDef>() else {
-                    if *ty_hint == p.never {
-                        expr.ty = Some(p.never);
+                    if let Some(ty_hint) = *ty_hint
+                        && ty_hint.propagates_out()
+                    {
+                        expr.ty = Some(ty_hint);
                         return Ok(());
                     }
                     return cerror2!(expr.full_span(), "Cannot infer enum type");
@@ -656,6 +656,7 @@ impl Sema {
                             expr.set_replacement(arr.elements[idx].upcast());
                         }
                     },
+                    _ if idx_ty.propagates_out() => expr.ty = Some(idx_ty),
                     _ => {
                         return cerror2!(
                             idx.full_span(),
@@ -701,9 +702,7 @@ impl Sema {
                         span.end(),
                         false,
                     )?;
-
-                    debug_assert!(is_finished_or_recursive(fn_ty, self));
-                    expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
+                    expr.ty = Some(self.get_fn_ret_ty(fn_ty));
                 } else if fn_ty == p.method_stub {
                     if is_const {
                         return error_const_call(call).into();
@@ -721,8 +720,7 @@ impl Sema {
                         false,
                     )?;
 
-                    debug_assert!(is_finished_or_recursive(fn_ty, self));
-                    expr.ty = Some(fn_ty.ret_ty.unwrap_or(p.unknown_ty));
+                    expr.ty = Some(self.get_fn_ret_ty(fn_ty));
                 } else if fn_ty == p.enum_variant {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
@@ -1169,28 +1167,28 @@ impl Sema {
                 };
                 let main_ty = self.get_symbol_var_ty(main)?;
                 expr.ty = Some(main_ty);
-                if main_ty != p.never {
-                    let Some(main_fn) = main_ty.try_downcast::<ast::Fn>() else {
-                        return cerror2!(
-                            main.ident.span,
-                            "Expected the entry point to be a function"
-                        );
-                    };
-                    let main_ret_ty = main_fn.ret_ty.u();
-                    if main_ret_ty != p.void_ty
-                        && main_ret_ty != p.never
-                        // not handled in `runtime.mylang`:
-                        && main_ret_ty.kind != AstKind::IntTy
+                let Some(main_fn) = main_ty.try_downcast::<ast::Fn>() else {
+                    if let Some(ty_hint) = *ty_hint
+                        && ty_hint.propagates_out()
                     {
-                        return cerror2!(
-                            main.ident.span,
-                            "Entry point '{}' has invalid return type `{}`",
-                            entry_point_sym,
-                            main_ret_ty,
-                        );
+                        expr.ty = Some(ty_hint);
+                        return Ok(());
                     }
-                    expr.set_replacement(main.const_val());
+                    return cerror2!(main.ident.span, "Expected the entry point to be a function");
+                };
+                let main_ret_ty = main_fn.ret_ty.u();
+                if main_ret_ty != p.void_ty
+                    && main_ret_ty.kind != AstKind::IntTy // not handled in `runtime.mylang`
+                    && !main_ret_ty.propagates_out()
+                {
+                    return cerror2!(
+                        main.ident.span,
+                        "Entry point '{}' has invalid return type `{}`",
+                        entry_point_sym,
+                        main_ret_ty,
+                    );
                 }
+                expr.set_replacement(main.const_val());
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let size = self.analyze_type(*type_)?.size();
@@ -1294,13 +1292,25 @@ impl Sema {
 
                     if let Some(body) = *body {
                         self.analyze(body, ret_ty, false)?;
-                        check_or_infer_target!(
+                        let ret_ty = check_or_infer_target!(
                             body.ty.u(),
                             ret_ty,
                             *has_known_ret_ty,
                             body.return_val_span()
-                        )
-                        .finalize();
+                        );
+                        if *ret_ty == p.rec_ret_ty {
+                            let rec_fn_decl = self
+                                .decl_stack
+                                .last()
+                                .filter(|d| d.init.is_some_and(|i| i.rep().p_eq(fn_ptr)));
+                            return cerror2!(
+                                rec_fn_decl
+                                    .map(|d| d.ident.span)
+                                    .unwrap_or_else(|| expr.full_span()),
+                                "cannot infer the return type of this recursive function"
+                            );
+                        }
+                        ret_ty.finalize();
                     } else {
                         debug_assert!(is_fn_ty);
                         //panic_debug!("this function has already been analyzed as a function type")
@@ -1310,17 +1320,6 @@ impl Sema {
                 self.function_stack.pop();
                 res?;
                 debug_assert!(ret_ty.is_some());
-
-                if *ret_ty == p.unknown_ty {
-                    let rec_fn_decl = self
-                        .decl_stack
-                        .last()
-                        .filter(|d| d.init.is_some_and(|i| i.rep().p_eq(fn_ptr)));
-                    return cerror2!(
-                        rec_fn_decl.map(|d| d.ident.span).unwrap_or_else(|| expr.full_span()),
-                        "cannot infer the return type of this recursive function"
-                    );
-                }
 
                 is_fn_ty = is_fn_ty || (*ret_ty == p.type_ty && body.u().kind != AstKind::Block);
                 expr.ty = Some(if is_fn_ty {
@@ -1759,7 +1758,7 @@ impl Sema {
                     }
                     consts.push(decl_ptr);
                 },
-                _ if ty == p.never => return SemaResult::HandledErr,
+                _ if ty == p.err_ty => return Err(HandledErr), // TODO: ty.propagates_out()?
                 _ => {
                     return cerror2!(
                         ty_expr.span,
@@ -1773,8 +1772,8 @@ impl Sema {
             let ty = self.analyze_type(t)?;
             debug_assert!(decl.var_ty.is_none_or(|t| ty_match(t, ty))); // TODO(without `NotFinished`): remove this
             decl.var_ty = Some(ty);
-            if ty == p.never {
-                decl.ty = Some(p.never);
+            if ty == p.err_ty {
+                return Err(HandledErr);
             }
         }
         if let Some(init) = decl.init {
@@ -1791,7 +1790,7 @@ impl Sema {
                 check_or_infer_target!(init.ty.u(), &mut decl.var_ty, true, init.full_span());
             let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
             init.as_mut().ty = Some(var_ty);
-            if is_init_const && var_ty != p.never && !init.rep().is_const_val() {
+            if is_init_const && var_ty != p.err_ty && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
                 let span = init.full_span();
                 return if is_static {
@@ -1854,18 +1853,21 @@ impl Sema {
         }
         match res {
             Err(HandledErr) => {
-                decl.var_ty = Some(p.never);
-                decl.ty = Some(p.never);
+                decl.var_ty = Some(p.err_ty);
+                decl.ty = Some(p.err_ty);
                 if let Some(init) = decl.init.as_mut() {
                     // see `tests::ordering::correctly_handle_error_in_later_cycles`
-                    init.ty = Some(p.never);
-                    init.rep().ty = Some(p.never);
+                    init.ty = Some(p.err_ty);
+                    init.rep().ty = Some(p.err_ty);
                 }
                 Ok(())
             },
             NotFinished { remaining } => NotFinished { remaining },
             Ok(()) => {
-                debug_assert!(decl.var_ty.is_some());
+                let var_ty = decl.var_ty.u();
+                if var_ty.propagates_out() {
+                    decl.ty = Some(var_ty);
+                }
                 decl.ident.decl = Some(decl);
                 Ok(())
             },
@@ -2041,7 +2043,7 @@ impl Sema {
 
             macro_rules! handle_deref {
                 ($operand:expr) => {{
-                    if $operand.ty == p().never {
+                    if $operand.ty.u().propagates_out() {
                         return Ok(());
                     }
                     let ptr_ty = $operand.ty.downcast::<ast::PtrTy>();
@@ -2064,7 +2066,7 @@ impl Sema {
                 ($lhs:expr, $idx:expr) => {{
                     debug_assert_ne!($lhs.ty.u().kind, AstKind::PtrTy); // autodereferencing is not implemented
 
-                    if $lhs.ty == p().never {
+                    if $lhs.ty.u().propagates_out() {
                         return Ok(());
                     }
 
@@ -2218,13 +2220,13 @@ impl Sema {
         let p = p();
         self.analyze(ty_expr, &Some(p.type_ty), true)?;
         let ty = ty_expr.ty.u();
-        if ty != p.type_ty {
-            if ty == p.never {
-                return Ok(p.never);
-            }
-            return error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into();
+        if ty == p.type_ty {
+            Ok(ty_expr.downcast_type())
+        } else if ty.propagates_out() {
+            Ok(ty)
+        } else {
+            error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
         }
-        Ok(ty_expr.downcast_type())
     }
 
     fn ty_match(&mut self, expr: Ptr<Ast>, expected_ty: Ptr<ast::Type>) -> SemaResult<()> {
@@ -2295,6 +2297,13 @@ impl Sema {
         })
     }
 
+    fn get_fn_ret_ty(&self, f: Ptr<ast::Fn>) -> Ptr<ast::Type> {
+        f.ret_ty.unwrap_or_else(|| {
+            debug_assert!(f == *self.function_stack.last().u()); // TODO: check all previous fns
+            p().rec_ret_ty
+        })
+    }
+
     fn open_scope(&mut self, new_scope: &mut Scope) {
         #[cfg(debug_assertions)]
         debug_assert!(new_scope.was_checked_for_duplicates);
@@ -2332,10 +2341,6 @@ pub enum MutationKind {
     Initialize,
     AddrOf,
     Slice,
-}
-
-fn is_finished_or_recursive(f: Ptr<ast::Fn>, _self: &Sema) -> bool {
-    f.ret_ty.is_some() || f == *_self.function_stack.last().u() // TODO: check all previous fns
 }
 
 pub trait OptionSemaExt<T> {

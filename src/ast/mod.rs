@@ -1286,11 +1286,12 @@ impl Decl {
     }
 
     pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
-        let never = primitives().never;
         debug_assert!(self.is_const);
         debug_assert!(self.var_ty.is_some() || self.init.u().kind == AstKind::Fn);
-        if self.var_ty == never {
-            return never.upcast();
+        if let Some(t) = self.var_ty
+            && t.propagates_out()
+        {
+            return t.upcast();
         }
         debug_assert!(self.is_const);
         self.init.u().downcast_const_val().upcast()
