@@ -1,1 +1,5 @@
-// currently unused
+isize :: i64; // TODO: platform dependent
+usize :: u64; // TODO: platform dependent
+
+int :: isize;
+uint :: usize;

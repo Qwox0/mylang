@@ -106,6 +106,14 @@ impl Scope {
         Ok(Scope::new(alloc.alloc_slice(&decls)?, kind))
     }
 
+    pub fn file(stmts: &[Ptr<ast::Ast>], parent_scope: Ptr<Scope>, alloc: &Arena) -> Scope {
+        let mut scope = Scope::from_stmts(stmts, ScopeKind::File, alloc).unwrap();
+        scope.parent = Some(parent_scope);
+        debug_assert!(!parent_scope.kind.allows_shadowing());
+        scope.pos_in_parent = ScopePos(parent_scope.decls.len() as u32);
+        scope
+    }
+
     /// also returns the fields as a [`DeclList`].
     pub fn for_aggregate(
         fields: Vec<Ptr<Decl>>,

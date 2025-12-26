@@ -3,7 +3,7 @@ libc :: #import "libc";
 static mut args: []*libc.c_char;
 
 init_runtime :: (argc: libc.c_int, argv: **libc.c_char) -> {
-    args = .{ ptr = argv, len = argc.as(u64) };
+    args = .{ ptr = argv, len = argc.as(usize) };
 }
 
 #__runtime_entry_point

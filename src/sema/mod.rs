@@ -14,7 +14,7 @@ use crate::{
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopePos},
+    scope::{Scope, ScopeKind, ScopePos},
     scoped_stack::ScopedStack,
     type_::{common_type, struct_offset, ty_match},
     util::{self, UnwrapDebug, then, unreachable_debug},
@@ -61,8 +61,8 @@ macro_rules! check_or_infer_target {
 pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
     let p = p();
     // validate top level stmts
-    cctx.root_scope.as_mut().verify_no_duplicates();
-    for file in cctx.files.iter().copied() {
+    cctx.primitives_scope.as_mut().verify_no_duplicates();
+    for file in cctx.files().iter().copied() {
         file.as_mut().scope.as_mut().u().verify_no_duplicates();
         for &s in stmts[file.stmt_range.u()].iter() {
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
@@ -92,10 +92,14 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
     while remaining_count > 0 {
         let old_remaining_count = remaining_count;
         remaining_count = 0;
-        for file in cctx.files.iter().copied() {
+        for file in cctx.files().iter().copied() {
+            let stmt_range = file.as_mut().stmt_range.as_mut().u();
+            if stmt_range.start == stmt_range.end {
+                continue;
+            }
+
             debug_assert!(file.scope.as_ref().u().parent.is_some());
             sema.open_scope(file.as_mut().scope.as_mut().u());
-            let stmt_range = file.as_mut().stmt_range.as_mut().u();
             if let NotFinished { remaining } =
                 analyze_scope(&mut stmts[..stmt_range.end], &mut stmt_range.start, |stmt| {
                     sema.analyze_top_level(stmt)
@@ -113,7 +117,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
             cerror!(Span::ZERO, "cycle(s) detected:");
-            for file in cctx.files.iter().copied() {
+            for file in cctx.files().iter().copied() {
                 for s in stmts[file.stmt_range.u()].iter().copied() {
                     let span = s
                         .try_downcast::<ast::Decl>()
@@ -186,7 +190,7 @@ impl Sema {
             decl_stack: vec![],
             defer_stack: ScopedStack::default(),
             cctx,
-            cur_scope: cctx.root_scope,
+            cur_scope: cctx.primitives_scope,
             cur_scope_pos: ScopePos(0),
         }
     }
@@ -448,7 +452,7 @@ impl Sema {
                 let lhs_ty = *analyze!(*lhs, None);
                 let t = if lhs_ty == p.module {
                     let m = lhs.downcast::<ast::ImportDirective>();
-                    let Some(s) = self.cctx.files[m.files_idx]
+                    let Some(s) = self.cctx.files()[m.files_idx]
                         .scope
                         .as_ref()
                         .u()
@@ -1155,14 +1159,14 @@ impl Sema {
                 }
                 debug_assert!(!self.cctx.args.is_lib);
                 let entry_point_sym = self.cctx.entry_point;
-                let root_file = self.cctx.files[self.cctx.root_file_idx.u()];
+                let start_file = self.cctx.start_file();
                 let Some(main) =
-                    root_file.scope.as_ref().u().find_decl_norec_unordered(entry_point_sym, true)
+                    start_file.scope.as_ref().u().find_decl_norec_unordered(entry_point_sym, true)
                 else {
                     return cerror2!(
-                        root_file.full_span().start(),
+                        start_file.full_span().start(),
                         "Couldn't find the entry point '{entry_point_sym}' in '{}'",
-                        self.cctx.path_in_proj(&root_file.path).display()
+                        self.cctx.path_in_proj(&start_file.path).display()
                     );
                 };
                 let main_ty = self.get_symbol_var_ty(main)?;
@@ -2307,14 +2311,16 @@ impl Sema {
     fn open_scope(&mut self, new_scope: &mut Scope) {
         #[cfg(debug_assertions)]
         debug_assert!(new_scope.was_checked_for_duplicates);
-        debug_assert!(new_scope.parent.is_none_or(|p| p == self.cur_scope));
-        //debug_assert!(new_scope.parent.is_none()); // For when NotFinished is removed
+        debug_assert!(if new_scope.kind == ScopeKind::File {
+            new_scope.parent.is_some()
+        } else {
+            new_scope.parent.is_none_or(|p| p == self.cur_scope)
+            //debug_assert!(new_scope.parent.is_none()); // For when NotFinished is removed
+        });
         if new_scope.parent.is_none() {
             new_scope.parent = Some(self.cur_scope);
             new_scope.pos_in_parent = self.cur_scope_pos;
         }
-
-        //println!("#### open pos: {:?} {:?}", new_scope.pos_in_parent, new_scope.kind);
 
         self.cur_scope = Ptr::from_ref(new_scope);
         self.cur_scope_pos = ScopePos(0);
@@ -2322,9 +2328,12 @@ impl Sema {
     }
 
     fn close_scope(&mut self) {
-        //self.symbols.close_scope();
+        // The parent scope of the prelude file is the root scope. During analysis of other files
+        // the correct starting value for cur_scope is the prelude scope, not the root scope.
+        // Nevertheless, assigning the root scope to cur_scope (after analysis of the prelude) is
+        // fine because open_scope is called immediately for the next file which overwrites cur_scope.
+
         self.cur_scope_pos = self.cur_scope.pos_in_parent;
-        //println!("#### close pos: {:?} {:?}", self.cur_decl_pos, self.cur_scope.kind);
         self.cur_scope = self.cur_scope.parent.u();
         self.defer_stack.close_scope();
     }

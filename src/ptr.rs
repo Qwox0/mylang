@@ -111,6 +111,16 @@ impl<T> Ptr<[T]> {
         Ptr::from(&[] as &[T])
     }
 
+    /// [`Ptr::from_ref`] but with a fixes assertion
+    pub fn from_slice(r: &[T]) -> Ptr<[T]> {
+        let p = Ptr(NonNull::from_ref(r));
+        debug_assert!(
+            (p.raw() as *const () as usize) > 0x500 || r.len() == 0,
+            "slice ({p:p}) might be invalid"
+        );
+        p
+    }
+
     pub fn cast_slice<U>(self) -> Ptr<[U]> {
         Ptr::new(unsafe { NonNull::new_unchecked(self.raw() as *mut [U]) })
     }

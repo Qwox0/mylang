@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn number_subtyping() {
-        let _ctx = CompilationContext::new(BuildArgs::default());
+        let _ctx = CompilationContext::empty(BuildArgs::default());
         let p = primitives();
         assert_eq!(common_type(p.int_lit, p.int_lit), p.int_lit);
         for supertype in [p.u32, p.sint_lit, p.i32, p.float_lit, p.f32] {

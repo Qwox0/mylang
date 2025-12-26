@@ -11,14 +11,16 @@ use crate::{
     diagnostics::{cerror, cerror2, chint, cwarn},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopeAndAggregateInfo, ScopeKind, ScopePos},
+    scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
     scratch_pool::ScratchPool,
-    util::{UnwrapDebug, concat_arr, then, unreachable_debug},
+    source_file::SourceFile,
+    util::{OptionExt, UnwrapDebug, concat_arr, then, unreachable_debug},
 };
 use core::str;
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind, is_ascii_space_or_tab};
 use parser_helper::ParserInterface;
+use std::ops::DerefMut;
 
 pub mod error;
 pub mod lexer;
@@ -108,33 +110,54 @@ macro_rules! parse_in_block {
     }};
 }
 
-pub fn parse_files_in_ctx<'a>(cctx: Ptr<CompilationContextInner>) -> &'a mut [Ptr<Ast>] {
-    let mut stmts = &mut cctx.as_mut().stmts;
+pub fn parse_files(cctx: Ptr<CompilationContextInner>) -> impl DerefMut<Target = [Ptr<Ast>]> {
+    debug_assert!(cctx.import_manager.start_file.is_some());
+    let mut stmts = Vec::new();
+    let has_prelude = parse_prelude_into(cctx, &mut stmts);
+
     // Note: this idx-based loop is needed because `ctx.files` might get mutated while the loop is
     // running.
-    let mut idx = 0;
-    while let Some(file) = cctx.files.get(idx).copied() {
-        let start_idx = stmts.len();
-        let mut p = Parser { lex: Lexer::new(file), cctx };
-        p.parse_stmts_into(&mut stmts, false);
-        while let Some(t) = p.lex.next() {
-            debug_assert_eq!(t.kind, TokenKind::CloseBrace);
-            cerror!(t.span, "unexpected token");
-            p.parse_stmts_into(&mut stmts, false);
-        }
-        debug_assert!(p.lex.is_empty());
-        let stmt_range = start_idx..stmts.len();
-        file.as_mut().set_stmt_range(stmt_range.clone());
-
-        let mut scope =
-            Scope::from_stmts(&stmts[stmt_range], ScopeKind::File, &cctx.alloc).unwrap();
-        scope.parent = Some(cctx.root_scope);
-        scope.pos_in_parent = ScopePos(cctx.root_scope.decls.len() as u32);
-        file.as_mut().scope = Some(scope);
-
+    let mut idx = has_prelude as usize;
+    while let Some(&file) = cctx.files().get(idx) {
+        parse_file_into(file, cctx, &mut stmts);
         idx += 1;
     }
-    stmts
+    #[cfg(not(test))]
+    return stmts.into_boxed_slice();
+    #[cfg(test)]
+    return Ptr::from_slice(cctx.as_mut().stmts.set_once(stmts.into_boxed_slice()).as_mut());
+}
+
+pub fn parse_file_into(
+    mut file: Ptr<SourceFile>,
+    cctx: Ptr<CompilationContextInner>,
+    stmts: &mut Vec<Ptr<Ast>>,
+) -> Ptr<Scope> {
+    debug_assert!(file.stmt_range.is_none());
+    debug_assert!(cctx.files().contains(&file));
+
+    let start_idx = stmts.len();
+    let mut p = Parser { lex: Lexer::new(file), cctx };
+    p.parse_stmts_into(stmts, false);
+    while let Some(t) = p.lex.next() {
+        debug_assert_eq!(t.kind, TokenKind::CloseBrace);
+        cerror!(t.span, "unexpected token");
+        p.parse_stmts_into(stmts, false);
+    }
+    debug_assert!(p.lex.is_empty());
+    let stmt_range = start_idx..stmts.len();
+    file.set_stmt_range(stmt_range.clone());
+    file.scope
+        .set_once(Scope::file(&stmts[stmt_range], cctx.global_scope, &cctx.alloc))
+        .into()
+}
+
+pub fn parse_prelude_into(cctx: Ptr<CompilationContextInner>, stmts: &mut Vec<Ptr<Ast>>) -> bool {
+    let Some(prelude) = cctx.import_manager.prelude_file else { return false };
+    debug_assert_eq!(prelude, cctx.files()[0]);
+    debug_assert_eq!(cctx.global_scope.kind, ScopeKind::Root);
+    cctx.as_mut().global_scope = parse_file_into(prelude, cctx, stmts);
+    return true;
 }
 
 pub struct Parser {
@@ -728,8 +751,7 @@ impl Parser {
                         );
                         // not using `set_replacement` because it requires a type and this is just
                         // a temporary hack.
-                        debug_assert!(decl.ident.replacement.is_none());
-                        decl.as_mut().ident.replacement = Some(main_ident);
+                        decl.as_mut().ident.replacement.set_once(main_ident);
                         func
                     }
                 }
