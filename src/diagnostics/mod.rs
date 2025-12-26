@@ -213,6 +213,14 @@ macro_rules! cerror2 {
 }
 pub(crate) use cerror2;
 
+macro_rules! cerror_fatal {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
+        crate::diagnostics::DiagnosticReporter::report(crate::context::ctx_mut(), crate::diagnostics::DiagnosticSeverity::Fatal, $span, &format_args!($fmt, $($args),*));
+        panic!()
+    }};
+}
+pub(crate) use cerror_fatal;
+
 macro_rules! cwarn {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::diagnostics::DiagnosticReporter::warn(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*))

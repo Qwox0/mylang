@@ -1,4 +1,4 @@
-extern puts : (str: *u8) -> void;
+puts : (str: *u8) -> void : #extern;
 
 main :: -> {
     s: [13]u8 = .[72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33, 0];

@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, arr, substr, test, test_body, test_parse};
+use crate::tests::{TestSpan, substr, test, test_body, test_parse};
 
 #[test]
 #[ignore = "unfinished test"]

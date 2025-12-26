@@ -47,9 +47,8 @@ pub enum CompileMode {
 }
 
 pub fn compile(mode: CompileMode, args: BuildArgs) -> CompileResult {
-    let ctx = CompilationContext::new(args);
+    let mut ctx = CompilationContext::basic(args)?;
     let args = &ctx.args;
-    ctx.0.set_source_root(args.path.clone())?;
 
     if !args.quiet {
         let proj_path = args.path.parent().unwrap();
@@ -74,7 +73,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Parsing #####
 
     let parse_start = Instant::now();
-    let stmts = parser::parse_files_in_ctx(ctx);
+    let mut stmts = parser::parse_files(ctx);
     ctx.compile_time.parser = parse_start.elapsed();
 
     if ctx.do_abort_compilation() {
@@ -84,11 +83,11 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
         return CompileResult::Err;
     }
 
-    debug_assert!(ctx.files.iter().all(|f| f.has_been_parsed()));
+    debug_assert!(ctx.files().iter().all(|f| f.has_been_parsed()));
 
     macro_rules! debug_ast {
         () => {
-            for file in ctx.files.iter() {
+            for file in ctx.files().iter() {
                 eprintln!("# File {:?}", file.path);
                 for s in stmts[file.stmt_range.u()].iter() {
                     eprintln!("stmt @ {:x?}", s);
@@ -114,7 +113,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     // ##### Sema #####
 
     let sema_start = Instant::now();
-    sema::analyze(ctx, stmts);
+    sema::analyze(ctx, &mut stmts);
     ctx.compile_time.sema = sema_start.elapsed();
 
     if ctx.do_abort_compilation() {

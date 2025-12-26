@@ -56,7 +56,7 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
 };
 
 fn test(code: impl ToString) -> NewTest {
-    NewTest { code: code.to_string() }
+    NewTest { code: code.to_string(), load_prelude: true }
 }
 
 fn test_body(code_body: impl Display) -> NewTest {
@@ -64,13 +64,13 @@ fn test_body(code_body: impl Display) -> NewTest {
 }
 
 fn test_parse(code: impl ToString) -> TestResult<Parsed> {
-    let res = test(code).prepare();
-    parser::parse_files_in_ctx(res.ctx.ctx.0);
+    let res = test(code).load_prelude(false).prepare();
+    parser::parse_files(res.ctx.ctx.0);
     TestResult { data: Parsed, ..res }
 }
 
 fn test_analyzed_struct(struct_code: &str) -> TestResult<Ptr<crate::ast::StructDef>> {
-    let res = test(format!("_ :: {struct_code}")).compile_no_err();
+    let res = test(format!("_ :: {struct_code}")).load_prelude(false).compile_no_err();
     let struct_def = res.stmts()[0]
         .downcast::<crate::ast::Decl>()
         .init
@@ -81,6 +81,7 @@ fn test_analyzed_struct(struct_code: &str) -> TestResult<Ptr<crate::ast::StructD
 
 struct NewTest {
     code: String,
+    load_prelude: bool,
 }
 
 struct TestCtx {
@@ -107,6 +108,7 @@ impl Drop for TestCtx {
 struct TestResult<Kind> {
     ctx: TestCtx,
     code: String,
+    loaded_prelude: bool,
     data: Kind,
 }
 
@@ -122,11 +124,25 @@ struct Ok<RetTy> {
 struct Err;
 
 impl NewTest {
+    fn load_prelude(mut self, load_prelude: bool) -> Self {
+        self.load_prelude = load_prelude;
+        self
+    }
+
     #[track_caller]
     fn prepare(self) -> TestResult<()> {
-        let ctx = CompilationContext::new(BuildArgs::test_args(TEST_OPTIONS));
-        ctx.0.set_test_root(Ptr::from_ref(self.code.as_ref())).unwrap();
-        TestResult { ctx: TestCtx { ctx, diag_idx: 0 }, code: self.code, data: () }
+        let code = Ptr::from_ref(self.code.as_str());
+        let ctx = CompilationContext::for_tests(
+            BuildArgs::test_args(TEST_OPTIONS),
+            code,
+            self.load_prelude,
+        );
+        TestResult {
+            ctx: TestCtx { ctx, diag_idx: 0 },
+            code: self.code,
+            loaded_prelude: self.load_prelude,
+            data: (),
+        }
     }
 
     #[track_caller]
@@ -253,7 +269,13 @@ impl<Res> TestResult<Res> {
     }
 
     pub fn stmts(&self) -> &[Ptr<ast::Ast>] {
-        &self.ctx.ctx.stmts
+        if self.loaded_prelude {
+            eprintln!(
+                "Warn: stmts might contain more elements than expected when also loading the \
+                 prelude"
+            )
+        }
+        self.ctx.ctx.stmts.as_ref().unwrap()
     }
 }
 

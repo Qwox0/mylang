@@ -149,6 +149,19 @@ macro_rules! panic_debug {
 }
 pub(crate) use panic_debug;
 
+pub trait OptionExt<T> {
+    fn set_once(&mut self, val: T) -> &mut T;
+}
+
+impl<T> OptionExt<T> for Option<T> {
+    #[inline]
+    fn set_once(&mut self, val: T) -> &mut T {
+        debug_assert!(self.is_none());
+        *self = Some(val);
+        self.as_mut().u()
+    }
+}
+
 #[inline]
 pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }
