@@ -182,6 +182,8 @@ mod tests {
 macro_rules! debug_expr {
     ($expr:expr) => {{
         let expr = &$expr;
+        #[allow(unused_imports)]
+        use crate::ast::UpcastToAst;
         let span = expr.full_span();
         print!("DEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
         if span.file.is_some() {
@@ -192,7 +194,7 @@ macro_rules! debug_expr {
         } else {
             println!(", span: {:?} (no file)", span);
         }
-        use crate::ast::OptionTypeExt;
+        use crate::util::OptionExt;
         println!("  ty: {}", expr.ty.display());
         println!("  {:x?}\n", expr.as_ref());
     }};

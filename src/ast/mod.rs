@@ -53,21 +53,21 @@ inherit_ast! {
 
 /// Constructor for ast nodes
 macro_rules! ast_new {
-    (local $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
+    (local $kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )?),* $(,)? }) => {
         crate::ast::$kind {
             kind: crate::ast::AstKind::$kind,
             ty: None,
             replacement: None,
             parenthesis_count: 0,
-            $( $field $(: $val)? ),*
+            $( $(#[$attr])* $field $(: $val)? ),*
         }
     };
-    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }) => { {
-        let expr = ast_new!(local $kind { $($field $(:$val)?),* });
+    ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }) => { {
+        let expr = ast_new!(local $kind { $( $(#[$attr])* $field $(:$val)?),* });
         crate::context::ctx().alloc.alloc(expr)?
     } };
-    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
-        ast_new!($kind { span: $span, $($field $(:$val)?),* })
+    ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
+        ast_new!($kind { span: $span, $( $(#[$attr])* $field $(:$val)?),* })
     };
 }
 pub(crate) use ast_new;
@@ -655,6 +655,9 @@ ast_variants! {
         /// if `body == None` this Ast node originated from a function type. Note: normal functions
         /// are also valid [`Type`]s.
         body: OPtr<Ast>,
+
+        #[cfg(debug_assertions)]
+        decl: OPtr<Decl>,
     },
 }
 
@@ -731,11 +734,15 @@ impl Ptr<Ast> {
 
     /// TODO: check if this is cheaper than [`Ptr::has_type_kind`]
     pub fn is_type(self) -> bool {
-        if self.ty.u() != primitives().type_ty {
-            return false;
+        if self.ty.u() == primitives().type_ty {
+            debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
+            true
+        } else if self.ty.u().p_eq(self) {
+            debug_assert_eq!(self.kind, AstKind::Fn);
+            true
+        } else {
+            false
         }
-        debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
-        true
     }
 
     /// only use this for debugging. otherwise use [`Ptr::is_type`] instead
@@ -762,6 +769,10 @@ impl Ptr<Ast> {
             active = replacement;
         }
         active
+    }
+
+    pub fn try_rep(self) -> OPtr<Ast> {
+        then!(self.replacement.is_some() => self.rep())
     }
 
     #[inline]
@@ -807,12 +818,19 @@ impl Ptr<Ast> {
         then!(p.is_const_val() => p.downcast_const_val())
     }
 
+    pub fn flat_downcast_type(self) -> Ptr<Type> {
+        //debug_assert!(self.is_type() || self.kind == AstKind::Fn);
+        debug_assert!(self.has_type_kind());
+        self.cast()
+    }
+
+    pub fn try_flat_downcast_type_by_kind(self) -> OPtr<Type> {
+        then!(self.has_type_kind() => self.flat_downcast_type())
+    }
+
     #[inline]
     pub fn downcast_type(self) -> Ptr<Type> {
-        let p = self.rep();
-        //debug_assert!(p.is_type() || p.kind == AstKind::Fn);
-        debug_assert!(p.has_type_kind());
-        p.cast()
+        self.rep().flat_downcast_type()
     }
 
     pub fn try_downcast_type(self) -> OPtr<Type> {
@@ -820,8 +838,7 @@ impl Ptr<Ast> {
     }
 
     pub fn try_downcast_type_by_kind(self) -> OPtr<Type> {
-        let p = self.rep();
-        then!(p.has_type_kind() => p.downcast_type())
+        self.rep().try_flat_downcast_type_by_kind()
     }
 
     pub fn downcast_type_ref(&mut self) -> &mut Ptr<Type> {
@@ -1157,7 +1174,6 @@ pub trait OptionTypeExt {
     fn matchable(self) -> Ptr<TypeEnum>;
     fn downcast<V: TypeVariant>(self) -> Ptr<V>;
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V>;
-    fn display(self) -> impl std::fmt::Display;
 }
 
 impl OptionTypeExt for OPtr<Type> {
@@ -1178,19 +1194,6 @@ impl OptionTypeExt for OPtr<Type> {
     #[inline]
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
         self?.try_downcast()
-    }
-
-    fn display(self) -> impl std::fmt::Display {
-        struct DisplayOption(OPtr<Type>);
-        impl std::fmt::Display for DisplayOption {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self.0 {
-                    Some(ty) => write!(f, "{ty}"),
-                    None => write!(f, "None"),
-                }
-            }
-        }
-        DisplayOption(self)
     }
 }
 

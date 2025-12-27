@@ -6,7 +6,7 @@ use crate::{
     },
     codegen::llvm::bindings::*,
     context::{ctx, primitives, tmp_alloc},
-    display_code::{debug_expr, display},
+    display_code::debug_expr,
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
     ptr::{OPtr, Ptr},
@@ -41,10 +41,10 @@ use inkwell::{
         BasicTypeEnum, FloatType, FunctionType, IntType, PointerType, StructType,
     },
     values::{
-        AggregateValue, AnyValue, AnyValueEnum, ArrayValue, AsValueRef, BasicMetadataValueEnum,
-        BasicValue, BasicValueEnum, CallSiteValue, FloatValue, FunctionValue, GlobalValue,
-        InstructionValue, IntMathValue, IntValue, PhiValue, PointerValue, StructValue,
-        UnnamedAddress,
+        AggregateValue, AnyValue, AnyValueEnum as AnyVal, ArrayValue, AsValueRef,
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
+        FunctionValue, GlobalValue, InstructionValue, IntMathValue, IntValue, PhiValue,
+        PointerValue, StructValue, UnnamedAddress,
     },
 };
 use std::{
@@ -132,6 +132,7 @@ impl<'ctx> Codegen<'ctx> {
             && let Ok(out) = out
         {
             match out {
+                Symbol::Void => {},
                 Symbol::Stack(ptr) => {
                     // #[cfg(debug_assertions)]
                     // println!("WARN: memcpy to write_target");
@@ -143,7 +144,10 @@ impl<'ctx> Codegen<'ctx> {
                 Symbol::Register(val) => {
                     self.build_store(target, val.basic_val(), expr.ty.u().alignment())?;
                 },
-                _ => {},
+                Symbol::Global(_) => panic_debug!(),
+                Symbol::Function(f) => {
+                    self.build_store(target, f.as_global_value().as_pointer_value(), 8)?;
+                },
             }
         }
         out
@@ -155,13 +159,14 @@ impl<'ctx> Codegen<'ctx> {
         mut expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        debug_assert!(expr.ty.u().is_finalized());
+        debug_assert!(expr.ty.u().is_finalized() || expr.ty == primitives().rec_ret_ty);
 
         // Don't use the type of the replacement. because the init type of `_: *u8 = nil;` should
         // be `*u8` not `*never`
         let out_ty = expr.ty.u();
         expr = expr.rep();
-        debug_assert!(out_ty.is_finalized());
+        debug_assert!(out_ty.is_finalized() || out_ty == primitives().rec_ret_ty);
+        // `rec_ret_ty` is fine because the call codegen below always uses the finished return type
 
         let p = primitives();
 
@@ -415,10 +420,9 @@ impl<'ctx> Codegen<'ctx> {
                     let sym = self.compile_expr(*func)?;
                     let fn_val = match sym {
                         Symbol::Function(val) => CallFnVal::Direct(val),
-                        Symbol::Stack(_) | Symbol::Register(_) => {
-                            let fn_ptr = self.sym_as_val(sym, p.any_ptr_ty)?.ptr_val();
-                            CallFnVal::FnPtr(fn_ptr, self.fn_type(f).0)
-                        },
+                        //let fn_ptr = self.sym_as_val(sym, p.any_ptr_ty)?.ptr_val();
+                        Symbol::Stack(fn_ptr) => CallFnVal::FnPtr(fn_ptr, self.fn_type(f).0),
+                        Symbol::Register(val) => CallFnVal::FnPtr(val.ptr_val(), self.fn_type(f).0),
                         _ => unreachable_debug(),
                     };
                     self.compile_call(f, fn_val, args.into_iter(), write_target.take())
@@ -547,10 +551,7 @@ impl<'ctx> Codegen<'ctx> {
                     TypeEnum::FloatTy { .. } => self
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
                         .map(reg_sym),
-                    _ => {
-                        display(expr.full_span()).finish();
-                        todo!("binop {op:?} for {}", arg_ty)
-                    },
+                    _ => todo!("binop {op:?} for {}", arg_ty),
                 }
                 .coerce()
             },
@@ -1267,6 +1268,10 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_fn(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> CodegenResult<FunctionValue<'ctx>> {
+        debug_assert!(match def {
+            FnKind::FnDef(_) => self.fn_table.get(&f).u().get_first_basic_block().is_none(),
+            FnKind::Lambda => !self.fn_table.contains_key(&f),
+        });
         debug_assert!(def.is_lamda_or(|d| d.init.is_some_and(|i| i.rep() == f.upcast())));
         let prev_bb = self.builder.get_insert_block();
 
@@ -1810,8 +1815,7 @@ impl<'ctx> Codegen<'ctx> {
             )?);
         }
 
-        display(expr.full_span()).finish();
-
+        debug_expr!(expr);
         todo!("cast {} to {}", expr_ty, target_ty);
     }
 
@@ -1874,10 +1878,12 @@ impl<'ctx> Codegen<'ctx> {
         sym: Symbol<'ctx>,
         ty: Ptr<ast::Type>,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        Ok(match sym.basic() {
-            BasicSymbol::Ref(ptr_value) => ptr_value,
-            BasicSymbol::Val(val) => self.build_alloca_value(val.basic_val(), ty.alignment())?,
-            BasicSymbol::Zst => panic_debug!("{ty} is not represented as a symbol"),
+        Ok(match sym {
+            Symbol::Stack(ptr_value) => ptr_value,
+            Symbol::Register(val) => self.build_alloca_value(val.basic_val(), ty.alignment())?,
+            Symbol::Global(global) => global.as_pointer_value(),
+            Symbol::Function(_) => unreachable_debug(),
+            Symbol::Void => panic_debug!("{ty} is not represented as a symbol"),
         })
     }
 
@@ -1937,17 +1943,16 @@ impl<'ctx> Codegen<'ctx> {
                 )?;
                 None
             },
-            (BasicSymbol::Val(_), CFfiType::Fn) => unreachable_debug(),
-            (BasicSymbol::Ref(ptr), CFfiType::Fn) => Some(ptr.as_basic_value_enum()),
             (BasicSymbol::Val(val), CFfiType::Simple(llvm_ty)) if ret_ty.is_aggregate() => {
                 let ret = self.build_alloca(llvm_ty, "ret", ret_ty)?;
                 self.build_store(ret, val.basic_val(), ret_ty.alignment())?;
                 Some(self.builder.build_load(llvm_ty, ret, "ret")?)
             },
-            (BasicSymbol::Val(val), CFfiType::Simple(_)) => Some(val.basic_val()),
+            (BasicSymbol::Val(val), CFfiType::Simple(_) | CFfiType::Fn) => Some(val.basic_val()),
             (BasicSymbol::Ref(ptr), CFfiType::Simple(ty)) => {
                 Some(self.build_load(ty, ptr, "ret", ret_ty.alignment())?)
             },
+            (BasicSymbol::Ref(ptr), CFfiType::Fn) => Some(ptr.as_basic_value_enum()),
             (BasicSymbol::Val(val), CFfiType::SmallSimpleEnum { small_int, ffi_int }) => {
                 let enum_ty = ret_ty.downcast::<ast::EnumDef>();
                 debug_assert!(enum_ty.is_simple_enum);
@@ -2338,7 +2343,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn new_struct_type(&mut self, fields: DeclList, name: Option<Ptr<str>>) -> StructType<'ctx> {
-        let mut field_types = tmp_alloc().alloc_capped_vec(fields.len()).expect("nocheckin");
+        let mut field_types = tmp_alloc().alloc_capped_vec(fields.len()).unwrap();
         for ty in fields.iter_types().filter(|ty| ty.size() > 0) {
             field_types.push(self.llvm_type(ty).inner);
         }
@@ -2517,7 +2522,14 @@ impl<'ctx> Codegen<'ctx> {
     ///
     /// See <https://discourse.llvm.org/t/questions-about-c-calling-conventions/72414>
     /// TODO: See <https://mcyoung.xyz/2024/04/17/calling-convention/>
-    fn c_ffi_type(&mut self, ty: Ptr<ast::Type>) -> CFfiType<'ctx> {
+    fn c_ffi_type(&mut self, mut ty: Ptr<ast::Type>) -> CFfiType<'ctx> {
+        if let Some(opt_ty) = ty.try_downcast::<ast::OptionTy>()
+            && let inner = opt_ty.inner_ty.downcast_type()
+            && inner.is_non_null()
+        {
+            ty = inner;
+        }
+
         if let Some(struct_ty) = ty.try_downcast_struct_def() {
             return self.c_ffi_struct(struct_ty.fields);
         } else if let Some(enum_def) = ty.try_downcast::<ast::EnumDef>()
@@ -2600,7 +2612,7 @@ impl<'ctx> Codegen<'ctx> {
             };
         }
 
-        for f in fields.iter_types() {
+        for mut f in fields.iter_types() {
             let f_size = f.size() as u32;
             if f_size == 0 {
                 continue;
@@ -2620,6 +2632,13 @@ impl<'ctx> Codegen<'ctx> {
                     prev_state = PrevState::Int;
                     prev_bytes += $bits.div_ceil(8);
                 }};
+            }
+
+            if let Some(opt_f) = f.try_downcast::<ast::OptionTy>()
+                && let inner = opt_f.inner_ty.downcast_type()
+                && inner.is_non_null()
+            {
+                f = inner;
             }
 
             match f.matchable().as_ref() {
@@ -2854,7 +2873,6 @@ impl<'ctx> Codegen<'ctx> {
                             self.fn_table.contains_key(&f),
                             "function prototype should have been precompiled",
                         );
-                        debug_assert!(self.fn_table.get(&f).u().get_first_basic_block().is_none());
                         self.compile_fn(f, FnKind::FnDef(decl))?;
                     },
                     AstMatch::ExternDirective(_) if during_precompile => {
@@ -2868,8 +2886,10 @@ impl<'ctx> Codegen<'ctx> {
                     AstMatch::ExternDirective(_) | AstMatch::IntrinsicDirective(_) => {},
                     _ => debug_assert!(during_precompile || self.fn_table.contains_key(&f)), // don't need to compile an alias again
                 }
-            } else if var_ty == p.type_ty {
-                let ty = init.u().downcast_type();
+            } else if var_ty == p.type_ty
+                && let Some(ty) = init.u().try_flat_downcast_type_by_kind()
+            // don't compile aliases again
+            {
                 // Ensure that the type is in `type_table`
                 self.llvm_type(ty);
                 if let Some(ty_scope) = ty.get_scope() {
@@ -2983,7 +3003,11 @@ impl<'ctx> CodegenModuleExt for Module<'ctx> {
     fn jit_run_fn<Ret>(&self, fn_name: &str, opt: OptimizationLevel) -> CodegenResult<Ret> {
         let jit = self.create_jit_execution_engine(opt).map_err(CodegenError::CannotCreateJit)?;
 
-        if ctx().libraries.len() > 0 {
+        fn is_lib_available_in_jit(lib: &str) -> bool {
+            matches!(lib, "c" | "m")
+        }
+
+        if ctx().libraries.iter().filter(|lib| !is_lib_available_in_jit(&lib.0)).count() > 0 {
             todo!("jit load libraries")
 
             // load_library_permanently(Path::new(/* TODO: link to .so */)).unwrap();
@@ -3028,7 +3052,9 @@ impl<'ctx> Symbol<'ctx> {
             Symbol::Stack(val) => BasicSymbol::Ref(val),
             Symbol::Register(val) => BasicSymbol::Val(val),
             Symbol::Global(val) => BasicSymbol::Ref(val.as_pointer_value()),
-            Symbol::Function(val) => BasicSymbol::Ref(val.as_global_value().as_pointer_value()),
+            Symbol::Function(val) => {
+                BasicSymbol::Val(CodegenValue::new(val.as_global_value().as_pointer_value()))
+            },
         }
     }
 
@@ -3049,7 +3075,7 @@ pub struct CodegenValue<'ctx> {
 
 impl<'ctx> std::fmt::Debug for CodegenValue<'ctx> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&unsafe { AnyValueEnum::new(self.val) }, f)
+        std::fmt::Debug::fmt(&unsafe { AnyVal::new(self.val) }, f)
     }
 }
 
@@ -3057,54 +3083,52 @@ impl<'ctx> CodegenValue<'ctx> {
     pub fn new<V: AsValueRef>(val: V) -> CodegenValue<'ctx> {
         #[cfg(debug_assertions)]
         unsafe {
-            AnyValueEnum::new(val.as_value_ref())
+            AnyVal::new(val.as_value_ref())
         };
 
         CodegenValue { val: val.as_value_ref(), _marker: PhantomData }
     }
 
     pub fn int_val(&self) -> IntValue<'ctx> {
-        debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_int_value());
+        debug_assert_matches!(self.any_val(), AnyVal::IntValue(_));
         unsafe { IntValue::new(self.val) }
     }
 
     pub fn bool_val(&self) -> IntValue<'ctx> {
-        debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_int_value());
+        debug_assert_matches!(self.any_val(), AnyVal::IntValue(_));
         unsafe { IntValue::new(self.val) }
     }
 
     pub fn float_val(&self) -> FloatValue<'ctx> {
-        debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_float_value());
+        debug_assert_matches!(self.any_val(), AnyVal::FloatValue(_));
         unsafe { FloatValue::new(self.val) }
     }
 
     pub fn ptr_val(&self) -> PointerValue<'ctx> {
-        debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_pointer_value());
+        debug_assert_matches!(self.any_val(), AnyVal::PointerValue(_) | AnyVal::FunctionValue(_));
         unsafe { PointerValue::new(self.val) }
     }
 
     pub fn struct_val(&self) -> StructValue<'ctx> {
-        debug_assert!(unsafe { AnyValueEnum::new(self.val) }.is_struct_value());
+        debug_assert_matches!(self.any_val(), AnyVal::StructValue(_));
         unsafe { StructValue::new(self.val) }
     }
 
     pub fn basic_val(&self) -> BasicValueEnum<'ctx> {
-        debug_assert!(BasicValueEnum::try_from(self.any_val()).is_ok());
         unsafe { BasicValueEnum::new(self.val) }
     }
 
     pub fn basic_metadata_val(&self) -> BasicMetadataValueEnum<'ctx> {
-        BasicMetadataValueEnum::try_from(self.any_val()).u()
+        match self.any_val() {
+            AnyVal::FunctionValue(f) => {
+                BasicMetadataValueEnum::PointerValue(f.as_global_value().as_pointer_value())
+            },
+            any_val => BasicMetadataValueEnum::try_from(any_val).u(),
+        }
     }
 
-    pub fn any_val(&self) -> AnyValueEnum<'ctx> {
-        match unsafe { AnyValueEnum::new(self.val) } {
-            AnyValueEnum::FunctionValue(f) => {
-                // For some reason `f.as_global_value().as_pointer_value().as_any_value_enum().is_pointer_value()` is `false`
-                AnyValueEnum::PointerValue(f.as_global_value().as_pointer_value())
-            },
-            v => v,
-        }
+    pub fn any_val(&self) -> AnyVal<'ctx> {
+        unsafe { AnyVal::new(self.val) }
     }
 }
 

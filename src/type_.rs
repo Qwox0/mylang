@@ -314,21 +314,19 @@ const ZST_ALIGNMENT: usize = 1;
 
 impl ast::Type {
     pub fn matches_int(self: Ptr<Self>) -> bool {
-        self.kind == AstKind::IntTy || self == primitives().never
+        self.kind == AstKind::IntTy || self.propagates_out()
     }
 
     pub fn matches_bool(self: Ptr<Self>) -> bool {
-        let p = primitives();
-        self == p.bool || self == p.never
+        self == primitives().bool || self.propagates_out()
     }
 
     pub fn matches_void(self: Ptr<Self>) -> bool {
-        let p = primitives();
-        self == p.void_ty || self == p.never
+        self == primitives().void_ty || self.propagates_out()
     }
 
     pub fn matches_ptr(self: Ptr<Self>) -> bool {
-        self.kind == AstKind::PtrTy || self == primitives().never
+        self.kind == AstKind::PtrTy || self.propagates_out()
     }
 
     pub fn matches_str(self: Ptr<Self>) -> bool {
@@ -337,6 +335,7 @@ impl ast::Type {
             || self
                 .try_downcast::<ast::SliceTy>()
                 .is_some_and(|slice| slice.elem_ty.downcast_type() == p.u8)
+            || self.propagates_out()
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -379,8 +378,7 @@ impl ast::Type {
             | TypeEnum::SliceTy { elem_ty: t, .. }
             | TypeEnum::ArrayTy { elem_ty: t, .. }
             | TypeEnum::OptionTy { inner_ty: t, .. } => {
-                let ty = t.rep_mut().downcast_type_ref();
-                ty.finalize();
+                t.downcast_type_ref().finalize();
             },
             TypeEnum::RangeTy { elem_ty, .. } => {
                 elem_ty.finalize();

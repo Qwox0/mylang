@@ -882,6 +882,8 @@ impl Parser {
                 body,
                 has_known_ret_ty: false,
                 has_varargs: false,
+                #[cfg(debug_assertions)]
+                decl: None,
             },
             start_span
         ))

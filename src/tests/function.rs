@@ -281,3 +281,25 @@ pause :: -> {};
         ";
     test(code).error("mismatched types (left: `u8`, right: `i32`)", substr!("+"));
 }
+
+#[test]
+fn function_ptr() {
+    let code = "
+f :: (x: int) -> x + 1;
+F :: *(_: int) -> int;
+
+get_f :: -> F { ptr := &f; ptr };
+
+test :: -> {
+    fn: F = get_f();
+    out: int = fn.*(10);
+    return out;
+}";
+    test(code).ok(11);
+
+    let code = "
+f :: (x: int) -> x + 1;
+test :: -> f.&.*(10);
+";
+    test(code).ok(11);
+}

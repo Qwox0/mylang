@@ -234,9 +234,11 @@ impl Sema {
         // println!("analyze {:x?}: {:?} {:?}", expr, expr.kind, ast::debug::DebugAst::to_text(&expr));
         let span = expr.span;
 
-        if expr.replacement.is_some() {
-            expr.ty = Some(expr.rep().ty.u());
-            // Does this work in general? Is this needed if NotFinished is removed?
+        if let Some(rep) = expr.try_rep() {
+            debug_assert!(expr.ty.is_some());
+            if rep.ty.u().propagates_out() {
+                expr.ty = Some(rep.ty.u()); // see `tests::sema::correctly_handle_error_in_later_cycles`
+            }
             return Ok(());
         }
 
@@ -783,7 +785,17 @@ impl Sema {
                             self.validate_mutation(MutationKind::AddrOf, *operand, expr)?;
                         }
                         let pointee = expr_ty.upcast();
-                        if is_const {
+                        if expr_ty.kind == AstKind::Fn {
+                            if is_mut {
+                                return cerror2!(
+                                    expr.full_span(),
+                                    "Cannot mutably reference functions"
+                                );
+                            }
+                            let const_val = operand.downcast_const_val();
+                            debug_assert!(const_val.kind == AstKind::Fn);
+                            expr.set_replacement(const_val.upcast());
+                        } else if is_const {
                             return cerror2!(
                                 expr.full_span(),
                                 "The \"address of\" operator is currently not supported at \
@@ -1738,6 +1750,13 @@ impl Sema {
                 decl.lhs_span(),
                 "cannot mark a declaration as `static` and as const (`::`)"
             );
+        }
+
+        #[cfg(debug_assertions)]
+        if let Some(init) = decl.init
+            && let Some(f) = init.try_downcast::<ast::Fn>()
+        {
+            f.as_mut().decl = Some(decl_ptr);
         }
 
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this

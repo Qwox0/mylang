@@ -151,6 +151,9 @@ pub(crate) use panic_debug;
 
 pub trait OptionExt<T> {
     fn set_once(&mut self, val: T) -> &mut T;
+
+    fn display(self) -> impl std::fmt::Display
+    where T: std::fmt::Display;
 }
 
 impl<T> OptionExt<T> for Option<T> {
@@ -159,6 +162,20 @@ impl<T> OptionExt<T> for Option<T> {
         debug_assert!(self.is_none());
         *self = Some(val);
         self.as_mut().u()
+    }
+
+    fn display(self) -> impl std::fmt::Display
+    where T: std::fmt::Display {
+        struct DisplayOption<T>(Option<T>);
+        impl<T: std::fmt::Display> std::fmt::Display for DisplayOption<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match &self.0 {
+                    Some(t) => write!(f, "{t}"),
+                    None => write!(f, "None"),
+                }
+            }
+        }
+        DisplayOption(self)
     }
 }
 

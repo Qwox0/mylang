@@ -88,3 +88,21 @@ fn parse_colon() {
         assert_eq!(x.init.unwrap().downcast::<ast::IntVal>().val, 3);
     }
 }
+
+#[test]
+#[ignore = "not fixed yet"]
+fn decl_in_weird_places_panic() {
+    let code = r#"
+        .[x := 1];
+        N // <- this symbol lookup panics because `x := 1` increase cur_decl_pos
+    "#;
+    test_body(code).ok(());
+
+    let code = r#"
+        N :: 1;
+        f :: (a: void) -> {}
+        f(x := N);
+        N // <- this symbol lookup panics because `x := N` increase cur_decl_pos
+    "#;
+    test_body(code).ok(());
+}
