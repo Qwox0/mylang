@@ -60,7 +60,7 @@ StrHashSet :: struct {
     }
 
     pub with_slots :: (slots: u32) -> {
-        std.assert(is_power_of_two(slots));
+        std.assert(std.num.is_power_of_two(slots.as(u64)));
         mask := slots - 1;
         ptr := std.malloc0(buf_size(slots));
         std.assert(ptr != nil, "HashMap allocation failed!");
@@ -74,13 +74,13 @@ StrHashSet :: struct {
     }
 
     /// Returns the number of slots needed to allow inserting `capacity` items without reallocating.
-    capacity_to_slots :: (capacity: u32) -> ceil_pow_of_2(capacity * 100 / MAX_LOAD_PERCENTAGE + 1);
+    capacity_to_slots :: (capacity: u32) -> std.num.ceil_pow_of_2(capacity * 100 / MAX_LOAD_PERCENTAGE + 1);
 
     buf_start :: (self: *StrHashSet) ->
         (self.*.ptr.as(u64) - #sizeof(Entry) * self.slots().as(u64)).as(*any);
 
     buf_size :: (slots: u32) -> {
-        std.assert(is_power_of_two(slots));
+        std.assert(slots == 0 or std.num.is_power_of_two_u32(slots));
         std.assert(#alignof(Tag) == 1, "no padding needed"); // TODO: `#assert`
         // #assert(is_power_of_two(#sizeof(Entry)))
         (#sizeof(Entry) + #sizeof(Tag)) * slots.as(u64)
@@ -97,7 +97,7 @@ StrHashSet :: struct {
         if (self.*.available >= additional) return;
 
         // TODO: overflow check for `+`
-        new_capacity := ceil_pow_of_2(self.*.size + additional).max(MIN_CAPACITY);
+        new_capacity := std.num.ceil_pow_of_2(self.*.size + additional).max(MIN_CAPACITY);
         mut new_set := StrHashSet.new(new_capacity);
 
         for idx in 0..self.slots() {
@@ -230,15 +230,7 @@ StrHashSet :: struct {
     }
 }
 
-// TODO: move helpers to `std`
-
-clz : (u32, is_zero_poison: bool) -> u32 : #intrinsic "llvm.ctlz.i32";
-
-ceil_pow_of_2 :: (mut x: u32) -> if x <= 1 then 1 else 1 << (32 - clz(x - 1, true));
-
-is_power_of_two :: (x: u32) -> x != 0 && (x & (x - 1)) == 0;
-
-max :: (a: u32, b: u32) -> if a > b then a else b;
+max :: std.num.max_u32;
 
 set_test :: -> {
     std.println("\nTest Set:");

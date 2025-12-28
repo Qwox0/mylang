@@ -1,15 +1,16 @@
 pub env :: #import "env.mylang";
 pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";
-pub str :: #import "str.mylang";
+pub num :: #import "num.mylang";
 pub set :: #import "set.mylang";
+pub str :: #import "str.mylang";
 
 libc :: #import "libc";
 
 panic :: (msg: []u8) -> never {
     print("PANIC: ");
     println(msg);
-    libc.exit(1)
+    libc.abort();
 }
 
 assert :: (cond: bool, msg := "") -> if !cond do panic(str.concat("Assertion failed! ", msg));

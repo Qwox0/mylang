@@ -1,0 +1,11 @@
+clz : (u32, is_zero_poison: bool) -> u32 : #intrinsic "llvm.ctlz.i32";
+
+ceil_pow_of_2 :: (mut x: u32) -> if x <= 1 then 1 else 1 << (32 - clz(x - 1, true));
+
+is_power_of_two :: (x: uint) -> x != 0 && (x & (x - 1)) == 0;
+is_power_of_two_u32 :: (x: u32) -> is_power_of_two(x.as(uint)); // TODO: implement generics
+
+max :: (a: uint, b: uint) -> if a > b then a else b;
+max_u32 :: (a: u32, b: u32) -> if a > b then a else b;
+
+min :: (a: uint, b: uint) -> if a < b then a else b;

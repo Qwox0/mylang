@@ -1,5 +1,7 @@
 // TODO: these bindings are incomplete
 
+#library "c";
+
 // ===== c interop =====
 
 // x86_64 Linux
@@ -44,6 +46,8 @@ pub c_double :: f64;
 
 
 // ===== <math.h> =====
+
+#library "m";
 
 log10 : (x: c_double) -> c_double : #extern;
 
@@ -119,11 +123,12 @@ fread : (data: *mut any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_si
 // ===== <stdlib.h> =====
 
 malloc : (size: c_size_t) -> ?*any : #extern;
-free : (ptr: *any) -> void : #extern;
+free : (ptr: ?*any) -> void : #extern;
 calloc : (count: c_size_t, size: c_size_t) -> ?*any : #extern;
 realloc : (ptr: ?*any, new_size: c_size_t) -> ?*any : #extern;
 reallocarray : (ptr: ?*any, new_count: c_size_t, new_size: c_size_t) -> ?*any : #extern;
 
+abort : () -> never : #extern;
 exit : (status: c_int) -> never : #extern;
 
 strtol : (string: *c_char, tailptr: **c_char, base: c_int) -> c_long : #extern;

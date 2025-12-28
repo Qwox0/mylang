@@ -185,6 +185,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     let obj_file_path = exe_file_path.with_added_extension("o");
 
     if args.emit_llvm_ir {
+        std::fs::create_dir_all(exe_file_path.parent().unwrap()).unwrap();
         std::fs::write(
             exe_file_path.with_added_extension("ll"),
             module.print_to_string().to_string(),
@@ -229,9 +230,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
             .arg(obj_file_path.as_os_str())
             .args(ctx.library_search_paths.iter().map(|s| format!("-L{}", s.0.as_ref())))
             .args(ctx.libraries.iter().map(|s| format!("-l{}", s.0.as_ref())))
-            .arg("-L/lib/x86_64-linux-gnu")
-            .arg("-lc")
-            .arg("-lm");
+            .arg("-L/lib/x86_64-linux-gnu");
         if args.debug_linker_args {
             eprintln!("### Linker Cmd");
             eprint!("{}", cmd.get_program().display());
