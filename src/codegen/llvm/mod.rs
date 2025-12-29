@@ -887,6 +887,7 @@ impl<'ctx> Codegen<'ctx> {
                     None => self.compile_fn(f, FnKind::Lambda)?,
                 }))
             },
+            AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
         };
     }
 
@@ -2509,7 +2510,7 @@ impl<'ctx> Codegen<'ctx> {
                     */
             },
             TypeEnum::Fn { .. } => CodegenType::new(self.ptr_type()),
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         };
 
         let old_entry = self.type_table.insert(ty, llvm_ty);
@@ -2692,7 +2693,7 @@ impl<'ctx> Codegen<'ctx> {
                         handle_normal_field!(rem_size * 8);
                     }
                 },
-                TypeEnum::Unset => unreachable_debug(),
+                TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
             }
         }
 

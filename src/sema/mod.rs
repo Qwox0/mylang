@@ -608,14 +608,23 @@ impl Sema {
                 expr.ty = Some(self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?)
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
-                let lhs_ty = analyze!(*lhs, None);
+                let idx_ty = analyze!(*idx, None).finalize();
+
+                let mut ty_hint_alloc = if idx_ty.kind == AstKind::RangeTy {
+                    ty_hint.and_then(|t| t.inner_ty())
+                } else {
+                    *ty_hint
+                }
+                .map(|elem_ty| type_new!(local ArrayLikeContainer {elem_ty }));
+                let ty_hint = ty_hint_alloc.as_mut().map(|t| Ptr::from_ref(t).upcast_to_type());
+
+                let lhs_ty = analyze!(*lhs, ty_hint);
                 let (TypeEnum::SliceTy { elem_ty, .. } | TypeEnum::ArrayTy { elem_ty, .. }) =
                     lhs_ty.matchable().as_ref()
                 else {
                     return cerror2!(lhs.full_span(), "cannot index into value of type {}", lhs_ty);
                 };
                 let elem_ty = elem_ty.downcast_type();
-                let idx_ty = analyze!(*idx, None).finalize();
 
                 match idx_ty.matchable().as_ref() {
                     TypeEnum::RangeTy { elem_ty: i, rkind, .. }
@@ -779,7 +788,10 @@ impl Sema {
 
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
-                        expr_ty = *analyze!(*operand, None);
+                        let ty_hint = ty_hint
+                            .and_then(|t| t.try_downcast_ty_hint::<ast::PtrTy>())
+                            .map(|ptr_ty| ptr_ty.pointee.downcast_type());
+                        expr_ty = *analyze!(*operand, ty_hint);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         if is_mut {
                             self.validate_mutation(MutationKind::AddrOf, *operand, expr)?;
@@ -1263,7 +1275,7 @@ impl Sema {
                 params_scope.verify_no_duplicates();
 
                 let fn_ptr = expr.downcast::<ast::Fn>();
-                let fn_hint = ty_hint.and_then(|t| t.try_downcast::<ast::Fn>());
+                let fn_hint = ty_hint.and_then(|t| t.try_downcast_ty_hint::<ast::Fn>());
 
                 let mut is_fn_ty = *ty_hint == p.type_ty;
 
@@ -1485,6 +1497,7 @@ impl Sema {
                 self.analyze_type(*inner_ty)?;
                 expr.ty = Some(p.type_ty);
             },
+            AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
         }
         #[cfg(debug_assertions)]
         if expr.ty.is_none() {
@@ -1584,9 +1597,8 @@ impl Sema {
         let lhs = if let Some(lhs) = lhs {
             self.analyze(lhs, &None, false)?;
             lhs
-        } else if let Some(arr_hint) = ty_hint.try_downcast::<ast::ArrayTy>() {
-            // Here we can't set `expr.ty` to `ty_hint` because the there might be a length mismatch
-            arr_hint.elem_ty
+        } else if let Some(elem_ty) = ty_hint.and_then(|t| t.inner_ty()) {
+            elem_ty.upcast()
         } else {
             return Ok(None);
         };

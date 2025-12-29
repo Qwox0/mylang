@@ -659,6 +659,11 @@ ast_variants! {
         #[cfg(debug_assertions)]
         decl: OPtr<Decl>,
     },
+
+    /// only for type hints
+    ArrayLikeContainer {
+        elem_ty: Ptr<Type>,
+    }
 }
 
 inherit_ast! {
@@ -978,9 +983,32 @@ impl Ptr<Type> {
                 | TypeEnum::Fn { .. }
                 | TypeEnum::SliceTy { .. } => break self,
                 TypeEnum::PtrTy { pointee, .. } => self = pointee.downcast_type(),
-                TypeEnum::Unset => panic_debug!("invalid type"),
+                TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => {
+                    panic_debug!("invalid type")
+                },
             }
         }
+    }
+
+    /// Returns any kind of sub type.
+    /// Useful to guess type inference when a mismatch occurs and reduce unnecessary "cannot infer"
+    /// errors.
+    pub fn inner_ty(self) -> OPtr<Type> {
+        match self.matchable2() {
+            TypeMatch::SimpleTy(_) | TypeMatch::IntTy(_) | TypeMatch::FloatTy(_) => None,
+            TypeMatch::PtrTy(p) => Some(p.pointee.downcast_type()),
+            TypeMatch::SliceTy(s) => Some(s.elem_ty.downcast_type()),
+            TypeMatch::ArrayTy(a) => Some(a.elem_ty.downcast_type()),
+            TypeMatch::StructDef(_) | TypeMatch::UnionDef(_) | TypeMatch::EnumDef(_) => None,
+            TypeMatch::RangeTy(r) => Some(r.elem_ty),
+            TypeMatch::OptionTy(o) => Some(o.inner_ty.downcast_type()),
+            TypeMatch::Fn(_) => None,
+            TypeMatch::ArrayLikeContainer(a) => Some(a.elem_ty),
+        }
+    }
+
+    pub fn try_downcast_ty_hint<V: TypeVariant>(self) -> OPtr<V> {
+        self.try_downcast::<V>().or_else(|| self.inner_ty().try_downcast::<V>())
     }
 }
 
