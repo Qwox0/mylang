@@ -439,6 +439,7 @@ impl DebugAst for Ast {
                 lines.write("?");
                 lines.write_tree(ty);
             },
+            AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
         }
         for _ in 0..parenthesis_count {
             lines.write(")");

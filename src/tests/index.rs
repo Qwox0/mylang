@@ -10,3 +10,11 @@ fn invalid_slice_mut_marker() {
     test_body(".[1,2,3][1]mut")
         .error("The `mut` marker can only be used when slicing, not when indexing", substr!("mut"));
 }
+
+#[test]
+fn infer_through_slicing() {
+    let code = "
+MyStruct :: struct {};
+slice: []MyStruct = .[.{}, .()][..];";
+    test_body(code).compile_no_err();
+}

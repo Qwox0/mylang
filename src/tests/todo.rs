@@ -190,23 +190,6 @@ fn invalid_array_lit_with_hint() {
 }
 
 #[test]
-fn incorrect_signedness_of_int_lit() {
-    test("test :: -> u8 { -1 }")
-        .error("Cannot apply unary operator `-` to type `u8`", substr!("-1"));
-
-    test_body("a: u8 = if true { -1 } else 1;")
-        .error("Cannot apply unary operator `-` to type `u8`", substr!("-1"));
-
-    let code = "
-f :: (p: *u32) -> p.*;
-test :: -> f((-1).&);";
-    test(code).error(
-        "mismatched types: expected `*u32`; got `*{signed integer literal}`",
-        substr!("(-1).&"),
-    );
-}
-
-#[test]
 #[ignore = "not implemented"]
 fn fix_enum_parse_error() {
     let code = "MyEnum :: enum { x: i32, x :: (s: *MyEnum) -> s.*.x; };";

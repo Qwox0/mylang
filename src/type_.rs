@@ -352,7 +352,7 @@ impl ast::Type {
             | TypeEnum::OptionTy { inner_ty: t, .. } => t.downcast_type().is_finalized(),
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
             TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
     }
 
@@ -387,7 +387,7 @@ impl ast::Type {
                 debug_assert!(params_scope.decls.iter().all(|p| p.var_ty.u().is_finalized()));
                 debug_assert!(ret_ty.u().is_finalized());
             },
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
         debug_assert!(self.is_finalized());
         *self
@@ -425,7 +425,7 @@ impl ast::Type {
                 t.downcast_type().size()
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
     }
 
@@ -453,7 +453,7 @@ impl ast::Type {
             TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { ty, .. } => ty.u().alignment(),
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         };
         debug_assert!(alignment.is_power_of_two());
         alignment
@@ -479,7 +479,7 @@ impl ast::Type {
             TypeEnum::EnumDef { .. } => todo!(),
             TypeEnum::RangeTy { .. } => todo!(),
             TypeEnum::OptionTy { .. } => false,
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
     }
 
@@ -503,7 +503,7 @@ impl ast::Type {
                 !*simple
             },
             TypeEnum::Fn { .. } => false,
-            TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
     }
 
