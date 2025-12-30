@@ -1308,7 +1308,7 @@ impl Decl {
                     Err(cerror!(dot.span, "A member declaration requires an associated type name"))
                 },
             },
-            _ => unexpected_expr(lhs, "a variable name"),
+            _ => Err(unexpected_expr(lhs, "a variable name")),
         }
     }
 

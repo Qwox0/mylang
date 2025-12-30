@@ -9,11 +9,10 @@ use crate::{
 use core::fmt;
 
 pub type ParseError = HandledErr;
-
 pub type ParseResult<T> = Result<T, ParseError>;
 
 #[track_caller]
-pub fn unexpected_token<T>(t: Token, expected: &[TokenKind]) -> ParseResult<T> {
+pub fn unexpected_token(t: Token, expected: &[TokenKind]) -> ParseError {
     debug_assert!(!expected.contains(&t.kind));
     match format_expected_tokens(expected) {
         Some(expected) => cerror2!(t.span, "expected {expected}, got {}", t.kind),
@@ -22,12 +21,12 @@ pub fn unexpected_token<T>(t: Token, expected: &[TokenKind]) -> ParseResult<T> {
 }
 
 #[track_caller]
-pub fn unexpected_token_expect1<T>(t: Token, expected: impl fmt::Display) -> ParseResult<T> {
+pub fn unexpected_token_expect1(t: Token, expected: impl fmt::Display) -> ParseError {
     cerror2!(t.span, "expected {expected}, got {}", t.kind)
 }
 
 #[track_caller]
-pub fn unexpected_expr<T>(expr: Ptr<ast::Ast>, expected: impl fmt::Display) -> ParseResult<T> {
+pub fn unexpected_expr(expr: Ptr<ast::Ast>, expected: impl fmt::Display) -> ParseError {
     cerror2!(expr.full_span(), "expected {expected}, got an expression")
 }
 
