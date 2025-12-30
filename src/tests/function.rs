@@ -183,6 +183,28 @@ fn parse_params_without_types() {
 }
 
 #[test]
+fn parse_invalid_comma_in_params() {
+    let code = "
+f :: (,,a:i32) -> {};
+g :: (a:i32,,b:i32) -> {};
+f(,1);
+g(1,,2);";
+    test_parse(code)
+        .error("expected parameter, got `,`", substr!(",,";.start()))
+        .error("expected parameter, got `,`", substr!("g :: (a:i32,,";.end()))
+        .error("expected expression, got `,`", substr!("f(,";.end()))
+        .error("expected expression, got `,`", substr!("g(1,,";.end()));
+}
+
+#[test]
+fn parse_empty_params() {
+    let code = "
+(); // err
+() -> {}; // ok";
+    test_parse(code).error("expected expression, got `)`", substr!(");";.start()));
+}
+
+#[test]
 fn lambda() {
     let code = "
 take_lambda :: (f: () -> i64) -> f();

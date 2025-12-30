@@ -534,33 +534,34 @@ impl Parser {
             },
             TokenKind::OpenParenthesis => {
                 // TODO: currently no tuples allowed!
-                // () -> ...
-                if self.advanced().lex.advance_if_kind(TokenKind::CloseParenthesis) {
-                    self.tok(TokenKind::Arrow)?;
-                    return Ok(self.function_tail(Ptr::empty_slice(), span, prec)?.upcast());
-                }
-                let mut first_expr = self.expr()?; // this assumes the parameter syntax is also a valid expression
+                let first_expr = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?; // this assumes the parameter syntax is also a valid expression
                 let t = self.lex.next_or_eof();
                 let params = match t.kind {
                     // (expr)
                     TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
-                        first_expr.parenthesis_count += 1;
-                        return Ok(first_expr);
+                        let Some(mut expr) = first_expr else {
+                            return Err(unexpected_token_expect1(t, "expression"));
+                        };
+                        expr.parenthesis_count += 1;
+                        return Ok(expr);
                     },
                     // (expr) -> ...
-                    TokenKind::CloseParenthesis => {
-                        let Some(decl) = first_expr.try_to_decl()? else {
-                            return unexpected_expr(first_expr, "a parameter");
-                        };
-                        self.alloc_slice(&[decl])?
-                    },
+                    TokenKind::CloseParenthesis if let Some(e) = first_expr => self
+                        .alloc_one_val_slice(
+                            e.try_to_decl()?.ok_or_else(|| unexpected_expr(e, "a parameter"))?,
+                        )?,
+                    // () -> ...
+                    TokenKind::CloseParenthesis => Ptr::empty_slice(),
                     // (params...) -> ...
                     TokenKind::Comma => {
-                        let Some(first_decl) = first_expr.try_to_decl()? else {
-                            return unexpected_expr(first_expr, "a parameter");
+                        let Some(expr) = first_expr else {
+                            return Err(unexpected_token_expect1(t, "parameter"));
+                        };
+                        let Some(first_decl) = expr.try_to_decl()? else {
+                            return Err(unexpected_expr(expr, "a parameter"));
                         };
                         let params = ScratchPool::new_with_first_val(first_decl)?;
-                        let params = self.var_decl_list(TokenKind::Comma, params, true)?;
+                        let params = self.params(params, true)?;
                         let expected_tok = if params.last().is_some_and(|d| d.is_lhs_only()) {
                             &EXPECTED_AFTER_IDENT_PARAM[..]
                         } else {
@@ -570,10 +571,10 @@ impl Parser {
                         self.tok(TokenKind::Arrow)?;
                         params
                     },
-                    _ if first_expr.kind == AstKind::Ident => {
-                        return unexpected_token(t, &EXPECTED_AFTER_IDENT_PARAM);
+                    _ if first_expr.is_some_and(|e| e.kind == AstKind::Ident) => {
+                        return Err(unexpected_token(t, &EXPECTED_AFTER_IDENT_PARAM));
                     },
-                    _ => return unexpected_token(t, &EXPECTED_AFTER_PARAM),
+                    _ => return Err(unexpected_token(t, &EXPECTED_AFTER_PARAM)),
                 };
                 self.function_tail(params, span, prec)?.upcast()
             },
@@ -765,7 +766,7 @@ impl Parser {
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
             TokenKind::Backslash => todo!("TokenKind::BackSlash"),
             TokenKind::Backtick => todo!("TokenKind::BackTick"),
-            kind => return unexpected_token(Token { kind, span }, &[]),
+            kind => return Err(unexpected_token(Token { kind, span }, &[])),
         })
     }
 
@@ -786,14 +787,14 @@ impl Parser {
                 Token { kind: TokenKind::Comma, .. } => {},
                 Token { kind: TokenKind::CloseBrace, span } => break span,
                 t => {
-                    return unexpected_token(
+                    return Err(unexpected_token(
                         t,
                         if init.is_none() {
                             &[TokenKind::Eq, TokenKind::Comma, TokenKind::CloseBrace]
                         } else {
                             &[TokenKind::Comma, TokenKind::CloseBrace]
                         },
-                    );
+                    ));
                 },
             }
         };
@@ -838,11 +839,11 @@ impl Parser {
                 new_arr_init!(ArrayInitializer { elements })
             },
             _ => {
-                return unexpected_token(t, &[
+                return Err(unexpected_token(t, &[
                     TokenKind::Comma,
                     TokenKind::Semicolon,
                     TokenKind::CloseBracket,
-                ]);
+                ]));
             },
         })
     }
@@ -985,18 +986,22 @@ impl Parser {
                 break;
             }
         }
-        debug_assert!(self.lex.peek().is_none_or(|t| t.kind != sep));
+        if let Some(t) = self.lex.peek()
+            && t.kind == sep
+        {
+            return Err(unexpected_token_expect1(t, "expression"));
+        }
         Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
     }
 
     /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also allows a trailing
     /// `sep`.
-    fn var_decl_list(
+    fn params(
         &mut self,
-        sep: TokenKind,
         mut list: ScratchPool<Ptr<ast::Decl>>,
         allow_ident_only: bool,
     ) -> ParseResult<DeclList> {
+        let sep = TokenKind::Comma;
         loop {
             let Some(decl) = opt!(self, var_decl(allow_ident_only), MIN_PRECEDENCE)? else {
                 break;
@@ -1006,7 +1011,11 @@ impl Parser {
                 break;
             }
         }
-        debug_assert!(self.lex.peek().is_none_or(|t| t.kind != sep));
+        if let Some(t) = self.lex.peek()
+            && t.kind == sep
+        {
+            return Err(unexpected_token_expect1(t, "parameter"));
+        }
         self.clone_slice_from_scratch_pool(list)
     }
 
@@ -1048,7 +1057,7 @@ impl Parser {
             TokenKind::ColonEq => DeclTailKind::Var,
             TokenKind::ColonColon => DeclTailKind::Const,
             _ if allow_ident_only => return Ok(decl),
-            _ => return unexpected_token(t, &DECL_TAIL_TOKENS),
+            _ => return Err(unexpected_token(t, &DECL_TAIL_TOKENS)),
         };
         self.advanced().decl_tail(decl, kind)
     }
@@ -1075,14 +1084,13 @@ impl Parser {
                 TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB_MASK),
                 TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC_MASK),
                 _ => {
-                    return unexpected_token(t, &[
+                    return Err(unexpected_token(t, &[
                         TokenKind::Ident,
                         TokenKind::Keyword(Keyword::Mut),
                         TokenKind::Keyword(Keyword::Rec),
                         TokenKind::Keyword(Keyword::Pub),
                         TokenKind::Keyword(Keyword::Static),
-                    ])
-                    .into();
+                    ]));
                 },
             }
             t = self.advanced().lex.peek_or_eof();
@@ -1129,7 +1137,7 @@ impl Parser {
     fn local_keyword(&mut self, local_keyword: &str) -> ParseResult<()> {
         let i = self.tok(TokenKind::Ident)?;
         if &*self.get_text_from_span(i.span) != local_keyword {
-            return unexpected_token_expect1(i, format_args!("`{local_keyword}`"));
+            return Err(unexpected_token_expect1(i, format_args!("`{local_keyword}`")));
         }
         Ok(())
     }
@@ -1152,7 +1160,7 @@ impl Parser {
             self.lex.advance();
             Ok(t)
         } else {
-            return unexpected_token(t, expected);
+            return Err(unexpected_token(t, expected));
         }
     }
 
