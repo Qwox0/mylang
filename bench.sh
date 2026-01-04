@@ -21,15 +21,18 @@ cd "$script_dir"
 
 cargo build --release
 
-sha256sum ./mylang-old
+old_exe="./mylang-old"
+
+sha256sum "$old_exe"
 sha256sum ./target/release/mylang
 
 cd "$script_dir"
 
 bench() {
-    sudo $(which poop) "./mylang-old $*" "./target/release/mylang $*"
+    sudo $(which poop) "$old_exe $*" "./target/release/mylang $*"
 }
 
+#bench check ./lib/std/bindgen/c.mylang
 bench check ./lib/std/bindgen/libclang.mylang --lib
 #bench check ./lib/std/bindgen/libglfw3.mylang --lib
 bench check ../../opengl_sphaerophoria/main.mylang

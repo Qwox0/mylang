@@ -1,11 +1,11 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
-    ast::{self, Decl, DeclList},
+    ast::{self, Ast, AstKind, Decl, DeclList, UpcastToAst},
     context::ctx,
     diagnostics::{DiagnosticReporter, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::{hash_val, unreachable_debug},
+    util::{hash_val, panic_debug, unreachable_debug},
 };
 use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 
@@ -56,6 +56,19 @@ impl ScopeKind {
 
     pub fn is_aggregate(self) -> bool {
         matches!(self, ScopeKind::Struct | ScopeKind::Union | ScopeKind::Enum)
+    }
+
+    pub fn for_container(container_kind: AstKind) -> ScopeKind {
+        match container_kind {
+            AstKind::Block => ScopeKind::Block,
+            AstKind::For => ScopeKind::ForLoop,
+            AstKind::While => todo!(),
+            AstKind::StructDef => ScopeKind::Struct,
+            AstKind::UnionDef => ScopeKind::Union,
+            AstKind::EnumDef => ScopeKind::Enum,
+            AstKind::Fn => ScopeKind::Fn,
+            k => panic_debug!("{k:?} doesn't contain a scope"),
+        }
     }
 }
 
@@ -190,7 +203,32 @@ impl Scope {
         debug_assert!(!self.kind.allows_shadowing());
         self.find_decl_norec(sym, ScopePos::UNSET, ignore_fields)
     }
+
+    pub fn get_expr(self: Ptr<Self>) -> OPtr<Ast> {
+        Some(match self.kind {
+            ScopeKind::Root | ScopeKind::File => return None,
+            ScopeKind::Block => get_scope_container!(self, ast::Block, scope).upcast(),
+            ScopeKind::ForLoop => get_scope_container!(self, ast::For, scope).upcast(),
+            ScopeKind::Fn => get_scope_container!(self, ast::Fn, params_scope).upcast(),
+            ScopeKind::Struct => get_scope_container!(self, ast::StructDef, scope).upcast(),
+            ScopeKind::Union => get_scope_container!(self, ast::UnionDef, scope).upcast(),
+            ScopeKind::Enum => get_scope_container!(self, ast::EnumDef, scope).upcast(),
+        })
+    }
 }
+
+macro_rules! get_scope_container {
+    ($scope:expr, $container_ty:path, $scope_field:ident) => {{
+        use crate::ast::AstVariant;
+        let scope: Ptr<Scope> = $scope;
+        debug_assert_eq!(scope.kind, ScopeKind::for_container(<$container_ty>::KIND));
+        crate::util::assert_has_field!($container_ty, $scope_field: Scope);
+        scope
+            .byte_sub(std::mem::offset_of!($container_ty, $scope_field))
+            .cast::<$container_ty>()
+    }};
+}
+pub(crate) use get_scope_container;
 
 /// `reverse` is needed because of shadowing
 fn linear_search_symbol(

@@ -104,6 +104,10 @@ impl<T: ?Sized> Ptr<T> {
     where T: Hash + Eq {
         HashKeyPtr(self)
     }
+
+    pub fn byte_sub(self, count: usize) -> Self {
+        Ptr::new(unsafe { self.0.byte_sub(count) })
+    }
 }
 
 impl<T> Ptr<[T]> {

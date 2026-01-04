@@ -129,7 +129,7 @@ impl<T> UnwrapDebug for Ptr<[OPtr<T>]> {
 /// like [`unreachable`] but UB in release mode.
 #[track_caller]
 #[inline]
-pub fn unreachable_debug() -> ! {
+pub const fn unreachable_debug() -> ! {
     if cfg!(debug_assertions) {
         unreachable!()
     } else {
@@ -318,3 +318,16 @@ pub(crate) use concat_arr;
 pub fn hash_val(h: &impl BuildHasher, val: impl Hash) -> u64 {
     h.hash_one(val)
 }
+
+macro_rules! assert_has_field {
+    ($ty:ty, $field:ident : $f_ty:ty) => {
+        const {
+            #[allow(unreachable_code, unused_variables)]
+            if false {
+                let x: $ty = unreachable_debug();
+                let _: $f_ty = x.$field;
+            }
+        }
+    };
+}
+pub(crate) use assert_has_field;

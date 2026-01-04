@@ -99,7 +99,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             }
 
             debug_assert!(file.scope.as_ref().u().parent.is_some());
-            sema.open_scope(file.as_mut().scope.as_mut().u());
+            let osh = sema.open_scope(file.as_mut().scope.as_mut().u());
             if let NotFinished { remaining } =
                 analyze_scope(&mut stmts[..stmt_range.end], &mut stmt_range.start, |stmt| {
                     sema.analyze_top_level(stmt)
@@ -112,7 +112,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                 sema.defer_stack.get_cur_scope().is_empty(),
                 "file scope must not contain defer statements"
             );
-            sema.close_scope();
+            sema.close_scope(osh);
         }
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
@@ -181,6 +181,9 @@ pub struct Sema {
     cctx: Ptr<CompilationContextInner>,
     cur_scope: Ptr<Scope>,
     cur_scope_pos: ScopePos,
+
+    #[cfg(debug_assertions)]
+    debug_scope_level: usize,
 }
 
 impl Sema {
@@ -192,6 +195,8 @@ impl Sema {
             cctx,
             cur_scope: cctx.primitives_scope,
             cur_scope_pos: ScopePos(0),
+            #[cfg(debug_assertions)]
+            debug_scope_level: 0,
         }
     }
 
@@ -290,7 +295,7 @@ impl Sema {
             },
             AstEnum::Block { stmts, has_trailing_semicolon, scope, .. } => {
                 scope.verify_no_duplicates();
-                self.open_scope(scope);
+                let osh = self.open_scope(scope);
                 let res: SemaResult<()> = try {
                     let max_idx = stmts.len().wrapping_sub(1);
                     for (idx, s) in stmts.iter().enumerate() {
@@ -307,7 +312,7 @@ impl Sema {
                         }
                     }
                 };
-                self.close_scope();
+                self.close_scope(osh);
                 res?;
                 let last_ty = stmts.last().map(|s| s.ty.u()).unwrap_or(p.void_ty);
                 expr.ty = Some(if !*has_trailing_semicolon || last_ty.propagates_out() {
@@ -557,6 +562,11 @@ impl Sema {
                     type_new!(PtrTy { pointee: elem_ty, is_mut }).upcast_to_type()
                 } else if lhs_ty.kind == AstKind::SliceTy && rhs.sym == p.len_sym {
                     p.u64
+                } else if let ty = lhs_ty.flatten_transparent()
+                    // `t.propagates_out()` implies `t.flatten_transparent() == t`
+                    && ty.propagates_out()
+                {
+                    ty
                 } else {
                     if rhs.replacement.is_some() {
                         debug_assert!(expr.ty.is_some());
@@ -1033,7 +1043,8 @@ impl Sema {
                     let Some(common_ty) = common_type(then_ty, else_ty) else {
                         return cerror2!(
                             else_body.full_span(),
-                            "'then' and 'else' branches have incompatible types"
+                            "'then' and 'else' branches have incompatible types (`{then_ty}`; \
+                             `{else_ty}`)"
                         );
                     };
                     Some(common_ty)
@@ -1070,7 +1081,7 @@ impl Sema {
                     },
                 };
 
-                self.open_scope(scope);
+                let osh = self.open_scope(scope);
                 let res = (|| {
                     iter_var.var_ty = Some(elem_ty);
                     self.analyze_decl(*iter_var, false, None)?;
@@ -1081,7 +1092,7 @@ impl Sema {
                     }
                     Ok(())
                 })();
-                self.close_scope();
+                self.close_scope(osh);
                 res?;
                 expr.ty = Some(p.void_ty);
             },
@@ -1094,7 +1105,7 @@ impl Sema {
                 let res: SemaResult<()> = try {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
                     if !body.can_ignore_yielded_value() {
-                        return error_cannot_yield_from_loop_block(body.return_val_span()).into();
+                        Err(error_cannot_yield_from_loop_block(body.return_val_span()))?
                     }
                 };
                 //self.close_scope();
@@ -1280,8 +1291,8 @@ impl Sema {
                 let mut is_fn_ty = *ty_hint == p.type_ty;
 
                 self.function_stack.push(fn_ptr);
-                self.open_scope(params_scope);
-                let res: SemaResult<()> = try {
+                let osh = self.open_scope(params_scope);
+                let res = (|| {
                     for (p_idx, param) in params_scope.decls.iter().enumerate() {
                         if param.is_const {
                             return cerror2!(
@@ -1343,8 +1354,9 @@ impl Sema {
                         debug_assert!(is_fn_ty);
                         //panic_debug!("this function has already been analyzed as a function type")
                     }
-                };
-                self.close_scope();
+                    Ok(())
+                })();
+                self.close_scope(osh);
                 self.function_stack.pop();
                 res?;
                 debug_assert!(ret_ty.is_some());
@@ -1388,19 +1400,19 @@ impl Sema {
             AstEnum::StructDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
                 self.allow_unfinished_use(expr, p.type_ty);
-                self.open_scope(scope);
+                let osh = self.open_scope(scope);
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
                     debug_assert!(member.is_const == consts.contains(&member));
                     self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))
                 });
-                self.close_scope();
+                self.close_scope(osh);
                 res?;
                 debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::UnionDef { scope, finished_members, consts, .. } => {
                 scope.verify_no_duplicates();
                 self.allow_unfinished_use(expr, p.type_ty);
-                self.open_scope(scope);
+                let osh = self.open_scope(scope);
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
                     debug_assert!(member.is_const == consts.contains(&member));
                     if !member.is_const
@@ -1410,7 +1422,7 @@ impl Sema {
                     }
                     self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))
                 });
-                self.close_scope();
+                self.close_scope(osh);
                 res?;
                 debug_assert_eq!(expr.ty, p.type_ty);
             },
@@ -1430,7 +1442,7 @@ impl Sema {
 
                 scope.verify_no_duplicates();
                 self.allow_unfinished_use(expr, p.type_ty);
-                self.open_scope(scope);
+                let osh = self.open_scope(scope);
                 let mut idx = 0;
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
                     if member.is_const {
@@ -1470,7 +1482,7 @@ impl Sema {
                     idx += 1;
                     Ok(())
                 });
-                self.close_scope();
+                self.close_scope(osh);
                 res?;
                 debug_assert_eq!(variants.len(), used_tags.len());
                 *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
@@ -2339,7 +2351,7 @@ impl Sema {
         })
     }
 
-    fn open_scope(&mut self, new_scope: &mut Scope) {
+    fn open_scope(&mut self, new_scope: &mut Scope) -> OpenScopeHandle {
         #[cfg(debug_assertions)]
         debug_assert!(new_scope.was_checked_for_duplicates);
         debug_assert!(if new_scope.kind == ScopeKind::File {
@@ -2356,14 +2368,17 @@ impl Sema {
         self.cur_scope = Ptr::from_ref(new_scope);
         self.cur_scope_pos = ScopePos(0);
         self.defer_stack.open_scope();
+
+        OpenScopeHandle::new(self)
     }
 
-    fn close_scope(&mut self) {
+    fn close_scope(&mut self, open_scope_handle: OpenScopeHandle) {
+        open_scope_handle.close(self);
+
         // The parent scope of the prelude file is the root scope. During analysis of other files
         // the correct starting value for cur_scope is the prelude scope, not the root scope.
         // Nevertheless, assigning the root scope to cur_scope (after analysis of the prelude) is
         // fine because open_scope is called immediately for the next file which overwrites cur_scope.
-
         self.cur_scope_pos = self.cur_scope.pos_in_parent;
         self.cur_scope = self.cur_scope.parent.u();
         self.defer_stack.close_scope();
@@ -2372,6 +2387,31 @@ impl Sema {
     #[inline]
     fn alloc<T>(&self, val: T) -> SemaResult<Ptr<T>> {
         Ok(self.cctx.alloc.alloc(val)?)
+    }
+}
+
+#[must_use]
+struct OpenScopeHandle(#[cfg(debug_assertions)] usize);
+
+impl OpenScopeHandle {
+    #[inline]
+    fn new(sema: &mut Sema) -> OpenScopeHandle {
+        Self(
+            #[cfg(debug_assertions)]
+            {
+                sema.debug_scope_level += 1;
+                sema.debug_scope_level
+            },
+        )
+    }
+
+    #[inline]
+    fn close(self, sema: &mut Sema) {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(self.0, sema.debug_scope_level, "forgot to close scope");
+            sema.debug_scope_level -= 1;
+        }
     }
 }
 

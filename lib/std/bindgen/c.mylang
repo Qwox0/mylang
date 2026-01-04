@@ -35,9 +35,12 @@ pub GenerateOpts :: struct {
     indent_width := 4;
 
     copy_docs := true;
+    format_docs := true;
 
     convert_macros := true;
     skip_macros_starting_with_double_underscores := false;
+
+    debug_anonymous_struct_ty_decls := false;
 }
 
 pub generate_c_bindings :: (
@@ -118,7 +121,6 @@ ClientData :: struct {
     unit: clang.CXTranslationUnit;
     bindgen_file: *libc.FILE;
     lib_name: []u8;
-    item_name: []u8 = "";
     opts: GenerateOpts;
 
     tmp_alloc: std.mem.FixedArenaAllocator;
@@ -126,7 +128,10 @@ ClientData :: struct {
     // TODO: needs better hashing function
     used_names := std.set.StrHashSet.EMPTY;
 
-    in_anon_type := false;
+    item_name: []u8 = "";
+    type_decl_naming := TypeDeclNaming.InvalidCursor;
+    field_count: uint = 0;
+    force_single_line := false;
 
     ident_level := 0;
 
@@ -134,10 +139,18 @@ ClientData :: struct {
         self.used_names.&mut.reset_with_free();
         self.used_names.free();
     }
+
+    format_fields :: (self: *ClientData) -> !self.*.force_single_line && self.*.opts.format_fields;
 };
 
 emit :: (data: *ClientData, fmt: []u8, a := 0, b := 0, c := 0, d := 0, e := 0) ->
     libc.fprintf(data.*.bindgen_file, fmt.ptr, a, b, c, d, e);
+
+emit_line :: (data: *ClientData, fmt: []u8, a := 0, b := 0, c := 0, d := 0, e := 0) -> {
+    data.emit_indent();
+    data.emit(fmt, a, b, c, d, e);
+    data.emit("\n");
+}
 
 visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) -> clang.enums.CXChildVisitResult {
     d := d.as(*mut ClientData);
@@ -148,11 +161,9 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) 
     defer d.*.item_name = "";
     item_name := d.*.item_name.ptr;
 
-    d.emit_docs(cursor);
-
     kind := clang.getCursorKind(cursor);
-
     if kind == .FunctionDecl {
+        d.emit_docs(cursor);
         //is_fn_no_ret();
         fn_ty := clang.getCursorType(cursor);
         mut function_name := d.*.item_name;
@@ -167,107 +178,52 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) 
         d.emit("%s : ", xx function_name.ptr);
         d.emit_fn_proto(cursor);
         d.emit(" : #extern;\n");
-    } else if kind == .StructDecl or kind == .UnionDecl {
-        v := (if kind == .StructDecl "struct" else "union").ptr;
+    } else if kind == .StructDecl or kind == .UnionDecl or kind == .EnumDecl {
+        keyword := elaborated_ty_keyword(cursor).ptr;
 
-        struct_ty := clang.getCursorType(cursor);
+        anon_kind := get_type_naming(d, cursor);
+        std.assert(anon_kind != .InvalidCursor);
+        prev_type_decl_naming := d.*.type_decl_naming;
+        d.*.type_decl_naming = anon_kind;
+        defer d.*.type_decl_naming = prev_type_decl_naming;
 
-        prev_in_anon_type := d.*.in_anon_type;
-        d.*.in_anon_type = clang.cursor_isAnonymous(cursor) != 0;
-        defer d.*.in_anon_type = prev_in_anon_type;
-
-        if not d.*.in_anon_type then d.emit("%ss.%s :: ", xx v, xx item_name)
-        else d.emit("// anonymous %s:\n", xx item_name);
-
-        if d.*.in_anon_type {
-            if d.*.ident_level > 0  d.*.ident_level += 1;
-            d.emit_indent();
-        }
-        defer if d.*.in_anon_type if d.*.ident_level > 0  d.*.ident_level -= 1;
-
-        is_incomplete := clang.type_getSizeOf(struct_ty) == xx clang.enums.CXTypeLayoutError.Incomplete;
-        if is_incomplete {
-            d.emit_opaque_ty();
-            d.emit(";\n");
-        } else {
-            d.emit("%s { ", xx v, xx item_name, xx v);
-            d.*.ident_level += 1;
-            clang.type_visitFields(struct_ty, &(cursor, d) -> {
-                d := d.as(*mut ClientData);
-                mut field: *u8 = d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor)).ptr;
-                if libc.strlen(field) == 0 then field = "_".ptr; // TODO: better default
-
-                if d.*.opts.format_fields { d.emit("\n"); d.emit_indent() }
-                if d.emit_docs(cursor) then d.emit_indent();
-
-                d.emit("%s: ", xx field);
-                d.emit_type(clang.getCursorType(cursor));
-                d.emit("; ");
-                return .Continue;
-            }, d);
-            d.*.ident_level -= 1;
-            if d.*.opts.format_fields {
-                d.emit("\n");
-                d.emit_indent();
+        prev_force_single_line := d.*.force_single_line;
+        if anon_kind == .NamedLit {
+            d.emit_docs(cursor);
+            d.emit("%ss.%s :: ", xx keyword, xx item_name);
+        } else if anon_kind == .FullyAnonymous
+            and (kind == .EnumDecl or d.*.opts.debug_anonymous_struct_ty_decls)
+        {
+            d.emit("// anonymous %s:", xx item_name);
+            if kind != .EnumDecl {
+                d.emit(" ");
+                d.*.force_single_line = true;
             }
-            d.emit("}\n");
-        }
-    } else if kind == .EnumDecl {
-        enum_ty := clang.getCursorType(cursor);
+        } else return .Continue; // in typedef
+        defer d.*.force_single_line = prev_force_single_line;
 
-        prev_in_anon_type := d.*.in_anon_type;
-        d.*.in_anon_type = clang.cursor_isAnonymous(cursor) != 0;
-        defer d.*.in_anon_type = prev_in_anon_type;
-
-        if not d.*.in_anon_type then d.emit("enums.%s :: enum { ", xx item_name)
-        else d.emit("// anonymous %s:\n", xx item_name);
-
-        d.*.ident_level += 1;
-        clang.visitChildren(cursor, &(cursor, p, d) -> {
-            d := d.as(*mut ClientData);
-            mut variant := d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor));
-            if d.*.opts.trim_enum_prefix {
-                trim_partial_prefix(&mut variant, d.*.item_name);
-            }
-            mut variant: []u8 = variant;
-            if variant.len == 0 then variant = "_"; // TODO: no duplicates
-
-            std.assert(cursor.kind == .EnumConstantDecl);
-            tag := clang.getEnumConstantDeclValue(cursor);
-
-            if not d.*.in_anon_type {
-                if d.*.opts.format_fields { d.emit("\n"); d.emit_indent() }
-                if d.emit_docs(cursor) then d.emit_indent();
-
-                d.emit("%s = %lld, ", xx variant.ptr, tag);
-            } else {
-                if d.*.used_names.&mut.insert(strclone(variant.ptr)) != nil d.emit("// DUPLICATE: ");
-                if d.emit_docs(cursor) then d.emit_indent();
-                d.emit("%s :: %lld;\n", xx variant.ptr, tag);
-            }
-            return .Continue;
-        }, d);
-        d.*.ident_level -= 1;
-
-        if not d.*.in_anon_type {
-            if d.*.opts.format_fields { d.emit("\n"); }
-            d.emit("}\n");
-        }
+        d.emit_elaborated_ty(cursor, clang.getCursorType(cursor));
+        if anon_kind != .FullyAnonymous or kind != .EnumDecl then d.emit(";\n");
     } else if kind == .TypedefDecl {
+        d.emit_docs(cursor);
         d.emit("%s :: ", xx item_name);
         d.emit_type(clang.getTypedefDeclUnderlyingType(cursor));
         d.emit(";\n");
     } else if kind == .VarDecl {
+        d.emit_docs(cursor);
         d.emit("static %s: ", xx item_name);
         d.emit_type(clang.getCursorType(cursor));
         d.emit(" = #extern;\n");
     } else if kind == .MacroDefinition {
+        d.emit_docs(cursor);
         d.emit_macro(cursor, d.*.item_name)
     } else if kind == .InclusionDirective {
+        d.emit_docs(cursor);
         file := clang.getIncludedFile(cursor);
         filename := d.tmp_alloc_cxstring(clang.getFileName(file)).ptr;
         d.emit("\n// #include %s\n", xx filename);
     } else {
+        d.emit_docs(cursor);
         kind_text := d.tmp_alloc_cxstring(clang.getCursorKindSpelling(kind)).ptr;
 
         d.emit( "// TODO(toplevel): %s: %s\n", xx item_name, xx kind_text);
@@ -278,6 +234,10 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) 
 
 emit_fn_proto :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     fn_ty := clang.getCursorType(cursor);
+
+    prev_force_single_line := d.*.force_single_line;
+    d.*.force_single_line = true;
+    defer d.*.force_single_line = prev_force_single_line;
 
     d.emit("(");
 
@@ -324,32 +284,20 @@ emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
         elem_ty := clang.getArrayElementType(ty);
         d.emit_type(elem_ty);
     } else if ty.kind == .Elaborated {
-        cursor := clang.getTypeDeclaration(ty);
-
         is_incomplete := clang.type_getSizeOf(ty) == xx clang.enums.CXTypeLayoutError.Incomplete;
-        if is_incomplete {
-            d.emit_opaque_ty();
-            return
-        }
+        if is_incomplete return d.emit_opaque_ty();
 
+        cursor := clang.getTypeDeclaration(ty);
         name := d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor)).ptr;
-        is_anon := clang.cursor_isAnonymous(cursor) != 0;
+        naming := d.get_type_naming(cursor);
+        std.assert(naming != .InvalidCursor, "a");
 
-        kind := clang.getCursorKindSpelling(cursor.kind);
-        kind_text := if cursor.kind == .StructDecl "struct"
-        else if cursor.kind == .UnionDecl "union"
-        else if cursor.kind == .EnumDecl "enum"
-        else if cursor.kind == .TypedefDecl {
+        if cursor.kind == .TypedefDecl {
+            std.assert(naming != .FullyAnonymous, "TypedefDecl cannot be anonymous");
             d.emit("%s", xx name);
-            return;
-        } else {
-            kind := d.tmp_alloc_cxstring(clang.getCursorKindSpelling(cursor.kind)).ptr;
-            libc.printf("unknown kind: %s\n".ptr, kind);
-            std.panic("unknown kind")
-        };
-
-        if not is_anon { d.emit("%ss.%s", xx kind_text.ptr, xx name); }
-        else { visit_toplevel(cursor, cursor, d); }
+        } else if naming == .NamedLit {
+            d.emit("%ss.%s", xx elaborated_ty_keyword(cursor).ptr, xx name);
+        } else d.emit_elaborated_ty(cursor, ty)
     } else if ty.kind == .FunctionProto {
         fn_ty := ty;
         d.emit("*(");
@@ -381,6 +329,93 @@ emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
     }
 }
 
+emit_elaborated_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -> {
+    std.assert(cursor.has_kind(.[.StructDecl, .UnionDecl, .EnumDecl][..]));
+    if cursor.kind == .EnumDecl then d.emit_enum_ty(cursor, ty) else d.emit_struct_ty(cursor, ty)
+}
+
+elaborated_ty_keyword :: (cursor: clang.CXCursor) -> {
+    std.assert(cursor.has_kind(.[.StructDecl, .UnionDecl, .EnumDecl][..]));
+    if cursor.kind == .StructDecl  "struct"
+    else if cursor.kind == .UnionDecl  "union"
+    else "enum"
+}
+
+/// also works for `union`s
+emit_struct_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -> void {
+    v := (if cursor.kind == .StructDecl "struct" else "union").ptr;
+
+    is_incomplete := clang.type_getSizeOf(ty) == xx clang.enums.CXTypeLayoutError.Incomplete;
+    if is_incomplete return d.emit_opaque_ty();
+
+    d.emit("%s {", xx v);
+    d.*.ident_level += 1;
+
+    prev_field_count := d.*.field_count;
+    d.*.field_count = 0;
+    defer d.*.field_count = prev_field_count;
+
+    clang.type_visitFields(ty, &(cursor, d) -> {
+        d := d.as(*mut ClientData);
+        d.*.field_count += 1;
+
+        mut field: *u8 = d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor)).ptr;
+        if libc.strlen(field) == 0 then field = "_".ptr; // TODO: better default
+
+        if d.format_fields() {
+            d.emit("\n");
+            d.emit_docs(cursor);
+            d.emit_indent() ;
+        } else { d.emit(" "); }
+
+        d.emit("%s: ", xx field);
+        d.emit_type(clang.getCursorType(cursor));
+        d.emit("; ");
+        return .Continue;
+    }, d);
+    d.*.ident_level -= 1;
+    if d.format_fields() {
+        if d.*.field_count > 0  d.emit("\n");
+        d.emit_indent();
+    }
+    d.emit("}");
+
+}
+
+emit_enum_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -> void {
+    if d.*.type_decl_naming != .FullyAnonymous  d.emit("enum {");
+    d.*.ident_level += 1;
+    clang.visitChildren(cursor, &(cursor, p, d) -> {
+        d := d.as(*mut ClientData);
+        mut variant := d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor));
+        if d.*.opts.trim_enum_prefix {
+            trim_partial_prefix(&mut variant, d.*.item_name);
+        }
+        variant := if variant.len == 0 then "_" else variant; // TODO: prevent duplicates of `_`
+
+        std.assert(cursor.kind == .EnumConstantDecl);
+        tag := clang.getEnumConstantDeclValue(cursor);
+
+        if d.format_fields() {
+            d.emit("\n");
+            d.emit_docs(cursor);
+            d.emit_indent();
+        } else { d.emit(" "); }
+
+        if d.*.type_decl_naming != .FullyAnonymous {
+            d.emit("%s = %lld,", xx variant.ptr, tag);
+        } else {
+            if d.*.used_names.&mut.insert(strclone(variant.ptr)) != nil d.emit("// DUPLICATE: ");
+            d.emit("%s :: %lld;", xx variant.ptr, tag);
+        }
+        return .Continue;
+    }, d);
+    d.*.ident_level -= 1;
+
+    if d.format_fields()  d.emit("\n");
+    if d.*.type_decl_naming != .FullyAnonymous  d.emit("}");
+}
+
 emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8) -> {
     if d.*.opts.skip_macros_starting_with_double_underscores && libc.strncmp(macro_name.ptr, "__".ptr, 2) == 0 return;
 
@@ -394,6 +429,7 @@ emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8)
 
 
     tokens := d.tokenize_cursor(cursor);
+    defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
     tokens := tokens[1..]; // The first token is always the macro ident
 
     if tokens.len == 0 {
@@ -452,15 +488,33 @@ emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8)
     if was_emitted d.*.used_names.&mut.insert(strclone(macro_name));
 }
 
-tokenize_cursor :: (d: *ClientData, cursor: clang.CXCursor) -> {
-    range := clang.getCursorExtent(cursor);
+/// ```mylang
+/// defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
+/// ```
+tokenize_cursor :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
+    // Recreating the range fixes buggy (empty) results for cursors containing macro expansions.
+    // see <https://github.com/jnikula/hawkmoth/commit/470d721c6c86b2ff041ae5d4d37fa1e6dafd2b03>
+    mut range := clang.getCursorExtent(cursor);
+    start := clang.getRangeStart(range).resolve_source_location();
+    end := clang.getRangeEnd(range).resolve_source_location();
+    start := clang.getLocationForOffset(d.*.unit, start.file, start.offset);
+    end := clang.getLocationForOffset(d.*.unit, end.file, end.offset);
+    range = clang.getRange(start, end);
 
+    d.tokenize_source_range(range)
+}
+
+/// ```mylang
+/// defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
+/// ```
+tokenize_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
     mut tokens: *mut clang.CXToken = nil;
     mut num_tokens: u32 = 0;
     clang.tokenize(d.*.unit, range, &mut tokens, &mut num_tokens);
-    std.assert(tokens != nil);
+    //libc.printf("tokens=%p; num=%d\n".ptr, tokens, num_tokens);
+    std.assert(tokens != nil, "tokenize failed!");
 
-    []clang.CXToken.{ ptr = tokens, len = xx num_tokens }
+    []mut clang.CXToken.{ ptr = tokens, len = xx num_tokens }
 }
 
 convert_primitive :: (kind: clang.enums.CXTypeKind) -> {
@@ -529,13 +583,58 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 
     s := clang.cursor_getRawCommentText(cursor);
     if clang.getCString(s) == nil return false;
-    docs := d.tmp_alloc_cxstring(s).ptr;
+    mut docs := d.tmp_alloc_cxstring(s);
 
-    if docs == nil return false;
+    trim_start :: (mut str: []mut u8) -> {
+        while str.len > 0 and std.str.is_ascii_whitespace(str[0]) do str = str[1..]mut;
+        str
+    }
 
-    d.emit("%s\n", xx docs);
+    trim_start_eq :: (mut str: []mut u8, start: []u8) -> {
+        if str.len < start.len return str;
+        mut idx: u64 = 0;
+        while idx < start.len {
+            if str[idx] != start[idx] break;
+            idx += 1;
+        }
+        return str[idx..]mut;
+    }
 
-    // TODO: reformat docs
+    trim_end :: (mut str: []mut u8) -> {
+        while str.len > 0 and std.str.is_ascii_whitespace(str[str.len - 1]) do str.len -= 1;
+        str
+    }
+
+    trim_end_eq :: (mut str: []mut u8, end: []u8) -> {
+        if str.len < end.len return str;
+        mut idx: u64 = 0;
+        while idx < end.len {
+            if str[str.len - idx] != end[end.len - idx] break;
+            idx += 1;
+        }
+        return str[..str.len - idx]mut;
+    }
+
+    find_newline :: (str: []u8) -> {
+        for idx in 0..str.len if str[idx] == '\n' return idx;
+        return str.len; // TODO: return None
+    }
+
+    if d.*.opts.format_docs {
+        docs = docs.trim_start_eq("/**").trim_start(/* trims first line entirely if it is empty */)
+            .trim_end_eq("*/").trim_end();
+
+        while docs.len > 0 {
+            nl := docs.find_newline();
+            mut line := docs[0..nl]mut;
+            line = line.trim_start().trim_start_eq("*").trim_start_eq(" ");
+            d.emit_line("/// %.*s", xx line.len, xx line.ptr);
+            if nl == docs.len break;
+            docs = docs[(nl + 1)..]mut;
+        }
+    } else {
+        d.emit("%s\n", xx docs.ptr);
+    }
 
     true
 }
@@ -554,23 +653,50 @@ debug_ty :: (d: *mut ClientData, ty: clang.CXType) -> {
 debug_cursor :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     name := d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor)).ptr;
     kind := d.tmp_alloc_cxstring(clang.getCursorKindSpelling(cursor.kind)).ptr;
-    cursor_range := clang.getCursorExtent(cursor);
-
-    mut file: clang.CXFile;
-    Pos :: struct { line: u32, column: u32, offset: u32 };
-    mut start: Pos;
-    clang.getExpansionLocation(clang.getRangeStart(cursor_range), &mut file, &mut start.line, &mut start.column, &mut start.offset);
-    filename := d.tmp_alloc_cxstring(clang.getFileName(file)).ptr;
-
     libc.printf("# cursor: %s (%s)".ptr, name, kind);
-    libc.printf(" ; %s:%d:%d(%d)\n".ptr, filename, start.line, start.column, start.offset);
+    std.print(" ; ");
+    d.debug_source_location(clang.getCursorLocation(cursor));
 }
 
-tmp_alloc_cxstring :: (d: *mut ClientData, cxstring: clang.CXString) -> {
+debug_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
+    start := clang.getRangeStart(range) |> resolve_source_location();
+    end := clang.getRangeEnd(range) |> resolve_source_location();
+    std.assert(file_equal(start.file, end.file), "both ends of a source range must be in the same file!");
+    filename := start.&.filename(d);
+    libc.printf("%s:%d:%d..%d:%d\n".ptr, filename.ptr, start.line, start.column, end.line, end.column);
+}
+
+debug_source_location :: (d: *mut ClientData, loc: clang.CXSourceLocation) ->
+    loc.resolve_source_location().&.debug(d);
+
+SourceLocation :: struct {
+    file: clang.CXFile;
+    line: u32;
+    column: u32;
+    offset: u32;
+
+    filename :: (self: *SourceLocation, d: *mut ClientData) ->
+        d.tmp_alloc_cxstring(clang.getFileName(self.*.file), allow_nil=true);
+
+    debug :: (self: *SourceLocation, d: *mut ClientData) ->
+        libc.printf("%s:%d:%d(%d)\n".ptr, self.filename(d).ptr, self.*.line, self.*.column, self.*.offset);
+}
+resolve_source_location :: (loc: clang.CXSourceLocation) -> {
+    mut out: SourceLocation;
+    clang.getExpansionLocation(loc, &mut out.file, &mut out.line, &mut out.column, &mut out.offset);
+    return out;
+}
+
+file_equal :: (file1: clang.CXFile, file2: clang.CXFile) -> clang.file_isEqual(file1, file2) != 0;
+
+tmp_alloc_cxstring :: (d: *mut ClientData, cxstring: clang.CXString, allow_nil := false) -> []mut u8 {
     defer clang.disposeString(cxstring);
     cstr := clang.getCString(cxstring);
-    std.assert(cstr != nil, "expected non-null cstr");
-    len := libc.strlen(cstr);
+    len := if allow_nil and cstr == nil then 0
+    else {
+        std.assert(cstr != nil, "expected non-null cstr");
+        libc.strlen(cstr)
+    };
 
     str_buf := d.*.tmp_alloc.&mut.allocator().alloc(len + 1, 1);
     std.assert(str_buf != nil, "tmp allocation for cxstring failed");
@@ -618,4 +744,81 @@ get_token_kind_spelling :: (t_kind: clang.CXTokenKind) -> {
     else if t_kind == .Literal "Literal"
     else if t_kind == .Comment "Comment"
     else "Invalid"
+}
+
+has_kind :: (cursor: clang.CXCursor, kinds: []clang.enums.CXCursorKind) -> {
+    for k in kinds if cursor.kind == k return true;
+    false
+}
+
+TypeDeclNaming :: enum {
+    /// `struct Name {`
+    NamedLit,
+    /// `struct /* no name */ {`
+    /// `typedef struct {} A;`
+    UnnamedLit,
+    /// `struct /* no name */ {` and no typedef
+    FullyAnonymous,
+
+    InvalidCursor,
+}
+get_type_naming :: (d: *mut ClientData, cursor: clang.CXCursor) -> TypeDeclNaming {
+    if cursor.kind != .StructDecl
+        and cursor.kind != .UnionDecl
+        /* and cursor.kind != .ClassDecl */
+        and cursor.kind != .EnumDecl
+        and cursor.kind != .TypedefDecl
+    then return .InvalidCursor;
+
+    if cursor._is_fully_anonymous_type() return .FullyAnonymous;
+
+    return if d._is_anonymous_type_lit(cursor) then .UnnamedLit else .NamedLit;
+}
+
+/// Returns whether the type decl behind `cursor` cannot be referenced by any name.
+/// Note: `typedef struct {} A;` is not fully anonymous, but it `is_anonymous_type_lit`.
+_is_fully_anonymous_type :: (cursor: clang.CXCursor) -> clang.cursor_isAnonymous(cursor) != 0;
+
+/// `struct /* no name */ {`
+///
+/// `cursor_isAnonymous` and `cursor_isAnonymousRecordDecl` don't work.
+/// see <https://github.com/well-typed/hs-bindgen/pull/748>,
+///     <https://github.com/well-typed/hs-bindgen/issues/795>
+_is_anonymous_type_lit :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
+    if cursor.kind != .StructDecl
+        and cursor.kind != .UnionDecl
+        /* and cursor.kind != .ClassDecl */
+        and cursor.kind != .EnumDecl
+        and cursor.kind != .TypedefDecl
+    then return false;
+
+    tokens := d.tokenize_cursor(cursor);
+    defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
+
+    if clang.getTokenKind(tokens[0]) == .Identifier {
+        // If the type is defined behind a macro expansion, it is not easily possible to get the
+        // expanded tokens. Because this function is only used to filter out declarations, the
+        // least problematic thing to do is to assume that the type is non anonymous, include
+        // the wrapper declarations and be sad about it. :(
+        // Problem:
+        // ```c
+        // #define PROBLEM_IMPL struct {}
+        // struct Problem {};
+        // typedef PROBLEM_IMPL Problem;
+        // ```
+        return false;
+    }
+
+    std.assert(clang.getTokenKind(tokens[0]) == .Keyword);
+    // TODO: assert spelling: struct/union/enum
+
+    for t in tokens[1..] {
+        // TODO: handle `__attribute__`s
+        t_kind := clang.getTokenKind(t);
+        if t_kind == .Identifier return false;
+        if t_kind == .Punctuation and std.str.eq(d.tmp_alloc_cxstring(clang.getTokenSpelling(d.*.unit, t)), "{")
+            break;
+    }
+
+    true
 }
