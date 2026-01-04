@@ -1,0 +1,42 @@
+libc :: #import "libc";
+std :: #import "std";
+Allocator :: std.mem.Allocator;
+
+FixedArenaAllocator :: struct {
+    start: *u8,
+    end: *u8,
+    pos: *mut u8,
+
+    new :: (buffer: []mut u8) -> {
+        start := buffer.ptr;
+        FixedArenaAllocator.{ start, end=(start.as(usize) + buffer.len).as(*u8), pos=start }
+    }
+
+    allocator :: (self: *mut FixedArenaAllocator) -> Allocator.{ impl = &impl, data = self };
+
+    impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
+        std.assert(self != nil);
+        self := self.as(*mut FixedArenaAllocator);
+        if mode == .Alloc {
+            // TODO: configurable bump direction
+            aligned_ptr := self.*.pos |> std.mem.ptr.align_forward(alignment);
+            next_pos := aligned_ptr.as(usize) + size;
+            if next_pos > self.*.end.as(usize) return nil;
+            self.*.pos = next_pos.as(*mut u8);
+            return aligned_ptr;
+        } else if mode == .Free {
+            // TODO: free if last allocation?
+            return nil; // unsupported
+        }
+        std.panic("unreachable"); // TODO: implement exhaustive switch
+    }
+
+    reset :: (self: *mut FixedArenaAllocator) -> self.*.pos = self.*.start.as(*mut u8);
+
+    Checkpoint :: struct { pos: *mut u8 };
+    checkpoint :: (self: *mut FixedArenaAllocator) -> Checkpoint.(self.*.pos);
+    reset_to :: (self: *mut FixedArenaAllocator, checkpoint: Checkpoint) -> {
+        if self.*.pos.as(usize) <= checkpoint.pos.as(usize) return;
+        self.*.pos = checkpoint.pos;
+    }
+}

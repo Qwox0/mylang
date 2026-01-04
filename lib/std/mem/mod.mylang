@@ -1,0 +1,6 @@
+pub ptr :: #import "ptr.mylang";
+
+pub Allocator :: #import "alloc.mylang".Allocator;
+
+pub CAllocator :: #import "c_allocator.mylang".CAllocator;
+pub FixedArenaAllocator :: #import "fixed_arena_allocator.mylang".FixedArenaAllocator;

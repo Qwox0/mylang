@@ -1,6 +1,7 @@
 pub env :: #import "env.mylang";
 pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";
+pub mem :: #import "mem/mod.mylang";
 pub num :: #import "num.mylang";
 pub set :: #import "set.mylang";
 pub str :: #import "str.mylang";

@@ -1,0 +1,23 @@
+libc :: #import "libc";
+std :: #import "std";
+Allocator :: std.mem.Allocator;
+
+/// ```c
+/// alignof(max_align_t);
+/// ```
+MAX_ALIGN :: 16;
+
+CAllocator :: struct {
+    allocator :: Allocator.{ impl = &impl, data = nil };
+
+    impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
+        if mode == .Alloc {
+            std.assert(alignment <= MAX_ALIGN);
+            return xx libc.malloc(size);
+        } else if mode == .Free {
+            libc.free(old_ptr);
+            return nil;
+        }
+        std.panic("unreachable"); // TODO: implement exhaustive switch
+    }
+}

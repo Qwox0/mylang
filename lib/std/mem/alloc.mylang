@@ -1,0 +1,24 @@
+Allocator :: struct {
+    impl: *ImplFunction,
+    data: ?*mut any,
+
+    Mode :: enum {
+        Alloc,
+        Free,
+    }
+
+    // TODO: benchmark vs vtable
+    ImplFunction :: (data: ?*mut any, mode: Mode, size: usize, alignment: usize, old_ptr: ?*mut u8) -> ?*mut u8;
+
+    alloc :: (self: Allocator, size: usize, alignment: usize) ->
+        self.impl.*(self.data, .Alloc, size, alignment, nil);
+
+    free :: (self: Allocator, ptr: ?*mut u8) -> {
+        self.impl.*(self.data, .Free, 0, 0, ptr);
+    }
+}
+
+/*
+pub new :: (T: type, allocator := #ctx.alloc) ->
+    allocator.alloc(#sizeof(T), #alignof(T)).as(?*mut T);
+*/
