@@ -10,6 +10,7 @@ use crate::{
     parser::lexer::Span,
     ptr::{HashKeyPtr, OPtr, Ptr},
     scope::{Scope, ScopeKind},
+    scratch_allocator::ScratchAllocator,
     sema::primitives::Primitives,
     source_file::SourceFile,
     util::{OptionExt, UnwrapDebug, is_canonical},
@@ -27,7 +28,7 @@ pub type CtxDiagnosticReporter = diagnostics::DiagnosticCollector;
 
 pub struct CompilationContextInner {
     pub alloc: Arena,
-    pub tmp_alloc: Arena,
+    pub tmp_alloc: ScratchAllocator,
     pub diagnostic_reporter: CtxDiagnosticReporter,
     pub compile_time: CompileDurations,
 
@@ -96,7 +97,7 @@ impl CompilationContext {
 
         let ctx = CompilationContextInner {
             alloc,
-            tmp_alloc: Arena::new_scratch(32 * 1024 - Arena::BUMP_OVERHEAD),
+            tmp_alloc: ScratchAllocator::new(32 * 1024 - Arena::BUMP_OVERHEAD),
             diagnostic_reporter,
             compile_time: CompileDurations::default(),
 
@@ -396,6 +397,6 @@ pub fn primitives() -> &'static Primitives {
 }
 
 #[inline]
-pub fn tmp_alloc() -> &'static mut Arena {
+pub fn tmp_alloc() -> &'static mut ScratchAllocator {
     &mut ctx_mut().tmp_alloc
 }

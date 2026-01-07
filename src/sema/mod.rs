@@ -352,6 +352,11 @@ impl Sema {
                 } else if lhs.ty.u().propagates_out() {
                     expr.ty = Some(lhs.ty.u());
                     return Ok(());
+                } else if let Some(lhs_ty) = lhs.try_downcast_type()
+                    && lhs_ty.propagates_out()
+                {
+                    expr.ty = Some(lhs_ty);
+                    return Ok(());
                 } else {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
@@ -382,6 +387,11 @@ impl Sema {
                     }
                 } else if lhs.ty.u().propagates_out() {
                     expr.ty = Some(lhs.ty.u());
+                    return Ok(());
+                } else if let Some(lhs_ty) = lhs.try_downcast_type()
+                    && lhs_ty.propagates_out()
+                {
+                    expr.ty = Some(lhs_ty);
                     return Ok(());
                 } else {
                     return error_cannot_apply_initializer(lhs, expr).into();
@@ -2395,7 +2405,7 @@ struct OpenScopeHandle(#[cfg(debug_assertions)] usize);
 
 impl OpenScopeHandle {
     #[inline]
-    fn new(sema: &mut Sema) -> OpenScopeHandle {
+    fn new(#[allow(unused)] sema: &mut Sema) -> OpenScopeHandle {
         Self(
             #[cfg(debug_assertions)]
             {
@@ -2406,7 +2416,7 @@ impl OpenScopeHandle {
     }
 
     #[inline]
-    fn close(self, sema: &mut Sema) {
+    fn close(self, #[allow(unused)] sema: &mut Sema) {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(self.0, sema.debug_scope_level, "forgot to close scope");

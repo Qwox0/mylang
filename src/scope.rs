@@ -204,6 +204,7 @@ impl Scope {
         self.find_decl_norec(sym, ScopePos::UNSET, ignore_fields)
     }
 
+    // Currently only for debugging
     pub fn get_expr(self: Ptr<Self>) -> OPtr<Ast> {
         Some(match self.kind {
             ScopeKind::Root | ScopeKind::File => return None,

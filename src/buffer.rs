@@ -1,4 +1,7 @@
-use crate::ptr::Ptr;
+use crate::{
+    ptr::{OPtr, Ptr},
+    scratch_allocator::ScratchAllocator,
+};
 use std::{
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
@@ -13,9 +16,9 @@ pub struct CappedVec<T> {
 }
 
 impl<T> CappedVec<T> {
-    pub fn with_buf(buf: Buffer<MaybeUninit<T>>) -> Self {
-        let buf = UnorderedInitBuf::with_buf(buf);
-        Self { buf, len: 0 }
+    #[allow(unused)]
+    pub fn with_buf(buf: Buffer<MaybeUninit<T>>, in_scratch: OPtr<ScratchAllocator>) -> Self {
+        Self { buf: UnorderedInitBuf::with_buf(buf, in_scratch), len: 0 }
     }
 
     #[inline]
@@ -55,14 +58,27 @@ pub struct UnorderedInitBuf<T> {
     buf: Buffer<MaybeUninit<T>>,
     #[cfg(debug_assertions)]
     was_initialized: Box<[bool]>,
+
+    #[cfg(debug_assertions)]
+    in_scratch: OPtr<ScratchAllocator>,
 }
 
 impl<T> UnorderedInitBuf<T> {
-    pub fn with_buf(buf: Buffer<MaybeUninit<T>>) -> Self {
+    pub fn with_buf(
+        buf: Buffer<MaybeUninit<T>>,
+        #[allow(unused)] in_scratch: OPtr<ScratchAllocator>,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        if let Some(scratch) = in_scratch {
+            scratch.as_mut().alive_allocations += 1;
+        }
+
         Self {
+            buf,
             #[cfg(debug_assertions)]
             was_initialized: vec![false; buf.len()].into_boxed_slice(),
-            buf,
+            #[cfg(debug_assertions)]
+            in_scratch,
         }
     }
 
@@ -85,5 +101,14 @@ impl<T> UnorderedInitBuf<T> {
 
     pub fn capacity(&self) -> usize {
         self.buf.len()
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<T> Drop for UnorderedInitBuf<T> {
+    fn drop(&mut self) {
+        if let Some(scratch) = self.in_scratch {
+            scratch.as_mut().alive_allocations -= 1;
+        }
     }
 }

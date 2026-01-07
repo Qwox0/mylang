@@ -209,7 +209,7 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(self.get_symbol(decl.u()))
             },
             AstEnum::Block { stmts, has_trailing_semicolon, .. } => {
-                self.precompile_decls(stmts.as_ref())?;
+                self.precompile_decls(stmts.as_ref(), false)?;
                 self.open_scope();
                 let res: CodegenResultAndControlFlow<Symbol> = try {
                     if !*has_trailing_semicolon && let Some(last) = stmts.last_mut() {
@@ -640,7 +640,9 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_conditional_branch(condition, then_bb, else_bb)?;
 
                 self.builder.position_at_end(then_bb);
-                then_body.ty = Some(out_ty);
+                if out_ty != p.void_ty {
+                    finalize_ty(then_body.ty.as_mut().u(), out_ty);
+                }
                 let then_sym = self
                     .compile_expr_with_write_target(*then_body, write_target)
                     .handle_unreachable()?;
@@ -652,7 +654,9 @@ impl<'ctx> Codegen<'ctx> {
 
                 self.builder.position_at_end(else_bb);
                 let else_sym = if let Some(else_body) = else_body {
-                    else_body.ty = Some(out_ty);
+                    if out_ty != p.void_ty {
+                        finalize_ty(else_body.ty.as_mut().u(), out_ty);
+                    }
                     self.compile_expr_with_write_target(*else_body, write_target)
                         .handle_unreachable()?
                 } else {
@@ -1002,19 +1006,30 @@ impl<'ctx> Codegen<'ctx> {
     /// a :: -> void b();
     /// b :: -> void a();
     /// ```
-    pub fn precompile_decls(&mut self, stmts: &[Ptr<ast::Ast>]) -> CodegenResult<()> {
-        self.compile_decls(stmts.iter().filter_map(|a| a.try_downcast::<ast::Decl>()), true)
+    pub fn precompile_decls(
+        &mut self,
+        stmts: &[Ptr<ast::Ast>],
+        top_level: bool,
+    ) -> CodegenResult<()> {
+        self.compile_decls(
+            stmts.iter().filter_map(|a| a.try_downcast::<ast::Decl>()),
+            true,
+            top_level,
+        )
     }
 
     fn compile_decls(
         &mut self,
         decls: impl IntoIterator<Item = Ptr<ast::Decl>>,
         during_precompile: bool,
+        top_level: bool,
     ) -> CodegenResult<()> {
         for d in decls {
             if d.might_need_precompilation() {
                 self.compile_decl(d, during_precompile).handle_unreachable()?;
-                tmp_alloc().reset_scratch(d.upcast());
+                if top_level {
+                    tmp_alloc().reset(d.upcast());
+                }
             }
         }
         Ok(())
@@ -2903,7 +2918,7 @@ impl<'ctx> Codegen<'ctx> {
                             d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
                         }
                     }
-                    self.compile_decls(ty_scope.decls, during_precompile)?;
+                    self.compile_decls(ty_scope.decls, during_precompile, false)?;
                 }
             }
 
@@ -3348,7 +3363,9 @@ struct ForInfo<'ctx> {
 
 pub fn finalize_ty(ty: &mut Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> Ptr<ast::Type> {
     debug_assert!(ty_match(*ty, out_ty));
-    *ty = out_ty;
+    if *ty != primitives().never {
+        *ty = out_ty;
+    }
     *ty
 }
 

@@ -367,6 +367,8 @@ impl ast::Type {
                     *self = p.i64;
                 } else if *self == p.float_lit {
                     *self = p.f64;
+                } else if *self == p.rec_ret_ty {
+                    cerror!(Span::ZERO, "Cannot infer return type"); // TODO: correct span
                 }
             },
             TypeEnum::IntTy { .. }
@@ -389,7 +391,7 @@ impl ast::Type {
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
-        debug_assert!(self.is_finalized());
+        debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
         *self
     }
 
@@ -468,16 +470,24 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
-                if self == p.void_ty { false } else { todo!("{:?}", self) }
+                if self == p.void_ty
+                    || self == p.int_lit
+                    || self == p.sint_lit
+                    || self == p.float_lit
+                {
+                    false
+                } else {
+                    todo!("{:?}", self)
+                }
             },
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => false,
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => true,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().is_non_null(),
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } => fields.iter_types().any(ast::Type::is_non_null),
-            TypeEnum::UnionDef { .. } => todo!(),
-            TypeEnum::EnumDef { .. } => todo!(),
-            TypeEnum::RangeTy { .. } => todo!(),
+            TypeEnum::UnionDef { fields, .. } => fields.iter_types().all(ast::Type::is_non_null),
+            TypeEnum::EnumDef { variant_tags, .. } => variant_tags.u().contains(&0), // TODO: precompute this?
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_non_null(),
             TypeEnum::OptionTy { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }

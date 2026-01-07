@@ -1,3 +1,4 @@
+pub bindgen :: #import "bindgen/mod.mylang";
 pub env :: #import "env.mylang";
 pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";

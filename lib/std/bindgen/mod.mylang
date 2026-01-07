@@ -1,0 +1,1 @@
+pub c :: #import "c.mylang";

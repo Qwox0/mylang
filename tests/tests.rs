@@ -133,7 +133,7 @@ fn c_ffi_take_array_arg() {
     // build & link with `main.c`
     let out = test_cmd(
         Command::new("clang")
-            .args(["-o", "./out/main", "./main.c", "./out/take_arr.o"])
+            .args(["-o", "./out/main", "./main.c", "./out/take_arr.o", "-lclang"]) // TODO: remove unused library
             .current_dir(&dir),
     );
     assert!(out.status.success());

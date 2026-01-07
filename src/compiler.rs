@@ -21,11 +21,11 @@ use std::{
 
 impl<'ctx> llvm::Codegen<'ctx> {
     pub fn compile_all(&mut self, stmts: &[Ptr<Ast>]) -> CodegenResult<()> {
-        self.precompile_decls(&stmts)?;
+        self.precompile_decls(&stmts, true)?;
 
         for s in stmts.iter().copied() {
             self.compile_top_level(s)?;
-            tmp_alloc().reset_scratch(s);
+            tmp_alloc().reset(s);
         }
 
         CodegenResult::Ok(())

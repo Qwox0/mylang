@@ -25,6 +25,26 @@ pub eq :: (str1: []u8, str2: []u8) -> bool {
     true
 }
 
+pub contains :: (str: []u8, substr: []u8, ignore_case := false) -> {
+    if str.len < substr.len return false;
+    mut matching_len: uint = 0;
+
+    flip_letter_case :: (c: u8) -> {
+        if b'A' <= c and c <= b'Z' return c - b'A' + b'a';
+        if b'a' <= c and c <= b'z' return c - b'a' + b'A';
+        c
+    }
+
+    for byte in str {
+        expected := substr[matching_len];
+        if byte == expected or (ignore_case and flip_letter_case(byte) == expected) {
+            matching_len += 1;
+            if matching_len == substr.len return true;
+        } else matching_len = 0;
+    }
+    false
+}
+
 pub is_null_terminated :: (str: []u8) -> str[str.len] == 0;
 
 /// 0x9 = \t; 0xA = \n; 0xB = vertical tab; 0xC = form feed; 0xD = \r; 0x20 = space
