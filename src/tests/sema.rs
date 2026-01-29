@@ -65,7 +65,7 @@ fn guessing_type_inference_on_mismatch() {
 take_f :: (f: *(x: int, y: int) -> int) -> f.*(1, 2);
 test :: -> take_f(/* missing '&' */ (x, y) -> x + y);
 ";
-    test(code).error(
+    test(code).with_prelude().error(
         "mismatched types: expected `*(x:int,y:int)->int`; got `(x:i64,y:i64)->i64`",
         substr!("(x, y) -> x + y"),
     );

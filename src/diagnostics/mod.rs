@@ -216,7 +216,7 @@ pub(crate) use cerror2;
 macro_rules! cerror_fatal {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
         crate::diagnostics::DiagnosticReporter::report(crate::context::ctx_mut(), crate::diagnostics::DiagnosticSeverity::Fatal, $span, &format_args!($fmt, $($args),*));
-        panic!()
+        panic!($fmt, $($args),*)
     }};
 }
 pub(crate) use cerror_fatal;
@@ -248,3 +248,10 @@ macro_rules! cunimplemented {
     };
 }
 pub(crate) use cunimplemented;
+
+macro_rules! ctodo {
+    ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
+        $crate::diagnostics::cerror_fatal!($span, "TODO: {}", format_args!($fmt, $($args),*))
+    };
+}
+pub(crate) use ctodo;

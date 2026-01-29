@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, substr, test, test_body, test_parse};
+use crate::tests::{TestSpan, substr, test, test_body};
 
 #[test]
 #[ignore = "unfinished test"]
@@ -64,7 +64,7 @@ fn sret_no_memcpy() {
 #[ignore = "unfinished test"]
 #[allow(unused)]
 fn fix_precedence_range() {
-    test_parse("for x in 1.. do print(x);");
+    test("for x in 1.. do print(x);").parse();
 
     let a = 1..{
         let x = 1;

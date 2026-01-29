@@ -1,4 +1,4 @@
-use crate::tests::{substr, test, test_body, test_parse};
+use crate::tests::{substr, test, test_body};
 
 #[test]
 fn if_variants() {
@@ -36,7 +36,7 @@ fn todo_fix_parser() {
 
 #[test]
 fn parse_err_missing_if_body() {
-    test_parse("if a .A").error("unexpected token: EOF", substr!("A";.after()));
+    test("if a .A").parse().error("unexpected token: EOF", substr!("A";.after()));
 }
 
 #[test]
@@ -51,5 +51,5 @@ fn single_branch_yields_value() {
 print :: -> i32 #import "libc".printf("hello world".ptr);
 if true print();
 }"#;
-    test_body(code).ok(());
+    test_body(code).with_prelude().ok(());
 }

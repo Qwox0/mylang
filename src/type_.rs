@@ -26,6 +26,19 @@ impl FromResidual<Option<Infallible>> for CommonTypeSelection {
     }
 }
 
+impl CommonTypeSelection {
+    pub fn flip_if(self, cond: bool) -> CommonTypeSelection {
+        if !cond {
+            return self;
+        }
+        match self {
+            CommonTypeSelection::Lhs => CommonTypeSelection::Rhs,
+            CommonTypeSelection::Rhs => CommonTypeSelection::Lhs,
+            s => s,
+        }
+    }
+}
+
 // Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
 //    Can this (or something similar) even happen?
 fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonTypeSelection {
@@ -38,8 +51,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if lhs == p.err_ty {
         return Lhs;
-    }
-    if rhs == p.err_ty {
+    } else if rhs == p.err_ty {
         return Rhs;
     }
 
@@ -59,9 +71,11 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
     if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
         let lhs_inner = lhs.inner_ty.downcast_type();
         return match rhs.try_downcast::<ast::OptionTy>() {
-            Some(rhs) => common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()),
+            Some(rhs) => {
+                common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()).flip_if(swap_inputs)
+            },
             // ?ilit + i32
-            None if rhs.is_non_null() => common_type_impl(lhs_inner, rhs),
+            None if rhs.is_non_null() => common_type_impl(lhs_inner, rhs).flip_if(swap_inputs),
             None => Mismatch,
         };
     }
@@ -70,7 +84,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
 
     if let Some(lhs_num_lvl) = number_subtyping_level(lhs) {
         let rhs_num_lvl = number_subtyping_level(rhs)?;
-        debug_assert_ne!(lhs, rhs, "was already checked above");
+        debug_assert_ne!(lhs, rhs, "exact equality was already checked above");
         return SubtypingLevel::select(lhs_num_lvl, rhs_num_lvl);
     }
 
@@ -251,7 +265,10 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
                 .iter()
                 .map(|p| p.var_ty.u())
                 .zip(expected_fn.params().iter().map(|p| p.var_ty.u()))
-                .all(|(g, e)| ty_match(g, e));
+                .all(|(g, e)|
+                    // g and e are swapped because functions are contravariant wrt. parameter types
+                    // TODO: better errors messages
+                    ty_match(e, g));
     }
 
     false
@@ -454,7 +471,7 @@ impl ast::Type {
             TypeEnum::EnumDef { variants, .. } => enum_alignment(variants),
             TypeEnum::RangeTy { rkind: RangeKind::Full, .. } => ZST_ALIGNMENT,
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
-            TypeEnum::OptionTy { ty, .. } => ty.u().alignment(),
+            TypeEnum::OptionTy { inner_ty, .. } => inner_ty.downcast_type().alignment(),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         };
         debug_assert!(alignment.is_power_of_two());

@@ -57,23 +57,17 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
 };
 
 fn test(code: impl ToString) -> NewTest {
-    NewTest { code: code.to_string(), load_prelude: true }
+    NewTest { code: code.to_string(), load_prelude: false }
 }
 
 fn test_body(code_body: impl Display) -> NewTest {
     test(format!("test :: -> {{ {code_body} }};"))
 }
 
-fn test_parse(code: impl ToString) -> TestResult<Parsed> {
-    let res = test(code).load_prelude(false).prepare();
-    parser::parse_files(res.ctx.ctx.0);
-    TestResult { data: Parsed, ..res }
-}
-
 fn test_analyzed_struct(struct_code: &str) -> TestResult<Ptr<crate::ast::StructDef>> {
-    let res = test(format!("_ :: {struct_code}")).load_prelude(false).compile_no_err();
-    let struct_def = res.stmts()[0]
-        .downcast::<crate::ast::Decl>()
+    let res = test(format!("_ :: {struct_code}")).compile_no_err();
+    let struct_def = res
+        .one_stmt::<crate::ast::Decl>()
         .init
         .unwrap()
         .downcast::<crate::ast::StructDef>();
@@ -125,8 +119,8 @@ struct Ok<RetTy> {
 struct Err;
 
 impl NewTest {
-    fn load_prelude(mut self, load_prelude: bool) -> Self {
-        self.load_prelude = load_prelude;
+    fn with_prelude(mut self) -> Self {
+        self.load_prelude = true;
         self
     }
 
@@ -146,6 +140,12 @@ impl NewTest {
         }
     }
 
+    fn parse(self) -> TestResult<Parsed> {
+        let res = self.prepare();
+        parser::parse_files(res.ctx.ctx.0);
+        TestResult { data: Parsed, ..res }
+    }
+
     #[track_caller]
     fn compile(self) -> TestResult<CompileResult> {
         let _self = self.prepare();
@@ -163,6 +163,15 @@ impl NewTest {
 
     #[track_caller]
     fn _ok<RetTy>(self) -> TestResult<Ok<RetTy>> {
+        if is_array::<RetTy>() && std::mem::size_of::<RetTy>() <= 16 {
+            // For some reason arrays with size == 16 are received incorrectly by Rust even though
+            // Rust should use sret for types with size >= 16.
+            panic!(
+                "Cannot use Rust array type `{}` as return type of test might cause problems \
+                 because mylang returns a pointer but Rust expectes an array value",
+                std::any::type_name::<RetTy>()
+            );
+        }
         let res = self.compile_no_err();
         let ret = res
             .data
@@ -270,13 +279,14 @@ impl<Res> TestResult<Res> {
     }
 
     pub fn stmts(&self) -> &[Ptr<ast::Ast>] {
-        if self.loaded_prelude {
-            eprintln!(
-                "Warn: stmts might contain more elements than expected when also loading the \
-                 prelude"
-            )
-        }
+        assert!(!self.loaded_prelude);
         self.ctx.ctx.stmts.as_ref().unwrap()
+    }
+
+    pub fn one_stmt<V: ast::AstVariant>(&self) -> Ptr<V> {
+        let stmts = self.stmts();
+        assert_eq!(stmts.len(), 1, "Expected exactly one parsed statement/expression");
+        stmts[0].downcast::<V>()
     }
 }
 
@@ -416,23 +426,31 @@ fn is_array<T>() -> bool {
 /// Rust does something else.
 #[derive(Clone, Copy, Eq)]
 #[repr(C)]
-pub struct EnsureSret<T> {
+pub struct CFfiArray<T> {
     pub val: T,
     __force_sret: [u64; 10],
 }
 
-impl<T: fmt::Debug> fmt::Debug for EnsureSret<T> {
+impl<T: fmt::Debug> fmt::Debug for CFfiArray<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.val.fmt(f)
     }
 }
 
-impl<T: PartialEq> PartialEq for EnsureSret<T> {
+impl<T: PartialEq> PartialEq for CFfiArray<T> {
     fn eq(&self, other: &Self) -> bool {
         self.val == other.val
     }
 }
 
-fn arr<T, const LEN: usize>(val: [T; LEN]) -> EnsureSret<[T; LEN]> {
-    EnsureSret { val, __force_sret: [0; 10] }
+fn arr<T, const LEN: usize>(val: [T; LEN]) -> CFfiArray<[T; LEN]> {
+    CFfiArray { val, __force_sret: [0; 10] }
+}
+
+/// Used to indicate that an array it to be interpreted as uniform fields, not a [`CFfiArray`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fields<T>(T);
+
+fn fields<T, const LEN: usize>(values: [T; LEN]) -> Fields<[T; LEN]> {
+    Fields(values)
 }

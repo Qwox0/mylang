@@ -5,7 +5,7 @@ use crate::{
     diagnostics::{DiagnosticReporter, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::{hash_val, panic_debug, unreachable_debug},
+    util::{debug_only_assert, hash_val, panic_debug, unreachable_debug},
 };
 use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 
@@ -162,8 +162,7 @@ impl Scope {
         cur_pos: ScopePos,
         ignore_fields: bool,
     ) -> OPtr<Decl> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.was_checked_for_duplicates);
+        debug_only_assert!(self.was_checked_for_duplicates);
         debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
         let ignore_non_const = ignore_fields && self.kind.is_aggregate();
         if let Some(decls_map) = self.decls_map.as_ref() {

@@ -1,5 +1,5 @@
 use crate::{
-    tests::{substr, test, test_body, test_parse},
+    tests::{fields, substr, test, test_body},
     util::transmute_unchecked,
 };
 
@@ -208,7 +208,9 @@ fn invalid_tag_ty() {
 #[test]
 fn error_expected_ident() {
     // we want `expected ident` instead of `expected '}'`
-    test_parse("E :: enum { += };").error("expected an identifier, got `+=`", substr!("+="));
+    test("E :: enum { += };")
+        .parse()
+        .error("expected an identifier, got `+=`", substr!("+="));
 }
 
 #[test]
@@ -239,7 +241,7 @@ test :: -> {
     a: MyEnum = .OneVariant(.{ a=7 });
     a
 }";
-    let res = test(code).ok([7i64, 456]);
+    let res = test(code).ok(fields([7i64, 456]));
     assert!(res.llvm_ir().contains("alloca { {}, { { i64, i64 }, [0 x i8] } }, align 8"));
     assert!(res.llvm_ir().contains("ret { i128 } %ret"));
     drop(res);
@@ -249,7 +251,7 @@ test :: -> {
 MyEnum :: enum { OneVariant(struct { a := 123, b := 456 }) };
 CONST :: MyEnum.OneVariant(.{ b=7 });
 test :: -> CONST;";
-    let res = test(code).ok([123i64, 7]);
+    let res = test(code).ok(fields([123i64, 7]));
     let const_val = "{ {} zeroinitializer, { i64, i64 } { i64 123, i64 7 } }";
     assert!(res.llvm_ir().contains(const_val));
     assert!(res.llvm_ir().contains("ret { i128 } %ret"));

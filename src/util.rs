@@ -233,42 +233,12 @@ macro_rules! then {
 }
 pub(crate) use then;
 
-#[derive(Debug)]
-pub enum IteratorOneError {
-    NoItems,
-    TooManyItems,
-}
-
 pub trait IteratorExt: Iterator + Sized {
-    fn one(self) -> Result<Self::Item, IteratorOneError>
-    where Self: FusedIterator;
-
-    /// Expects the iterator to have exactly one item.
-    fn expect_one(self) -> Self::Item
-    where Self: FusedIterator {
-        self.one().unwrap_or_else(|e| {
-            let count = match e {
-                IteratorOneError::NoItems => "0",
-                IteratorOneError::TooManyItems => "multiple",
-            };
-            panic!("Expected the iterator to have exactly one item but got {count} items instead");
-        })
-    }
-
     fn join(self, sep: impl AsRef<str>) -> String
     where Self::Item: std::fmt::Display;
 }
 
 impl<I: FusedIterator> IteratorExt for I {
-    fn one(mut self) -> Result<Self::Item, IteratorOneError>
-    where Self: FusedIterator {
-        let Some(item) = self.next() else { return Err(IteratorOneError::NoItems) };
-        if self.next().is_some() {
-            return Err(IteratorOneError::TooManyItems);
-        }
-        Ok(item)
-    }
-
     fn join(mut self, sep: impl AsRef<str>) -> String
     where Self::Item: std::fmt::Display {
         let sep = sep.as_ref();
@@ -331,3 +301,21 @@ macro_rules! assert_has_field {
     };
 }
 pub(crate) use assert_has_field;
+
+/// Like [`debug_assert`] but is only type checked in debug_mode
+macro_rules! debug_only_assert {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        assert!($($arg)*);
+    };
+}
+pub(crate) use debug_only_assert;
+
+/// Like [`debug_assert_eq`] but is only type checked in debug_mode
+macro_rules! debug_only_assert_eq {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        assert_eq!($($arg)*);
+    };
+}
+pub(crate) use debug_only_assert_eq;

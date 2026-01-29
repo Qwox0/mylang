@@ -4,6 +4,10 @@ use crate::tests::{arr, substr, test_body};
 #[test]
 fn arr_initializer_with_lhs() {
     test_body("u8.[1, 2, 3, 4]").ok(arr([1u8, 2, 3, 4]));
+
+    // lhs cannot be weakened
+    test_body("mut x := 1; arr := *mut i64.[&mut x, &x];")
+        .error("mismatched types: expected `*mut i64`; got `*i64`", substr!("&x"));
 }
 
 /// also tests that the `elem_ty` is still inferred correctly.

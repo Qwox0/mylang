@@ -1,7 +1,6 @@
 use crate::{
     ast,
-    tests::{TestSpan, substr, test, test_body, test_parse},
-    util::IteratorExt,
+    tests::{TestSpan, substr, test, test_body},
 };
 
 #[test]
@@ -170,15 +169,13 @@ fn duplicate_parameter() {
 #[test]
 fn parse_params_without_types() {
     {
-        let res = test_parse("(a, b, c) -> {};");
-        let f = res.stmts().iter().expect_one().downcast::<ast::Fn>();
-        assert_eq!(f.params().len(), 3);
+        let res = test("(a, b, c) -> {};").parse();
+        assert_eq!(res.one_stmt::<ast::Fn>().params().len(), 3);
     }
 
     {
-        let res = test_parse("(a, b) -> {};");
-        let f = res.stmts().iter().expect_one().downcast::<ast::Fn>();
-        assert_eq!(f.params().len(), 2);
+        let res = test("(a, b) -> {};").parse();
+        assert_eq!(res.one_stmt::<ast::Fn>().params().len(), 2);
     }
 }
 
@@ -189,7 +186,8 @@ f :: (,,a:i32) -> {};
 g :: (a:i32,,b:i32) -> {};
 f(,1);
 g(1,,2);";
-    test_parse(code)
+    test(code)
+        .parse()
         .error("expected parameter, got `,`", substr!(",,";.start()))
         .error("expected parameter, got `,`", substr!("g :: (a:i32,,";.end()))
         .error("expected expression, got `,`", substr!("f(,";.end()))
@@ -201,7 +199,7 @@ fn parse_empty_params() {
     let code = "
 (); // err
 () -> {}; // ok";
-    test_parse(code).error("expected expression, got `)`", substr!(");";.start()));
+    test(code).parse().error("expected expression, got `)`", substr!(");";.start()));
 }
 
 #[test]
@@ -317,11 +315,11 @@ test :: -> {
     out: int = fn.*(10);
     return out;
 }";
-    test(code).ok(11);
+    test(code).with_prelude().ok(11);
 
     let code = "
 f :: (x: int) -> x + 1;
 test :: -> f.&.*(10);
 ";
-    test(code).ok(11);
+    test(code).with_prelude().ok(11);
 }

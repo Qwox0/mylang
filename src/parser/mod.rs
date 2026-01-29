@@ -293,6 +293,7 @@ impl Parser {
                             dot.as_mut().lhs = Some(lhs);
                             dot.as_mut().has_lhs = true;
                         } else {
+                            // Note: This works for both `x |> Type.func()` and `x |> y.func()`!
                             args.push(lhs)?;
                         }
                         self.tok(TokenKind::OpenParenthesis)?;

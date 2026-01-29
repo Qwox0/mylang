@@ -1,6 +1,6 @@
 use crate::{
     ptr::{OPtr, Ptr},
-    scratch_allocator::ScratchAllocator,
+    scratch_allocator::ScratchAllocator, util::debug_only_assert,
 };
 use std::{
     mem::MaybeUninit,
@@ -94,8 +94,7 @@ impl<T> UnorderedInitBuf<T> {
 
     #[inline]
     pub fn assume_init(self) -> Buffer<T> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.was_initialized.iter().all(|b| *b));
+        debug_only_assert!(self.was_initialized.iter().all(|b| *b));
         self.buf.assume_init()
     }
 

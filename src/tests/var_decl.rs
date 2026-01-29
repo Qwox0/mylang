@@ -1,7 +1,6 @@
 use crate::{
     ast::{self, AstKind},
-    tests::{substr, test, test_body, test_parse},
-    util::IteratorExt,
+    tests::{substr, test, test_body},
 };
 
 #[test]
@@ -66,8 +65,8 @@ fn good_invalid_token_error() {
 #[test]
 fn parse_colon() {
     fn test_fn_in_var_ty(code: &str) {
-        let res = test_parse(code);
-        let cos = res.stmts().iter().expect_one().downcast::<ast::Decl>();
+        let res = test(code).parse();
+        let cos = res.one_stmt::<ast::Decl>();
         assert_eq!(cos.ident.sym.text(), "cos");
         let var_ty = cos.var_ty_expr.unwrap().downcast::<ast::Fn>();
         let var_ty_ret = var_ty.body.unwrap().downcast::<ast::Ident>();
@@ -78,8 +77,8 @@ fn parse_colon() {
     test_fn_in_var_ty("cos : (f64) -> f64 : #intrinsic \"llvm.cos.f64\";");
 
     {
-        let res = test_parse("v :: x : i32 : 3;");
-        let v = res.stmts().iter().expect_one().downcast::<ast::Decl>();
+        let res = test("v :: x : i32 : 3;").parse();
+        let v = res.one_stmt::<ast::Decl>();
         assert_eq!(v.ident.sym.text(), "v");
         assert!(v.var_ty_expr.is_none());
         let x = v.init.unwrap().downcast::<ast::Decl>();

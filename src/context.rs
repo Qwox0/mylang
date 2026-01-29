@@ -261,12 +261,7 @@ pub struct ImportManager {
 
 impl ImportManager {
     fn new() -> Self {
-        let compiler_libs_path = if !cfg!(miri) {
-            let compiler_binary_path = std::env::current_exe().unwrap();
-            compiler_binary_path.parent().unwrap().join("lib").canonicalize().unwrap()
-        } else {
-            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/debug/lib"))
-        };
+        let compiler_libs_path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/lib"));
         assert!(
             compiler_libs_path.is_dir(),
             "\"{}\" must be a directory",

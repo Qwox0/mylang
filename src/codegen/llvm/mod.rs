@@ -6,6 +6,7 @@ use crate::{
     },
     codegen::llvm::bindings::*,
     context::{ctx, primitives, tmp_alloc},
+    diagnostics::ctodo,
     display_code::debug_expr,
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
@@ -13,8 +14,8 @@ use crate::{
     scoped_stack::ScopedStack,
     type_::{enum_alignment, struct_size, ty_match, union_size},
     util::{
-        self, UnwrapDebug, forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment,
-        unreachable_debug,
+        self, UnwrapDebug, debug_only_assert, debug_only_assert_eq, forget_lifetime,
+        is_simple_enum, panic_debug, round_up_to_alignment, unreachable_debug,
     },
 };
 use error::{
@@ -84,6 +85,7 @@ pub struct Codegen<'ctx> {
 
     noundef: Attribute,
     empty_struct_ty: StructType<'ctx>,
+    isize_type: IntType<'ctx>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -104,6 +106,7 @@ impl<'ctx> Codegen<'ctx> {
 
             noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 0),
             empty_struct_ty: context.struct_type(&[], false),
+            isize_type: context.i64_type(), // TODO: 32-bit
         };
 
         // needed for string slice literals
@@ -138,7 +141,7 @@ impl<'ctx> Codegen<'ctx> {
                     // println!("WARN: memcpy to write_target");
                     let layout = expr.ty.u().layout();
                     let alignment = layout.align as u32;
-                    let size = self.context.i64_type().const_int(layout.size as u64, false);
+                    let size = self.isize_type.const_int(layout.size as u64, false);
                     self.builder.build_memcpy(target, alignment, ptr, alignment, size)?;
                 },
                 Symbol::Register(val) => {
@@ -342,7 +345,7 @@ impl<'ctx> Codegen<'ctx> {
                     TypeEnum::SliceTy { .. } => self.build_slice_field_access(lhs_sym)?,
                     TypeEnum::ArrayTy { len, .. } => {
                         let arr_ptr = self.build_ptr_to_sym(lhs_sym, lhs_ty)?;
-                        let len = self.context.i64_type().const_int(len.int(), false);
+                        let len = self.isize_type.const_int(len.int(), false);
                         (arr_ptr, len)
                     },
                     _ => unreachable_debug(),
@@ -545,13 +548,20 @@ impl<'ctx> Codegen<'ctx> {
                     TypeEnum::PtrTy { .. } => self
                         .build_int_binop(lhs_val.ptr_val(), rhs_val.ptr_val(), false, op)
                         .map(reg_sym),
-                    TypeEnum::OptionTy { ty, .. } if ty.u().kind == AstKind::PtrTy => self
-                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), false, op)
-                        .map(reg_sym),
+                    TypeEnum::OptionTy { inner_ty, .. }
+                        if inner_ty.downcast_type().kind == AstKind::PtrTy =>
+                    {
+                        let int_ty = self.isize_type;
+                        let lhs_int =
+                            self.builder.build_ptr_to_int(lhs_val.ptr_val(), int_ty, "")?;
+                        let rhs_int =
+                            self.builder.build_ptr_to_int(rhs_val.ptr_val(), int_ty, "")?;
+                        self.build_int_binop(lhs_int, rhs_int, false, op).map(reg_sym)
+                    },
                     TypeEnum::FloatTy { .. } => self
                         .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
                         .map(reg_sym),
-                    _ => todo!("binop {op:?} for {}", arg_ty),
+                    _ => ctodo!(expr.full_span(), "binop {op:?} for {}", arg_ty),
                 }
                 .coerce()
             },
@@ -703,7 +713,7 @@ impl<'ctx> Codegen<'ctx> {
 
                     match source_ty.matchable().as_ref() {
                         TypeEnum::ArrayTy { len, .. } => {
-                            let idx_ty = self.context.i64_type();
+                            let idx_ty = self.isize_type;
                             let len = idx_ty.const_int(len.int(), false);
                             let for_info =
                                 self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
@@ -719,7 +729,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.build_for_end(for_info, out)?
                         },
                         TypeEnum::SliceTy { elem_ty, .. } => {
-                            let idx_ty = self.context.i64_type();
+                            let idx_ty = self.isize_type;
                             let (ptr, len) = self.build_slice_field_access(source_sym)?;
 
                             let for_info =
@@ -919,8 +929,10 @@ impl<'ctx> Codegen<'ctx> {
                 TypeEnum::EnumDef { .. } => {
                     let int_val = cv.downcast::<ast::IntVal>();
                     let enum_def = ty.downcast::<ast::EnumDef>();
-                    #[cfg(debug_assertions)]
-                    debug_assert_eq!(enum_def.find_variant_ty_for_tag(*val as isize), p.void_ty);
+                    debug_only_assert_eq!(
+                        enum_def.find_variant_ty_for_tag(*val as isize),
+                        p.void_ty
+                    );
                     ret(self.const_enum_val(enum_def, int_val.upcast_to_const_val(), None)?)
                 },
                 _ => unreachable_debug(),
@@ -947,10 +959,10 @@ impl<'ctx> Codegen<'ctx> {
                 ret(self.build_slice(ptr.as_pointer_value(), len, true)?)
             },
             ConstValEnum::PtrVal { val, .. } => {
-                #[cfg(debug_assertions)]
                 debug_assert!(match ty.matchable().as_ref() {
                     TypeEnum::PtrTy { .. } => true,
-                    TypeEnum::OptionTy { inner_ty, .. } => matches!(inner_ty.kind, AstKind::PtrTy),
+                    TypeEnum::OptionTy { inner_ty, .. } =>
+                        matches!(inner_ty.rep().kind, AstKind::PtrTy),
                     _ => false,
                 });
                 if *val == 0 {
@@ -1610,7 +1622,7 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResultAndControlFlow<()> {
         let elem_ty = arr_ty.elem_ty.downcast_type();
         debug_assert_eq!(elements.len(), arr_ty.len.int());
-        let idx_ty = self.context.i64_type();
+        let idx_ty = self.isize_type;
         for (idx, elem) in elements.iter_mut().enumerate() {
             finalize_ty(elem.ty.as_mut().u(), elem_ty);
             let idx = idx_ty.const_int(idx as u64, false);
@@ -1634,7 +1646,7 @@ impl<'ctx> Codegen<'ctx> {
         let len: u32 = count.int();
         debug_assert_eq!(len, arr_ty.len.int());
 
-        let idx_ty = self.context.i64_type();
+        let idx_ty = self.isize_type;
         let for_info = self.build_for(
             idx_ty,
             false,
@@ -1955,7 +1967,7 @@ impl<'ctx> Codegen<'ctx> {
                     alignment,
                     ptr,
                     alignment,
-                    self.context.i64_type().const_int(ret_ty.size() as u64, false),
+                    self.isize_type.const_int(ret_ty.size() as u64, false),
                 )?;
                 None
             },
@@ -2453,7 +2465,7 @@ impl<'ctx> Codegen<'ctx> {
     #[inline]
     fn slice_ty(&self) -> StructType<'ctx> {
         self.struct_type_inner(
-            &mut [self.ptr_type().as_type_ref(), self.context.i64_type().as_type_ref()],
+            &mut [self.ptr_type().as_type_ref(), self.isize_type.as_type_ref()],
             None,
             false,
         )
@@ -3169,33 +3181,28 @@ impl<'ctx> CodegenType<'ctx> {
     }
 
     pub fn int_ty(&self) -> IntType<'ctx> {
-        #[cfg(debug_assertions)]
         debug_assert!(self.any_ty().is_int_type());
         unsafe { IntType::new(self.inner) }
     }
 
     pub fn float_ty(&self) -> FloatType<'ctx> {
-        #[cfg(debug_assertions)]
         debug_assert!(self.any_ty().is_float_type());
         unsafe { FloatType::new(self.inner) }
     }
 
     #[allow(unused)]
     pub fn ptr_ty(&self) -> PointerType<'ctx> {
-        #[cfg(debug_assertions)]
         debug_assert!(self.any_ty().is_pointer_type());
         unsafe { PointerType::new(self.inner) }
     }
 
     pub fn arr_ty(&self) -> ArrayType<'ctx> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.any_ty().is_array_type());
+        debug_only_assert!(self.any_ty().is_array_type());
         unsafe { ArrayType::new(self.inner) }
     }
 
     pub fn struct_ty(&self) -> StructType<'ctx> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.any_ty().is_struct_type());
+        debug_only_assert!(self.any_ty().is_struct_type());
         unsafe { StructType::new(self.inner) }
     }
 

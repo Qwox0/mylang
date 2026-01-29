@@ -12,7 +12,7 @@
 //! { i32, f32 } -> i64
 //! { f32, i32 } -> i64
 
-use crate::tests::{test, test_body};
+use crate::tests::{fields, test, test_body};
 
 macro_rules! test_struct_return {
     ($test_name:ident : { $($field:ident : $ty:ty = $val:expr),* $(,)? }) => {
@@ -192,7 +192,7 @@ MyNum :: struct { val: [2]i32 }
 add :: (n: MyNum, other: i64) -> MyNum.(.[n.val[0] + xx other, n.val[1]]);
 pass_through :: (n: MyNum, other: i64) -> add(n, other);
 test :: -> pass_through(.(.[1,2]), 2);";
-    test(code).ok([3i32, 2]);
+    test(code).ok(fields([3i32, 2]));
 }
 
 #[test]

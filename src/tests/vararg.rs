@@ -13,7 +13,7 @@ f2 :: #varargs () -> {};";
 #[test]
 fn printf_codegen() {
     let code = include_str!("../../tests/printf_vararg.mylang");
-    let res = test(code).compile_no_err();
+    let res = test(code).with_prelude().compile_no_err();
     assert!(res.llvm_ir().contains("declare noundef i32 @printf(ptr noundef, ...)"));
     assert!(res.llvm_ir().contains(
         "call noundef i32 (ptr, ...) @printf(ptr noundef @0, i64 10, double 1.234560e+02, ptr @1)"

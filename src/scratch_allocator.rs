@@ -3,6 +3,7 @@ use crate::{
     ast,
     buffer::{CappedVec, UnorderedInitBuf},
     ptr::Ptr,
+    util::debug_only_assert_eq,
 };
 #[cfg(debug_assertions)]
 use std::any::type_name;
@@ -95,9 +96,9 @@ impl ScratchAllocator {
             debug_expr!(s);
         }
 
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(
-            self.alive_allocations, 0,
+        debug_only_assert_eq!(
+            self.alive_allocations,
+            0,
             "Cannot reset scratch if allocations are still alive"
         );
 

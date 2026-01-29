@@ -17,7 +17,7 @@ use crate::{
     scope::{Scope, ScopeKind, ScopePos},
     scoped_stack::ScopedStack,
     type_::{common_type, struct_offset, ty_match},
-    util::{self, UnwrapDebug, then, unreachable_debug},
+    util::{self, UnwrapDebug, debug_only_assert, then, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
 use err::SemaResult::*;
@@ -398,33 +398,33 @@ impl Sema {
                 };
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
-                let mut elem_iter = elements.iter().copied();
-
-                let elem_ty =
-                    self.analyze_array_initializer_lhs(*lhs, elements.len(), *ty_hint, expr)?;
-                let mut elem_ty = if let Some(elem_ty) = elem_ty {
+                let elem_ty = if let Some(elem_ty) =
+                    self.analyze_array_initializer_lhs(*lhs, elements.len(), *ty_hint, expr)?
+                {
+                    for elem in elements.into_iter() {
+                        let () =
+                            self.analyze_and_finalize_with_known_type(elem, elem_ty, is_const)?;
+                    }
                     elem_ty
                 } else {
+                    let mut elem_iter = elements.into_iter();
+
                     let Some(elem) = elem_iter.next() else {
                         expr.ty = Some(p.empty_array_ty.upcast_to_type()); // `.[]`
                         return Ok(());
                     };
-                    *analyze!(elem, None)
+
+                    let mut elem_ty = *analyze!(elem, None);
+                    for elem in elem_iter {
+                        self.analyze(elem, &Some(elem_ty), is_const)?;
+                        let ty = elem.ty.u();
+                        let Some(common_ty) = common_type(ty, elem_ty) else {
+                            return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
+                        };
+                        elem_ty = common_ty;
+                    }
+                    elem_ty
                 };
-                #[cfg(debug_assertions)]
-                let orig_elem_ty = elem_ty;
-
-                for elem in elem_iter {
-                    self.analyze(elem, &Some(elem_ty), is_const)?;
-                    let ty = elem.ty.u();
-                    let Some(common_ty) = common_type(ty, elem_ty) else {
-                        return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
-                    };
-                    elem_ty = common_ty;
-                }
-
-                #[cfg(debug_assertions)]
-                debug_assert!(lhs.is_none() || elem_ty == orig_elem_ty);
 
                 if lhs.is_none() || expr.ty.is_none() {
                     let len = elements.len() as i64;
@@ -1536,10 +1536,7 @@ impl Sema {
         is_const: bool,
     ) -> SemaResult<()> {
         self.analyze(expr, &Some(expected_ty), is_const)?;
-        let expr_ty = expr.ty.u();
-        if !ty_match(expr_ty, expected_ty) {
-            return error_mismatched_types(expr.full_span(), expected_ty, expr_ty).into();
-        }
+        let () = self.ty_match(expr, expected_ty)?;
         debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
         expr.as_mut().ty = Some(expected_ty);
         Ok(())
@@ -2362,8 +2359,7 @@ impl Sema {
     }
 
     fn open_scope(&mut self, new_scope: &mut Scope) -> OpenScopeHandle {
-        #[cfg(debug_assertions)]
-        debug_assert!(new_scope.was_checked_for_duplicates);
+        debug_only_assert!(new_scope.was_checked_for_duplicates);
         debug_assert!(if new_scope.kind == ScopeKind::File {
             new_scope.parent.is_some()
         } else {
