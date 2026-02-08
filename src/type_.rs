@@ -1,5 +1,5 @@
 use crate::{
-    ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum},
+    ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum, UpcastToAst, type_new},
     context::{ctx, primitives},
     diagnostics::cerror,
     parser::lexer::Span,
@@ -7,7 +7,7 @@ use crate::{
     sema::primitives::Primitives,
     util::{
         Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_alignment,
-        round_up_to_nearest_power_of_two, unreachable_debug, variant_count_to_tag_size_bits,
+        round_up_to_nearest_power_of_two, then, unreachable_debug, variant_count_to_tag_size_bits,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -18,6 +18,7 @@ enum CommonTypeSelection {
     Lhs,
     Rhs,
     Mismatch,
+    NewAlloc(Ptr<ast::Type>),
 }
 
 impl FromResidual<Option<Infallible>> for CommonTypeSelection {
@@ -27,10 +28,7 @@ impl FromResidual<Option<Infallible>> for CommonTypeSelection {
 }
 
 impl CommonTypeSelection {
-    pub fn flip_if(self, cond: bool) -> CommonTypeSelection {
-        if !cond {
-            return self;
-        }
+    pub fn flip(self) -> CommonTypeSelection {
         match self {
             CommonTypeSelection::Lhs => CommonTypeSelection::Rhs,
             CommonTypeSelection::Rhs => CommonTypeSelection::Lhs,
@@ -46,12 +44,13 @@ pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> 
         CommonTypeSelection::Lhs => Some(lhs),
         CommonTypeSelection::Rhs => Some(rhs),
         CommonTypeSelection::Mismatch => None,
+        CommonTypeSelection::NewAlloc(ty) => Some(ty),
     }
 }
 
 // Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
 //    Can this (or something similar) even happen?
-fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonTypeSelection {
+fn common_type_impl(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> CommonTypeSelection {
     use CommonTypeSelection::*;
     let p = primitives();
 
@@ -71,26 +70,34 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
         return Lhs;
     }
 
-    let swap_inputs = rhs.kind == AstKind::OptionTy;
-    if swap_inputs {
-        let tmp = rhs;
-        rhs = lhs;
-        lhs = tmp;
+    /// ?ilit + i32 => ?i32
+    fn not_both_optional(inner_ty: Ptr<ast::Type>, other: Ptr<ast::Type>) -> CommonTypeSelection {
+        debug_assert!(other.kind != AstKind::OptionTy);
+        if !other.is_non_null() {
+            // TODO: chint!(todo!(), "Consider explicitly wrapping the value with `Some`");
+            return Mismatch;
+        }
+        match common_type_impl(inner_ty, other) {
+            Equal | Lhs => Lhs,
+            Rhs => NewAlloc(type_new!(OptionTy { inner_ty: other.upcast() }).upcast_to_type()),
+            NewAlloc(inner_common) => {
+                NewAlloc(type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type())
+            },
+            Mismatch => Mismatch,
+        }
     }
 
     if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
         let lhs_inner = lhs.inner_ty.downcast_type();
         return match rhs.try_downcast::<ast::OptionTy>() {
-            Some(rhs) => {
-                common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()).flip_if(swap_inputs)
-            },
-            // ?ilit + i32
-            None if rhs.is_non_null() => common_type_impl(lhs_inner, rhs).flip_if(swap_inputs),
-            None => Mismatch,
+            Some(rhs) => common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()),
+            None => not_both_optional(lhs_inner, rhs),
         };
+    } else if let Some(rhs) = rhs.try_downcast::<ast::OptionTy>() {
+        let rhs_inner = rhs.inner_ty.downcast_type();
+        debug_assert_ne!(lhs.kind, AstKind::OptionTy);
+        return not_both_optional(rhs_inner, lhs).flip();
     }
-
-    debug_assert!(!swap_inputs);
 
     if let Some(lhs_num_lvl) = number_subtyping_level(lhs) {
         let rhs_num_lvl = number_subtyping_level(rhs)?;
@@ -103,7 +110,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
     /// common_type([][]mut T, []mut []T) == [][]T
     ///      would require an allocation. => currently an error (TODO)
     macro_rules! common_mut {
-        ($lhs:ident, $rhs:ident, $child_sel:expr $(,)?) => {{
+        ($lhs:ident, $rhs:ident, $child_sel:expr, $ty:ident $child_field:ident $(,)?) => {{
             let child_sel = $child_sel;
             let out_mut = $lhs.is_mut && $rhs.is_mut;
             match child_sel {
@@ -130,6 +137,11 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
                     debug_assert!($rhs.is_mut == out_mut);
                     Rhs
                 },
+                // TODO: Maybe allocate in the other problematic case aswell
+                NewAlloc(child) => NewAlloc(
+                    type_new!($ty { is_mut: out_mut, $child_field: child.upcast() })
+                        .upcast_to_type(),
+                ),
             }
         }};
     }
@@ -140,6 +152,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
             lhs,
             rhs,
             common_type_impl(lhs.pointee.downcast_type(), rhs.pointee.downcast_type()),
+            PtrTy pointee,
         );
     }
 
@@ -149,6 +162,7 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
             lhs,
             rhs,
             common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type()),
+            SliceTy elem_ty,
         );
     }
 
@@ -205,7 +219,7 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return SubtypingLevel::select(expected_lvl, got_lvl) != CommonTypeSelection::Mismatch;
     }
 
-    // needs to be above every non_null `got` value.
+    // must be above every non_null `got` value.
     if let Some(expected) = expected.try_downcast::<ast::OptionTy>() {
         let expected_inner = expected.inner_ty.downcast_type();
         return match got.try_downcast::<ast::OptionTy>() {
@@ -428,7 +442,7 @@ impl ast::Type {
                 elem_ty.downcast_type().size() * len.int::<usize>()
             },
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => struct_size(fields),
+            TypeEnum::StructDef { fields, .. } => struct_size(fields.iter_types()),
             TypeEnum::UnionDef { fields, .. } => union_size(*fields),
             TypeEnum::EnumDef { variants, tag_ty, .. } => aligned_add(
                 int_size(tag_ty.u().bits),
@@ -479,10 +493,12 @@ impl ast::Type {
     }
 
     pub fn is_non_null(self: Ptr<Self>) -> bool {
+        //self.first_non_null_field().is_some()
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
                 if self == p.void_ty
+                    || self == p.never
                     || self == p.int_lit
                     || self == p.sint_lit
                     || self == p.float_lit
@@ -503,6 +519,49 @@ impl ast::Type {
             TypeEnum::OptionTy { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
         }
+    }
+
+    /// (byte_offset, field_type)
+    pub fn first_non_null_field(self: Ptr<Self>) -> Option<(usize, Ptr<ast::Type>)> {
+        match self.matchable().as_ref() {
+            TypeEnum::SimpleTy { .. } => {
+                let p = primitives();
+                if self == p.void_ty
+                    || self == p.never
+                    || self == p.int_lit
+                    || self == p.sint_lit
+                    || self == p.float_lit
+                {
+                    None
+                } else {
+                    todo!("{:?}", self)
+                }
+            },
+            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => None,
+            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => Some(self),
+            TypeEnum::ArrayTy { elem_ty, .. } => {
+                then!(elem_ty.downcast_type().is_non_null() => elem_ty.downcast_type())
+            },
+            //TypeEnum::FunctionTy { .. } => todo!(),
+            TypeEnum::StructDef { fields, .. } => {
+                return fields.iter_types().enumerate().find_map(|(idx, ty)| {
+                    ty.first_non_null_field().map(|(offset, ty)| {
+                        (struct_size(fields.iter_types().take(idx)) + offset, ty)
+                    })
+                });
+            },
+            TypeEnum::UnionDef { fields, .. } => {
+                then!(fields.iter_types().all(ast::Type::is_non_null) => fields[0].var_ty.u())
+            },
+            TypeEnum::EnumDef { variant_tags, tag_ty, .. } => {
+                // TODO: precompute condition
+                then!(variant_tags.u().contains(&0) => tag_ty.u().upcast_to_type())
+            },
+            TypeEnum::RangeTy { elem_ty, .. } => then!(elem_ty.is_non_null() => *elem_ty),
+            TypeEnum::OptionTy { .. } => None,
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+        }
+        .map(|ty| (0, ty))
     }
 
     /// `not is_primitive`
@@ -556,8 +615,8 @@ pub fn int_alignment(bits: u32) -> usize {
 }
 
 #[inline]
-pub fn struct_size(fields: &[Ptr<ast::Decl>]) -> usize {
-    struct_layout(fields).size
+pub fn struct_size(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> usize {
+    struct_layout(field_types).size
 }
 
 #[inline]
@@ -565,17 +624,17 @@ pub fn struct_alignment(fields: &[Ptr<ast::Decl>]) -> usize {
     fields.iter_types().map(ast::Type::alignment).max().unwrap_or(ZST_ALIGNMENT)
 }
 
-pub fn struct_layout(fields: &[Ptr<ast::Decl>]) -> Layout {
-    let l = struct_layout_unaligned(fields);
+pub fn struct_layout(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> Layout {
+    let l = struct_layout_unaligned(field_types);
     let size = round_up_to_alignment!(l.size, l.align);
     Layout { size, ..l }
 }
 
 /// doesn't align the [`Layout::size`] to the alignment of the entire struct.
-fn struct_layout_unaligned(fields: &[Ptr<ast::Decl>]) -> Layout {
+fn struct_layout_unaligned(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> Layout {
     let mut align = ZST_ALIGNMENT;
-    let size = fields
-        .iter_types()
+    let size = field_types
+        .into_iter()
         .map(ast::Type::layout)
         .inspect(|layout| align = align.max(layout.align))
         .fold(0, aligned_add);
@@ -584,7 +643,7 @@ fn struct_layout_unaligned(fields: &[Ptr<ast::Decl>]) -> Layout {
 
 pub fn struct_offset(fields: &[Ptr<ast::Decl>], f_idx: usize) -> usize {
     let f = fields.get(f_idx).u();
-    let prev_offset = struct_layout_unaligned(&fields[..f_idx]).size;
+    let prev_offset = struct_layout_unaligned(fields[..f_idx].iter_types()).size;
     round_up_to_alignment!(prev_offset, f.var_ty.u().alignment())
 }
 

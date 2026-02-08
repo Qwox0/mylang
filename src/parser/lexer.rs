@@ -159,6 +159,8 @@ pub enum TokenKind {
     Semicolon,
     /// `?`
     Question,
+    // /// `??`
+    // QuestionQuestion, // Currently causes problems for nested optional types (`??int`)
     /// `#`
     Pound,
     /// `$`
@@ -293,6 +295,7 @@ impl TokenKind {
             TokenKind::ColonEq => "`:=`",
             TokenKind::Semicolon => "`;`",
             TokenKind::Question => "`?`",
+            //TokenKind::QuestionQuestion => "`??`",
             TokenKind::Pound => "`#`",
             TokenKind::Dollar => "`$`",
             TokenKind::At => "`@`",
@@ -378,6 +381,7 @@ keywords! {
     AndEq = "and=",
     Or = "or",
     OrEq = "or=",
+    OrElse = "orelse",
     Not = "not",
     If = "if",
     Then = "then",
@@ -779,7 +783,10 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
             '=' => TokenKind::ColonEq,
         },
         ';' => TokenKind::Semicolon,
-        '?' => TokenKind::Question,
+        '?' => maybe_followed_by! {
+            default: TokenKind::Question,
+            //'?' => TokenKind::QuestionQuestion,
+        },
         '#' => TokenKind::Pound,
         '$' => TokenKind::Dollar,
         '@' => TokenKind::At,

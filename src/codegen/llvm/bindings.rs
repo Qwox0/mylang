@@ -4,8 +4,8 @@ use inkwell::{
         core::*,
         prelude::{LLVMTypeRef, LLVMValueRef},
     },
-    types::{AsTypeRef, FunctionType, StructType},
-    values::StructValue,
+    types::{AnyTypeEnum, AsTypeRef, FunctionType, StructType},
+    values::{AnyValue, StructValue},
 };
 
 pub fn new_raw_const_struct<'ctx>(
@@ -64,4 +64,8 @@ pub fn set_struct_body<'ctx>(
             packed as i32,
         );
     }
+}
+
+pub fn get_type<'ctx>(value: impl AnyValue<'ctx>) -> AnyTypeEnum<'ctx> {
+    unsafe { AnyTypeEnum::new(LLVMTypeOf(value.as_value_ref())) }
 }

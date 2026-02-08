@@ -34,6 +34,7 @@ mod logic_binop;
 mod mut_checks;
 mod never_value;
 mod number_literal;
+mod optional;
 mod parse_number_literals;
 mod ptr;
 mod range;

@@ -1,6 +1,8 @@
-use super::{DeclMarkers, HasAstKind, OptionTypeExt};
 use crate::{
-    ast::{self, Ast, AstEnum, AstKind, TypeEnum, UnaryOpKind, UpcastToAst},
+    ast::{
+        self, Ast, AstEnum, AstKind, DeclMarkers, HasAstKind, OPtrTypeExt, TypeEnum, UnaryOpKind,
+        UpcastToAst,
+    },
     context::{ctx, primitives},
     parser::lexer::Span,
     ptr::Ptr,
@@ -182,6 +184,11 @@ impl DebugAst for Ast {
                 lines.write_opt_tree(start.as_ref());
                 lines.write(if *is_inclusive { "..=" } else { ".." });
                 lines.write_opt_tree(end.as_ref());
+            },
+            AstEnum::OrElse { lhs, rhs, .. } => {
+                lines.write_tree(lhs);
+                lines.write(" orelse ");
+                lines.write_tree(rhs);
             },
             AstEnum::Assign { lhs, rhs, .. } => {
                 lines.write_tree(lhs);
@@ -370,6 +377,14 @@ impl DebugAst for Ast {
                     lines.write_tree(body);
                     lines.write("}");
                 }
+            },
+            AstEnum::OptionalVal { val, .. } => match val {
+                Some(val) => {
+                    lines.write("Some(");
+                    lines.write_tree(val);
+                    lines.write(")");
+                },
+                None => lines.write("None"),
             },
 
             AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),

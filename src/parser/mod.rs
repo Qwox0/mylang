@@ -254,6 +254,10 @@ impl Parser {
                 }
                 expr!(Range { start: Some(lhs), end, is_inclusive }, span)
             },
+            FollowingOperator::OrElse => {
+                let rhs = self.expr_(op.precedence())?;
+                expr!(OrElse { lhs, rhs }, span)
+            },
             FollowingOperator::Pipe => {
                 let t = self.lex.peek_or_eof();
                 match t.kind {
@@ -1242,10 +1246,11 @@ pub enum FollowingOperator {
     /// `a op b`
     /// `  ^^`
     BinOp(BinOpKind),
-
     Range {
         is_inclusive: bool,
     },
+    /// `a orelse b`, `a ?? b`
+    OrElse,
 
     /// `a |> b`
     Pipe,
@@ -1337,6 +1342,8 @@ impl FollowingOperator {
             TokenKind::ColonEq => FollowingOperator::Decl(DeclTailKind::Var),
             //TokenKind::Semicolon => todo!("TokenKind::Semicolon"),
             TokenKind::Question => FollowingOperator::PostOp(UnaryOpKind::Try),
+            //TokenKind::QuestionQuestion |
+            TokenKind::Keyword(Keyword::OrElse) => FollowingOperator::OrElse,
             TokenKind::Dollar => todo!("TokenKind::Dollar"),
             TokenKind::At => todo!("TokenKind::At"),
             TokenKind::Tilde => todo!("TokenKind::Tilde"),
@@ -1355,10 +1362,11 @@ impl FollowingOperator {
             | FollowingOperator::NamedInitializer
             | FollowingOperator::ArrayInitializer
             | FollowingOperator::SingleArgNoParenFn
-            | FollowingOperator::PostOp(_) => POSTOP_PRECEDENCE,
+            | FollowingOperator::PostOp(_) => DIRECT_POSTOP_PRECEDENCE,
             FollowingOperator::BinOp(k) => k.precedence(),
             FollowingOperator::Range { .. } => RANGE_PRECEDENCE,
-            FollowingOperator::Pipe => 4,
+            FollowingOperator::OrElse => ORELSE_PRECEDENCE,
+            FollowingOperator::Pipe => PIPE_PRECEDENCE,
             FollowingOperator::Assign
             | FollowingOperator::BinOpAssign(_)
             | FollowingOperator::Decl(_) => ASSIGN_PRECEDENCE,
@@ -1372,10 +1380,14 @@ const DOT_PRECEDENCE: u8 = 24;
 const PIPE_TARGET_PRECEDENCE: u8 = 23;
 /// for `*ty`, `[]ty`, `?ty`
 const TY_PREFIX_PRECEDENCE: u8 = 22;
-const POSTOP_PRECEDENCE: u8 = 21;
+const DIRECT_POSTOP_PRECEDENCE: u8 = 21;
 const PREOP_PRECEDENCE: u8 = 20;
 
 const RANGE_PRECEDENCE: u8 = 10;
+
+/// (optional orelse default) |> do_something()
+const ORELSE_PRECEDENCE: u8 = 5;
+const PIPE_PRECEDENCE: u8 = 4;
 /// `a: ty = init`
 /// `   ^^`
 /// must be higher than [`FollowingOperator::Assign`]!

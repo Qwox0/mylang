@@ -1,4 +1,7 @@
-use crate::tests::{substr, test, test_analyzed_struct, test_body};
+use crate::{
+    ast::DeclListExt,
+    tests::{substr, test, test_analyzed_struct, test_body},
+};
 use std::mem::offset_of;
 
 #[test]
@@ -109,7 +112,7 @@ fn struct_layout() {
     // layout: `aaaaaaaab_cc____`
     let res = test_analyzed_struct("struct { a: i64, b: u8, c: u16 }");
 
-    assert_eq!(crate::type_::struct_size(&res.data.fields), std::mem::size_of::<A>());
+    assert_eq!(crate::type_::struct_size(res.data.fields.iter_types()), std::mem::size_of::<A>());
     assert_eq!(crate::type_::struct_alignment(&res.data.fields), std::mem::align_of::<A>());
 
     assert_eq!(crate::type_::struct_offset(&res.data.fields, 0), offset_of!(A, a));

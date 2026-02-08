@@ -60,8 +60,8 @@ pub struct Primitives {
     pub as_sym: Symbol,
 
     // Other:
-    /// TODO: remove nil
-    pub nil: Ptr<ast::Decl>,
+    pub null_lit: Ptr<ast::Decl>,
+    pub some_variant: Ptr<ast::Decl>,
     pub slice_ptr_field_ident: Ptr<ast::Ident>,
     pub slice_len_field: Ptr<ast::Decl>,
     /// struct def for type `[]untyped`. The inner type can be unknown because llvm doesn't care
@@ -176,6 +176,8 @@ impl Primitives {
         let u8 = new_primitive_ty!("u8", IntTy { bits: 8, is_signed: false });
         let u64 = new_primitive_ty!("u64", IntTy { bits: 64, is_signed: false });
 
+        let enum_variant = new_primitive_ty!("{enum variant}", simple_ty, finalized: false);
+
         let mut untyped_slice_ptr_field = new_primitive_decl("ptr")?;
         untyped_slice_ptr_field.is_const = false;
         init_decl(untyped_slice_ptr_field, any_ptr_ty, None);
@@ -225,7 +227,7 @@ impl Primitives {
             sint_lit: new_primitive_ty!("{signed integer literal}", simple_ty, finalized: false),
             float_lit: new_primitive_ty!("{float literal}", simple_ty, finalized: false),
             method_stub: new_primitive_ty!("{method stub}", simple_ty, finalized: false),
-            enum_variant: new_primitive_ty!("{enum variant}", simple_ty, finalized: false),
+            enum_variant,
             module: new_primitive_ty!("{module}", simple_ty, finalized: true),
             library: new_primitive_ty!("{library}", simple_ty, finalized: true),
 
@@ -234,9 +236,29 @@ impl Primitives {
             main_sym: sym("main"),
             as_sym: sym("as"),
 
-            nil: {
-                let decl = new_primitive_decl("nil")?;
-                init_decl(decl, never_ptr_ty, Some(ast_new!(PtrVal { val: 0 }).upcast()));
+            null_lit: {
+                let null_lit_ty = ast_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
+                init_ty(null_lit_ty);
+                let decl = new_primitive_decl("null")?;
+                init_decl(decl, null_lit_ty, Some(ast_new!(OptionalVal { val: None }).upcast()));
+                insert_symbol_no_duplicate(decls, decl);
+                {
+                    // TODO: remove nil
+
+                    let decl = new_primitive_decl("nil")?;
+                    init_decl(
+                        decl,
+                        null_lit_ty,
+                        Some(ast_new!(OptionalVal { val: None }).upcast()),
+                    );
+                    insert_symbol_no_duplicate(decls, decl);
+                }
+                decl
+            },
+            some_variant: {
+                let mut decl = new_primitive_decl("Some")?;
+                decl.is_const = false;
+                init_decl(decl, enum_variant, None);
                 insert_symbol_no_duplicate(decls, decl);
                 decl
             },

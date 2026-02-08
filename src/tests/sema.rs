@@ -51,9 +51,9 @@ A :: struct {
 
     let code = "
 A :: struct {
-    b: *B;
-    X : A : .(nil); // must pause on `A` because type_check would fail otherwise
-    Y :: A.(nil); // must pause on `A`
+    b: ?*B;
+    X : A : .(null); // must pause on `A` because type_check would fail otherwise
+    Y :: A.(null); // must pause on `A`
     B :: struct { a: *A };
 };";
     test(code).compile_no_err();

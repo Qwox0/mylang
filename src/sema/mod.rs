@@ -4,11 +4,11 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OptionTypeExt,
-        RangeKind, TypeEnum, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg,
-        type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclListExt, DeclMarkers, OPtrExt,
+        OPtrTypeExt, RangeKind, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, ast_new,
+        debug::DebugAst, is_pos_arg, type_new,
     },
-    context::{CompilationContextInner, primitives as p},
+    context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, cinfo, common::*, cunimplemented, cwarn},
     display_code::display,
     intern_pool::Symbol,
@@ -221,7 +221,11 @@ impl Sema {
 
             display(expr.full_span()).label(&label).finish();
         }
-        res.map(|()| expr.as_mut().ty.as_mut().u())
+        res.map(|()| {
+            let ty = expr.as_mut().ty.as_mut().u();
+            debug_assert_ne!(ty.kind, AstKind::ArrayLikeContainer);
+            ty
+        })
     }
 
     /// This modifies the [`Ast`] behind `expr` to ensure that codegen is possible.
@@ -629,15 +633,17 @@ impl Sema {
             AstEnum::Index { mut_access, lhs, idx, .. } => {
                 let idx_ty = self.analyze(*idx, &None, is_const)?.finalize();
 
-                let mut ty_hint_alloc = if idx_ty.kind == AstKind::RangeTy {
+                let tmp_ty_hint = if idx_ty.kind == AstKind::RangeTy {
                     ty_hint.and_then(|t| t.inner_ty())
                 } else {
                     *ty_hint
                 }
-                .map(|elem_ty| type_new!(local ArrayLikeContainer { elem_ty }));
-                let ty_hint = ty_hint_alloc.as_mut().map(|t| Ptr::from_ref(t).upcast_to_type());
+                .map(|elem_ty| {
+                    type_new!(ArrayLikeContainer { elem_ty }, tmp_alloc()).upcast_to_type()
+                });
 
-                let lhs_ty = analyze!(*lhs, ty_hint);
+                let lhs_ty = analyze!(*lhs, tmp_ty_hint);
+                debug_assert!(lhs.ty != tmp_ty_hint, "temporary allocation won't be valid");
                 let (TypeEnum::SliceTy { elem_ty, .. } | TypeEnum::ArrayTy { elem_ty, .. }) =
                     lhs_ty.matchable().as_ref()
                 else {
@@ -712,9 +718,9 @@ impl Sema {
             },
             AstEnum::Call { func, args, .. } => {
                 let call = expr.downcast::<ast::Call>();
-                let ty_hint =
+                let func_ty_hint =
                     ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
-                let fn_ty = *analyze!(*func, ty_hint);
+                let fn_ty = *analyze!(*func, func_ty_hint);
                 if let Some(fn_ty) = fn_ty.try_downcast::<ast::Fn>() {
                     if is_const {
                         return error_const_call(call).into();
@@ -745,6 +751,37 @@ impl Sema {
                     )?;
 
                     expr.ty = Some(self.get_fn_ret_ty(fn_ty));
+                } else if fn_ty == p.enum_variant
+                    && let Some(i) = func.try_flat_downcast::<ast::Ident>()
+                {
+                    debug_assert_eq!(i.decl, p.some_variant);
+                    if args.len() != 1 {
+                        return cerror2!(span, "expected 1 argument, got {}", args.len());
+                    }
+                    let val = args.get(0).u();
+                    let opt_ty =
+                        if let Some(ty_hint) = ty_hint.try_downcast_ty_hint::<ast::OptionTy>() {
+                            let inner_ty = ty_hint.inner_ty.downcast_type();
+                            let val_ty = analyze!(val, Some(inner_ty));
+                            /* // see `error_optional_orelse_optional` > "decide if these errors are better"
+                            let _ = self.ty_match(val, inner_ty);
+                            ty_hint
+                            */
+                            type_new!(OptionTy { inner_ty: val_ty.upcast() })
+                        } else {
+                            // Use ty_hint anyway to improve type inference in some error cases.
+                            // see `error_optional_orelse_optional` > "inference still works"
+                            type_new!(OptionTy { inner_ty: analyze!(val, ty_hint).upcast() })
+                        };
+                    expr.ty = Some(opt_ty.upcast_to_type());
+
+                    if is_const {
+                        let Some(cv) = val.try_downcast_const_val() else {
+                            return error_non_const(val, "expected constant value").into();
+                        };
+                        let optional_cv = ast_new!(OptionalVal { val: Some(cv) }, expr.full_span());
+                        expr.set_replacement(optional_cv.upcast());
+                    }
                 } else if fn_ty == p.enum_variant {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
@@ -798,7 +835,7 @@ impl Sema {
                 expr.ty = Some(match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let ty_hint = ty_hint
-                            .and_then(|t| t.try_downcast_ty_hint::<ast::PtrTy>())
+                            .try_downcast_ty_hint::<ast::PtrTy>()
                             .map(|ptr_ty| ptr_ty.pointee.downcast_type());
                         expr_ty = *analyze!(*operand, ty_hint);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
@@ -991,6 +1028,40 @@ impl Sema {
                 };
                 expr.ty = Some(type_new!(RangeTy { elem_ty, rkind }).upcast_to_type());
             },
+            AstEnum::OrElse { lhs, rhs, .. } => {
+                let alloc_opt_ty = |t: Ptr<ast::Type>| type_new!(OptionTy { inner_ty: t.upcast() });
+                let lhs_ty_alloc = ty_hint.map(alloc_opt_ty);
+                let lhs_ty = analyze!(*lhs, lhs_ty_alloc.upcast_to_type());
+                let Some(lhs_opt_ty) = lhs_ty.try_downcast::<ast::OptionTy>() else {
+                    return error_mismatched_types_custom(
+                        lhs.full_span(),
+                        "an optional value",
+                        *lhs_ty,
+                    )
+                    .into();
+                };
+                let lhs_inner = lhs_opt_ty.inner_ty.downcast_type();
+
+                let rhs_hint = ty_hint.unwrap_or(lhs_inner); // lhs might be `null` (ty = `?never`)
+                let rhs_ty = *self.analyze(*rhs, &Some(rhs_hint), is_const)?;
+                let common_ty = common_type(lhs_inner, rhs_ty).unwrap_or_else(|| {
+                    error_mismatched_types(rhs.full_span(), lhs_inner, rhs_ty);
+                    if let Some(rhs_optional_depth) = rhs.ty.map(ast::Type::count_optional_nesting)
+                        && let lhs_optional_depth = lhs_ty.count_optional_nesting()
+                        && lhs_optional_depth <= rhs_optional_depth
+                    {
+                        chint!(expr.span, "Consider using `or` operator instead");
+                    }
+                    lhs_inner
+                });
+
+                if common_ty != lhs_inner {
+                    let lhs_opt_ty = lhs_ty_alloc.unwrap_or_else(|| alloc_opt_ty(common_ty));
+                    lhs_opt_ty.as_mut().inner_ty = common_ty.upcast();
+                    *lhs_ty = lhs_opt_ty.upcast_to_type();
+                }
+                expr.ty = Some(common_ty);
+            },
             AstEnum::Assign { lhs, rhs, .. } => {
                 assert!(!is_const, "todo: Assign in const");
                 let lhs_ty = *self.analyze(*lhs, &None, is_const)?;
@@ -1125,6 +1196,7 @@ impl Sema {
                 *parent_fn = Some(func);
                 expr.ty = Some(p.never);
                 let val_ty = if let Some(val) = *val {
+                    // TODO: set func.ret_ty to err_ty on error?
                     *self.analyze(val, &func.ret_ty, is_const)?
                 } else {
                     p.void_ty
@@ -1285,7 +1357,7 @@ impl Sema {
                 params_scope.verify_no_duplicates();
 
                 let fn_ptr = expr.downcast::<ast::Fn>();
-                let fn_hint = ty_hint.and_then(|t| t.try_downcast_ty_hint::<ast::Fn>());
+                let fn_hint = ty_hint.try_downcast_ty_hint::<ast::Fn>();
 
                 let mut is_fn_ty = *ty_hint == p.type_ty;
 
@@ -1371,6 +1443,7 @@ impl Sema {
                     fn_ptr.upcast_to_type()
                 });
             },
+            AstEnum::OptionalVal { .. } => unreachable_debug(),
 
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => {
                 expr.ty = Some(p.type_ty)
@@ -1550,6 +1623,18 @@ impl Sema {
         Ok(())
     }
 
+    fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
+        let p = p();
+        let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
+        if ty == p.type_ty {
+            Ok(ty_expr.downcast_type())
+        } else if ty.propagates_out() {
+            Ok(ty)
+        } else {
+            error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
+        }
+    }
+
     pub fn analyze_enum_tag(
         &mut self,
         expr: Ptr<Ast>,
@@ -1658,15 +1743,28 @@ impl Sema {
         expr: Ptr<Ast>,
         is_const: bool,
     ) -> SemaResult<()> {
-        let _lhs_ty = self.analyze(operand, &Some(target_ty), is_const)?;
+        let op_ty = *self.analyze(operand, &Some(target_ty), is_const)?;
         // TODO: check if cast is possible
+        expr.as_mut().ty = Some(target_ty);
 
         if is_const {
-            // TODO: is this always valid?
-            expr.set_replacement(operand.rep());
+            match (op_ty.matchable2(), target_ty.matchable2()) {
+                // TODO: remove this int -> ptr cast?
+                (_, TypeMatch::PtrTy(_)) if op_ty == p().int_lit => {
+                    let i_val = operand.downcast::<ast::IntVal>();
+                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
+                    expr.set_replacement(ptr_val.upcast());
+                },
+                (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
+                    let i_val = operand.downcast::<ast::IntVal>();
+                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
+                    expr.set_replacement(ptr_val.upcast());
+                },
+                // TODO: correctly handle other cases
+                _ => expr.set_replacement(operand.rep()),
+            }
         }
 
-        expr.as_mut().ty = Some(target_ty);
         Ok(())
     }
 
@@ -2294,18 +2392,6 @@ impl Sema {
             },
         }
         self.validate_mutation(MutationKind::Assign, lvalue, full_expr)
-    }
-
-    fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
-        let p = p();
-        let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
-        if ty == p.type_ty {
-            Ok(ty_expr.downcast_type())
-        } else if ty.propagates_out() {
-            Ok(ty)
-        } else {
-            error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
-        }
     }
 
     pub fn int_primitive(&self, bits: u32, is_signed: bool) -> OPtr<ast::IntTy> {

@@ -42,6 +42,10 @@ impl ScratchAllocator {
         }
     }
 
+    pub fn alloc<T>(&self, val: T) -> Result<TmpPtr<T>, AllocErr> {
+        Ok(TmpPtr::new(self.arena.alloc(val)?, self))
+    }
+
     pub fn alloc_capped_vec<T>(&self, capacity: usize) -> Result<CappedVec<T>, AllocErr> {
         debug_scratch!("alloc CappedVec<{}> (capacity: {capacity})", type_name::<T>());
         Ok(CappedVec::with_buf(self.arena.alloc_uninit_slice(capacity)?, Some(Ptr::from_ref(self))))
@@ -159,5 +163,26 @@ impl<T: ?Sized> DerefMut for TmpPtr<T> {
 impl<T: ?Sized> Drop for TmpPtr<T> {
     fn drop(&mut self) {
         self.in_scratch.alive_allocations -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alive_allocations_counter_with_tmp_ptr_deref() {
+        let alloc = ScratchAllocator::new(100);
+        debug_only_assert_eq!(alloc.alive_allocations, 0);
+
+        let tmp_ptr = alloc.alloc(123_i64).unwrap();
+        debug_only_assert_eq!(alloc.alive_allocations, 1);
+
+        let ptr = *tmp_ptr.deref(); // TODO: force this to be explicit?
+        debug_only_assert_eq!(alloc.alive_allocations, 1);
+        drop(tmp_ptr);
+        debug_only_assert_eq!(alloc.alive_allocations, 0);
+
+        assert_eq!(*ptr, 123);
     }
 }

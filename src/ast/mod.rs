@@ -11,6 +11,7 @@ use crate::{
     util::{UnwrapDebug, panic_debug, then, unreachable_debug},
 };
 use core::fmt;
+use std::iter;
 
 pub mod debug;
 
@@ -85,8 +86,11 @@ macro_rules! type_new {
             $( $field $(: $val)? ),*
         }
     }};
+    ($kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }, $alloc:expr) => {
+        $alloc.alloc(crate::ast::type_new!(local $kind { $($field $(:$val)?),* })).expect("TODO: handle oom")
+    };
     ($kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
-        crate::context::ctx().alloc.alloc(crate::ast::type_new!(local $kind { $($field $(:$val)?),* }))?
+        crate::ast::type_new!($kind { $($field $(:$val)?),* }, crate::context::ctx().alloc)
     };
 }
 pub(crate) use type_new;
@@ -424,6 +428,11 @@ ast_variants! {
         start: OPtr<Ast>,
         end: OPtr<Ast>,
     },
+    /// `<source> orelse <default>`, `<source> ?? <default>`
+    OrElse {
+        lhs: Ptr<Ast>,
+        rhs: Ptr<Ast>,
+    },
 
     /// `<lhs> = <lhs>`
     Assign {
@@ -553,6 +562,8 @@ ast_variants! {
     SizeOfValDirective { val: Ptr<Ast> },
     AlignOfDirective { type_: Ptr<Ast> },
     OffsetOfDirective { type_: Ptr<Ast>, field: Ptr<Ident> },
+
+    OptionalVal { val: OPtr<ConstVal> },
 
     ===== Types =====
 
@@ -1082,7 +1093,8 @@ impl Ast {
             },
             AstEnum::BinOp { lhs, rhs, .. }
             | AstEnum::Assign { lhs, rhs, .. }
-            | AstEnum::BinOpAssign { lhs, rhs, .. } => lhs.full_span().join(rhs.full_span()),
+            | AstEnum::BinOpAssign { lhs, rhs, .. }
+            | AstEnum::OrElse { lhs, rhs, .. } => lhs.full_span().join(rhs.full_span()),
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
@@ -1190,6 +1202,13 @@ impl Type {
             _ => None,
         }
     }
+
+    /// Counts the number of nested optional layers.
+    /// `???int` => 3
+    pub fn count_optional_nesting(self: Ptr<Type>) -> usize {
+        iter::successors(self.try_downcast::<OptionTy>(), |t| t.inner_ty.try_downcast::<OptionTy>())
+            .count()
+    }
 }
 
 impl TypeEnum {
@@ -1202,13 +1221,26 @@ impl TypeEnum {
     }
 }
 
-pub trait OptionTypeExt {
+pub trait OPtrExt<T> {
+    fn upcast_to_type(self) -> OPtr<Type>
+    where T: TypeVariant;
+}
+
+impl<T> OPtrExt<T> for OPtr<T> {
+    fn upcast_to_type(self) -> OPtr<Type>
+    where T: TypeVariant {
+        self.map(Ptr::upcast_to_type)
+    }
+}
+
+pub trait OPtrTypeExt {
     fn matchable(self) -> Ptr<TypeEnum>;
     fn downcast<V: TypeVariant>(self) -> Ptr<V>;
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V>;
+    fn try_downcast_ty_hint<V: TypeVariant>(self) -> OPtr<V>;
 }
 
-impl OptionTypeExt for OPtr<Type> {
+impl OPtrTypeExt for OPtr<Type> {
     #[inline]
     fn matchable(self) -> Ptr<TypeEnum> {
         match self {
@@ -1226,6 +1258,11 @@ impl OptionTypeExt for OPtr<Type> {
     #[inline]
     fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
         self?.try_downcast()
+    }
+
+    #[inline]
+    fn try_downcast_ty_hint<V: TypeVariant>(self) -> OPtr<V> {
+        self.and_then(|t| t.try_downcast_ty_hint::<V>())
     }
 }
 
@@ -1550,9 +1587,13 @@ pub enum UnaryOpKind {
 
 impl UnaryOpKind {
     /// used during codegen
-    pub fn finalize_arg_type(self, arg_ty: &mut Ptr<Type>, out_ty: Ptr<Type>) {
+    pub fn finalize_arg_type(self, arg_ty: &mut Ptr<Type>, mut out_ty: Ptr<Type>) {
         match self {
             UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
+                if let Some(opt) = out_ty.try_downcast::<OptionTy>() {
+                    // TODO: implement type coercion elsewhere
+                    out_ty = opt.inner_ty.downcast_type();
+                }
                 let pointee = out_ty.downcast::<PtrTy>().pointee.downcast_type();
                 debug_assert!(ty_match(*arg_ty, pointee));
                 if pointee != primitives().any {
@@ -1681,7 +1722,7 @@ pub type DeclList = Ptr<[Ptr<Decl>]>;
 pub trait DeclListExt {
     fn find_field(&self, sym: Symbol) -> Option<(usize, Ptr<Decl>)>;
 
-    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + '_;
+    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + Clone + '_;
 }
 
 impl DeclListExt for [Ptr<Decl>] {
@@ -1689,7 +1730,7 @@ impl DeclListExt for [Ptr<Decl>] {
         self.iter().copied().enumerate().find(|(_, d)| d.ident.sym == sym)
     }
 
-    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + '_ {
+    fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + Clone + '_ {
         self.iter().map(|decl| decl.var_ty.u())
     }
 }
