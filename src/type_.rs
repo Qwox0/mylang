@@ -39,6 +39,16 @@ impl CommonTypeSelection {
     }
 }
 
+/// symmetrical
+pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
+    match common_type_impl(lhs, rhs) {
+        CommonTypeSelection::Equal => Some(lhs),
+        CommonTypeSelection::Lhs => Some(lhs),
+        CommonTypeSelection::Rhs => Some(rhs),
+        CommonTypeSelection::Mismatch => None,
+    }
+}
+
 // Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
 //    Can this (or something similar) even happen?
 fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonTypeSelection {
@@ -171,16 +181,6 @@ fn common_type_impl(mut lhs: Ptr<ast::Type>, mut rhs: Ptr<ast::Type>) -> CommonT
     Mismatch
 }
 
-/// symmetrical
-pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
-    match common_type_impl(lhs, rhs) {
-        CommonTypeSelection::Equal => Some(lhs),
-        CommonTypeSelection::Lhs => Some(lhs),
-        CommonTypeSelection::Rhs => Some(rhs),
-        CommonTypeSelection::Mismatch => None,
-    }
-}
-
 /// might not be symmetrical
 pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     let p = primitives();
@@ -199,15 +199,10 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return false;
     }
 
-    if got == p.int_lit {
-        return matches!(expected.kind, AstKind::IntTy | AstKind::FloatTy)
-            || expected == p.float_lit;
-    } else if got == p.sint_lit {
-        return expected.is_sint() || expected.kind == AstKind::FloatTy || expected == p.float_lit;
-    }
-
-    if got == p.float_lit {
-        return expected.kind == AstKind::FloatTy || expected.is_int_lit();
+    if let Some(expected_lvl) = number_subtyping_level(expected) {
+        let Some(got_lvl) = number_subtyping_level(got) else { return false };
+        debug_assert_ne!(expected, got, "exact equality was already checked above");
+        return SubtypingLevel::select(expected_lvl, got_lvl) != CommonTypeSelection::Mismatch;
     }
 
     // needs to be above every non_null `got` value.

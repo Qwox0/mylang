@@ -175,7 +175,7 @@ impl DebugAst for Ast {
             },
             AstEnum::BinOp { lhs, op, rhs, .. } => {
                 lines.write_tree(lhs);
-                write!(lines, " {} ", op.to_binop_text()).unwrap();
+                write!(lines, " {} ", op.as_binop_text()).unwrap();
                 lines.write_tree(rhs);
             },
             AstEnum::Range { start, end, is_inclusive, .. } => {
@@ -190,7 +190,7 @@ impl DebugAst for Ast {
             },
             AstEnum::BinOpAssign { lhs, op, rhs, .. } => {
                 lines.write_tree(lhs);
-                lines.write(op.to_binop_assign_text());
+                lines.write(op.as_binop_assign_text());
                 lines.write_tree(rhs);
             },
             AstEnum::Decl {

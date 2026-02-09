@@ -24,10 +24,13 @@ impl<T> SemaResult<T> {
     pub const HandledErr: SemaResult<T> = Err(HandledErr);
 }
 
-#[allow(unused)]
 impl<T> SemaResult<T> {
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Ok(_))
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U> {
+        match self {
+            Ok(t) => Ok(f(t)),
+            NotFinished { remaining } => NotFinished { remaining },
+            Err(HandledErr) => Err(HandledErr),
+        }
     }
 }
 

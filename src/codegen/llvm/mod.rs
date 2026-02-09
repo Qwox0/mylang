@@ -14,7 +14,7 @@ use crate::{
     scoped_stack::ScopedStack,
     type_::{enum_alignment, struct_size, ty_match, union_size},
     util::{
-        self, UnwrapDebug, debug_only_assert, debug_only_assert_eq, forget_lifetime,
+        self, OptionExt, UnwrapDebug, debug_only_assert, debug_only_assert_eq, forget_lifetime,
         is_simple_enum, panic_debug, round_up_to_alignment, unreachable_debug,
     },
 };
@@ -198,7 +198,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.$compile_fn(struct_ty, ptr, s_def.fields, values)?;
                     reg(ptr)
                 } else {
-                    unreachable_debug()
+                    panic_debug!("invalid out_ty for initializer: {out_ty}")
                 }
             }};
         }
@@ -257,7 +257,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_array_initializer_body(arr_ty, arr_llvm_ty, ptr, elements)?;
                     reg(ptr)
                 } else {
-                    unreachable_debug()
+                    panic_debug!("invalid out_ty for ArrayInitializer: {out_ty}")
                 }
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
@@ -291,7 +291,7 @@ impl<'ctx> Codegen<'ctx> {
                     )?;
                     reg(ptr)
                 } else {
-                    unreachable_debug()
+                    panic_debug!("invalid out_ty for ArrayInitializerShort: {out_ty}")
                 }
             },
             AstEnum::Dot { lhs, rhs, .. } => {
@@ -325,8 +325,10 @@ impl<'ctx> Codegen<'ctx> {
                     let union_sym = self.compile_expr(lhs)?;
                     debug_assert!(!(u_def.fields.len() > 0 && union_ty.count_fields() == 0));
                     self.build_struct_access(union_ty, union_sym, 0, rhs.sym.text()).coerce()
+                } else if lhs_ty == p.never {
+                    self.compile_never_expr(lhs)
                 } else {
-                    unreachable_debug()
+                    panic_debug!("invalid lhs_ty for Dot: {lhs_ty}")
                 }
             },
             AstEnum::Index { lhs, idx, .. } => {
@@ -334,8 +336,12 @@ impl<'ctx> Codegen<'ctx> {
                 let elem_ty_out = match idx.ty.matchable().as_ref() {
                     TypeEnum::IntTy { .. } => out_ty,
                     TypeEnum::RangeTy { .. } => out_ty.get_arr_elem_ty(),
-                    _ => unreachable_debug(),
+                    _ => panic_debug!("invalid index type: {}", idx.ty.display()),
                 };
+
+                if lhs.ty == p.never {
+                    return self.compile_never_expr(*lhs);
+                }
 
                 let elem_ty = finalize_ty(lhs.ty.u().get_arr_elem_ty_mut(), elem_ty_out);
                 let lhs_sym = self.compile_expr(*lhs)?;
@@ -348,7 +354,7 @@ impl<'ctx> Codegen<'ctx> {
                         let len = self.isize_type.const_int(len.int(), false);
                         (arr_ptr, len)
                     },
-                    _ => unreachable_debug(),
+                    _ => panic_debug!("invalid lhs_ty for Index: {lhs_ty}"),
                 };
                 let llvm_elem_ty = self.llvm_type(elem_ty).basic_ty();
 
@@ -471,7 +477,7 @@ impl<'ctx> Codegen<'ctx> {
                     let data = args.get(0);
                     self.compile_enum_val(enum_ty, dot.rhs.sym, data, write_target.take())
                 } else {
-                    unreachable_debug()
+                    panic_debug!("invalid lhs_ty for Call: {}", func.ty.display());
                 }
             },
             AstEnum::UnaryOp { op, operand, .. } => {
@@ -905,6 +911,14 @@ impl<'ctx> Codegen<'ctx> {
         };
     }
 
+    fn compile_never_expr(&mut self, expr: Ptr<Ast>) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
+        debug_assert_eq!(expr.ty.u(), primitives().never);
+        match self.compile_expr(expr) {
+            Ok(_) => panic_debug!("expected Unreachable"),
+            res => res,
+        }
+    }
+
     fn compile_const_val(
         &mut self,
         cv: Ptr<ast::ConstVal>,
@@ -935,7 +949,7 @@ impl<'ctx> Codegen<'ctx> {
                     );
                     ret(self.const_enum_val(enum_def, int_val.upcast_to_const_val(), None)?)
                 },
-                _ => unreachable_debug(),
+                _ => panic_debug!("invalid ty for IntVal: {ty}"),
             },
             ConstValEnum::FloatVal { val, .. } => {
                 let float_ty = ty.downcast::<ast::FloatTy>();
@@ -1005,7 +1019,7 @@ impl<'ctx> Codegen<'ctx> {
                     )?),
                     TypeEnum::RangeTy { .. } => todo!(),
                     TypeEnum::OptionTy { .. } => todo!(),
-                    _ => unreachable_debug(),
+                    _ => panic_debug!("invalid ty for AggregateVal: {ty}"),
                 }
             },
             _ => todo!(),
@@ -1735,7 +1749,7 @@ impl<'ctx> Codegen<'ctx> {
             {
                 reg(self.builder.build_int_to_ptr(int, self.ptr_type(), "")?)
             } else {
-                unreachable_debug()
+                panic_debug!("cannot cast IntTy to {target_ty}");
             };
         }
 
@@ -2406,8 +2420,7 @@ impl<'ctx> Codegen<'ctx> {
         {
             let remaining_size = union_size(fields) - biggest_alignment_field.size();
             let biggest_alignment_field = self.llvm_type(biggest_alignment_field).inner;
-            let remaining_size_field =
-                self.context.i8_type().array_type((remaining_size) as u32).as_type_ref();
+            let remaining_size_field = self.raw_type((remaining_size) as u32).as_type_ref();
             &mut [biggest_alignment_field, remaining_size_field] as &mut [_]
         } else {
             &mut []
@@ -2474,10 +2487,9 @@ impl<'ctx> Codegen<'ctx> {
     fn llvm_type(&mut self, ty: Ptr<ast::Type>) -> CodegenType<'ctx> {
         let p = primitives();
         if ty.kind == AstKind::SimpleTy {
-            return if ty == p.void_ty {
-                CodegenType::new(self.context.void_type())
-            } else if ty == p.never {
-                unreachable_debug()
+            return if ty == p.void_ty || ty == p.never {
+                // VoidType is not a valid basic type => It cannot be used in alloca
+                CodegenType::new(self.raw_type(0))
             } else if ty == p.bool {
                 CodegenType::new(self.context.bool_type())
             } else if ty == p.char {
@@ -2544,6 +2556,10 @@ impl<'ctx> Codegen<'ctx> {
         debug_assert!(old_entry.is_none());
 
         llvm_ty
+    }
+
+    fn raw_type(&self, size: u32) -> impl BasicType<'ctx> {
+        self.context.i8_type().array_type(size)
     }
 
     /// The C calling convention is way to complicated thus this is definitely not cross-platform.

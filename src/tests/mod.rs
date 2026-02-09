@@ -32,6 +32,7 @@ mod index;
 mod initializer;
 mod logic_binop;
 mod mut_checks;
+mod never_value;
 mod number_literal;
 mod parse_number_literals;
 mod ptr;
@@ -46,6 +47,7 @@ mod union_;
 mod var_decl;
 mod vararg;
 mod while_loop;
+mod zst;
 
 const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     debug_ast: false,

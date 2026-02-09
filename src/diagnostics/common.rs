@@ -1,9 +1,10 @@
 use crate::{
     ast::{self, AstKind, UpcastToAst},
+    context::primitives,
     diagnostics::{HandledErr, cerror, chint},
     parser::lexer::Span,
     ptr::Ptr,
-    util::{UnwrapDebug, unreachable_debug},
+    util::{StrExt, UnwrapDebug, unreachable_debug},
 };
 use std::fmt::{self, Display};
 
@@ -95,20 +96,34 @@ pub fn error_const_ptr_initializer(initializer: Ptr<ast::Ast>) -> HandledErr {
 }
 
 #[track_caller]
-pub fn error_non_const(runtimevalue: Ptr<ast::Ast>, msg: impl Display) -> HandledErr {
-    cerror!(runtimevalue.full_span(), "{msg}");
-    // TODO: label: not a compile time known value
-    // this help doesn't make sense when `runtimevalue` is a local variable
-    chint!(
-        runtimevalue.full_span(),
-        "help: consider using `#run` to evaluate expression at compile time"
-    );
+pub fn error_non_const(runtimevalue: Ptr<ast::Ast>, what: impl Display) -> HandledErr {
+    error_non_const_custom(
+        runtimevalue,
+        format_args!("{} must be known at compile time", what.to_string().capitalize()),
+        format_args!("Cannot evaluate {what} at compile time"),
+    )
+}
+
+#[track_caller]
+pub fn error_non_const_custom(
+    runtimevalue: Ptr<ast::Ast>,
+    for_ident: impl Display,
+    for_expr: impl Display,
+) -> HandledErr {
+    let span = runtimevalue.full_span();
+    if runtimevalue.kind == AstKind::Ident {
+        return cerror!(span, "{for_ident}");
+    }
+    cerror!(span, "{for_expr}");
+    if runtimevalue.ty.u() != primitives().never {
+        chint!(span, "help: consider using `#run` to evaluate expression at compile time");
+    }
     HandledErr
 }
 
 #[track_caller]
 pub fn error_non_const_initializer_field(field_init: Ptr<ast::Ast>) -> HandledErr {
-    error_non_const(field_init, "fields of constant struct values must be known at compile time")
+    error_non_const(field_init, "field of constant struct value")
 }
 
 #[track_caller]

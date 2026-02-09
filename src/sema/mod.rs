@@ -201,15 +201,15 @@ impl Sema {
     }
 
     pub fn analyze_top_level(&mut self, s: Ptr<Ast>) -> SemaResult<()> {
-        self.analyze(s, &Some(p().void_ty), true)
+        self.analyze(s, &Some(p().void_ty), true).map(|_| ())
     }
 
-    pub fn analyze(
+    pub fn analyze<'a>(
         &mut self,
         expr: Ptr<Ast>,
         ty_hint: &OPtr<ast::Type>,
         is_const: bool,
-    ) -> SemaResult<()> {
+    ) -> SemaResult<&'a mut Ptr<ast::Type>> {
         let res = self._analyze_inner(expr, ty_hint, is_const);
         #[cfg(debug_assertions)]
         if self.cctx.args.debug_types {
@@ -221,11 +221,7 @@ impl Sema {
 
             display(expr.full_span()).label(&label).finish();
         }
-        #[cfg(debug_assertions)]
-        if res.is_ok() {
-            debug_assert!(expr.ty.is_some());
-        }
-        res
+        res.map(|()| expr.as_mut().ty.as_mut().u())
     }
 
     /// This modifies the [`Ast`] behind `expr` to ensure that codegen is possible.
@@ -249,6 +245,18 @@ impl Sema {
 
         let p = p();
 
+        macro_rules! not_never {
+            ($ty:expr) => {{
+                let ty = $ty;
+                if ty.propagates_out() {
+                    let t: &Ptr<ast::Type> = &ty;
+                    expr.as_mut().ty = Some(*t);
+                    return Ok(());
+                }
+                ty
+            }};
+        }
+
         /// Like [`Sema::analyze`] but returns on error and never
         macro_rules! analyze {
             ($expr:expr, $ty_hint:expr) => {
@@ -256,12 +264,7 @@ impl Sema {
             };
             ($expr:expr, $ty_hint:expr, $is_const:expr) => {{
                 let e: Ptr<Ast> = $expr;
-                self.analyze(e, &$ty_hint, $is_const)?;
-                if e.ty.u().propagates_out() {
-                    expr.as_mut().ty = Some(e.ty.u());
-                    return Ok(());
-                }
-                e.as_mut().ty.as_mut().u()
+                not_never!(self.analyze(e, &$ty_hint, $is_const)?)
             }};
         }
 
@@ -301,7 +304,7 @@ impl Sema {
                     for (idx, s) in stmts.iter().enumerate() {
                         let expected_ty = if max_idx == idx { ty_hint } else { &None };
                         match self.analyze(*s, expected_ty, false) {
-                            Ok(()) => {
+                            Ok(_ty) => {
                                 // s.ty = s.ty.finalize();
                                 debug_assert!(s.ty.is_some());
                             },
@@ -414,10 +417,9 @@ impl Sema {
                         return Ok(());
                     };
 
-                    let mut elem_ty = *analyze!(elem, None);
+                    let mut elem_ty = *self.analyze(elem, &None, is_const)?;
                     for elem in elem_iter {
-                        self.analyze(elem, &Some(elem_ty), is_const)?;
-                        let ty = elem.ty.u();
+                        let ty = *self.analyze(elem, &Some(elem_ty), is_const)?;
                         let Some(common_ty) = common_type(ty, elem_ty) else {
                             return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
                         };
@@ -440,19 +442,17 @@ impl Sema {
                 }
             },
             AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
-                analyze!(*count, Some(p.u64), true);
-                self.ty_match(*count, p.u64)?;
-                let len = count
+                self.analyze_and_check_type(*count, p.u64, true)?;
+                let len = *count;
+                let len_val = len
                     .try_downcast_const_val()
-                    .ok_or_else(|| {
-                        error_non_const(*count, "Array length must be known at compile time")
-                    })?
-                    .upcast();
+                    .and_then(|x| x.upcast().try_int())
+                    .ok_or_else(|| error_non_const(*count, "array length"))?;
 
                 let mut elem_ty =
-                    self.analyze_array_initializer_lhs(*lhs, len.int(), *ty_hint, expr)?;
+                    self.analyze_array_initializer_lhs(*lhs, len_val, *ty_hint, expr)?;
 
-                let val_ty = *analyze!(*val, elem_ty);
+                let val_ty = *self.analyze(*val, &elem_ty, is_const)?;
                 let elem_ty =
                     check_or_infer_target!(val_ty, &mut elem_ty, true, val.return_val_span())
                         .upcast();
@@ -460,8 +460,7 @@ impl Sema {
                 expr.ty = Some(arr_ty.upcast_to_type());
 
                 if is_const {
-                    let len = len.int();
-                    let cv = self.create_aggregate_const_val(iter::repeat_n(*val, len))?;
+                    let cv = self.create_aggregate_const_val(iter::repeat_n(*val, len_val))?;
                     expr.set_replacement(cv.upcast());
                 }
             },
@@ -573,7 +572,7 @@ impl Sema {
                 } else if lhs_ty.kind == AstKind::SliceTy && rhs.sym == p.len_sym {
                     p.u64
                 } else if let ty = lhs_ty.flatten_transparent()
-                    // `t.propagates_out()` implies `t.flatten_transparent() == t`
+                    // `lhs_ty.propagates_out()` implies `lhs_ty.flatten_transparent() == lhs_ty`
                     && ty.propagates_out()
                 {
                     ty
@@ -628,7 +627,7 @@ impl Sema {
                 expr.ty = Some(self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?)
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
-                let idx_ty = analyze!(*idx, None).finalize();
+                let idx_ty = self.analyze(*idx, &None, is_const)?.finalize();
 
                 let mut ty_hint_alloc = if idx_ty.kind == AstKind::RangeTy {
                     ty_hint.and_then(|t| t.inner_ty())
@@ -691,7 +690,8 @@ impl Sema {
                             expr.set_replacement(arr.elements[idx].upcast());
                         }
                     },
-                    _ if idx_ty.propagates_out() => expr.ty = Some(idx_ty),
+                    // TODO: allow `never` index?
+                    //_ if idx_ty.propagates_out() => expr.ty = Some(idx_ty),
                     _ => {
                         return cerror2!(
                             idx.full_span(),
@@ -701,25 +701,14 @@ impl Sema {
                 }
             },
             AstEnum::Cast { operand, target_ty, .. } => {
-                let ty = self.analyze_type(*target_ty)?;
-                analyze!(*operand, Some(ty));
-                // TODO: check if cast is possible
-
-                if is_const {
-                    // TODO: is this always valid?
-                    expr.set_replacement(operand.rep());
-                }
-
-                expr.ty = Some(ty);
+                let target_ty = self.analyze_type(*target_ty)?;
+                let () = self.analyze_cast(*operand, target_ty, expr, is_const)?;
             },
             AstEnum::Autocast { operand, .. } => {
-                if ty_hint.is_some() {
-                    analyze!(*operand, ty_hint);
-                    // TODO: check if cast is possible
-                    expr.ty = *ty_hint;
-                } else {
+                let Some(target_ty) = *ty_hint else {
                     return cerror2!(expr.full_span(), "Cannot infer target type of autocast");
-                }
+                };
+                let () = self.analyze_cast(*operand, target_ty, expr, is_const)?;
             },
             AstEnum::Call { func, args, .. } => {
                 let call = expr.downcast::<ast::Call>();
@@ -880,11 +869,12 @@ impl Sema {
                 });
             },
             AstEnum::BinOp { lhs, op, rhs, .. } => {
-                let lhs_ty = *analyze!(*lhs, None);
-                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
+                let lhs_ty = *self.analyze(*lhs, &None, is_const)?;
+                let rhs_ty = *self.analyze(*rhs, &Some(lhs_ty), is_const)?;
                 let Some(mut common_ty) = common_type(rhs_ty, lhs_ty) else {
                     return error_mismatched_types_binop(expr.span, lhs_ty, rhs_ty).into();
                 };
+                not_never!(common_ty);
                 // todo: check if binop can be applied to type
                 expr.ty = Some(match op {
                     BinOpKind::Mul
@@ -920,13 +910,13 @@ impl Sema {
                     let lhs = lhs.try_downcast_const_val().ok_or_else(|| {
                         error_non_const(
                             *lhs,
-                            "Left-hand side of compile time operation not known at compile time",
+                            format_args!("left-hand side of `{}`", op.as_binop_text()),
                         )
                     })?;
                     let rhs = rhs.try_downcast_const_val().ok_or_else(|| {
                         error_non_const(
                             *rhs,
-                            "Right-hand side of compile time operation not known at compile time",
+                            format_args!("right-hand side of `{}`", op.as_binop_text()),
                         )
                     })?;
 
@@ -1003,22 +993,23 @@ impl Sema {
             },
             AstEnum::Assign { lhs, rhs, .. } => {
                 assert!(!is_const, "todo: Assign in const");
-                let lhs_ty = *analyze!(*lhs, None);
-                analyze!(*rhs, Some(lhs_ty));
+                let lhs_ty = *self.analyze(*lhs, &None, is_const)?;
+                let rhs_ty = *self.analyze(*rhs, &Some(lhs_ty), is_const)?;
                 // todo: check if binop can be applied to type
                 self.ty_match(*rhs, lhs_ty)?;
                 self.validate_lvalue(*lhs, expr)?;
+                not_never!(rhs_ty);
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::BinOpAssign { lhs, rhs, op, .. } => {
                 assert!(!is_const, "todo: BinOpAssign in const");
-                let lhs_ty = *analyze!(*lhs, None);
-                let rhs_ty = *analyze!(*rhs, Some(lhs_ty));
+                let lhs_ty = *self.analyze(*lhs, &None, is_const)?;
+                let rhs_ty = *self.analyze(*rhs, &Some(lhs_ty), is_const)?;
                 if let Some(ptr_ty) = lhs_ty.try_downcast::<ast::PtrTy>() {
                     cerror!(
                         lhs.full_span(),
                         "Cannot apply binary operatator `{}` to pointer type `{lhs_ty}`",
-                        op.to_binop_assign_text()
+                        op.as_binop_assign_text()
                     );
                     if ty_match(rhs_ty, ptr_ty.pointee.downcast_type()) {
                         chint!(
@@ -1031,6 +1022,7 @@ impl Sema {
                 // TODO: check if binop can be applied to type
                 self.ty_match(*rhs, lhs_ty)?;
                 self.validate_lvalue(*lhs, expr)?;
+                not_never!(rhs_ty);
                 expr.ty = Some(p.void_ty);
             },
             AstEnum::Decl { on_type, .. } => {
@@ -1045,11 +1037,9 @@ impl Sema {
                 analyze!(*condition, Some(bool_ty));
                 self.ty_match(*condition, bool_ty)?;
 
-                self.analyze(*then_body, ty_hint, is_const)?;
-                let then_ty = then_body.ty.u();
+                let then_ty = *self.analyze(*then_body, ty_hint, is_const)?;
                 expr.ty = if let Some(else_body) = *else_body {
-                    self.analyze(else_body, &Some(then_ty), is_const)?;
-                    let else_ty = else_body.ty.u();
+                    let else_ty = *self.analyze(else_body, &Some(then_ty), is_const)?;
                     let Some(common_ty) = common_type(then_ty, else_ty) else {
                         return cerror2!(
                             else_body.full_span(),
@@ -1135,8 +1125,7 @@ impl Sema {
                 *parent_fn = Some(func);
                 expr.ty = Some(p.never);
                 let val_ty = if let Some(val) = *val {
-                    self.analyze(val, &func.ret_ty, is_const)?;
-                    val.ty.u()
+                    *self.analyze(val, &func.ret_ty, is_const)?
                 } else {
                     p.void_ty
                 };
@@ -1340,9 +1329,9 @@ impl Sema {
                     }
 
                     if let Some(body) = *body {
-                        self.analyze(body, ret_ty, false)?;
+                        let body_ty = *self.analyze(body, ret_ty, false)?;
                         let ret_ty = check_or_infer_target!(
-                            body.ty.u(),
+                            body_ty,
                             ret_ty,
                             *has_known_ret_ty,
                             body.return_val_span()
@@ -1469,9 +1458,9 @@ impl Sema {
                         *is_simple_enum = false;
                     }
                     if let Some(variant_idx) = variant_idx {
-                        self.analyze(variant_idx, &repr_ty, true)?;
+                        let variant_idx_ty = *self.analyze(variant_idx, &repr_ty, true)?;
                         check_or_infer_target!(
-                            variant_idx.ty.u(),
+                            variant_idx_ty,
                             &mut repr_ty,
                             false,
                             variant_idx.full_span()
@@ -1529,14 +1518,33 @@ impl Sema {
         Ok(())
     }
 
+    fn ty_match(&mut self, expr: Ptr<Ast>, expected_ty: Ptr<ast::Type>) -> SemaResult<()> {
+        let got_ty = expr.ty.u();
+        if !ty_match(got_ty, expected_ty) {
+            return error_mismatched_types(expr.full_span(), expected_ty, got_ty).into();
+        }
+        Ok(())
+    }
+
+    fn analyze_and_check_type(
+        &mut self,
+        expr: Ptr<Ast>,
+        expected_ty: Ptr<ast::Type>,
+        is_const: bool,
+    ) -> SemaResult<&mut Ptr<ast::Type>> {
+        let ty = self.analyze(expr, &Some(expected_ty), is_const)?;
+        let () = self.ty_match(expr, expected_ty)?;
+        Ok(ty)
+    }
+
+    /// TODO: check [`ast::Type::propagates_out`], like in `analyze!`
     fn analyze_and_finalize_with_known_type(
         &mut self,
         expr: Ptr<Ast>,
         expected_ty: Ptr<ast::Type>,
         is_const: bool,
     ) -> SemaResult<()> {
-        self.analyze(expr, &Some(expected_ty), is_const)?;
-        let () = self.ty_match(expr, expected_ty)?;
+        self.analyze_and_check_type(expr, expected_ty, is_const)?;
         debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
         expr.as_mut().ty = Some(expected_ty);
         Ok(())
@@ -1641,6 +1649,25 @@ impl Sema {
             // TODO: also allow lhs slices?
             return error_cannot_apply_initializer(lhs, initializer_expr).into();
         }))
+    }
+
+    pub fn analyze_cast(
+        &mut self,
+        operand: Ptr<ast::Ast>,
+        target_ty: Ptr<ast::Type>,
+        expr: Ptr<Ast>,
+        is_const: bool,
+    ) -> SemaResult<()> {
+        let _lhs_ty = self.analyze(operand, &Some(target_ty), is_const)?;
+        // TODO: check if cast is possible
+
+        if is_const {
+            // TODO: is this always valid?
+            expr.set_replacement(operand.rep());
+        }
+
+        expr.as_mut().ty = Some(target_ty);
+        Ok(())
     }
 
     pub fn validate_initializer(
@@ -1839,24 +1866,24 @@ impl Sema {
 
             let is_field = kind == Some(VarDeclSpecialCase::Field);
             let is_init_const = decl.is_const || is_static || is_field;
-            self.analyze(init, &decl.var_ty, is_init_const)?;
-            let var_ty =
-                check_or_infer_target!(init.ty.u(), &mut decl.var_ty, true, init.full_span());
+            let init_ty = *self.analyze(init, &decl.var_ty, is_init_const)?;
+            let var_ty = check_or_infer_target!(init_ty, &mut decl.var_ty, true, init.full_span());
             let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
             init.as_mut().ty = Some(var_ty);
             if is_init_const && var_ty != p.err_ty && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
                 let span = init.full_span();
                 return if is_static {
-                    cerror2!(
-                        span,
-                        "Currently the initial value of a static must be known at compile time"
-                    )
-                } else if init.kind == AstKind::Ident {
-                    cerror2!(span, "Cannot access a non-constant symbol at compile time")
+                    // TODO: add static initialization?
+                    cerror!(span, "The initial value of a static must be known at compile time")
                 } else {
-                    cerror2!(span, "Cannot evaluate value at compile time")
-                };
+                    error_non_const_custom(
+                        init,
+                        "Cannot access a non-constant symbol at compile time",
+                        "Cannot evaluate value at compile time",
+                    )
+                }
+                .into();
             }
             Ok(())
         } else if decl.var_ty.is_some() {
@@ -1981,8 +2008,7 @@ impl Sema {
                 let param_ty = param.var_ty.or_not_finished()?;
                 self.analyze_and_finalize_with_known_type(pos_arg, param_ty, is_const)?;
             } else if allows_varargs {
-                self.analyze(pos_arg, &None, is_const)?;
-                pos_arg.as_mut().ty.as_mut().u().finalize();
+                self.analyze(pos_arg, &None, is_const)?.finalize();
             } else {
                 let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
                 return cerror2!(
@@ -2272,23 +2298,13 @@ impl Sema {
 
     fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
-        self.analyze(ty_expr, &Some(p.type_ty), true)?;
-        let ty = ty_expr.ty.u();
+        let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
         if ty == p.type_ty {
             Ok(ty_expr.downcast_type())
         } else if ty.propagates_out() {
             Ok(ty)
         } else {
             error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
-        }
-    }
-
-    fn ty_match(&mut self, expr: Ptr<Ast>, expected_ty: Ptr<ast::Type>) -> SemaResult<()> {
-        let got_ty = expr.ty.u();
-        if ty_match(got_ty, expected_ty) {
-            Ok(())
-        } else {
-            return error_mismatched_types(expr.full_span(), expected_ty, got_ty).into();
         }
     }
 

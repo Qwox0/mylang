@@ -852,10 +852,14 @@ impl Ptr<Ast> {
         Ptr::from_ref(p).cast::<Ptr<Type>>().as_mut()
     }
 
+    pub fn try_int<Int: TryFrom<i64>>(self) -> Option<Int>
+    where Int::Error: fmt::Debug {
+        then!(self.rep().kind == AstKind::IntVal => self.int())
+    }
+
     pub fn int<Int: TryFrom<i64>>(self) -> Int
     where Int::Error: fmt::Debug {
         let int = self.downcast::<IntVal>().val;
-        debug_assert!(Int::try_from(int).is_ok(), "{int}");
         Int::try_from(int).u()
     }
 
@@ -1440,7 +1444,7 @@ pub enum BinOpKind {
 }
 
 impl BinOpKind {
-    pub fn to_binop_text(self) -> &'static str {
+    pub fn as_binop_text(self) -> &'static str {
         match self {
             BinOpKind::Mul => "*",
             BinOpKind::Div => "/",
@@ -1458,12 +1462,12 @@ impl BinOpKind {
             BinOpKind::Le => "<=",
             BinOpKind::Gt => ">",
             BinOpKind::Ge => ">=",
-            BinOpKind::And => "&&",
-            BinOpKind::Or => "||",
+            BinOpKind::And => "and",
+            BinOpKind::Or => "or",
         }
     }
 
-    pub fn to_binop_assign_text(self) -> &'static str {
+    pub fn as_binop_assign_text(self) -> &'static str {
         match self {
             BinOpKind::Mul => "*=",
             BinOpKind::Div => "/=",

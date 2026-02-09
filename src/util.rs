@@ -252,6 +252,19 @@ impl<I: FusedIterator> IteratorExt for I {
     }
 }
 
+pub trait StrExt {
+    fn capitalize(&mut self) -> &mut Self;
+}
+
+impl StrExt for str {
+    fn capitalize(&mut self) -> &mut Self {
+        if let Some(first_char) = self.get_mut(..1) {
+            first_char.make_ascii_uppercase();
+        }
+        self
+    }
+}
+
 pub fn is_canonical(path: &Path) -> bool {
     path.canonicalize().is_ok_and(|p| p.as_path() == path)
 }

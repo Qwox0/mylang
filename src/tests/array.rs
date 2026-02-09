@@ -1,4 +1,3 @@
-use super::TestSpan;
 use crate::tests::{arr, substr, test_body};
 
 #[test]
@@ -59,28 +58,4 @@ fn arr_initializer_on_ref_mut_check() {
         substr!("slice.[5, 6, 7]"),
     );
     */
-}
-
-#[test]
-fn never_val_in_array() {
-    #[rustfmt::skip]
-    let code = |inner_ret_val| format!("
-mut a := 0;
-return .[
-    {{ a += 1; 1 }},
-    {{ a += 1; 2 }},
-    return {inner_ret_val},
-    {{ a += 1; 4 }},
-]");
-
-    test_body(code(".[a, a]")).error(
-        "mismatched types: expected `[2]i64`; got `[4]{integer literal}`",
-        |code| {
-            let start = code.find(".[").unwrap();
-            let end = code.rfind("]").unwrap() + 1;
-            TestSpan::new(start, end)
-        },
-    );
-
-    test_body(code(".[a, a, a, a]")).ok([2i64; 4]);
 }
