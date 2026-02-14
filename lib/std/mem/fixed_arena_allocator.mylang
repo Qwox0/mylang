@@ -15,18 +15,18 @@ FixedArenaAllocator :: struct {
     allocator :: (self: *mut FixedArenaAllocator) -> Allocator.{ impl = &impl, data = self };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
-        std.assert(self != nil);
+        std.assert(self != null);
         self := self.as(*mut FixedArenaAllocator);
         if mode == .Alloc {
             // TODO: configurable bump direction
             aligned_ptr := self.*.pos |> std.mem.ptr.align_forward(alignment);
             next_pos := aligned_ptr.as(usize) + size;
-            if next_pos > self.*.end.as(usize) return nil;
+            if next_pos > self.*.end.as(usize) return null;
             self.*.pos = next_pos.as(*mut u8);
             return aligned_ptr;
         } else if mode == .Free {
             // TODO: free if last allocation?
-            return nil; // unsupported
+            return null; // unsupported
         }
         std.panic("unreachable"); // TODO: implement exhaustive switch
     }

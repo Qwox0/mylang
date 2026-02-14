@@ -8,7 +8,7 @@ Allocator :: std.mem.Allocator;
 MAX_ALIGN :: 16;
 
 CAllocator :: struct {
-    allocator :: Allocator.{ impl = &impl, data = nil };
+    allocator :: Allocator.{ impl = &impl, data = null };
 
     impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
         if mode == .Alloc {
@@ -16,7 +16,7 @@ CAllocator :: struct {
             return xx libc.malloc(size);
         } else if mode == .Free {
             libc.free(old_ptr);
-            return nil;
+            return null;
         }
         std.panic("unreachable"); // TODO: implement exhaustive switch
     }

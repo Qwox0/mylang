@@ -6,9 +6,9 @@ align_forward :: (ptr: *mut u8, alignment: u64) -> {
     // return ((ptr.as(u64) + (alignment - 1)) & !(alignment - 1)).as(*mut u8);
     ptr := ptr.as(u64);
     add := ptr + (alignment - 1);
-    if add < ptr return nil; // TODO: better overflow check
-    res := (add & !(alignment - 1)).as(*mut u8);
-    std.assert(res != nil);
+    if add < ptr return null; // TODO: better overflow check
+    res := (add & !(alignment - 1)).as(?*mut u8);
+    std.assert(res != null);
     res
 }
 

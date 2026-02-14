@@ -49,7 +49,7 @@ pub generate_c_bindings :: (
         idx,
         header_file.ptr,
         clang_args.ptr, xx clang_args.len,
-        nil, 0,
+        null, 0,
         (if opts.convert_macros then clang.enums.CXTranslationUnit_Flags.DetailedPreprocessingRecord
         else clang.enums.CXTranslationUnit_Flags.None).as(u32)
             //| clang.enums.CXTranslationUnit_Flags.SingleFileParse.as(u32)
@@ -58,7 +58,7 @@ pub generate_c_bindings :: (
 
     mut ok := true;
 
-    if unit == nil {
+    if unit == null {
         std.println("ERR: Clang couldn't parse translation unit\n");
         ok = false;
     }
@@ -71,7 +71,7 @@ pub generate_c_bindings :: (
         defer clang.disposeString(text);
 
         libc.puts("Diagnostic: \"\"\"\n".ptr);
-        libc.puts(clang.getCString(text));
+        libc.puts(clang.getCString(text) orelse "NULL".ptr);
         libc.puts("\"\"\"\n".ptr);
     }
 
@@ -79,9 +79,8 @@ pub generate_c_bindings :: (
 
     cursor := clang.getTranslationUnitCursor(unit);
 
-    bindgen_file := libc.fopen(out_file.ptr, "w".ptr);
+    bindgen_file := libc.fopen(out_file.ptr, "w".ptr) orelse std.panic("Failed to open output file");
     defer libc.fclose(bindgen_file);
-    std.assert(bindgen_file != nil, "Failed to open output file");
 
     mut tmp_alloc_buf: [1024 * 1024]u8;
     tmp_alloc := std.mem.FixedArenaAllocator.new(tmp_alloc_buf[..]mut);
@@ -180,7 +179,7 @@ emit_license :: (d: *mut ClientData, unit: clang.CXTranslationUnit) -> bool {
     found_license
 }
 
-visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) -> clang.enums.CXChildVisitResult {
+visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: ?*mut any) -> clang.enums.CXChildVisitResult {
     d := d.as(*mut ClientData);
 
     d.*.tmp_alloc.&mut.reset();
@@ -195,7 +194,7 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: *mut any) 
         //is_fn_no_ret();
         fn_ty := clang.getCursorType(cursor);
         mut function_name := d.*.item_name;
-        if d.*.used_names.&mut.insert(strclone(function_name.ptr)) != nil {
+        if d.*.used_names.&mut.insert(strclone(function_name.ptr)) != null {
             d.emit("// DUPLICATE: ");
         } else if d.*.opts.trim_function_prefix {
             if trim_prefix(function_name.&mut, d.*.opts.function_prefix) {
@@ -358,7 +357,7 @@ emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
         d.emit("any");
     } else {
         primitive := d.convert_primitive(ty);
-        if primitive != nil {
+        if primitive != null {
             d.emit("%s", xx primitive);
         } else {
             kind_text := d.tmp_alloc_cxstring(clang.getTypeKindSpelling(ty.kind)).ptr;
@@ -409,7 +408,7 @@ emit_struct_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType)
 
         implicit := (decl_addr + 29).as(*u8).* >> 1 & 1 != 0;
         name := (decl_addr + 40).as(**u8).*;
-        std.assert(!implicit || (name == nil), "implicit fields shouldn't have a name");
+        std.assert(!implicit || (name == null), "implicit fields shouldn't have a name");
 
         is_anon_field := implicit or libc.strlen(field) == 0;
         if is_anon_field then field = std.fmt.format("_%d", xx d.*.field_count).ptr;
@@ -459,7 +458,7 @@ emit_enum_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -
         if d.*.type_decl_naming != .FullyAnonymous {
             d.emit("%s = %lld,", xx variant.ptr, tag);
         } else {
-            if d.*.used_names.&mut.insert(strclone(variant.ptr)) != nil d.emit("// DUPLICATE: ");
+            if d.*.used_names.&mut.insert(strclone(variant.ptr)) != null d.emit("// DUPLICATE: ");
             d.emit("%s :: %lld;", xx variant.ptr, tag);
         }
         return .Continue;
@@ -563,13 +562,11 @@ tokenize_cursor :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 /// defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
 /// ```
 tokenize_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
-    mut tokens: *mut clang.CXToken = nil;
+    mut tokens: ?*mut clang.CXToken = null;
     mut num_tokens: u32 = 0;
     clang.tokenize(d.*.unit, range, &mut tokens, &mut num_tokens);
-    //libc.printf("tokens=%p; num=%d\n".ptr, tokens, num_tokens);
-    std.assert(tokens != nil, "tokenize failed!");
-
-    []mut clang.CXToken.{ ptr = tokens, len = xx num_tokens }
+    ptr := tokens orelse std.panic("tokenize failed!");
+    []mut clang.CXToken.{ ptr, len = xx num_tokens }
 }
 
 convert_primitive :: (d: *mut ClientData, ty: clang.CXType) -> {
@@ -649,7 +646,7 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     if !d.*.opts.copy_docs return false;
 
     s := clang.cursor_getRawCommentText(cursor);
-    if clang.getCString(s) == nil return false;
+    if clang.getCString(s) == null return false;
     mut docs := d.tmp_alloc_cxstring(s);
 
     trim_start :: (mut str: []mut u8) -> {
@@ -684,7 +681,7 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 
     find_newline :: (str: []u8) -> {
         for idx in 0..str.len if str[idx] == '\n' return idx;
-        return str.len; // TODO: return None
+        return str.len; // TODO: return null
     }
 
     if d.*.opts.format_docs {
@@ -752,7 +749,7 @@ SourceLocation :: struct {
     offset: u32;
 
     filename :: (self: *SourceLocation, d: *mut ClientData) ->
-        d.tmp_alloc_cxstring(clang.getFileName(self.*.file), allow_nil=true);
+        d.tmp_alloc_cxstring(clang.getFileName(self.*.file), allow_None=true);
 }
 resolve_source_location :: (loc: clang.CXSourceLocation) -> {
     mut out: SourceLocation;
@@ -762,9 +759,9 @@ resolve_source_location :: (loc: clang.CXSourceLocation) -> {
 
 file_equal :: (file1: clang.CXFile, file2: clang.CXFile) -> clang.file_isEqual(file1, file2) != 0;
 
-tmp_alloc_str :: (d: *mut ClientData, cstr: *u8, len: usize) -> {
-    ptr := d.*.tmp_alloc.&mut.allocator().alloc(len + 1, 1);
-    std.assert(ptr != nil, "tmp allocation for string failed");
+tmp_alloc_str :: (d: *mut ClientData, cstr: ?*u8, len: usize) -> {
+    std.assert(cstr != null || len == 0);
+    ptr := d.*.tmp_alloc.&mut.allocator().alloc(len + 1, 1) orelse std.panic("tmp allocation for string failed");
     str := []mut u8.{ ptr, len=len + 1 };
 
     libc.memcpy(str.ptr, cstr, len);
@@ -773,16 +770,12 @@ tmp_alloc_str :: (d: *mut ClientData, cstr: *u8, len: usize) -> {
     str[..len]mut
 }
 
-tmp_alloc_cxstring :: (d: *mut ClientData, cxstring: clang.CXString, allow_nil := false) -> []mut u8 {
+tmp_alloc_cxstring :: (d: *mut ClientData, cxstring: clang.CXString, allow_None := false) -> []mut u8 {
     defer clang.disposeString(cxstring);
     cstr := clang.getCString(cxstring);
-    len := if allow_nil and cstr == nil then 0
-    else {
-        std.assert(cstr != nil, "expected non-null cstr");
-        libc.strlen(cstr)
-    };
-
-    d.tmp_alloc_str(cstr, len)
+    if allow_None and cstr == null return .[][..]mut;
+    cstr := cstr orelse std.panic("expected non-null cstr");
+    d.tmp_alloc_str(cstr, libc.strlen(cstr))
 }
 
 tmp_format :: (d: *mut ClientData, fmt: []u8, a := 0, b := 0, c := 0) -> {

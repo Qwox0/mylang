@@ -4,9 +4,9 @@ std :: #import "std";
 libc :: #import "libc";
 
 pub malloc_str :: (len: u64) -> []mut u8 {
-    buffer := std.malloc0(len + 1); // adds a trailing 0 byte for C compatibility.
-    if buffer == nil do std.panic("failed to malloc string buffer");
-    return .{ ptr = buffer, len };
+    // adds a trailing 0 byte for C compatibility.
+    buffer := std.malloc0(len + 1) orelse std.panic("failed to malloc string buffer");
+    return .{ ptr = buffer.as(*mut u8), len };
 }
 
 /// The `ptr` on the returned slice must be `free`d by the caller.

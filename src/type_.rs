@@ -229,14 +229,6 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         };
     }
 
-    // TODO: remove this rule when implementing option lifting
-    if let Some(got_opt) = got.try_downcast::<ast::OptionTy>()
-        && expected.kind == AstKind::PtrTy
-        && got_opt.inner_ty.rep().kind == AstKind::PtrTy
-    {
-        return true;
-    }
-
     if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
         let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() else { return false };
         if ctx().do_mut_checks && expected_ptr.is_mut && !got_ptr.is_mut {

@@ -242,17 +242,6 @@ impl Primitives {
                 let decl = new_primitive_decl("null")?;
                 init_decl(decl, null_lit_ty, Some(ast_new!(OptionalVal { val: None }).upcast()));
                 insert_symbol_no_duplicate(decls, decl);
-                {
-                    // TODO: remove nil
-
-                    let decl = new_primitive_decl("nil")?;
-                    init_decl(
-                        decl,
-                        null_lit_ty,
-                        Some(ast_new!(OptionalVal { val: None }).upcast()),
-                    );
-                    insert_symbol_no_duplicate(decls, decl);
-                }
                 decl
             },
             some_variant: {

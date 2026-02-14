@@ -18,18 +18,16 @@ panic :: (msg: []u8) -> never {
 assert :: (cond: bool, msg := "") -> if !cond do panic(str.concat("Assertion failed! ", msg));
 
 malloc0 :: (size: libc.c_size_t) -> {
-    ptr := libc.malloc(size);
+    ptr := libc.malloc(size) orelse return null;
     libc.memset(ptr, 0, size);
     ptr
 }
 
-malloc_buf :: (size: libc.c_size_t) -> []mut u8.(libc.malloc(size), size);
+malloc_buf :: (size: libc.c_size_t) -> []mut u8.(libc.malloc(size) orelse return null, size);
 
 open_file :: (pathname: []u8, mode: []u8) -> *libc.FILE {
     // currently all string slices are 0 terminated, so this should be fine.
-    file := libc.fopen(pathname.ptr, mode.ptr);
-    if file == nil do panic("No such file or directory");
-    file
+    libc.fopen(pathname.ptr, mode.ptr) orelse panic("No such file or directory")
 }
 
 /// The `ptr` on the returned slice must be `free`d by the caller.

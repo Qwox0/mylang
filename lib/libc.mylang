@@ -122,16 +122,16 @@ fread : (data: *mut any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_si
 
 // ===== <stdlib.h> =====
 
-malloc : (size: c_size_t) -> ?*any : #extern;
+malloc : (size: c_size_t) -> ?*mut any : #extern;
 free : (ptr: ?*any) -> void : #extern;
-calloc : (count: c_size_t, size: c_size_t) -> ?*any : #extern;
-realloc : (ptr: ?*any, new_size: c_size_t) -> ?*any : #extern;
-reallocarray : (ptr: ?*any, new_count: c_size_t, new_size: c_size_t) -> ?*any : #extern;
+calloc : (count: c_size_t, size: c_size_t) -> ?*mut any : #extern;
+realloc : (ptr: ?*any, new_size: c_size_t) -> ?*mut any : #extern;
+reallocarray : (ptr: ?*any, new_count: c_size_t, new_size: c_size_t) -> ?*mut any : #extern;
 
 abort : () -> never : #extern;
 exit : (status: c_int) -> never : #extern;
 
-strtol : (string: *c_char, tailptr: **c_char, base: c_int) -> c_long : #extern;
+strtol : (string: *c_char, tailptr: ?*?*c_char, base: c_int) -> c_long : #extern;
 atoi : (string: *c_char) -> c_int : #extern;
 atol : (string: *c_char) -> c_long : #extern;
 
@@ -143,8 +143,8 @@ qsort : (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *a
 
 // ===== <string.h> =====
 
-memcpy : (dest: *any, src: *any, len: c_size_t) -> *any : #extern;
-memset : (ptr: *any, byte: u8, len: c_size_t) -> *any : #extern;
+memcpy : (dest: ?*any, src: ?*any, len: c_size_t) -> *any : #extern;
+memset : (ptr: ?*any, byte: u8, len: c_size_t) -> *any : #extern;
 
 strlen : (str: *c_char) -> c_size_t : #extern;
 

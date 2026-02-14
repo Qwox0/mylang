@@ -27,7 +27,7 @@ StrHashSet :: struct {
     /// The mask used to access elements in the buffer. One less than the number of allocated slots.
     mask: u32,
 
-    pub EMPTY :: StrHashSet.{ ptr=nil, size=0, available=0, mask=!0 };
+    pub EMPTY :: StrHashSet.{ ptr=null, size=0, available=0, mask=!0 };
 
     MAX_LOAD_PERCENTAGE :: 85;
     MIN_CAPACITY :: 8;
@@ -62,15 +62,14 @@ StrHashSet :: struct {
     pub with_slots :: (slots: u32) -> {
         std.assert(std.num.is_power_of_two(slots.as(u64)));
         mask := slots - 1;
-        ptr := std.malloc0(buf_size(slots));
-        std.assert(ptr != nil, "HashMap allocation failed!");
+        ptr := std.malloc0(buf_size(slots)) orelse std.panic("HashMap allocation failed!");
         ptr := ptr.as(u64) + #sizeof(Entry) * slots.as(u64);
         available := slots * MAX_LOAD_PERCENTAGE / 100;
         StrHashSet.{ ptr = xx ptr, size = 0, available, mask }
     }
 
     pub free :: (self: StrHashSet) -> {
-        if self.ptr != nil then libc.free(self.&.buf_start());
+        if self.ptr != null then libc.free(self.&.buf_start());
     }
 
     /// Returns the number of slots needed to allow inserting `capacity` items without reallocating.
@@ -101,8 +100,8 @@ StrHashSet :: struct {
         mut new_set := StrHashSet.new(new_capacity);
 
         for idx in 0..self.slots() {
-            if !self.tag(idx).*.is_used() continue;
-            val := self.entry(idx).*.val;
+            if not self.tag(idx).*.is_used() continue;
+            val := self.entry(idx).*.val orelse std.panic("unreachable");
             hash := hash(val);
             new_idx := new_set.&.get_realloc_index(hash);
             new_set.&mut.insert_raw(new_idx, hash, val);
@@ -140,7 +139,7 @@ StrHashSet :: struct {
         if self.*.size == 0 return false; // TODO: unlikely branch
         hash := hash(val);
         idx := self.get_index_with_hash(val, hash);
-        return self.entry(idx).*.val != nil;
+        return self.entry(idx).*.val != null;
     }
 
     pub remove :: (self: *mut StrHashSet, val: []u8) -> bool {
@@ -148,7 +147,7 @@ StrHashSet :: struct {
         idx := self.get_index(val);
         was_present := self.tag(idx).*.is_used();
         self.tag(idx).* = Tag.deleted;
-        self.entry(idx).*.val = nil;
+        self.entry(idx).*.val = null;
         self.*.size -= 1;
         self.*.available += 1;
         return was_present
@@ -181,7 +180,8 @@ StrHashSet :: struct {
 
         while not self.tag(idx).*.eq(Tag.empty) {
             if self.tag(idx).*.eq(tag) {
-                if libc.strcmp(val, self.entry(idx).*.val) == 0 return idx;
+                entry_str := self.entry(idx).*.val orelse std.panic("unreachable");
+                if libc.strcmp(val, entry_str) == 0 return idx;
             } else if self.tag(idx).*.eq(Tag.deleted) {
                 deleted_tag_idx = idx;
             }
@@ -217,7 +217,7 @@ StrHashSet :: struct {
     }
 
     pub debug :: (self: *StrHashSet) -> {
-        libc.printf("StrHashSet (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask); // nocheckin
+        libc.printf("StrHashSet (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask);
         for idx in 0..self.slots() {
             tag := self.tag(idx).*;
             text := if tag.is_used() then self.entry(idx).*.val
