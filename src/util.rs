@@ -319,7 +319,7 @@ pub(crate) use assert_has_field;
 macro_rules! debug_only_assert {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        assert!($($arg)*);
+        assert!($($arg)*)
     };
 }
 pub(crate) use debug_only_assert;
@@ -328,7 +328,7 @@ pub(crate) use debug_only_assert;
 macro_rules! debug_only_assert_eq {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        assert_eq!($($arg)*);
+        assert_eq!($($arg)*)
     };
 }
 pub(crate) use debug_only_assert_eq;

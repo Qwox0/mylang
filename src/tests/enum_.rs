@@ -292,3 +292,11 @@ fn enum_repr_type() {
     test("MyEnum :: enum { A, B = 1000000.as(u32), C = -1 }")
         .error("Cannot apply unary operator `-` to type `u32`", substr!("-1"));
 }
+
+#[test]
+fn non_null_enum() {
+    test_body("E :: enum { A = 123, B }; opt: ?E = E.A").ok(());
+
+    test_body("E :: enum { A, B = 123 }; opt: ?E = E.A")
+        .error("mismatched types: expected `?E`; got `E`", substr!("E.A"));
+}

@@ -1,7 +1,6 @@
+use crate::diagnostics::DiagnosticSeverity;
 use clap::Parser;
 use std::{panic::Location, path::PathBuf};
-
-use crate::diagnostics::DiagnosticSeverity;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -106,6 +105,7 @@ impl BuildArgs {
     #[track_caller]
     pub fn comp_bench_args() -> Self {
         Self::test_args(TestArgsOptions {
+            print_source: false,
             debug_ast: false,
             debug_types: false,
             debug_typed_ast: false,
@@ -140,6 +140,7 @@ impl BuildArgs {
 
 #[derive(Debug)]
 pub struct TestArgsOptions {
+    pub print_source: bool,
     pub debug_ast: bool,
     pub debug_types: bool,
     pub debug_typed_ast: bool,
@@ -151,6 +152,7 @@ pub struct TestArgsOptions {
 impl Default for TestArgsOptions {
     fn default() -> Self {
         Self {
+            print_source: Default::default(),
             debug_ast: Default::default(),
             debug_types: Default::default(),
             debug_typed_ast: Default::default(),

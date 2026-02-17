@@ -1,6 +1,6 @@
 use crate::{
     ast::DeclListExt,
-    tests::{substr, test, test_analyzed_struct, test_body},
+    tests::{substr, test, test_body},
 };
 use std::mem::offset_of;
 
@@ -110,12 +110,13 @@ fn struct_layout() {
     #[rustfmt::skip]
     struct A { a: i64, b: u8, c: u16 }
     // layout: `aaaaaaaab_cc____`
-    let res = test_analyzed_struct("struct { a: i64, b: u8, c: u16 }");
+    let res = test("_ :: struct { a: i64, b: u8, c: u16 }").compile_no_err();
+    let s = res.one_decl_init::<crate::ast::StructDef>();
 
-    assert_eq!(crate::type_::struct_size(res.data.fields.iter_types()), std::mem::size_of::<A>());
-    assert_eq!(crate::type_::struct_alignment(&res.data.fields), std::mem::align_of::<A>());
+    assert_eq!(crate::type_::struct_size(s.fields.iter_types()), std::mem::size_of::<A>());
+    assert_eq!(crate::type_::struct_alignment(&s.fields), std::mem::align_of::<A>());
 
-    assert_eq!(crate::type_::struct_offset(&res.data.fields, 0), offset_of!(A, a));
-    assert_eq!(crate::type_::struct_offset(&res.data.fields, 1), offset_of!(A, b));
-    assert_eq!(crate::type_::struct_offset(&res.data.fields, 2), offset_of!(A, c));
+    assert_eq!(crate::type_::struct_offset(&s.fields, 0), offset_of!(A, a));
+    assert_eq!(crate::type_::struct_offset(&s.fields, 1), offset_of!(A, b));
+    assert_eq!(crate::type_::struct_offset(&s.fields, 2), offset_of!(A, c));
 }

@@ -236,12 +236,6 @@ impl CompilationContextInner {
     }
 }
 
-impl CompilationContextInner {
-    pub fn debug_llvm_module_on_invalid_fn(&self) -> bool {
-        self.args.debug_llvm_ir_optimized || self.args.debug_llvm_ir_unoptimized
-    }
-}
-
 pub struct ImportManager {
     /// absolute import file path -> index into `files`
     //pub imports: HashMap<Box<Path>, FilesIndex>, // If I use this valgrind shows false positives

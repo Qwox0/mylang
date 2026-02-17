@@ -213,12 +213,12 @@ impl Parser {
             FollowingOperator::PositionalInitializer => {
                 let (args, close_p_span) = self.parse_call(ScratchPool::new())?;
                 let span = span.join(close_p_span);
-                expr!(PositionalInitializer { lhs: Some(lhs), args }, span)
+                expr!(PositionalInitializer { lhs: Some(lhs), args, parsed_with_lhs: true }, span)
             },
             FollowingOperator::NamedInitializer => {
                 let (fields, close_b_span) = self.parse_initializer_fields()?;
                 let span = span.join(close_b_span);
-                expr!(NamedInitializer { lhs: Some(lhs), fields }, span)
+                expr!(NamedInitializer { lhs: Some(lhs), fields, parsed_with_lhs: true }, span)
             },
             FollowingOperator::ArrayInitializer => self.parse_array_initializer(Some(lhs), span)?,
             FollowingOperator::SingleArgNoParenFn => {
@@ -646,12 +646,12 @@ impl Parser {
             TokenKind::DotOpenParenthesis => {
                 let (args, close_p_span) = self.advanced().parse_call(ScratchPool::new())?;
                 let span = span.join(close_p_span);
-                expr!(PositionalInitializer { lhs: None, args }, span)
+                expr!(PositionalInitializer { lhs: None, args, parsed_with_lhs: false }, span)
             },
             TokenKind::DotOpenBrace => {
                 let (fields, close_b_span) = self.advanced().parse_initializer_fields()?;
                 let span = span.join(close_b_span);
-                expr!(NamedInitializer { lhs: None, fields }, span)
+                expr!(NamedInitializer { lhs: None, fields, parsed_with_lhs: false }, span)
             },
             TokenKind::DotOpenBracket => self.advanced().parse_array_initializer(None, span)?,
             TokenKind::Colon => todo!("TokenKind::Colon"),
@@ -816,7 +816,7 @@ impl Parser {
         macro_rules! new_arr_init {
             ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? } $(,)? ) => {{
                 let close_b = self.tok(TokenKind::CloseBracket)?;
-                expr!($kind { lhs, $($field $(: $val )?),* }, open_b_span.join(close_b.span))
+                expr!($kind { lhs, parsed_with_lhs: lhs.is_some(), $($field $(: $val )?),* }, open_b_span.join(close_b.span))
             }}
         }
 

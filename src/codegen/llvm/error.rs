@@ -10,7 +10,6 @@ use std::{
 #[error("{:?}", self)]
 pub enum CodegenError {
     BuilderError(BuilderError),
-    InvalidGeneratedFunction,
     FunctionLookupError(FunctionLookupError),
     CannotOptimizeModule(LLVMString),
     CannotCompileObjFile(LLVMString),
@@ -66,6 +65,7 @@ impl<T> CodegenResultAndControlFlow<T> {
 }
 
 impl<T> CodegenResult<T, !> {
+    #[track_caller]
     pub fn unwrap(self) -> T {
         match self {
             Ok(t) => t,

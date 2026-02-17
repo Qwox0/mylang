@@ -1,4 +1,8 @@
-use crate::tests::{substr, test, test_body};
+use crate::{
+    ast::debug::DebugAst,
+    ptr::OPtr,
+    tests::{substr, test, test_body},
+};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq)]
@@ -224,6 +228,16 @@ test :: (opt_ptr: ?*u8) -> {
     let res = test(code).compile_no_err();
     let func = res.one_stmt::<Decl>().init.unwrap().downcast::<Fn>();
     assert_eq!(func.ret_ty.unwrap().to_string(), "?*u8");
+    drop(res);
+
+    let res =
+        test("test :: (x: ?*f64) -> []f64.{ ptr=x orelse return null, len=1 };").compile_no_err();
+    assert_eq!(res.one_decl_init::<Fn>().ret_ty.unwrap().to_text(true), "?[]f64");
+    drop(res);
+
+    let res = test("test :: (x: ?*f64) -> { s: []f64 = .{ ptr=x orelse return null, len=1 }; s };")
+        .compile_no_err();
+    assert_eq!(res.one_decl_init::<Fn>().ret_ty.unwrap().to_text(true), "?[]f64");
 }
 
 #[test]
@@ -232,4 +246,26 @@ fn error_cannot_coerce_zeroable_to_optional() {
         .error("mismatched types: expected `?never`; got `{integer}`", substr!("5"))
         // TODO: .hint("Consider explicitly wrapping the value with `Some`", |_| todo!())
     ;
+}
+
+#[test]
+fn orelse_with_out_coercion() {
+    // ?*mut u8 -> orelse -> *mut u8 -> coerce -> ?*mut u8
+    let code = "
+test :: () -> ?*mut u8 {
+    1.as(?*mut u8) orelse return null
+}";
+    test(code).ok(1_u64);
+
+    let code = "
+test :: () -> {
+    1.as(?*mut u8) orelse return null
+}";
+    test(code).ok(1_u64);
+}
+
+#[test]
+fn return_nested_optional_null() {
+    test("test :: -> ??*u8        null;").ok(Optional::<OPtr<u8>>::NULL);
+    test("test :: -> ??*u8 return null;").ok(Optional::<OPtr<u8>>::NULL);
 }

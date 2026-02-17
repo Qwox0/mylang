@@ -43,6 +43,7 @@ mod slice;
 mod string;
 mod struct_;
 mod todo;
+mod type_coercion;
 mod type_joining;
 mod union_;
 mod var_decl;
@@ -51,6 +52,7 @@ mod while_loop;
 mod zst;
 
 const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
+    print_source: true,
     debug_ast: false,
     debug_types: false,
     debug_typed_ast: false,
@@ -65,16 +67,6 @@ fn test(code: impl ToString) -> NewTest {
 
 fn test_body(code_body: impl Display) -> NewTest {
     test(format!("test :: -> {{ {code_body} }};"))
-}
-
-fn test_analyzed_struct(struct_code: &str) -> TestResult<Ptr<crate::ast::StructDef>> {
-    let res = test(format!("_ :: {struct_code}")).compile_no_err();
-    let struct_def = res
-        .one_stmt::<crate::ast::Decl>()
-        .init
-        .unwrap()
-        .downcast::<crate::ast::StructDef>();
-    TestResult { data: struct_def, ..res }
 }
 
 struct NewTest {
@@ -130,11 +122,14 @@ impl NewTest {
     #[track_caller]
     fn prepare(self) -> TestResult<()> {
         let code = Ptr::from_ref(self.code.as_str());
-        let ctx = CompilationContext::for_tests(
-            BuildArgs::test_args(TEST_OPTIONS),
-            code,
-            self.load_prelude,
-        );
+        let args = BuildArgs::test_args(TEST_OPTIONS);
+        if TEST_OPTIONS.print_source {
+            println!("##### TEST SOURCE {} #####", args.path.display());
+            println!("{code}");
+            println!("##### END TEST SOURCE #####");
+        }
+
+        let ctx = CompilationContext::for_tests(args, code, self.load_prelude);
         TestResult {
             ctx: TestCtx { ctx, diag_idx: 0 },
             code: self.code,
@@ -290,6 +285,13 @@ impl<Res> TestResult<Res> {
         let stmts = self.stmts();
         assert_eq!(stmts.len(), 1, "Expected exactly one parsed statement/expression");
         stmts[0].downcast::<V>()
+    }
+
+    pub fn one_decl_init<V: ast::AstVariant>(&self) -> Ptr<V> {
+        self.one_stmt::<ast::Decl>()
+            .init
+            .expect("expected Decl to have `init`")
+            .downcast::<V>()
     }
 }
 

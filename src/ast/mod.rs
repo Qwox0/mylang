@@ -349,6 +349,7 @@ ast_variants! {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     PositionalInitializer {
+        parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         args: Ptr<[Ptr<Ast>]>,
     },
@@ -358,16 +359,19 @@ ast_variants! {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     NamedInitializer {
+        parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SoA
     },
     /// `alloc(MyArray).[<expr>, <expr>, ..., <expr>,]`
     ArrayInitializer {
+        parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         elements: Ptr<[Ptr<Ast>]>,
     },
     /// `alloc(MyArray).[<expr>; <count>]`
     ArrayInitializerShort {
+        parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         val: Ptr<Ast>,
         count: Ptr<Ast>,
@@ -863,6 +867,10 @@ impl Ptr<Ast> {
         Ptr::from_ref(p).cast::<Ptr<Type>>().as_mut()
     }
 
+    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
+        self.try_downcast_type()?.try_downcast_struct_def()
+    }
+
     pub fn try_int<Int: TryFrom<i64>>(self) -> Option<Int>
     where Int::Error: fmt::Debug {
         then!(self.rep().kind == AstKind::IntVal => self.int())
@@ -1067,11 +1075,11 @@ impl Ast {
     pub fn full_span(&self) -> Span {
         let span = self.span;
         let full_span = match self.matchable().as_ref() {
-            AstEnum::PositionalInitializer { lhs, .. }
-            | AstEnum::NamedInitializer { lhs, .. }
-            | AstEnum::ArrayInitializer { lhs, .. }
-            | AstEnum::ArrayInitializerShort { lhs, .. } => {
-                span.maybe_join(lhs.map(|e| e.full_span()))
+            AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
+            | AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. }
+            | AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
+            | AstEnum::ArrayInitializerShort { lhs, parsed_with_lhs, .. } => {
+                span.maybe_join(lhs.filter(|_| *parsed_with_lhs).map(|e| e.full_span()))
             },
             AstEnum::Dot { lhs, has_lhs, rhs, .. } => {
                 lhs.filter(|_| *has_lhs).map(|l| l.full_span()).unwrap_or(span).join(rhs.span)
@@ -1199,7 +1207,7 @@ impl Type {
     }
 
     /// Counts the number of nested optional layers.
-    /// `???int` => 3
+    /// `???int` => 3; `int` => 0
     pub fn count_optional_nesting(self: Ptr<Type>) -> usize {
         iter::successors(self.try_downcast::<OptionTy>(), |t| t.inner_ty.try_downcast::<OptionTy>())
             .count()
@@ -1537,8 +1545,8 @@ impl BinOpKind {
             | BinOpKind::BitOr
             | BinOpKind::And
             | BinOpKind::Or => {
-                finalize_ty(lhs_ty, out_ty);
-                finalize_ty(rhs_ty, out_ty);
+                finalize_ty(lhs_ty, out_ty, false);
+                finalize_ty(rhs_ty, out_ty, false);
             },
             BinOpKind::Eq
             | BinOpKind::Ne
@@ -1582,13 +1590,10 @@ pub enum UnaryOpKind {
 
 impl UnaryOpKind {
     /// used during codegen
-    pub fn finalize_arg_type(self, arg_ty: &mut Ptr<Type>, mut out_ty: Ptr<Type>) {
+    pub fn finalize_arg_type(self, arg_ty: &mut Ptr<Type>, out_ty: Ptr<Type>) {
+        // type coercion is not possible here => `remove_type_coercion_for_finalize` is not needed
         match self {
             UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
-                if let Some(opt) = out_ty.try_downcast::<OptionTy>() {
-                    // TODO: implement type coercion elsewhere
-                    out_ty = opt.inner_ty.downcast_type();
-                }
                 let pointee = out_ty.downcast::<PtrTy>().pointee.downcast_type();
                 debug_assert!(ty_match(*arg_ty, pointee));
                 if pointee != primitives().any {
@@ -1599,7 +1604,7 @@ impl UnaryOpKind {
             },
             UnaryOpKind::Deref => {
                 let pointee = arg_ty.downcast_ref::<PtrTy>().pointee.downcast_type_ref();
-                debug_assert!(ty_match(*pointee, out_ty));
+                debug_assert!(ty_match(*pointee, out_ty), "{pointee} matches {out_ty}");
                 *pointee = out_ty;
             },
             UnaryOpKind::Not | UnaryOpKind::Neg => {

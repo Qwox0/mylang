@@ -194,3 +194,8 @@ test :: -> {
 }";
     test(code).error("Cannot access a non-constant symbol at compile time", substr!("a";skip=1));
 }
+
+#[test]
+fn const_cast_num_to_ptr() {
+    test("NULL :: 0.as(*never); test :: -> ?*u8 NULL;").ok(std::ptr::null::<()>());
+}

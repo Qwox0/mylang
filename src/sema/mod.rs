@@ -141,6 +141,8 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
 /// . . . . . x x x|.
 /// 0 1 3 4 7 8 6 2 5 9
 /// . . . . . . x x x|
+///
+/// . = sema finished; x = sema waiting
 fn analyze_scope<T>(
     items: &mut [Ptr<T>],
     finished_count: &mut usize,
@@ -328,8 +330,8 @@ impl Sema {
                     p.void_ty
                 })
             },
-            AstEnum::PositionalInitializer { lhs, args, .. } => {
-                let lhs = self.analyze_initializer_lhs(*lhs, *ty_hint, expr)?;
+            AstEnum::PositionalInitializer { args, .. } => {
+                let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(s) = lhs.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
@@ -368,8 +370,8 @@ impl Sema {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
-            AstEnum::NamedInitializer { lhs: lhs_expr, fields: values, .. } => {
-                let lhs = self.analyze_initializer_lhs(*lhs_expr, *ty_hint, expr)?;
+            AstEnum::NamedInitializer { fields: values, .. } => {
+                let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(struct_ty) = lhs.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
@@ -404,13 +406,12 @@ impl Sema {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
-            AstEnum::ArrayInitializer { lhs, elements, .. } => {
+            AstEnum::ArrayInitializer { elements, .. } => {
                 let elem_ty = if let Some(elem_ty) =
-                    self.analyze_array_initializer_lhs(*lhs, elements.len(), *ty_hint, expr)?
+                    self.analyze_array_initializer_lhs(expr, elements.len(), *ty_hint)?
                 {
                     for elem in elements.into_iter() {
-                        let () =
-                            self.analyze_and_finalize_with_known_type(elem, elem_ty, is_const)?;
+                        self.analyze_and_check_type(elem, elem_ty, is_const)?;
                     }
                     elem_ty
                 } else {
@@ -432,11 +433,11 @@ impl Sema {
                     elem_ty
                 };
 
-                if lhs.is_none() || expr.ty.is_none() {
+                //debug_assert!(expr.ty.is_none());
+                if expr.ty.is_none() {
                     let len = elements.len() as i64;
                     let len = ast_new!(IntVal { val: len }, Span::ZERO).upcast();
                     let arr_ty = type_new!(ArrayTy { len, elem_ty: elem_ty.upcast() });
-                    //debug_assert!(expr.ty.is_none());
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
 
@@ -445,7 +446,7 @@ impl Sema {
                     expr.set_replacement(cv.upcast());
                 }
             },
-            AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
+            AstEnum::ArrayInitializerShort { val, count, .. } => {
                 self.analyze_and_check_type(*count, p.u64, true)?;
                 let len = *count;
                 let len_val = len
@@ -453,8 +454,7 @@ impl Sema {
                     .and_then(|x| x.upcast().try_int())
                     .ok_or_else(|| error_non_const(*count, "array length"))?;
 
-                let mut elem_ty =
-                    self.analyze_array_initializer_lhs(*lhs, len_val, *ty_hint, expr)?;
+                let mut elem_ty = self.analyze_array_initializer_lhs(expr, len_val, *ty_hint)?;
 
                 let val_ty = *self.analyze(*val, &elem_ty, is_const)?;
                 let elem_ty =
@@ -1600,6 +1600,7 @@ impl Sema {
         Ok(())
     }
 
+    /// TODO: check [`ast::Type::propagates_out`], like in `analyze!`
     fn analyze_and_check_type(
         &mut self,
         expr: Ptr<Ast>,
@@ -1609,19 +1610,6 @@ impl Sema {
         let ty = self.analyze(expr, &Some(expected_ty), is_const)?;
         let () = self.ty_match(expr, expected_ty)?;
         Ok(ty)
-    }
-
-    /// TODO: check [`ast::Type::propagates_out`], like in `analyze!`
-    fn analyze_and_finalize_with_known_type(
-        &mut self,
-        expr: Ptr<Ast>,
-        expected_ty: Ptr<ast::Type>,
-        is_const: bool,
-    ) -> SemaResult<()> {
-        self.analyze_and_check_type(expr, expected_ty, is_const)?;
-        debug_assert!(expected_ty.is_finalized()); // => common_ty() is not needed.
-        expr.as_mut().ty = Some(expected_ty);
-        Ok(())
     }
 
     fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
@@ -1684,14 +1672,25 @@ impl Sema {
 
     fn analyze_initializer_lhs(
         &mut self,
-        lhs: OPtr<ast::Ast>,
-        ty_hint: OPtr<ast::Type>,
         initializer_expr: Ptr<ast::Ast>,
+        ty_hint: OPtr<ast::Type>,
     ) -> SemaResult<Ptr<ast::Ast>> {
-        Ok(if let Some(lhs) = lhs {
+        let lhs = match initializer_expr.matchable().as_mut() {
+            AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
+            | AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. } => {
+                if !*parsed_with_lhs && let Some(lhs) = *lhs {
+                    return Ok(lhs);
+                }
+                lhs
+            },
+            _ => unreachable_debug(),
+        };
+
+        Ok(if let Some(lhs) = *lhs {
             self.analyze(lhs, &None, false)?;
             lhs
         } else if let Some(ty_hint) = ty_hint {
+            *lhs = Some(ty_hint.upcast());
             ty_hint.upcast()
         } else {
             cerror!(initializer_expr.full_span(), "cannot infer struct type");
@@ -1702,15 +1701,26 @@ impl Sema {
 
     fn analyze_array_initializer_lhs(
         &mut self,
-        lhs: OPtr<Ast>,
+        initializer_expr: Ptr<ast::Ast>,
         count: usize,
         ty_hint: OPtr<ast::Type>,
-        initializer_expr: Ptr<ast::Ast>,
     ) -> SemaResult<OPtr<ast::Type>> {
-        let lhs = if let Some(lhs) = lhs {
+        let lhs = match initializer_expr.matchable().as_mut() {
+            AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
+            | AstEnum::ArrayInitializerShort { lhs, parsed_with_lhs, .. } => {
+                if !*parsed_with_lhs && let Some(lhs) = *lhs {
+                    return Ok(Some(lhs.downcast_type()));
+                }
+                lhs
+            },
+            _ => unreachable_debug(),
+        };
+
+        let lhs = if let Some(lhs) = *lhs {
             self.analyze(lhs, &None, false)?;
             lhs
         } else if let Some(elem_ty) = ty_hint.and_then(|t| t.inner_ty()) {
+            *lhs = Some(elem_ty.upcast());
             elem_ty.upcast()
         } else {
             return Ok(None);
@@ -1752,6 +1762,13 @@ impl Sema {
             match (op_ty.matchable2(), target_ty.matchable2()) {
                 // TODO: remove this int -> ptr cast?
                 (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
+                    let i_val = operand.downcast::<ast::IntVal>();
+                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
+                    expr.set_replacement(ptr_val.upcast());
+                },
+                (TypeMatch::IntTy(_), TypeMatch::OptionTy(o))
+                    if o.inner_ty.downcast_type().kind == AstKind::PtrTy =>
+                {
                     let i_val = operand.downcast::<ast::IntVal>();
                     let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
                     expr.set_replacement(ptr_val.upcast());
@@ -1818,8 +1835,8 @@ impl Sema {
 
             let init = *init.get_or_insert(f.upcast());
             let field_ty = f_decl.var_ty.or_not_finished()?;
-            match self.analyze_and_finalize_with_known_type(init, field_ty, is_const) {
-                Ok(()) => {},
+            match self.analyze_and_check_type(init, field_ty, is_const) {
+                Ok(_ty) => {},
                 NotFinished { remaining } => {
                     return NotFinished { remaining: remaining + initializer_values.len() - idx };
                 },
@@ -1963,7 +1980,7 @@ impl Sema {
             let init_ty = *self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty = check_or_infer_target!(init_ty, &mut decl.var_ty, true, init.full_span());
             let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
-            init.as_mut().ty = Some(var_ty);
+            // init.ty is finalized later
             if is_init_const && var_ty != p.err_ty && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
                 let span = init.full_span();
@@ -2100,7 +2117,7 @@ impl Sema {
         while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
             if let Some(&param) = params.get(pos_idx) {
                 let param_ty = param.var_ty.or_not_finished()?;
-                self.analyze_and_finalize_with_known_type(pos_arg, param_ty, is_const)?;
+                self.analyze_and_check_type(pos_arg, param_ty, is_const)?;
             } else if allows_varargs {
                 self.analyze(pos_arg, &None, is_const)?.finalize();
             } else {
@@ -2150,7 +2167,7 @@ impl Sema {
                 was_set[param_idx] = true;
             }
             let param_ty = param.var_ty.or_not_finished()?;
-            self.analyze_and_finalize_with_known_type(named_arg.rhs, param_ty, is_const)?;
+            self.analyze_and_check_type(named_arg.rhs, param_ty, is_const)?;
         }
 
         // missing args
@@ -2458,12 +2475,12 @@ impl Sema {
 
     fn open_scope(&mut self, new_scope: &mut Scope) -> OpenScopeHandle {
         debug_only_assert!(new_scope.was_checked_for_duplicates);
-        debug_assert!(if new_scope.kind == ScopeKind::File {
-            new_scope.parent.is_some()
+        if new_scope.kind == ScopeKind::File {
+            debug_assert!(new_scope.parent.is_some());
         } else {
-            new_scope.parent.is_none_or(|p| p == self.cur_scope)
+            debug_assert!(new_scope.parent.is_none_or(|p| p == self.cur_scope));
             //debug_assert!(new_scope.parent.is_none()); // For when NotFinished is removed
-        });
+        }
         if new_scope.parent.is_none() {
             new_scope.parent = Some(self.cur_scope);
             new_scope.pos_in_parent = self.cur_scope_pos;

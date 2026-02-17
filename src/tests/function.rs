@@ -323,3 +323,18 @@ test :: -> f.&.*(10);
 ";
     test(code).with_prelude().ok(11);
 }
+
+#[test]
+#[ignore = "TODO"]
+fn parse_tail_correct_precedence() {
+    test("fn     :  (i32)     -> i32 :  (a:  i32) -> a + 1;").parse();
+    test("fn_ptr : *(i32)     -> i32 : &(a:  i32) -> a + 1;").parse();
+    test("fn_ptr :  (a: *i32) -> i32 :  (a: *i32) -> a.* = 3;").parse();
+}
+
+#[test]
+#[ignore = "TODO"]
+fn fix_parse_error() {
+    test("FnTy :: *i32 -> i32;").parse();
+    test("FnTy :: (*i32) -> i32;").parse();
+}

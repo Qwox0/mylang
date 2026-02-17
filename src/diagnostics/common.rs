@@ -62,10 +62,12 @@ pub fn error_cannot_apply_initializer(
 ) -> HandledErr {
     let initializer_kind = initializer_expr.kind.initializer_kind();
     let lhs_expr = match initializer_expr.matchable().as_ref() {
-        ast::AstEnum::PositionalInitializer { lhs, .. }
-        | ast::AstEnum::NamedInitializer { lhs, .. }
-        | ast::AstEnum::ArrayInitializer { lhs, .. }
-        | ast::AstEnum::ArrayInitializerShort { lhs, .. } => lhs,
+        ast::AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
+        | ast::AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. }
+        | ast::AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
+        | ast::AstEnum::ArrayInitializerShort { lhs, parsed_with_lhs, .. } => {
+            lhs.filter(|_| *parsed_with_lhs)
+        },
         _ => unreachable_debug(),
     };
     let span = lhs_expr.unwrap_or(initializer_expr).full_span();
@@ -81,6 +83,7 @@ pub fn error_cannot_apply_initializer(
             chint!(initializer_expr.span, "Consider using an array initializer (`.[...]`) instead")
         }
     } else {
+        debug_assert!(analyzed_lhs == lhs_expr.u());
         cerror!(
             span,
             "Cannot apply {initializer_kind} to a value of type `{}`",

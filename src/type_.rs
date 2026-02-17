@@ -6,7 +6,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     util::{
-        Layout, UnwrapDebug, aligned_add, is_simple_enum, round_up_to_alignment,
+        Layout, UnwrapDebug, aligned_add, is_simple_enum, panic_debug, round_up_to_alignment,
         round_up_to_nearest_power_of_two, then, unreachable_debug, variant_count_to_tag_size_bits,
     },
 };
@@ -325,6 +325,28 @@ fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
     }
 }
 
+pub fn remove_type_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
+    if let Some(out_opt) = out_ty.try_downcast::<ast::OptionTy>()
+        && expr_ty.is_non_null()
+    {
+        let expr_opt_depth = expr_ty.count_optional_nesting();
+        let out_opt_depth = out_ty.count_optional_nesting();
+        debug_assert!(expr_opt_depth <= out_opt_depth, "should have been a type mismatch");
+        match out_opt_depth - expr_opt_depth {
+            0 => {},
+            1 => *out_ty = out_opt.inner_ty.downcast_type(),
+            _ => panic_debug!("should have been a type mismatch"),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn has_no_type_coercion(expr_ty: Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> bool {
+    let mut new_out_ty = out_ty;
+    remove_type_coercion_for_finalize(expr_ty, &mut new_out_ty);
+    new_out_ty == out_ty
+}
+
 const ZST_ALIGNMENT: usize = 1;
 
 impl ast::Type {
@@ -493,7 +515,7 @@ impl ast::Type {
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, .. } => fields.iter_types().any(ast::Type::is_non_null),
             TypeEnum::UnionDef { fields, .. } => fields.iter_types().all(ast::Type::is_non_null),
-            TypeEnum::EnumDef { variant_tags, .. } => variant_tags.u().contains(&0), // TODO: precompute this?
+            TypeEnum::EnumDef { variant_tags, .. } => !variant_tags.u().contains(&0), // TODO: precompute this?
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_non_null(),
             TypeEnum::OptionTy { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
@@ -525,7 +547,7 @@ impl ast::Type {
             },
             TypeEnum::EnumDef { variant_tags, tag_ty, .. } => {
                 // TODO: precompute condition
-                then!(variant_tags.u().contains(&0) => tag_ty.u().upcast_to_type())
+                then!(!variant_tags.u().contains(&0) => tag_ty.u().upcast_to_type())
             },
             TypeEnum::RangeTy { elem_ty, .. } => then!(elem_ty.is_non_null() => *elem_ty),
             TypeEnum::OptionTy { .. } => None,

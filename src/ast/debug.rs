@@ -78,14 +78,14 @@ impl DebugAst for Ast {
                 }
                 lines.write("}");
             },
-            AstEnum::PositionalInitializer { lhs, args, .. } => {
-                lines.write_opt_tree(lhs.as_ref());
+            AstEnum::PositionalInitializer { lhs, args, parsed_with_lhs, .. } => {
+                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
                 lines.write(".(");
                 lines.write_many_expr(args, ",");
                 lines.write(")");
             },
-            AstEnum::NamedInitializer { lhs, fields, .. } => {
-                lines.write_opt_tree(lhs.as_ref());
+            AstEnum::NamedInitializer { lhs, fields, parsed_with_lhs, .. } => {
+                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
                 lines.write(".{");
                 lines.write_many(
                     fields.iter(),
@@ -100,14 +100,14 @@ impl DebugAst for Ast {
                 );
                 lines.write("}");
             },
-            AstEnum::ArrayInitializer { lhs, elements, .. } => {
-                lines.write_opt_tree(lhs.as_ref());
+            AstEnum::ArrayInitializer { lhs, elements, parsed_with_lhs, .. } => {
+                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
                 lines.write(".[");
                 lines.write_many(elements.iter(), |e, _, l| l.write_tree(e), ",");
                 lines.write("]");
             },
-            AstEnum::ArrayInitializerShort { lhs, val, count, .. } => {
-                lines.write_opt_tree(lhs.as_ref());
+            AstEnum::ArrayInitializerShort { lhs, val, count, parsed_with_lhs, .. } => {
+                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
                 lines.write(".[");
                 lines.write_tree(val);
                 lines.write(";");
