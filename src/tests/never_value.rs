@@ -13,7 +13,7 @@ return .[
 ]");
 
     test_body(code(".[a, a]")).error(
-        "mismatched types: expected `[2]i64`; got `[4]{integer literal}`",
+        "mismatched types: expected `[2]i64`; got `[4]{integer}`",
         |code| {
             let start = code.find(".[").unwrap();
             let end = code.rfind("]").unwrap() + 1;
@@ -37,7 +37,7 @@ return .[
 fn array_initializer_short() {
     test_body(".[return .[1, 2, 3]; 3]").ok(arr([1_i64, 2, 3]));
     test_body(".[return .[1, 2, 3]; 10]").error(
-        "mismatched types: expected `[3]{integer literal}`; got `[10]never`",
+        "mismatched types: expected `[3]{integer}`; got `[10]never`",
         substr!(".[return .[1, 2, 3]; 10]"),
     );
 
@@ -55,7 +55,7 @@ fn cast() {
     test_body("(return 99).as(u16)").ok(99_u16);
 
     test_body("(return 99).as(bool)").error(
-        "mismatched types: expected `{integer literal}`; got `bool`",
+        "mismatched types: expected `{integer}`; got `bool`",
         substr!("(return 99).as(bool)"),
     );
 }
@@ -78,9 +78,9 @@ fn binop() {
 #[test]
 fn assign() {
     test_body("a := return 3; a = 7; a")
-        .error("mismatched types: expected `never`; got `{integer literal}`", substr!("7"));
+        .error("mismatched types: expected `never`; got `{integer}`", substr!("7"));
     test_body("a := return 3; a += 7; a")
-        .error("mismatched types: expected `never`; got `{integer literal}`", substr!("7"));
+        .error("mismatched types: expected `never`; got `{integer}`", substr!("7"));
 
     test_body("a := return 3; a = return 7;")
         .error("Cannot assign to `a`, as it is not declared as mutable", substr!("a = return 7"));

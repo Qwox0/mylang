@@ -7,6 +7,10 @@ use crate::{
     scope::{Scope, ScopeKind},
 };
 
+pub const INT_LIT_TYPE_NAME: &str = "{integer}";
+pub const SINT_LIT_TYPE_NAME: &str = "{signed integer}";
+pub const FLOAT_LIT_TYPE_NAME: &str = "{float}";
+
 #[derive(Debug)]
 pub struct Primitives {
     // Types:
@@ -43,9 +47,9 @@ pub struct Primitives {
     pub rec_ret_ty: Ptr<ast::Type>,
     // /// a type which hasn't been infered yet.
     //pub unknown_ty: Ptr<ast::Type>,
-    pub int_lit: Ptr<ast::Type>,
-    pub sint_lit: Ptr<ast::Type>,
-    pub float_lit: Ptr<ast::Type>,
+    pub int_lit: Ptr<ast::IntTy>,
+    pub sint_lit: Ptr<ast::IntTy>,
+    pub float_lit: Ptr<ast::FloatTy>,
     pub method_stub: Ptr<ast::Type>,
     /// `MyEnum.VarA(value)`
     /// `^^^^^^^^^^^`
@@ -153,13 +157,14 @@ impl Primitives {
                 init_ty_decl(decl, ty);
                 ty
             }};
-            ($decl_name:expr, $ty_kind:ident {
-                $( $field:ident : $val:expr),* $(,)?
-            }) => {{
+            ($decl_name:expr, $ty_kind:ident { $( $field:ident : $val:expr),* $(,)? }) => {{
+                new_primitive_ty!($decl_name, raw $ty_kind { $( $field : $val),* }).upcast_to_type()
+            }};
+            ($decl_name:expr, raw $ty_kind:ident { $( $field:ident : $val:expr),* $(,)? }) => {{
                 let decl = new_primitive_decl($decl_name)?;
                 insert_symbol_no_duplicate(decls, decl);
-                let ty = ast_new!($ty_kind { $($field: $val),* }).upcast_to_type();
-                init_ty_decl(decl, ty);
+                let ty = ast_new!($ty_kind { $($field: $val),* });
+                init_ty_decl(decl, ty.upcast_to_type());
                 ty
             }};
         }
@@ -173,8 +178,8 @@ impl Primitives {
         let any_ptr_ty = ast_new!(PtrTy { pointee: any.upcast(), is_mut: false }).upcast_to_type();
         init_ty(any_ptr_ty);
 
-        let u8 = new_primitive_ty!("u8", IntTy { bits: 8, is_signed: false });
-        let u64 = new_primitive_ty!("u64", IntTy { bits: 64, is_signed: false });
+        let u8 = new_primitive_ty!("u8", IntTy { bits: Some(8), is_signed: false });
+        let u64 = new_primitive_ty!("u64", IntTy { bits: Some(64), is_signed: false });
 
         let enum_variant = new_primitive_ty!("{enum variant}", simple_ty, finalized: false);
 
@@ -191,22 +196,22 @@ impl Primitives {
             never_ptr_ty,
             any,
             any_ptr_ty,
-            u0: new_primitive_ty!("u0", IntTy { bits: 0, is_signed: false }),
+            u0: new_primitive_ty!("u0", IntTy { bits: Some(0), is_signed: false }),
             u8,
-            u16: new_primitive_ty!("u16", IntTy { bits: 16, is_signed: false }),
-            u32: new_primitive_ty!("u32", IntTy { bits: 32, is_signed: false }),
+            u16: new_primitive_ty!("u16", IntTy { bits: Some(16), is_signed: false }),
+            u32: new_primitive_ty!("u32", IntTy { bits: Some(32), is_signed: false }),
             u64,
-            u128: new_primitive_ty!("u128", IntTy { bits: 128, is_signed: false }),
-            i8: new_primitive_ty!("i8", IntTy { bits: 8, is_signed: true }),
-            i16: new_primitive_ty!("i16", IntTy { bits: 16, is_signed: true }),
-            i32: new_primitive_ty!("i32", IntTy { bits: 32, is_signed: true }),
-            i64: new_primitive_ty!("i64", IntTy { bits: 64, is_signed: true }),
-            i128: new_primitive_ty!("i128", IntTy { bits: 128, is_signed: true }),
+            u128: new_primitive_ty!("u128", IntTy { bits: Some(128), is_signed: false }),
+            i8: new_primitive_ty!("i8", IntTy { bits: Some(8), is_signed: true }),
+            i16: new_primitive_ty!("i16", IntTy { bits: Some(16), is_signed: true }),
+            i32: new_primitive_ty!("i32", IntTy { bits: Some(32), is_signed: true }),
+            i64: new_primitive_ty!("i64", IntTy { bits: Some(64), is_signed: true }),
+            i128: new_primitive_ty!("i128", IntTy { bits: Some(128), is_signed: true }),
             bool: new_primitive_ty!("bool", simple_ty, finalized: true),
             char: new_primitive_ty!("char", simple_ty, finalized: true),
-            f32: new_primitive_ty!("f32", FloatTy { bits: 32 }),
-            f64: new_primitive_ty!("f64", FloatTy { bits: 64 }),
-            f128: new_primitive_ty!("f128", FloatTy { bits: 128 }),
+            f32: new_primitive_ty!("f32", FloatTy { bits: Some(32) }),
+            f64: new_primitive_ty!("f64", FloatTy { bits: Some(64) }),
+            f128: new_primitive_ty!("f128", FloatTy { bits: Some(128) }),
             str_slice_ty: {
                 let str_slice =
                     ast_new!(SliceTy { elem_ty: u8.upcast(), is_mut: false }).upcast_to_type();
@@ -223,9 +228,9 @@ impl Primitives {
             err_ty: new_primitive_ty!("{error}", simple_ty, finalized: true),
             //unknown_ty: new_primitive_ty!("{unknown}", simple_ty, finalized: false),
             rec_ret_ty: new_primitive_ty!("{recursive return ty}", simple_ty, finalized: false),
-            int_lit: new_primitive_ty!("{integer literal}", simple_ty, finalized: false),
-            sint_lit: new_primitive_ty!("{signed integer literal}", simple_ty, finalized: false),
-            float_lit: new_primitive_ty!("{float literal}", simple_ty, finalized: false),
+            int_lit: new_primitive_ty!(INT_LIT_TYPE_NAME, raw IntTy { bits: None, is_signed: false }),
+            sint_lit: new_primitive_ty!(SINT_LIT_TYPE_NAME, raw IntTy { bits: None, is_signed: true }),
+            float_lit: new_primitive_ty!(FLOAT_LIT_TYPE_NAME, raw FloatTy { bits: None }),
             method_stub: new_primitive_ty!("{method stub}", simple_ty, finalized: false),
             enum_variant,
             module: new_primitive_ty!("{module}", simple_ty, finalized: true),

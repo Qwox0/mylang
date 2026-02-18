@@ -128,8 +128,8 @@ fn use_correct_return_type() {
 #[ignore = "not implemented"]
 fn specialize_return_type_to_optional() {
     let code = "test :: -> { // return type: `unknown`
-        if false return 1; // return type: `{int_literal}`
-        None // return type: `?{int_literal}`
+        if false return 1; // return type: `int_lit`
+        None // return type: `?int_lit`
     };"; // return type: `?i64`
     test(code).ok(5.0f64);
 

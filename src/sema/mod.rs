@@ -883,7 +883,7 @@ impl Sema {
                         expr_ty = *analyze!(*operand, ty_hint);
                         if expr_ty == p.bool {
                             simple_unary_op!(!BoolVal)
-                        } else if expr_ty.kind == AstKind::IntTy || expr_ty.is_int_lit() {
+                        } else if expr_ty.kind == AstKind::IntTy {
                             simple_unary_op!(!IntVal)
                         } else {
                             return err(expr_ty);
@@ -893,10 +893,10 @@ impl Sema {
                         expr_ty = *analyze!(*operand, ty_hint);
                         if expr_ty.is_sint() {
                             simple_unary_op!(-IntVal)
-                        } else if expr_ty.is_int_lit() {
+                        } else if expr_ty == p.int_lit.upcast_to_type() {
                             simple_unary_op!(-IntVal);
-                            p.sint_lit
-                        } else if expr_ty.kind == AstKind::FloatTy || expr_ty == p.float_lit {
+                            p.sint_lit.upcast_to_type()
+                        } else if expr_ty.kind == AstKind::FloatTy {
                             simple_unary_op!(-FloatVal)
                         } else {
                             return err(expr_ty);
@@ -959,12 +959,12 @@ impl Sema {
 
                     macro_rules! calc_num_binop {
                         ($op:tt $(, allow $float_val:ident)?) => {
-                            if common_ty.kind == AstKind::IntTy || common_ty.is_int_lit() {
+                            if common_ty.kind == AstKind::IntTy {
                                 let val = lhs.downcast::<ast::IntVal>().val
                                     $op rhs.downcast::<ast::IntVal>().val;
                                 Some(self.alloc(ast_new!(IntVal { val, span: expr.full_span() }))?
                                     .upcast())
-                            } $( else if common_ty.kind == AstKind::FloatTy || common_ty == p.float_lit {
+                            } $( else if common_ty.kind == AstKind::FloatTy {
                                 let val = lhs.float_val() $op rhs.float_val();
                                 Some(self.alloc(ast_new!($float_val { val, span: expr.full_span() }))?
                                     .upcast())
@@ -1302,17 +1302,17 @@ impl Sema {
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let size = self.analyze_type(*type_)?.size();
-                expr.ty = Some(p.int_lit);
+                expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let size = analyze!(*val, None).size();
-                expr.ty = Some(p.int_lit);
+                expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 let align = self.analyze_type(*type_)?.alignment();
-                expr.ty = Some(p.int_lit);
+                expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast_new!(IntVal { val: align as i64 }, Span::ZERO).upcast());
             },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
@@ -1324,7 +1324,7 @@ impl Sema {
                     return error_unknown_field(*field, s_def.upcast_to_type()).into();
                 };
                 let offset = struct_offset(&s_def.fields, f_idx);
-                expr.ty = Some(p.int_lit);
+                expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast_new!(IntVal { val: offset as i64 }, Span::ZERO).upcast());
             },
             AstEnum::SimpleDirective { ret_ty, .. } => {
@@ -1334,12 +1334,14 @@ impl Sema {
             AstEnum::IntVal { val, .. } => {
                 expr.ty = Some(match ty_hint {
                     Some(t) if matches!(t.kind, AstKind::IntTy | AstKind::FloatTy) => *t,
-                    _ if val.is_negative() => p.sint_lit,
-                    _ => p.int_lit,
+                    _ if val.is_negative() => p.sint_lit.upcast_to_type(),
+                    _ => p.int_lit.upcast_to_type(),
                 });
             },
             AstEnum::FloatVal { .. } => {
-                let ty = ty_hint.filter(|t| t.kind == AstKind::FloatTy).unwrap_or(p.float_lit);
+                let ty = ty_hint
+                    .filter(|t| t.kind == AstKind::FloatTy)
+                    .unwrap_or(p.float_lit.upcast_to_type());
                 expr.ty = Some(ty);
             },
             AstEnum::BoolVal { .. } => expr.ty = Some(p.bool),
@@ -1507,7 +1509,7 @@ impl Sema {
                 tag_ty,
                 ..
             } => {
-                let mut repr_ty = Some(p.int_lit);
+                let mut repr_ty = Some(p.int_lit.upcast_to_type());
                 let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
                 let mut tag = 0;
                 *is_simple_enum = true;
@@ -1559,11 +1561,10 @@ impl Sema {
                 debug_assert_eq!(variants.len(), used_tags.len());
                 *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
 
-                let repr_ty = repr_ty.u();
-                let min_size_bits = util::variant_count_to_tag_size_bits(variants.len());
-                *tag_ty = Some(if repr_ty.is_int_lit() {
-                    let is_signed = repr_ty == p.sint_lit;
-                    let Some(int_ty) = self.int_primitive(min_size_bits, is_signed) else {
+                let repr_ty = repr_ty.u().downcast::<ast::IntTy>();
+                *tag_ty = Some(if repr_ty.bits.is_none() {
+                    let min_size_bits = util::variant_count_to_tag_size_bits(variants.len());
+                    let Some(int_ty) = self.int_primitive(min_size_bits, repr_ty.is_signed) else {
                         return cerror2!(
                             expr.span,
                             "enums which can't be represented by an `u128` are currently not \
@@ -1572,7 +1573,7 @@ impl Sema {
                     };
                     int_ty
                 } else {
-                    repr_ty.downcast::<ast::IntTy>()
+                    repr_ty
                 });
                 debug_assert_eq!(expr.ty, p.type_ty);
             },
@@ -1665,7 +1666,7 @@ impl Sema {
         };
         let bits = name[1..].parse().ok()?;
         debug_assert!(![8, 16, 32, 64, 128].contains(&bits));
-        Some(type_new!(local IntTy { bits, is_signed }))
+        Some(type_new!(local IntTy { bits: Some(bits), is_signed }))
     }
 
     /// To allow recursive (or indirectly recursive) functions and types, we need to set the
@@ -1750,11 +1751,6 @@ impl Sema {
         if is_const {
             match (op_ty.matchable2(), target_ty.matchable2()) {
                 // TODO: remove this int -> ptr cast?
-                (_, TypeMatch::PtrTy(_)) if op_ty == p().int_lit => {
-                    let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
-                    expr.set_replacement(ptr_val.upcast());
-                },
                 (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
                     let i_val = operand.downcast::<ast::IntVal>();
                     let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);

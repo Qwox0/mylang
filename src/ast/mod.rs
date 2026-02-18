@@ -574,10 +574,10 @@ ast_variants! {
     },
     IntTy {
         is_signed: bool,
-        bits: u32,
+        bits: Option<u32>,
     },
     FloatTy {
-        bits: u32,
+        bits: Option<u32>,
     },
 
     /// `*<ty>`
@@ -971,11 +971,6 @@ impl Ptr<Type> {
     pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
         debug_assert!(self.replacement.is_none());
         then!(self.kind.is_struct_kind() => self.downcast_struct_def())
-    }
-
-    pub fn is_int_lit(self) -> bool {
-        let p = primitives();
-        self == p.int_lit || self == p.sint_lit
     }
 
     pub fn is_sint(self) -> bool {

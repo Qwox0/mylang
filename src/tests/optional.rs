@@ -136,14 +136,14 @@ fn orelse_combine_types() {
 #[test]
 fn error_optional_orelse_optional() {
     test("Wrong :: struct{}; test :: -> Wrong Some(12) orelse null;")
-        .error("mismatched types: expected `{integer literal}`; got `?never`", substr!("null"))
+        .error("mismatched types: expected `{integer}`; got `?never`", substr!("null"))
         .info("Consider using `or` operator instead", substr!("orelse"))
         .error(
-            "mismatched types: expected `Wrong`; got `{integer literal}`",
+            "mismatched types: expected `Wrong`; got `{integer}`",
             substr!("Some(12) orelse null"),
         );
     /* TODO: decide if these errors are better:
-        .error("mismatched types: expected `Wrong`; got `{integer literal}`", substr!("12"))
+        .error("mismatched types: expected `Wrong`; got `{integer}`", substr!("12"))
         .error("mismatched types: expected `Wrong`; got `?never`", substr!("None"))
         .info("Consider using `or` operator instead", substr!("orelse"));
     */
@@ -168,7 +168,7 @@ fn error_optional_orelse_optional() {
 #[test]
 fn error_optional_orelse_invalid() {
     test("test :: -> Some(123) orelse \"\";")
-        .error("mismatched types: expected `{integer literal}`; got `[]u8`", substr!("\"\""));
+        .error("mismatched types: expected `{integer}`; got `[]u8`", substr!("\"\""));
 }
 
 #[test]
@@ -229,7 +229,7 @@ test :: (opt_ptr: ?*u8) -> {
 #[test]
 fn error_cannot_coerce_zeroable_to_optional() {
     test_body("if true return null; 5")
-        .error("mismatched types: expected `?never`; got `{integer literal}`", substr!("5"))
+        .error("mismatched types: expected `?never`; got `{integer}`", substr!("5"))
         // TODO: .hint("Consider explicitly wrapping the value with `Some`", |_| todo!())
     ;
 }

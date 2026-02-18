@@ -6,6 +6,7 @@ use crate::{
     context::{ctx, primitives},
     parser::lexer::Span,
     ptr::Ptr,
+    sema::primitives::{FLOAT_LIT_TYPE_NAME, INT_LIT_TYPE_NAME, SINT_LIT_TYPE_NAME},
     util::{self, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};
@@ -389,12 +390,20 @@ impl DebugAst for Ast {
 
             AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),
             AstEnum::IntTy { bits, is_signed, .. } => {
-                lines.write(if *is_signed { "i" } else { "u" });
-                lines.write(&bits.to_string());
+                if let Some(bits) = *bits {
+                    lines.write(if *is_signed { "i" } else { "u" });
+                    lines.write(&bits.to_string());
+                } else {
+                    lines.write(if *is_signed { SINT_LIT_TYPE_NAME } else { INT_LIT_TYPE_NAME });
+                }
             },
             AstEnum::FloatTy { bits, .. } => {
-                lines.write("f");
-                lines.write(&bits.to_string());
+                if let Some(bits) = *bits {
+                    lines.write("f");
+                    lines.write(&bits.to_string());
+                } else {
+                    lines.write(FLOAT_LIT_TYPE_NAME);
+                }
             },
             AstEnum::PtrTy { pointee, is_mut, .. } => {
                 lines.write(if *is_mut { "*mut " } else { "*" });

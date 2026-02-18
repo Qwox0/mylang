@@ -312,20 +312,17 @@ impl SubtypingLevel {
 ///                         bottom
 /// ```
 fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
-    let p = primitives();
-    Some(if ty == p.int_lit {
-        SubtypingLevel { level: 1, is_leaf: false }
-    } else if ty == p.sint_lit {
-        SubtypingLevel { level: 2, is_leaf: false }
-    } else if ty == p.float_lit {
-        SubtypingLevel { level: 3, is_leaf: false }
-    } else if let Some(int_ty) = ty.try_downcast::<ast::IntTy>() {
-        SubtypingLevel { level: 2 + int_ty.is_signed as u8, is_leaf: true }
-    } else if ty.kind == AstKind::FloatTy {
-        SubtypingLevel { level: 4, is_leaf: true }
-    } else {
-        return None;
-    })
+    match ty.matchable2() {
+        ast::TypeMatch::IntTy(int_ty) => Some(SubtypingLevel {
+            level: 1 + int_ty.is_signed as u8 + int_ty.bits.is_some() as u8,
+            is_leaf: int_ty.bits.is_some(),
+        }),
+        ast::TypeMatch::FloatTy(float_ty) => Some(SubtypingLevel {
+            level: 3 + float_ty.bits.is_some() as u8,
+            is_leaf: float_ty.bits.is_some(),
+        }),
+        _ => None,
+    }
 }
 
 const ZST_ALIGNMENT: usize = 1;
@@ -359,11 +356,10 @@ impl ast::Type {
     pub fn is_finalized(&self) -> bool {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { is_finalized, .. } => *is_finalized,
-            TypeEnum::IntTy { .. }
-            | TypeEnum::FloatTy { .. }
-            | TypeEnum::StructDef { .. }
-            | TypeEnum::UnionDef { .. }
-            | TypeEnum::EnumDef { .. } => true,
+            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => bits.is_some(),
+            TypeEnum::StructDef { .. } | TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => {
+                true
+            },
             TypeEnum::PtrTy { pointee: t, .. }
             | TypeEnum::SliceTy { elem_ty: t, .. }
             | TypeEnum::ArrayTy { elem_ty: t, .. }
@@ -381,14 +377,12 @@ impl ast::Type {
         debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
         match self.matchable().as_mut() {
             TypeEnum::SimpleTy { .. } => {
-                if self.is_int_lit() {
-                    *self = p.i64;
-                } else if *self == p.float_lit {
-                    *self = p.f64;
-                } else if *self == p.rec_ret_ty {
+                if *self == p.rec_ret_ty {
                     cerror!(Span::ZERO, "Cannot infer return type"); // TODO: correct span
                 }
             },
+            TypeEnum::IntTy { bits: None, .. } => *self = p.i64,
+            TypeEnum::FloatTy { bits: None, .. } => *self = p.f64,
             TypeEnum::IntTy { .. }
             | TypeEnum::FloatTy { .. }
             | TypeEnum::StructDef { .. }
@@ -427,7 +421,7 @@ impl ast::Type {
                     unreachable_debug()
                 }
             },
-            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_size(*bits),
+            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_size(bits.u()),
             TypeEnum::PtrTy { .. } | TypeEnum::Fn { .. } => PTR_SIZE,
             TypeEnum::SliceTy { .. } => 2 * PTR_SIZE,
             TypeEnum::ArrayTy { len, elem_ty, .. } => {
@@ -437,7 +431,7 @@ impl ast::Type {
             TypeEnum::StructDef { fields, .. } => struct_size(fields.iter_types()),
             TypeEnum::UnionDef { fields, .. } => union_size(*fields),
             TypeEnum::EnumDef { variants, tag_ty, .. } => aligned_add(
-                int_size(tag_ty.u().bits),
+                int_size(tag_ty.u().bits.u()),
                 Layout::new(union_size(*variants), struct_alignment(variants)),
             ),
             TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
@@ -462,7 +456,9 @@ impl ast::Type {
                     todo!()
                 }
             },
-            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_alignment(*bits),
+            TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => {
+                int_alignment(bits.u())
+            },
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => 8,
             TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().alignment(),
             //TypeEnum::FunctionTy { .. } => todo!(),
@@ -489,16 +485,7 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
-                if self == p.void_ty
-                    || self == p.never
-                    || self == p.int_lit
-                    || self == p.sint_lit
-                    || self == p.float_lit
-                {
-                    false
-                } else {
-                    todo!("{:?}", self)
-                }
+                if self == p.void_ty || self == p.never { false } else { todo!("{:?}", self) }
             },
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => false,
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => true,
@@ -518,16 +505,7 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
-                if self == p.void_ty
-                    || self == p.never
-                    || self == p.int_lit
-                    || self == p.sint_lit
-                    || self == p.float_lit
-                {
-                    None
-                } else {
-                    todo!("{:?}", self)
-                }
+                if self == p.void_ty || self == p.never { None } else { todo!("{:?}", self) }
             },
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => None,
             TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => Some(self),
@@ -658,10 +636,14 @@ mod tests {
     fn number_subtyping() {
         let _ctx = CompilationContext::empty(BuildArgs::default());
         let p = primitives();
-        assert_eq!(common_type(p.int_lit, p.int_lit), p.int_lit);
-        for supertype in [p.u32, p.sint_lit, p.i32, p.float_lit, p.f32] {
-            assert_eq!(common_type(p.int_lit, supertype), supertype);
-            assert_eq!(common_type(supertype, p.int_lit), supertype);
+        let int_lit = p.int_lit.upcast_to_type();
+        let sint_lit = p.sint_lit.upcast_to_type();
+        let float_lit = p.float_lit.upcast_to_type();
+
+        assert_eq!(common_type(int_lit, int_lit), int_lit);
+        for supertype in [p.u32, sint_lit, p.i32, float_lit, p.f32] {
+            assert_eq!(common_type(int_lit, supertype), supertype);
+            assert_eq!(common_type(supertype, int_lit), supertype);
             assert_eq!(common_type(supertype, supertype), supertype);
         }
     }

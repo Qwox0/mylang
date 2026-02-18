@@ -943,14 +943,14 @@ impl<'ctx> Codegen<'ctx> {
             //ConstValEnum::IntVal { val, .. } => match ty.finalize().matchable().as_ref() {
             ConstValEnum::IntVal { val, .. } => match ty.matchable().as_ref() {
                 TypeEnum::IntTy { bits, is_signed, .. } => {
-                    ret(self.int_type(*bits).const_int(*val as u64, *is_signed))
+                    ret(self.int_type(bits.u()).const_int(*val as u64, *is_signed))
                 },
                 TypeEnum::FloatTy { bits, .. } => {
                     let float = *val as f64;
                     if float as i64 != *val {
                         panic!("literal precision loss")
                     }
-                    ret(self.float_type(*bits).const_float(float))
+                    ret(self.float_type(bits.u()).const_float(float))
                 },
                 TypeEnum::EnumDef { .. } => {
                     let int_val = cv.downcast::<ast::IntVal>();
@@ -965,7 +965,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             ConstValEnum::FloatVal { val, .. } => {
                 let float_ty = ty.downcast::<ast::FloatTy>();
-                ret(self.float_type(float_ty.bits).const_float(*val))
+                ret(self.float_type(float_ty.bits.u()).const_float(*val))
             },
             ConstValEnum::BoolVal { val, .. } => {
                 debug_assert!(ty == p.bool);
@@ -1150,7 +1150,7 @@ impl<'ctx> Codegen<'ctx> {
                 CFfiType::Simple(simple_ty) => {
                     let val = if is_vararg
                         && let Some(f_ty) = param_ty.try_downcast::<ast::FloatTy>()
-                        && f_ty.bits < 64
+                        && f_ty.bits.u() < 64
                     {
                         // see <https://stackoverflow.com/a/53712850>
                         let small_float = self
@@ -2142,7 +2142,7 @@ impl<'ctx> Codegen<'ctx> {
             (BasicSymbol::Val(val), CFfiType::SmallSimpleEnum { small_int, ffi_int }) => {
                 let enum_ty = ret_ty.downcast::<ast::EnumDef>();
                 debug_assert!(enum_ty.is_simple_enum);
-                debug_assert!(enum_ty.tag_ty.u().bits < DEFAULT_C_ENUM_BITS);
+                debug_assert!(enum_ty.tag_ty.u().bits.u() < DEFAULT_C_ENUM_BITS);
                 let val = val.int_val();
                 debug_assert_eq!(val.get_type(), small_int);
                 Some(self.builder.build_int_z_extend(val, ffi_int, "ret")?.as_basic_value_enum())
@@ -2617,7 +2617,7 @@ impl<'ctx> Codegen<'ctx> {
 
     #[inline]
     fn enum_tag_type(&self, enum_def: Ptr<ast::EnumDef>) -> EnumTagType<'ctx> {
-        let tag_bits = enum_def.tag_ty.u().bits;
+        let tag_bits = enum_def.tag_ty.u().bits.u();
         debug_assert!(
             tag_bits >= util::variant_count_to_tag_size_bytes(enum_def.variants.len()) * 8
         );
@@ -2680,8 +2680,8 @@ impl<'ctx> Codegen<'ctx> {
 
         let llvm_ty = match ty.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => unreachable_debug(),
-            TypeEnum::IntTy { bits, .. } => CodegenType::new(self.int_type(*bits)),
-            TypeEnum::FloatTy { bits, .. } => CodegenType::new(self.float_type(*bits)),
+            TypeEnum::IntTy { bits, .. } => CodegenType::new(self.int_type(bits.u())),
+            TypeEnum::FloatTy { bits, .. } => CodegenType::new(self.float_type(bits.u())),
             TypeEnum::PtrTy { .. } => CodegenType::new(self.ptr_type()),
             TypeEnum::SliceTy { .. } => self.llvm_type(p.untyped_slice_struct_def.upcast_to_type()),
             TypeEnum::ArrayTy { len, elem_ty, .. } => CodegenType::new(
@@ -2742,7 +2742,7 @@ impl<'ctx> Codegen<'ctx> {
             let Some(tag_ty) = self.enum_tag_type(enum_def).sized() else {
                 return CFfiType::Zst;
             };
-            return if enum_def.tag_ty.u().bits < DEFAULT_C_ENUM_BITS {
+            return if enum_def.tag_ty.u().bits.u() < DEFAULT_C_ENUM_BITS {
                 CFfiType::SmallSimpleEnum {
                     small_int: tag_ty,
                     ffi_int: self.int_type(DEFAULT_C_ENUM_BITS),
@@ -2857,13 +2857,13 @@ impl<'ctx> Codegen<'ctx> {
                         unreachable_debug()
                     }
                 },
-                TypeEnum::IntTy { bits, .. } => handle_normal_field!(bits),
-                TypeEnum::FloatTy { bits: 64, .. } => {
+                TypeEnum::IntTy { bits, .. } => handle_normal_field!(bits.u()),
+                TypeEnum::FloatTy { bits: Some(64), .. } => {
                     debug_assert_eq!(prev_state, PrevState::None);
                     debug_assert_eq!(prev_bytes, 0);
                     add_field!(self.context.f64_type());
                 },
-                TypeEnum::FloatTy { bits: 32, .. } => {
+                TypeEnum::FloatTy { bits: Some(32), .. } => {
                     prev_bytes += 4;
                     prev_state = match prev_state {
                         PrevState::None => PrevState::Float,
