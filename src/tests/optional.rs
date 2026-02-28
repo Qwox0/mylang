@@ -176,6 +176,27 @@ fn error_optional_orelse_invalid() {
 }
 
 #[test]
+fn error_orelse_invalid_lhs() {
+    let code = "
+f :: (i: i32) -> i + 1;
+get_opt_i64 :: -> ?i64 Some(10);
+test :: -> get_opt_i64() orelse 20 |> f();
+//                              ^^ no second error here!
+";
+    test(code)
+        .error("mismatched types: expected `i32`; got `i64`", substr!("get_opt_i64() orelse 20"));
+
+    let code = "
+f :: (i: i32) -> i + 1;
+test :: -> Some(\"abc\") orelse 20 |> f();
+";
+    test(code)
+        .error("mismatched types: expected `[]u8`; got `{integer}`", substr!("20"))
+        .error("mismatched types: expected `i32`; got `[]u8`", substr!("Some(\"abc\") orelse 20"));
+    // 2 errors are fine here
+}
+
+#[test]
 #[ignore = "not implemented"]
 fn optional_or_optional() {
     for lhs in [None, Some(123)] {

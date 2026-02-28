@@ -1206,6 +1206,15 @@ impl Type {
         }
     }
 
+    pub fn get_associated_consts(&self) -> Option<&[Ptr<Decl>]> {
+        match self.matchable().as_ref() {
+            TypeEnum::StructDef { consts, .. }
+            | TypeEnum::UnionDef { consts, .. }
+            | TypeEnum::EnumDef { consts, .. } => Some(consts),
+            _ => None,
+        }
+    }
+
     /// Counts the number of nested optional layers.
     /// `???int` => 3; `int` => 0
     pub fn count_optional_nesting(self: Ptr<Type>) -> usize {

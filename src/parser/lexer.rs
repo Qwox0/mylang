@@ -453,7 +453,7 @@ impl Span {
     /// ```
     /// this function is commutative
     pub fn join(self, other: Span) -> Span {
-        debug_assert_eq!(self.file, other.file);
+        debug_assert!(self.file == other.file);
         Span::new(self.start.min(other.start)..self.end.max(other.end), self.file)
     }
 

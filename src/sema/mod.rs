@@ -89,6 +89,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
 
     let mut sema = Sema::new(cctx);
     let mut remaining_count = usize::MAX;
+    let mut no_progress_count = 0;
     while remaining_count > 0 {
         let old_remaining_count = remaining_count;
         remaining_count = 0;
@@ -116,6 +117,10 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
         }
         // println!("finished statements: {:?}", finished);
         if remaining_count == old_remaining_count {
+            no_progress_count += 1;
+            if no_progress_count <= 3 {
+                continue;
+            }
             cerror!(Span::ZERO, "cycle(s) detected:");
             for file in cctx.files().iter().copied() {
                 for s in stmts[file.stmt_range.u()].iter().copied() {
@@ -128,6 +133,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             }
             break;
         }
+        no_progress_count = 0;
     }
 }
 
@@ -614,21 +620,25 @@ impl Sema {
                     debug_assert!(expr.ty.is_some());
                     return Ok(());
                 }
-                // `.<ident>` must be an enum
-                let Some(enum_ty) = ty_hint.try_downcast::<ast::EnumDef>() else {
-                    if let Some(ty_hint) = *ty_hint
-                        && ty_hint.propagates_out()
-                    {
-                        expr.ty = Some(ty_hint);
-                        return Ok(());
-                    }
-                    return cerror2!(expr.full_span(), "Cannot infer enum type");
-                };
-                let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
-                    return error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
-                };
-                *lhs = Some(enum_ty.upcast());
-                expr.ty = Some(self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?)
+                expr.ty = Some(if let Some(enum_ty) = ty_hint.try_downcast::<ast::EnumDef>() {
+                    let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
+                        return error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
+                    };
+                    *lhs = Some(enum_ty.upcast());
+                    self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?
+                } else if let Some(t) = ty_hint
+                    && let Some(consts) = t.get_associated_consts()
+                    && let Some((_, const_mem)) = consts.find_field(rhs.sym)
+                {
+                    let ty = self.get_symbol_var_ty(const_mem)?;
+                    debug_assert!(const_mem.is_const);
+                    expr.set_replacement(const_mem.const_val());
+                    ty
+                } else {
+                    ty_hint
+                        .filter(|t| t.propagates_out())
+                        .ok_or_else(|| cerror!(expr.full_span(), "Cannot infer enum type"))?
+                });
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
                 let idx_ty = self.analyze(*idx, &None, is_const)?.finalize();
@@ -718,9 +728,7 @@ impl Sema {
             },
             AstEnum::Call { func, args, .. } => {
                 let call = expr.downcast::<ast::Call>();
-                let func_ty_hint =
-                    ty_hint.filter(|t| t.kind == AstKind::EnumDef && func.kind == AstKind::Dot); // I hope this doesn't conflict with `method_stub`
-                let fn_ty = *analyze!(*func, func_ty_hint);
+                let fn_ty = *analyze!(*func, ty_hint);
                 if let Some(fn_ty) = fn_ty.try_downcast::<ast::Fn>() {
                     if is_const {
                         return error_const_call(call).into();
@@ -1042,8 +1050,12 @@ impl Sema {
                 };
                 let lhs_inner = lhs_opt_ty.inner_ty.downcast_type();
 
-                let rhs_hint = ty_hint.unwrap_or(lhs_inner); // lhs might be `null` (ty = `?never`)
-                let rhs_ty = *self.analyze(*rhs, &Some(rhs_hint), is_const)?;
+                debug_assert_eq!(
+                    p.null_lit.var_ty.unwrap().downcast::<ast::OptionTy>().inner_ty.downcast_type(),
+                    p.never
+                );
+                let rhs_hint = if lhs_inner != p.never { &Some(lhs_inner) } else { ty_hint };
+                let rhs_ty = *self.analyze(*rhs, rhs_hint, is_const)?;
                 let common_ty = common_type(lhs_inner, rhs_ty).unwrap_or_else(|| {
                     error_mismatched_types(rhs.full_span(), lhs_inner, rhs_ty);
                     if let Some(rhs_optional_depth) = rhs.ty.map(ast::Type::count_optional_nesting)

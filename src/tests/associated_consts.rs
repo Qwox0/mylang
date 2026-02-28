@@ -202,3 +202,31 @@ fn mangle_function_in_anon_struct() {
         }.f()";
     test_body(code).ok(3i64);
 }
+
+#[test]
+fn infer_const_namespace() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+
+    MIN :: MyStruct.(-10);
+    MAX :: MyStruct.(10);
+}
+get_val :: (s: MyStruct) -> s.val;
+test :: -> get_val(.MIN);
+";
+    test(code).ok(-10_i32);
+}
+
+#[test]
+fn infer_function_namespace() {
+    let code = "
+MyStruct :: struct {
+    val: i32;
+    new :: (x: i32) -> MyStruct.(x);
+}
+take_struct :: (s: MyStruct) -> s.val;
+test :: -> take_struct(.new(-10));
+";
+    test(code).ok(-10_i32);
+}

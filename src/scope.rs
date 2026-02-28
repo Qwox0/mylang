@@ -316,6 +316,7 @@ fn verify_no_duplicates(
     }
 }
 
+#[track_caller]
 fn error_duplicate_in_unordered_scope(
     scope_kind: ScopeKind,
     decl: Ptr<ast::Decl>,
