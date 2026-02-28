@@ -1,3 +1,5 @@
+std :: #import "std";
+
 Allocator :: struct {
     impl: *ImplFunction,
     data: ?*mut any,
@@ -5,16 +7,32 @@ Allocator :: struct {
     Mode :: enum {
         Alloc,
         Free,
+        FreeAll,
+        Resize,
     }
 
     // TODO: benchmark vs vtable
-    ImplFunction :: (data: ?*mut any, mode: Mode, size: usize, alignment: usize, old_ptr: ?*mut u8) -> ?*mut u8;
+    ImplFunction :: (data: ?*mut any, mode: Mode, size: usize, alignment: usize, old_ptr: ?*mut u8) -> ?[]mut u8;
 
     alloc :: (self: Allocator, size: usize, alignment: usize) ->
-        self.impl.*(self.data, .Alloc, size, alignment, null);
+        (self.alloc_at_least(size, alignment) orelse return null).ptr;
+
+    /// Some allocators (like `std.mem.page_allocator`) might return a larger allocation than requested.
+    alloc_at_least :: (self: Allocator, min_size: usize, alignment: usize) -> {
+        std.assert(std.num.is_power_of_2(alignment), "Allocation alignment must be a power of two.");
+        return self.impl.*(self.data, .Alloc, min_size, alignment, null);
+    }
 
     free :: (self: Allocator, ptr: ?*mut u8) -> {
         self.impl.*(self.data, .Free, 0, 0, ptr);
+    }
+
+    free_all :: (self: Allocator) -> {
+        self.impl.*(self.data, .FreeAll, 0, 0, null);
+    }
+
+    resize :: (self: Allocator, ptr: *mut u8, new_size: usize, alignment: usize) -> {
+        return self.impl.*(self.data, .Resize, new_size, alignment, ptr);
     }
 }
 

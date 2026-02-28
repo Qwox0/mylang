@@ -1,6 +1,21 @@
-pub ptr :: #import "ptr.mylang";
+std :: #import "std";
+libc :: #import "libc";
+
+pub MMap :: #import "mmap.mylang".MMap;
 
 pub Allocator :: #import "alloc.mylang".Allocator;
 
-pub CAllocator :: #import "c_allocator.mylang".CAllocator;
+pub page_allocator :: #import "page_allocator.mylang".page_allocator;
+pub c_allocator :: #import "c_allocator.mylang".c_allocator;
+pub ArenaAllocator :: #import "arena_allocator.mylang".ArenaAllocator;
 pub FixedArenaAllocator :: #import "fixed_arena_allocator.mylang".FixedArenaAllocator;
+pub VirtualArenaAllocator :: #import "virtual_arena_allocator.mylang".VirtualArenaAllocator;
+
+pub pagesize :: () -> {
+    mut static pagesize: usize = 0;
+    if pagesize == 0 {
+        // TODO: this is not threadsafe
+        pagesize = libc.sysconf(libc._SC_PAGESIZE).as(usize);
+    }
+    pagesize
+}

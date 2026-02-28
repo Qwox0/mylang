@@ -1,0 +1,109 @@
+libc :: #import "libc";
+std :: #import "std";
+Allocator :: std.mem.Allocator;
+MMap :: std.mem.MMap;
+
+VirtualArenaAllocator :: struct {
+    reserve_end: *u8,
+    block_size: usize,
+    commit_pos: *u8,
+    pos: *mut u8,
+
+    /// Both `reserve_size` and `block_size` are rounded up to the next multiple of `std.mem.pagesize()`.
+    new :: (reserve_size: usize, block_size: usize) -> {
+        if block_size > reserve_size then std.panic("cannot commit more virtual memory than is reserved");
+        if block_size == 0 then std.panic("block_size must be non-zero");
+
+        pagesize := std.mem.pagesize();
+
+        reserve_size := std.num.align_up_pow2(reserve_size, pagesize);
+        block_size := std.num.align_up_pow2(block_size, pagesize);
+
+        mapping := reserve(reserve_size) orelse std.panic("reserving virtual memory failed");
+        if not commit(.(mapping.addr, block_size)) then std.panic("commiting memory failed");
+
+        addr := mapping.addr.as(*mut u8);
+        addr.as(*mut VirtualArenaAllocator).{
+            reserve_end = std.ptr.add_bytes(addr, reserve_size),
+            block_size,
+            commit_pos = std.ptr.add_bytes(addr, block_size),
+            pos = std.ptr.add_bytes_mut(addr, #sizeof(VirtualArenaAllocator)),
+        }
+    }
+
+    destroy :: (self: *mut VirtualArenaAllocator) -> {
+        ok := MMap.(self, self.reserve_size()).unmap();
+        if not ok then std.panic("VirtualArenaAllocator.destroy failed");
+    }
+
+    reserve_size :: (self: *VirtualArenaAllocator) -> std.ptr.difference(self.*.reserve_end, self);
+
+    allocator :: (self: *mut VirtualArenaAllocator) -> Allocator.{ impl = &impl, data = self };
+
+    impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
+        std.assert(self != null);
+        self := self.as(*mut VirtualArenaAllocator);
+        if mode == .Alloc {
+            return self.alloc(size, alignment);
+        } else if mode == .Free {
+            // TODO: free if last allocation?
+            return null; // unsupported
+        } else if mode == .FreeAll {
+            self.reset();
+            return null;
+        }
+        std.panic("unreachable"); // TODO: implement exhaustive switch
+    }
+
+    alloc :: (self: *mut VirtualArenaAllocator, size: usize, alignment: usize) -> {
+        aligned_pos := std.ptr.align_forward(self.*.pos, alignment) orelse return null; // overflow
+
+        next_pos := std.ptr.add_bytes_mut(aligned_pos, size);
+
+        if next_pos > self.*.reserve_end return null; // oom
+
+        if next_pos > self.*.commit_pos {
+            // `block_size` is a multiple of `pagesize()` but not necessarily a power of 2.
+            next_commit_pos := next_pos.as(usize) |> std.num.align_up(self.*.block_size).as(*u8);
+
+            if not commit(.(self.*.commit_pos, std.ptr.difference(next_commit_pos, self.*.commit_pos)))
+                return null; // TODO: error "commit failed"
+
+            self.*.commit_pos = next_commit_pos;
+        }
+
+        self.*.pos = next_pos;
+
+        []mut u8.{ ptr=aligned_pos, len=size }
+    }
+
+    reset :: (self: *mut VirtualArenaAllocator, do_decommit := true) -> {
+        self.*.pos = (self.as(usize) + #sizeof(VirtualArenaAllocator)).as(*mut u8);
+
+        if not do_decommit return;
+        commit_size := std.ptr.difference(self.*.commit_pos, self);
+        if commit_size == self.*.block_size return;
+        std.assert(commit_size > self.*.block_size);
+
+        extra_mapping := MMap.(
+            (self.as(usize) + self.*.block_size).as(?*any),
+            commit_size - self.*.block_size
+        );
+
+        if not decommit(extra_mapping) std.panic("decommit failed");
+        self.*.commit_pos = (self.as(usize) + self.*.block_size).as(*u8);
+    }
+
+    /*
+    Checkpoint :: struct { pos: *mut u8 };
+    checkpoint :: (self: *mut VirtualArenaAllocator) -> Checkpoint.(self.*.pos);
+    reset_to :: (self: *mut VirtualArenaAllocator, checkpoint: Checkpoint) -> {
+        if self.*.pos.as(usize) <= checkpoint.pos.as(usize) return;
+        self.*.pos = checkpoint.pos;
+    }
+    */
+}
+
+reserve :: (size: usize) -> MMap.map_mem(null, size, .NONE, 0);
+commit :: (mapping: MMap) -> mapping.protect(.READ_WRITE);
+decommit :: (mapping: MMap) -> mapping.protect(.NONE) and mapping.advise(.DONTNEED);

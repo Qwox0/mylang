@@ -9,6 +9,7 @@ pub c_char :: u8;
 pub c_int :: i32;
 pub c_long :: i64;
 pub c_size_t :: usize;
+pub c_off_t :: i64;
 pub c_off64_t :: i64;
 pub c_float :: f32;
 pub c_double :: f64;
@@ -26,6 +27,8 @@ pub c_double :: f64;
 
 // ===== <errno.h> =====
 
+__errno_location : -> *i32 : #extern;
+get_errno :: -> __errno_location().*;
 
 // ===== <fenv.h> =====
 
@@ -151,6 +154,8 @@ strlen : (str: *c_char) -> c_size_t : #extern;
 strcmp : (s1: *c_char, s2: *c_char) -> c_int : #extern;
 strncmp : (s1: *c_char, s2: *c_char, len: c_size_t) -> c_int : #extern;
 
+strerror : (errnum: c_int) -> *c_char : #extern;
+
 // ===== <tgmath.h> =====
 
 
@@ -168,3 +173,69 @@ strncmp : (s1: *c_char, s2: *c_char, len: c_size_t) -> c_int : #extern;
 
 // ===== <wctype.h> =====
 
+// ===== <unistd.h> =====
+
+sleep : (__seconds: u32) -> u32 : #extern;
+
+sysconf : (name: c_int) -> c_long : #extern;
+_SC_PAGESIZE :: 30;
+
+// ===== <sys/mman.h> =====
+
+/// return value `null` represents a valid address.
+mmap     : (addr: ?*any, len: c_size_t, prot: c_int, flags: c_int, fd: c_int, offset: c_off_t) -> ?*any : #extern;
+munmap   : (addr: ?*any, len: c_size_t) -> c_int : #extern;
+mprotect : (addr: ?*any, len: c_size_t, prot: c_int) -> c_int : #extern;
+msync    : (addr: ?*any, len: c_size_t, flags: c_int) -> c_int : #extern;
+madvise  : (addr: ?*any, len: c_size_t, advice: c_int) -> c_int : #extern;
+
+PROT_READ  :: 0x1;
+PROT_WRITE :: 0x2;
+PROT_EXEC  :: 0x4;
+PROT_NONE  :: 0x0;
+PROT_GROWSDOWN :: 0x01000000;
+PROT_GROWSUP   :: 0x02000000;
+
+MAP_FAILED :: (-1).as(?*any);
+
+/// Compatibility flag. Ignored.
+MAP_FILE            :: 0;
+
+MAP_SHARED          :: 0x1;
+MAP_PRIVATE         :: 0x2;
+MAP_SHARED_VALIDATE :: 0x3;
+
+/// Zero memory under memory pressure
+MAP_DROPPABLE       :: 0x8;
+MAP_FIXED           :: 0x10;
+MAP_ANONYMOUS       :: 0x20;
+MAP_ANON            :: MAP_ANONYMOUS;
+MAP_32BIT           :: 0x40;
+MAP_ABOVE4G         :: 0x80;
+MAP_GROWSDOWN       :: 0x100;
+MAP_DENYWRITE       :: 0x800;
+MAP_EXECUTABLE      :: 0x1000;
+MAP_LOCKED          :: 0x2000;
+MAP_NORESERVE       :: 0x4000;
+MAP_POPULATE        :: 0x8000;
+MAP_NONBLOCK        :: 0x10000;
+MAP_STACK           :: 0x20000;
+MAP_HUGETLB         :: 0x40000;
+MAP_SYNC            :: 0x80000;
+MAP_FIXED_NOREPLACE :: 0x100000;
+MAP_UNINITIALIZED   :: 0x4000000;
+MAP_HUGE_SHIFT      :: 26;
+MAP_HUGE_MASK       :: 0x3f;
+MAP_HUGE_16KB       :: 14 << MAP_HUGE_SHIFT;
+MAP_HUGE_64KB       :: 16 << MAP_HUGE_SHIFT;
+MAP_HUGE_512KB      :: 19 << MAP_HUGE_SHIFT;
+MAP_HUGE_1MB        :: 20 << MAP_HUGE_SHIFT;
+MAP_HUGE_2MB        :: 21 << MAP_HUGE_SHIFT;
+MAP_HUGE_8MB        :: 23 << MAP_HUGE_SHIFT;
+MAP_HUGE_16MB       :: 24 << MAP_HUGE_SHIFT;
+MAP_HUGE_32MB       :: 25 << MAP_HUGE_SHIFT;
+MAP_HUGE_256MB      :: 28 << MAP_HUGE_SHIFT;
+MAP_HUGE_512MB      :: 29 << MAP_HUGE_SHIFT;
+MAP_HUGE_1GB        :: 30 << MAP_HUGE_SHIFT;
+MAP_HUGE_2GB        :: 31 << MAP_HUGE_SHIFT;
+MAP_HUGE_16GB       :: 34 << MAP_HUGE_SHIFT;

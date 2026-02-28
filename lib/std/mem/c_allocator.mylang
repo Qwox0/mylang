@@ -7,17 +7,19 @@ Allocator :: std.mem.Allocator;
 /// ```
 MAX_ALIGN :: 16;
 
-CAllocator :: struct {
-    allocator :: Allocator.{ impl = &impl, data = null };
+c_allocator :: Allocator.{ impl = &c_allocator_impl, data = null };
 
-    impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
-        if mode == .Alloc {
-            std.assert(alignment <= MAX_ALIGN);
-            return xx libc.malloc(size);
-        } else if mode == .Free {
-            libc.free(old_ptr);
-            return null;
-        }
-        std.panic("unreachable"); // TODO: implement exhaustive switch
+c_allocator_impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
+    if mode == .Alloc {
+        std.assert(alignment <= MAX_ALIGN, "malloc cannot guarantee needed alignment");
+        ptr := libc.malloc(size);
+        return []mut u8.{ ptr=xx ptr, len=size }
+    } else if mode == .Free {
+        libc.free(old_ptr);
+        return null;
+    } else if mode == .FreeAll {
+        std.panic("unsupported");
+        return null;
     }
+    std.panic("unreachable"); // TODO: implement exhaustive switch
 }

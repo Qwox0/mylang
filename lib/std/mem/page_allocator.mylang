@@ -1,0 +1,23 @@
+libc :: #import "libc";
+std :: #import "std";
+Allocator :: std.mem.Allocator;
+MMap :: std.mem.MMap;
+
+page_allocator :: Allocator.{ impl=&page_allocator_impl, data=null };
+
+page_allocator_impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
+    if mode == .Alloc {
+        std.assert(alignment <= std.mem.pagesize());
+        size := std.num.try_align_up_pow2(size, std.mem.pagesize()) orelse return null; // Error: overflow
+        return MMap.map_mem(null, size, .READ_WRITE, 0) orelse { return null }
+            |>.as_slice();
+    } else if mode == .Free {
+        ok := MMap.(old_ptr, size).unmap();
+        // TODO: if !ok return error
+        return null; // unsupported
+    } else if mode == .FreeAll {
+        std.panic("unsupported");
+        return null;
+    }
+    std.panic("unreachable"); // TODO: implement exhaustive switch
+}

@@ -1,11 +1,39 @@
+std :: #import "std";
+
 clz : (u32, is_zero_poison: bool) -> u32 : #intrinsic "llvm.ctlz.i32";
 
 ceil_pow_of_2 :: (mut x: u32) -> if x <= 1 then 1 else 1 << (32 - clz(x - 1, true));
 
-is_power_of_two :: (x: uint) -> x != 0 && (x & (x - 1)) == 0;
-is_power_of_two_u32 :: (x: u32) -> is_power_of_two(x.as(uint)); // TODO: implement generics
+is_power_of_2 :: (x: uint) -> x != 0 && (x & (x - 1)) == 0;
+is_power_of_2_u32 :: (x: u32) -> is_power_of_2(x.as(uint)); // TODO: implement generics
 
 max :: (a: uint, b: uint) -> if a > b then a else b;
 max_u32 :: (a: u32, b: u32) -> if a > b then a else b;
 
 min :: (a: uint, b: uint) -> if a < b then a else b;
+
+try_align_up_pow2 :: (x: uint, pow2: uint) -> {
+    std.assert(std.num.is_power_of_2(pow2));
+    a := x + (pow2 - 1);
+    if a < x then return null;
+    Some(a & !(pow2 - 1))
+}
+
+align_up_pow2 :: (x: uint, pow2: uint) ->
+    try_align_up_pow2(x, pow2) orelse std.panic("align_up_pow2 overflowed!");
+
+align_down_pow2 :: (x: uint, pow2: uint) -> {
+    std.assert(std.num.is_power_of_2(pow2));
+    x & !(pow2 - 1)
+}
+
+try_align_up :: (x: uint, alignment: uint) -> {
+    std.assert(alignment != 0, "alignment must be non-zero");
+    a := x + (alignment - 1);
+    if a < x then return null;
+    Some(a - (a % alignment))
+}
+
+align_up :: (x: uint, alignment: uint) ->
+    try_align_up(x, alignment) orelse std.panic("align_up overflowed!");
+

@@ -1,0 +1,137 @@
+std :: #import "std";
+libc :: #import "libc";
+
+/// A memory mapping
+MMap :: struct {
+    /// `null` represents a valid address.
+    addr: ?*any,
+    len: usize,
+    // TODO: #assert(#sizeof(?MMap) == #sizeof(MMap))
+
+    /// TODO: bitset
+    Prot :: struct {
+        READ  := false; // 0x1
+        WRITE := false; // 0x2
+        EXEC  := false; // 0x4
+
+        NONE :: Prot.{};
+        /// TODO: somehow allow `.READ | .WRITE` syntax
+        READ_WRITE :: Prot.{ READ=true, WRITE=true };
+
+        to_c_int :: (self: Prot) -> {
+            mut res : libc.c_int = libc.PROT_NONE;
+            if self.READ  res |= libc.PROT_READ;
+            if self.WRITE  res |= libc.PROT_WRITE;
+            if self.EXEC  res |= libc.PROT_EXEC;
+            return res;
+        }
+    }
+
+    /// Type of mapping
+    Type :: enum {
+        SHARED  = libc.MAP_SHARED;
+        PRIVATE = libc.MAP_PRIVATE;
+
+        /// linux extension
+        SHARED_VALIDATE = libc.MAP_SHARED_VALIDATE;
+    }
+
+    // Flags (TODO: bitset)
+    /// Zero memory under memory pressure
+    DROPPABLE       :: libc.MAP_DROPPABLE;
+    FIXED           :: libc.MAP_FIXED;
+    ANONYMOUS       :: libc.MAP_ANONYMOUS;
+    ANON            :: libc.MAP_ANON;
+    // TODO: raw ident
+    _32BIT          :: libc.MAP_32BIT;
+    ABOVE4G         :: libc.MAP_ABOVE4G;
+    GROWSDOWN       :: libc.MAP_GROWSDOWN;
+    DENYWRITE       :: libc.MAP_DENYWRITE;
+    EXECUTABLE      :: libc.MAP_EXECUTABLE;
+    LOCKED          :: libc.MAP_LOCKED;
+    NORESERVE       :: libc.MAP_NORESERVE;
+    POPULATE        :: libc.MAP_POPULATE;
+    NONBLOCK        :: libc.MAP_NONBLOCK;
+    STACK           :: libc.MAP_STACK;
+    HUGETLB         :: libc.MAP_HUGETLB;
+    SYNC            :: libc.MAP_SYNC;
+    FIXED_NOREPLACE :: libc.MAP_FIXED_NOREPLACE;
+    UNINITIALIZED   :: libc.MAP_UNINITIALIZED;
+    HUGE_16KB       :: libc.MAP_HUGE_16KB;
+    HUGE_64KB       :: libc.MAP_HUGE_64KB;
+    HUGE_512KB      :: libc.MAP_HUGE_512KB;
+    HUGE_1MB        :: libc.MAP_HUGE_1MB;
+    HUGE_2MB        :: libc.MAP_HUGE_2MB;
+    HUGE_8MB        :: libc.MAP_HUGE_8MB;
+    HUGE_16MB       :: libc.MAP_HUGE_16MB;
+    HUGE_32MB       :: libc.MAP_HUGE_32MB;
+    HUGE_256MB      :: libc.MAP_HUGE_256MB;
+    HUGE_512MB      :: libc.MAP_HUGE_512MB;
+    HUGE_1GB        :: libc.MAP_HUGE_1GB;
+    HUGE_2GB        :: libc.MAP_HUGE_2GB;
+    HUGE_16GB       :: libc.MAP_HUGE_16GB;
+
+    map :: (addr: ?*any, len: usize, prot: Prot, type: Type, mut flags: libc.c_int, fd: libc.c_int, offset: isize) -> ?MMap {
+        flags |= type.as(libc.c_int);
+        addr := libc.mmap(null, len, prot.to_c_int(), flags, fd, offset);
+        if addr == libc.MAP_FAILED return null;
+        return Some(MMap.{ addr, len })
+    }
+
+    map_mem :: (addr: ?*any, len: usize, prot: Prot, more_flags: libc.c_int) ->
+        map(addr, len, prot, .PRIVATE, more_flags | libc.MAP_ANONYMOUS, -1, 0);
+
+    unmap :: (self: MMap) -> {
+        std.assert(std.ptr.is_aligned(self.addr, std.mem.pagesize()));
+        libc.munmap(self.addr, self.len) == 0
+    }
+
+    protect :: (self: MMap, prot: Prot) -> {
+        std.assert(std.ptr.is_aligned(self.addr, std.mem.pagesize()));
+        libc.mprotect(self.addr, self.len, prot.to_c_int()) == 0
+    }
+
+    /// TODO: flags bitset
+    sync :: (self: MMap, flags: libc.c_int) -> {
+        std.assert(std.ptr.is_aligned(self.addr, std.mem.pagesize()));
+        libc.msync(self.addr, self.len, flags) == 0
+    }
+
+    Advice :: enum {
+        NORMAL          = 0;
+        RANDOM          = 1;
+        SEQUENTIAL      = 2;
+        WILLNEED        = 3;
+        DONTNEED        = 4;
+        FREE            = 8;
+        REMOVE          = 9;
+        DONTFORK        = 10;
+        DOFORK          = 11;
+        MERGEABLE       = 12;
+        UNMERGEABLE     = 13;
+        HUGEPAGE        = 14;
+        NOHUGEPAGE      = 15;
+        DONTDUMP        = 16;
+        DODUMP          = 17;
+        WIPEONFORK      = 18;
+        KEEPONFORK      = 19;
+        COLD            = 20;
+        PAGEOUT         = 21;
+        POPULATE_READ   = 22;
+        POPULATE_WRITE  = 23;
+        DONTNEED_LOCKED = 24;
+        COLLAPSE        = 25;
+        HWPOISON        = 100;
+    }
+
+    advise :: (self: MMap, advice: Advice) -> {
+        std.assert(std.ptr.is_aligned(self.addr, std.mem.pagesize()));
+        libc.madvise(self.addr, self.len, advice.as(libc.c_int)) == 0
+    }
+
+    /// Fails iff the address returned by mmap is `0`.
+    as_slice :: (self: MMap) -> []mut u8 {
+        std.assert(self.addr != null, "0 is a valid address, but is not compatible with the sematics of `?[]T`");
+        []mut u8.{ ptr=self.addr.as(*mut u8), len=self.len }
+    }
+}

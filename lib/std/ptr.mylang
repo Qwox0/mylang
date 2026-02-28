@@ -1,0 +1,22 @@
+std :: #import "std";
+
+is_aligned :: (ptr: ?*any, alignment: u64) -> {
+    std.assert(std.num.is_power_of_2(alignment));
+    ptr.as(u64) & (alignment - 1) == 0
+}
+
+/// <https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding>
+align_forward :: (ptr: *mut u8, alignment: u64) -> ?*mut u8 {
+    aligned := std.num.try_align_up_pow2(ptr.as(u64), alignment) orelse return null;
+    aligned.as(*mut u8)
+}
+
+/// `null` indicates the address `0`, not a failure.
+align_backward :: (ptr: *mut u8, alignment: u64) ->
+    std.num.align_down_pow2(ptr.as(u64), alignment).as(?*mut u8);
+
+add_bytes :: (ptr: *u8, offset: usize) -> (ptr.as(usize) + offset).as(*u8);
+add_bytes_opt :: (ptr: ?*u8, offset: usize) -> (ptr.as(usize) + offset).as(?*u8);
+add_bytes_mut :: (ptr: *mut u8, offset: usize) -> (ptr.as(usize) + offset).as(*mut u8);
+
+difference :: (minuend: *any, subtrahend: *any) -> minuend.as(usize) - subtrahend.as(usize);

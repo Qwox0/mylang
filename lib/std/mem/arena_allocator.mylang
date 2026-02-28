@@ -1,0 +1,122 @@
+libc :: #import "libc";
+std :: #import "std";
+Allocator :: std.mem.Allocator;
+fixed_arena_alloc :: #import "./fixed_arena_allocator.mylang".fixed_arena_alloc;
+
+ArenaAllocator :: struct {
+    cur_block: ?*mut BlockHeader = null;
+    backing_allocator: Allocator;
+
+    new :: (backing_allocator: Allocator) -> ArenaAllocator.{ backing_allocator };
+
+    allocator :: (data: *mut ArenaAllocator) -> Allocator.{ impl = &impl, data };
+
+    impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
+        std.assert(self != null);
+        self := self.as(*mut ArenaAllocator);
+        if mode == .Alloc {
+            return self.alloc(size, alignment);
+        } else if mode == .Free {
+            // TODO: free if last allocation?
+            return null; // unsupported
+        } else if mode == .FreeAll {
+            self.reset();
+            return null;
+        }
+        std.panic("unreachable"); // TODO: implement exhaustive switch
+    }
+
+    /// Arena Block:
+    ///
+    /// ```text
+    /// BlockHeader, data...
+    /// ^                   ^
+    /// block.*             end.*
+    /// ```
+    BlockHeader :: struct {
+        pos: *mut u8;
+        end: *u8;
+        prev_block: ?*mut BlockHeader;
+
+        data_start :: (self: *BlockHeader) -> std.ptr.add_bytes_mut(self.as(*mut u8), #sizeof(BlockHeader));
+
+        init :: (buf: []u8, prev_block: ?*mut BlockHeader) -> {
+            self := buf.ptr.as(*mut BlockHeader);
+            return self.{
+                prev_block,
+                pos = data_start(self),
+                end = std.ptr.add_bytes(buf.ptr, buf.len),
+            };
+        }
+
+        reset :: (self: *mut BlockHeader) -> {
+            self.*.pos = self.data_start();
+        }
+    };
+
+    //static EMPTY_BLOCK: BlockHeader = .{ prev_block=null, end=ArenaAllocator.EMPTY_BLOCK.& };
+
+    alloc :: (self: *mut ArenaAllocator, size: usize, alignment: usize) -> {
+        self.try_alloc_in_cur_block(size, alignment) orelse {
+            // TODO: try resize old block
+            cur_block_size := if self.*.cur_block == null then 0 else
+                self.*.cur_block.as(*BlockHeader).*.end.as(usize) - self.*.cur_block.as(usize); // TODO: remove this cur_block cast
+            min_block_size := #sizeof(BlockHeader) + alignment + size;
+            new_block_size := block_grow_strategy(min_block_size, cur_block_size);
+            new_block_buf := self.*.backing_allocator.alloc_at_least(new_block_size, #alignof(BlockHeader)) orelse
+                return null;
+            self.*.cur_block = BlockHeader.init(new_block_buf, self.*.cur_block);
+
+            self.try_alloc_in_cur_block(size, alignment) orelse // TODO: is align_forward overflow possible here?
+                std.panic("unreachable: new_block is big enough")
+        }
+    }
+
+    // TODO: make this configurable
+    block_grow_strategy :: (min_block_size: usize, prev_block_size: usize) -> {
+        if prev_block_size == 0 return 16 + min_block_size;
+        prev_block_size * 2 + min_block_size
+    }
+
+    try_alloc_in_cur_block :: (self: *mut ArenaAllocator, size: usize, alignment: usize) -> {
+        cur_block := self.*.cur_block orelse return null;
+        fixed_arena_alloc(&mut cur_block.*.pos, cur_block.*.end, size, alignment)
+    }
+
+    ResetMode :: enum {
+        KeepCurrentBlock,
+        FreeAllBlocks,
+    };
+
+    reset :: (self: *mut ArenaAllocator, mode := ResetMode.KeepCurrentBlock) -> {
+        first_block := self.*.cur_block orelse return;
+
+        mut block_to_free := if mode == ResetMode.FreeAllBlocks then {
+            self.*.cur_block = null;
+            first_block
+        } else {
+            first_block.reset();
+            first_block.*.prev_block
+        };
+
+        while true {
+            block := block_to_free orelse break;
+            //libc.printf("free block %p\n".ptr, block);
+            //block_len := block.*.end.as(usize) - block.as(usize);
+
+            self.*.backing_allocator.free(block.as(*mut u8));
+
+            block_to_free = block.*.prev_block;
+        }
+    }
+
+    /*
+    Checkpoint :: struct { pos: *mut u8 };
+    checkpoint :: (self: *mut ArenaAllocator) -> Checkpoint.(self.*.pos);
+    reset_to :: (self: *mut ArenaAllocator, checkpoint: Checkpoint) -> {
+        if self.*.pos.as(usize) <= checkpoint.pos.as(usize) return;
+        self.*.pos = checkpoint.pos;
+    }
+    */
+}
+

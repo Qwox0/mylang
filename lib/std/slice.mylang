@@ -1,0 +1,11 @@
+std :: #import "std";
+
+// TODO: use builtin range type
+PtrU8Range :: struct { start: *u8, end: *u8 };
+PtrMutU8Range :: struct { start: *mut u8, end: *mut u8 };
+
+as_ptr_range_u8 :: (slice: []u8) ->
+    PtrU8Range.(slice.ptr, std.ptr.add_bytes(slice.ptr, slice.len));
+
+as_ptr_range_mut_u8 :: (slice: []mut u8) ->
+    PtrMutU8Range.(slice.ptr, std.ptr.add_bytes_mut(slice.ptr, slice.len));

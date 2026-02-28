@@ -3,30 +3,32 @@ std :: #import "std";
 Allocator :: std.mem.Allocator;
 
 FixedArenaAllocator :: struct {
+    pos: *mut u8,
     start: *u8,
     end: *u8,
-    pos: *mut u8,
 
     new :: (buffer: []mut u8) -> {
-        start := buffer.ptr;
-        FixedArenaAllocator.{ start, end=(start.as(usize) + buffer.len).as(*u8), pos=start }
+        addr_range := std.slice.as_ptr_range_mut_u8(buffer);;
+        FixedArenaAllocator.{
+            pos = addr_range.start,
+            start = addr_range.start,
+            end = addr_range.end,
+        }
     }
 
-    allocator :: (self: *mut FixedArenaAllocator) -> Allocator.{ impl = &impl, data = self };
+    allocator :: (data: *mut FixedArenaAllocator) -> Allocator.{ impl = &impl, data };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
         std.assert(self != null);
         self := self.as(*mut FixedArenaAllocator);
         if mode == .Alloc {
-            // TODO: configurable bump direction
-            aligned_ptr := self.*.pos |> std.mem.ptr.align_forward(alignment);
-            next_pos := aligned_ptr.as(usize) + size;
-            if next_pos > self.*.end.as(usize) return null;
-            self.*.pos = next_pos.as(*mut u8);
-            return aligned_ptr;
+            return fixed_arena_alloc(self.*.pos.&mut, self.*.end, size, alignment);
         } else if mode == .Free {
             // TODO: free if last allocation?
             return null; // unsupported
+        } else if mode == .FreeAll {
+            self.reset();
+            return null;
         }
         std.panic("unreachable"); // TODO: implement exhaustive switch
     }
@@ -39,4 +41,13 @@ FixedArenaAllocator :: struct {
         if self.*.pos.as(usize) <= checkpoint.pos.as(usize) return;
         self.*.pos = checkpoint.pos;
     }
+}
+
+fixed_arena_alloc :: (pos: *mut *mut u8, end: *u8, size: usize, alignment: usize) -> {
+    // TODO: configurable bump direction
+    aligned_pos := pos.* |> std.ptr.align_forward(alignment) orelse return null; // overflow
+    next_pos := std.ptr.add_bytes(aligned_pos, size);
+    if next_pos > end return null; // oom
+    pos.* = next_pos.as(*mut u8);
+    return []mut u8.{ ptr=aligned_pos, len=size };
 }

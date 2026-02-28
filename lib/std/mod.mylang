@@ -4,7 +4,9 @@ pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";
 pub mem :: #import "mem/mod.mylang";
 pub num :: #import "num.mylang";
+pub ptr :: #import "ptr.mylang";
 pub set :: #import "set.mylang";
+pub slice :: #import "slice.mylang";
 pub str :: #import "str.mylang";
 
 libc :: #import "libc";
