@@ -56,15 +56,15 @@ macro_rules! skip_tokens_until {
         scope_close = $close_scope_pat:pat $(,)?
     ) => {
         let mut depth: usize = 0;
-        $p.lex.advance_while(|t| {
+        while let Some(t) = $p.lex.peek() {
             match t.kind {
                 $open_scope_pat => depth += 1,
-                $until_pat if depth == 0 => return false,
+                $until_pat if depth == 0 => break,
                 $close_scope_pat => depth -= 1,
                 _ => {},
             };
-            true
-        });
+            $p.lex.advance();
+        }
     };
 }
 
@@ -77,10 +77,13 @@ macro_rules! parse_in_block {
             if $self.lex.peek().is_none_or(|t| t.kind == TokenKind::CloseBrace) {
                 break;
             }
-            let res: Result<Ptr<ast::Ast>, ParseError> = try {
+            let res: ParseResult<Ptr<ast::Ast>> = try {
                 $parse_item
             };
             let Ok(expr) = res else {
+                if $self.lex.has_unclosed_block_comment() {
+                    return Err(parse_err());
+                }
                 skip_tokens_until!(
                     $self,
                     until = TokenKind::CloseBrace $( | $sep )*,
@@ -138,11 +141,13 @@ pub fn parse_file_into(
 
     let start_idx = stmts.len();
     let mut p = Parser { lex: Lexer::new(file), cctx };
-    p.parse_stmts_into(stmts, false);
-    while let Some(t) = p.lex.next() {
+    let _ = p.parse_stmts_into(stmts, false);
+    while let Some(t) = p.lex.next()
+        && !p.lex.has_unclosed_block_comment()
+    {
         debug_assert_eq!(t.kind, TokenKind::CloseBrace);
-        cerror!(t.span, "unexpected token");
-        p.parse_stmts_into(stmts, false);
+        unexpected_token(t, &[]);
+        let _ = p.parse_stmts_into(stmts, false);
     }
     debug_assert!(p.lex.is_empty());
     let stmt_range = start_idx..stmts.len();
@@ -540,7 +545,7 @@ impl Parser {
             TokenKind::OpenParenthesis => {
                 // TODO: currently no tuples allowed!
                 let first_expr = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?; // this assumes the parameter syntax is also a valid expression
-                let t = self.lex.next_or_eof();
+                let t = self.lex.next_or_eof()?;
                 let params = match t.kind {
                     // (expr)
                     TokenKind::CloseParenthesis if !self.lex.advance_if_kind(TokenKind::Arrow) => {
@@ -665,10 +670,14 @@ impl Parser {
 
                 let mut parse_str_lit_arg = |usage: &str| {
                     let arg = opt!(self, value(MAX_PRECEDENCE), MIN_PRECEDENCE)?;
-                    arg.and_then(Ptr::<Ast>::try_downcast::<ast::StrVal>).ok_or_else(|| {
-                        let span = arg.map(|a| a.full_span()).unwrap_or(self.lex.pos_span());
-                        cerror!(span, "Expected {} after the #{directive_name} directive", usage)
-                    })
+                    arg.and_then(Ptr::<Ast>::try_downcast::<ast::StrVal>)
+                        .ok_or_else::<ParseError, _>(|| {
+                            cerror2!(
+                                arg.map(|a| a.full_span()).unwrap_or(self.lex.pos_span()),
+                                "Expected {} after the #{directive_name} directive",
+                                usage
+                            )
+                        })
                 };
 
                 let p = primitives();
@@ -676,8 +685,11 @@ impl Parser {
                 // function-like directives:
                 if directive_name == "import" {
                     let path = parse_str_lit_arg("a path string literal")?;
-                    let idx =
-                        self.cctx.add_import(&path.text, Some(&self.lex.file.path), path.span)?;
+                    let idx = self.cctx.add_import(
+                        &path.text,
+                        Some(&self.lex.cursor.file.path),
+                        path.span,
+                    )?;
                     expr!(ImportDirective { path, files_idx: idx }, span)
                 } else if directive_name == "extern" {
                     expr!(ExternDirective { decl: None }, span.join(directive_ident.span))
@@ -788,7 +800,7 @@ impl Parser {
             let init = then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
             fields.push((ident, init))?;
 
-            match self.lex.next_or_eof() {
+            match self.lex.next_or_eof()? {
                 Token { kind: TokenKind::Comma, .. } => {},
                 Token { kind: TokenKind::CloseBrace, span } => break span,
                 t => {
@@ -948,7 +960,7 @@ impl Parser {
         debug_assert_eq!(open_b.kind, TokenKind::OpenBrace);
 
         let mut stmts = Vec::new();
-        let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true);
+        let has_trailing_semicolon = self.parse_stmts_into(&mut stmts, true)?;
 
         let close_b = self.tok(TokenKind::CloseBrace)?;
 
@@ -968,12 +980,12 @@ impl Parser {
         &mut self,
         stmts: &mut Vec<Ptr<Ast>>,
         in_block: bool,
-    ) -> HasTrailingSemicolon {
-        parse_in_block!(self, sep = [TokenKind::Semicolon], in_block = in_block, {
+    ) -> ParseResult<HasTrailingSemicolon> {
+        Ok(parse_in_block!(self, sep = [TokenKind::Semicolon], in_block = in_block, {
             let expr = self.expr()?;
             stmts.push(expr);
             expr
-        })
+        }))
     }
 
     /// Also returns a `has_trailing_sep` [`bool`].
@@ -1048,7 +1060,7 @@ impl Parser {
             Keyword::Union => ScopeKind::Union,
             _ => unreachable_debug(),
         };
-        Scope::for_aggregate(fields, consts, &self.cctx.alloc, kind)
+        Ok(Scope::for_aggregate(fields, consts, &self.cctx.alloc, kind)?)
     }
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
@@ -1178,19 +1190,19 @@ impl Parser {
 
     #[inline]
     fn alloc<T>(&self, val: T) -> ParseResult<Ptr<T>> {
-        self.cctx.alloc.alloc(val)
+        Ok(self.cctx.alloc.alloc(val)?)
     }
 
     #[inline]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
-        self.cctx.alloc.alloc_slice(slice)
+        Ok(self.cctx.alloc.alloc_slice(slice)?)
     }
 
     fn scratch_pool_with_first_val<'bump, T>(
         &self,
         first: T,
     ) -> ParseResult<ScratchPool<'bump, T>> {
-        ScratchPool::new_with_first_val(first)
+        Ok(ScratchPool::new_with_first_val(first)?)
     }
 
     /// Clones all values from a [`ScratchPool`] to `self.alloc`.
@@ -1199,12 +1211,12 @@ impl Parser {
         &self,
         scratch_pool: ScratchPool<T>,
     ) -> ParseResult<Ptr<[T]>> {
-        scratch_pool.clone_to_slice_into_arena(&self.cctx.alloc)
+        Ok(scratch_pool.clone_to_slice_into_arena(&self.cctx.alloc)?)
     }
 
     #[inline]
     fn alloc_one_val_slice<T>(&self, val: T) -> ParseResult<Ptr<[T]>> {
-        self.cctx.alloc.alloc_one_val_slice(val)
+        Ok(self.cctx.alloc.alloc_one_val_slice(val)?)
     }
 
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {

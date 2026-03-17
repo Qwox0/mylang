@@ -5,7 +5,7 @@ use crate::{
     compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
     context::CompilationContext,
     diagnostics::{DiagnosticReporter, DiagnosticSeverity},
-    parser::{self, lexer::Span},
+    parser::lexer::Span,
     ptr::Ptr,
 };
 use std::{
@@ -37,6 +37,7 @@ mod never_value;
 mod number_literal;
 mod optional;
 mod parse_number_literals;
+mod parser;
 mod pipe;
 mod ptr;
 mod range;
@@ -142,7 +143,7 @@ impl NewTest {
 
     fn parse(self) -> TestResult<Parsed> {
         let res = self.prepare();
-        parser::parse_files(res.ctx.ctx.0);
+        crate::parser::parse_files(res.ctx.ctx.0);
         TestResult { data: Parsed, ..res }
     }
 

@@ -2,9 +2,9 @@ use crate::{
     ast::debug::DebugAst,
     codegen::llvm::finalize_ty,
     context::{FilesIndex, ctx, ctx_mut, primitives},
-    diagnostics::{HandledErr, cerror},
+    diagnostics::{HandledErr, cerror2},
     intern_pool::Symbol,
-    parser::{lexer::Span, unexpected_expr},
+    parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     scope::Scope,
     type_::ty_match,
@@ -1352,13 +1352,13 @@ impl Decl {
 
     /// `MyStruct.ABC : u8 : /* ... */`
     /// `^^^^^^^^^^^^ lhs`
-    pub fn from_lhs(lhs: Ptr<Ast>) -> Result<Decl, HandledErr> {
+    pub fn from_lhs(lhs: Ptr<Ast>) -> ParseResult<Decl> {
         match lhs.matchable2() {
             AstMatch::Ident(lhs) => Ok(Decl::from_ident(lhs)),
             AstMatch::Dot(dot) => match dot.lhs {
                 Some(ty_expr) => Ok(Decl::new(dot.rhs, Some(ty_expr), lhs.full_span())),
                 None => {
-                    Err(cerror!(dot.span, "A member declaration requires an associated type name"))
+                    Err(cerror2!(dot.span, "A member declaration requires an associated type name"))
                 },
             },
             _ => Err(unexpected_expr(lhs, "a variable name")),

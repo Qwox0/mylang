@@ -197,6 +197,14 @@ impl<T, E: From<HandledErr>> From<HandledErr> for Result<T, E> {
     }
 }
 
+impl std::fmt::Display for HandledErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "already emitted error")
+    }
+}
+
+impl std::error::Error for HandledErr {}
+
 macro_rules! cerror {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {{
         crate::diagnostics::DiagnosticReporter::error(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*));

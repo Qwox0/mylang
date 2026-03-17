@@ -15,7 +15,7 @@ pub trait ParserInterface {
         self.next();
     }
 
-    /// Advances the inner [`Chars`] [`Iterator`] while a condition is true.
+    /// Advances the parser while the predicate returns true for the peeked item.
     fn advance_while(&mut self, mut f: impl FnMut(Self::PeekedItem) -> bool) {
         while self.peek().is_some_and(&mut f) {
             self.advance();

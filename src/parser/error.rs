@@ -1,19 +1,30 @@
 use super::lexer::{Token, TokenKind};
 use crate::{
     ast,
-    diagnostics::{HandledErr, cerror, cerror2},
+    diagnostics::{HandledErr, cerror2},
     parser::lexer::Span,
     ptr::Ptr,
     util::{IteratorExt, UnwrapDebug},
 };
 use core::fmt;
 
+#[cfg(not(debug_assertions))]
 pub type ParseError = HandledErr;
+#[cfg(debug_assertions)]
+pub type ParseError = anyhow::Error;
+
 pub type ParseResult<T> = Result<T, ParseError>;
+
+pub fn parse_err() -> ParseError {
+    HandledErr.into()
+}
 
 #[track_caller]
 pub fn unexpected_token(t: Token, expected: &[TokenKind]) -> ParseError {
     debug_assert!(!expected.contains(&t.kind));
+    if t.kind == TokenKind::HandledErr {
+        return parse_err();
+    }
     match format_expected_tokens(expected) {
         Some(expected) => cerror2!(t.span, "expected {expected}, got {}", t.kind),
         None => cerror2!(t.span, "unexpected token: {}", t.kind),
@@ -32,7 +43,7 @@ pub fn unexpected_expr(expr: Ptr<ast::Ast>, expected: impl fmt::Display) -> Pars
 
 #[track_caller]
 pub fn expected_token(after_expr_span: Span, expected: &[TokenKind]) -> ParseError {
-    cerror!(after_expr_span, "expected {}", format_expected_tokens(expected).u())
+    cerror2!(after_expr_span, "expected {}", format_expected_tokens(expected).u())
 }
 
 fn format_expected_tokens(expected: &[TokenKind]) -> Option<String> {

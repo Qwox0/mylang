@@ -119,7 +119,7 @@ impl BuildArgs {
     #[track_caller]
     pub fn test_args(opt: TestArgsOptions) -> Self {
         BuildArgs {
-            path: PathBuf::from(Location::caller().file()).canonicalize().unwrap(),
+            path: PathBuf::from(format!("{{test @ {}}}", Location::caller())),
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,

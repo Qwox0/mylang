@@ -1,5 +1,6 @@
 use crate::{
-    parser::parser_helper::ParserInterface,
+    diagnostics::cerror,
+    parser::{ParseResult, parser_helper::ParserInterface},
     ptr::{OPtr, Ptr},
     source_file::SourceFile,
     util::{UnwrapDebug, unreachable_debug},
@@ -177,7 +178,7 @@ pub enum TokenKind {
 
     EOF,
 
-    Unknown,
+    HandledErr,
 }
 
 impl TokenKind {
@@ -303,7 +304,7 @@ impl TokenKind {
             TokenKind::Backslash => "`\"`",
             TokenKind::Backtick => "```",
             TokenKind::EOF => "EOF",
-            TokenKind::Unknown => "an unknown token",
+            TokenKind::HandledErr => "an invalid token",
         }
     }
 }
@@ -569,24 +570,26 @@ pub fn is_ident_continue(c: char) -> bool {
     unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Lexer {
-    pub code: Cursor,
+    pub cursor: Cursor,
     next_tok: Option<Token>,
-
-    pub file: Ptr<SourceFile>,
 }
 
 impl Lexer {
     pub fn new(file: Ptr<SourceFile>) -> Lexer {
-        let mut code = Cursor::new(file.code);
-        let first_tok = load_next(&mut code, file);
-        Self { code, file, next_tok: first_tok }
+        let mut cursor = Cursor::new(file);
+        let first_tok = load_next(&mut cursor);
+        Self { cursor, next_tok: first_tok }
     }
 
     #[inline]
     pub fn get_code(&self) -> &Code {
-        &self.code.code
+        &self.cursor.code
+    }
+
+    pub fn has_unclosed_block_comment(&self) -> bool {
+        self.cursor.has_unclosed_block_comment
     }
 
     pub fn pos_span(&self) -> Span {
@@ -594,15 +597,15 @@ impl Lexer {
     }
 
     pub fn eof_span(&self) -> Span {
-        Span::pos(self.get_code().len(), Some(self.file))
+        Span::pos(self.get_code().len(), Some(self.cursor.file))
     }
 
     pub fn get_state(&self) -> LexerState {
-        LexerState { pos: self.code.pos, next_tok: self.next_tok }
+        LexerState { pos: self.cursor.pos, next_tok: self.next_tok }
     }
 
     pub fn set_state(&mut self, state: LexerState) {
-        self.code.pos = state.pos;
+        self.cursor.pos = state.pos;
         self.next_tok = state.next_tok;
     }
 
@@ -616,8 +619,11 @@ impl Lexer {
         self.advance_if(|t| t.kind == kind)
     }
 
-    pub fn next_or_eof(&mut self) -> Token {
-        self.next().unwrap_or(Token { kind: TokenKind::EOF, span: self.eof_span() })
+    pub fn next_or_eof(&mut self) -> ParseResult<Token> {
+        if self.cursor.has_unclosed_block_comment {
+            //return Err(parse_err())
+        }
+        Ok(self.next().unwrap_or(Token { kind: TokenKind::EOF, span: self.eof_span() }))
     }
 
     pub fn peek_or_eof(&self) -> Token {
@@ -631,7 +637,7 @@ impl ParserInterface for Lexer {
 
     fn next(&mut self) -> Option<Self::Item> {
         let t = self.next_tok;
-        self.next_tok = load_next(&mut self.code, self.file);
+        self.next_tok = load_next(&mut self.cursor);
         t
     }
 
@@ -640,7 +646,7 @@ impl ParserInterface for Lexer {
     }
 }
 
-fn load_next(lex: &mut Cursor, file: Ptr<SourceFile>) -> Option<Token> {
+fn load_next(lex: &mut Cursor) -> Option<Token> {
     let mut start;
     let mut kind;
     loop {
@@ -652,7 +658,7 @@ fn load_next(lex: &mut Cursor, file: Ptr<SourceFile>) -> Option<Token> {
             break;
         };
     }
-    Some(Token { kind, span: Span::new(start..lex.pos, Some(file)) })
+    Some(Token { kind, span: Span::new(start..lex.pos, Some(lex.file)) })
 }
 
 fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
@@ -734,7 +740,7 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
         '/' => maybe_followed_by! {
             default: TokenKind::Slash,
             '/' => line_comment(lex),
-            '*' => block_comment(lex),
+            '*' => block_comment(lex, start),
             '=' => TokenKind::SlashEq,
         },
         '%' => maybe_followed_by! {
@@ -803,7 +809,10 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
         },
         c if is_ident_start(c) => ident_like(lex, start),
 
-        _ => TokenKind::Unknown,
+        _ => {
+            cerror!(Span::new(start..lex.pos, Some(lex.file)), "unknown token");
+            TokenKind::HandledErr
+        },
     })
 }
 
@@ -897,7 +906,7 @@ fn line_comment(code: &mut Cursor) -> TokenKind {
     t
 }
 
-fn block_comment(code: &mut Cursor) -> TokenKind {
+fn block_comment(code: &mut Cursor, span_start: usize) -> TokenKind {
     let t = match code.peek() {
         Some('!') => TokenKind::BlockDocInner,
         // `/**/` => CommentType::Comment
@@ -919,6 +928,14 @@ fn block_comment(code: &mut Cursor) -> TokenKind {
         }
     }
 
+    if depth > 0 {
+        let start_tok_len = if t == TokenKind::BlockComment { 2 } else { 3 };
+        let span = Span::new(span_start..span_start + start_tok_len, Some(code.file));
+        cerror!(span, "unterminated block comment: missing trailing `*/`");
+        code.has_unclosed_block_comment = true;
+        return TokenKind::HandledErr;
+    }
+
     t
 }
 
@@ -931,15 +948,17 @@ fn ident_like(code: &mut Cursor, start: usize) -> TokenKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Cursor {
+    pub file: Ptr<SourceFile>,
     code: Ptr<Code>,
     pos: usize,
+    has_unclosed_block_comment: bool,
 }
 
 impl Cursor {
-    pub fn new(code: Ptr<Code>) -> Cursor {
-        Cursor { code, pos: 0 }
+    pub fn new(file: Ptr<SourceFile>) -> Cursor {
+        Cursor { file, code: file.code, pos: 0, has_unclosed_block_comment: false }
     }
 
     pub fn get_rem(&self) -> &str {
@@ -950,11 +969,6 @@ impl Cursor {
         let mut c = self.get_rem().chars();
         c.next();
         c.next()
-    }
-
-    pub fn advance(&mut self) {
-        let offset = self.get_rem().char_indices().next().map(|(idx, _)| idx).unwrap_or_default();
-        self.pos += offset + 1;
     }
 }
 
