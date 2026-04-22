@@ -884,10 +884,14 @@ impl Ptr<Ast> {
 
     /// similar to [`Ast::full_span`] but returns a better span for [`Block`] nodes.
     pub fn return_val_span(self) -> Span {
-        self.try_downcast::<Block>()
-            .and_then(|b| b.stmts.last().copied())
-            .unwrap_or(self)
-            .full_span()
+        let mut expr = self;
+        while let Some(block) = expr.try_downcast::<Block>() {
+            match block.stmts.last().copied() {
+                Some(s) => expr = s,
+                None => break,
+            }
+        }
+        expr.full_span()
     }
 
     /// ```mylang

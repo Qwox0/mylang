@@ -1,5 +1,5 @@
 use crate::{
-    ast,
+    ast::{self, debug::DebugAst},
     cli::{BuildArgs, TestArgsOptions},
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
@@ -41,6 +41,7 @@ mod parser;
 mod pipe;
 mod ptr;
 mod range;
+mod realistic;
 mod sema;
 mod slice;
 mod string;
@@ -88,12 +89,23 @@ impl Drop for TestCtx {
         if thread::panicking() {
             return; // Test failed already
         }
-        let unhandled_errors = self.ctx.diagnostic_reporter.diagnostics[self.diag_idx..]
-            .iter()
-            .filter(|diag| diag.severity.aborts_compilation())
-            .count();
+        let mut unhandled_errors = 0;
+        let mut unhandled_warnings = 0;
+        let mut unhandled_infos = 0;
+        for diag in &self.ctx.diagnostic_reporter.diagnostics[self.diag_idx..] {
+            match diag.severity {
+                DiagnosticSeverity::Fatal | DiagnosticSeverity::Error => unhandled_errors += 1,
+                DiagnosticSeverity::Warn => unhandled_warnings += 1,
+                DiagnosticSeverity::Info => unhandled_infos += 1,
+            }
+        }
         if unhandled_errors > 0 {
             panic!("Test failed! Got {unhandled_errors} unexpected compiler errors!");
+        }
+        if unhandled_warnings > 0 || unhandled_infos > 0 {
+            println!(
+                "unhandled diagnostics: {unhandled_warnings} warnings, {unhandled_infos} infos"
+            );
         }
     }
 }
@@ -197,6 +209,13 @@ impl NewTest {
         res
     }
 
+    fn ok_stack_ptr(self) -> TestResult<Ok<*const ()>> {
+        let res = self._ok::<*const ()>();
+        let stack_alloc = ();
+        assert!(unsafe { res.data.ret.byte_offset_from(&stack_alloc) }.unsigned_abs() < 0x800);
+        res
+    }
+
     #[track_caller]
     fn get_out<RetTy: Copy>(self) -> RetTy {
         self._ok().data.ret
@@ -295,6 +314,31 @@ impl<Res> TestResult<Res> {
             .init
             .expect("expected Decl to have `init`")
             .downcast::<V>()
+    }
+
+    pub fn test_fn(&self) -> Ptr<ast::Fn> {
+        let mut test_decls = self
+            .stmts()
+            .iter()
+            .filter_map(|a| a.try_downcast::<ast::Decl>())
+            .filter(|d| d.ident.sym.text() == "test");
+        let test_decl = test_decls.next().expect("has a \"test\" decl");
+        assert_eq!(test_decls.count(), 0, "Has only one \"test\" decl");
+        test_decl.init.unwrap().downcast::<ast::Fn>()
+    }
+
+    fn get_ret_ty(&self) -> Ptr<ast::Type> {
+        self.test_fn().ret_ty.expect("\"test\" fn must have a ret_ty")
+    }
+
+    #[track_caller]
+    fn ret_ty(self, expected: &str) -> Self {
+        let ret_ty = self.get_ret_ty().to_text(true);
+        assert_eq!(
+            ret_ty, expected,
+            "expected \"test\" function to have return type `{expected}` (got: {ret_ty})"
+        );
+        self
     }
 }
 

@@ -285,7 +285,7 @@ fn good_error_cannot_apply_initializer_to_type() {
 
 #[test]
 fn enum_repr_type() {
-    let res = test_body("MyEnum :: enum { A, B = 1000000.as(u32), C }; MyEnum.C").ok(1000001u32);
+    let res = test_body("MyEnum :: enum { A, B = 1000000.as(u32), C }; MyEnum.C").ok(1000001_u32);
     assert!(res.llvm_ir().contains("ret i32 1000001"));
     drop(res);
 
@@ -293,10 +293,23 @@ fn enum_repr_type() {
         .error("Cannot apply unary operator `-` to type `u32`", substr!("-1"));
 }
 
+/// see also [`super::optional::optional_repr`]
+#[test]
+fn enum_size() {
+    test_body("#sizeof(enum { A, B, C })").ok(1_usize);
+    test_body("#sizeof(enum { })").ok(0_usize);
+    test_body("#sizeof(enum { A })").ok(0_usize);
+}
+
 #[test]
 fn non_null_enum() {
     test_body("E :: enum { A = 123, B }; opt: ?E = E.A").ok(());
 
+    // A == 0
     test_body("E :: enum { A, B = 123 }; opt: ?E = E.A")
+        .error("mismatched types: expected `?E`; got `E`", substr!("E.A"));
+
+    // size(enum) == 0 => 0 is invalid => not non-null
+    test_body("E :: enum { A = 123 }; opt: ?E = E.A")
         .error("mismatched types: expected `?E`; got `E`", substr!("E.A"));
 }

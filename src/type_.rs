@@ -7,7 +7,7 @@ use crate::{
     sema::primitives::Primitives,
     util::{
         Layout, UnwrapDebug, aligned_add, is_simple_enum, panic_debug, round_up_to_alignment,
-        round_up_to_nearest_power_of_two, then, unreachable_debug, variant_count_to_tag_size_bits,
+        round_up_to_nearest_power_of_two, unreachable_debug, variant_count_to_tag_size_bits,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -39,7 +39,28 @@ impl CommonTypeSelection {
 
 /// symmetrical
 pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
-    match common_type_impl(lhs, rhs) {
+    common_type_restrict_optional_coerction(lhs, rhs, AllowOptionalCoercion::TRUE)
+}
+
+pub struct AllowOptionalCoercion {
+    lhs: bool,
+    rhs: bool,
+}
+
+#[allow(unused)]
+impl AllowOptionalCoercion {
+    pub const FALSE: AllowOptionalCoercion = AllowOptionalCoercion { lhs: false, rhs: false };
+    pub const LHS: AllowOptionalCoercion = AllowOptionalCoercion { lhs: true, rhs: false };
+    pub const RHS: AllowOptionalCoercion = AllowOptionalCoercion { lhs: false, rhs: true };
+    pub const TRUE: AllowOptionalCoercion = AllowOptionalCoercion { lhs: true, rhs: true };
+}
+
+pub fn common_type_restrict_optional_coerction(
+    lhs: Ptr<ast::Type>,
+    rhs: Ptr<ast::Type>,
+    allow_opt_coercion: AllowOptionalCoercion,
+) -> OPtr<ast::Type> {
+    match common_type_impl_(lhs, rhs, allow_opt_coercion) {
         CommonTypeSelection::Equal => Some(lhs),
         CommonTypeSelection::Lhs => Some(lhs),
         CommonTypeSelection::Rhs => Some(rhs),
@@ -51,6 +72,14 @@ pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> 
 // Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
 //    Can this (or something similar) even happen?
 fn common_type_impl(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> CommonTypeSelection {
+    common_type_impl_(lhs, rhs, AllowOptionalCoercion::TRUE)
+}
+
+fn common_type_impl_(
+    lhs: Ptr<ast::Type>,
+    rhs: Ptr<ast::Type>,
+    allow_opt_coercion: AllowOptionalCoercion,
+) -> CommonTypeSelection {
     use CommonTypeSelection::*;
     let p = primitives();
 
@@ -70,33 +99,40 @@ fn common_type_impl(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> CommonTypeSelec
         return Lhs;
     }
 
-    /// ?ilit + i32 => ?i32
-    fn not_both_optional(inner_ty: Ptr<ast::Type>, other: Ptr<ast::Type>) -> CommonTypeSelection {
-        debug_assert!(other.kind != AstKind::OptionTy);
-        if !other.is_non_null() {
-            // TODO: chint!(todo!(), "Consider explicitly wrapping the value with `Some`");
-            return Mismatch;
-        }
-        match common_type_impl(inner_ty, other) {
-            Equal | Lhs => Lhs,
-            Rhs => NewAlloc(type_new!(OptionTy { inner_ty: other.upcast() }).upcast_to_type()),
-            NewAlloc(inner_common) => {
-                NewAlloc(type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type())
-            },
-            Mismatch => Mismatch,
-        }
+    fn optional_common(
+        lhs: Ptr<ast::OptionTy>,
+        rhs: Ptr<ast::Type>,
+        allow_opt_coercion: bool,
+    ) -> CommonTypeSelection {
+        let lhs_inner = lhs.inner_ty.downcast_type();
+        return if allow_opt_coercion
+            && lhs_inner.count_optional_nesting() >= rhs.count_optional_nesting()
+            && rhs.is_non_zero()
+        {
+            match common_type_impl_(lhs_inner, rhs, AllowOptionalCoercion::FALSE) {
+                Equal | Lhs => Lhs,
+                Rhs => NewAlloc(type_new!(OptionTy { inner_ty: rhs.upcast() }).upcast_to_type()),
+                NewAlloc(inner_common) => NewAlloc(
+                    type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type(),
+                ),
+                Mismatch => Mismatch,
+            }
+        } else if let Some(rhs_opt) = rhs.try_downcast::<ast::OptionTy>() {
+            common_type_impl_(
+                lhs_inner,
+                rhs_opt.inner_ty.downcast_type(),
+                AllowOptionalCoercion::FALSE,
+            )
+        } else {
+            Mismatch
+        };
     }
 
     if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
-        let lhs_inner = lhs.inner_ty.downcast_type();
-        return match rhs.try_downcast::<ast::OptionTy>() {
-            Some(rhs) => common_type_impl(lhs_inner, rhs.inner_ty.downcast_type()),
-            None => not_both_optional(lhs_inner, rhs),
-        };
+        return optional_common(lhs, rhs, allow_opt_coercion.rhs);
     } else if let Some(rhs) = rhs.try_downcast::<ast::OptionTy>() {
-        let rhs_inner = rhs.inner_ty.downcast_type();
         debug_assert_ne!(lhs.kind, AstKind::OptionTy);
-        return not_both_optional(rhs_inner, lhs).flip();
+        return optional_common(rhs, lhs, allow_opt_coercion.lhs).flip();
     }
 
     if let Some(lhs_num_lvl) = number_subtyping_level(lhs) {
@@ -197,6 +233,10 @@ fn common_type_impl(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> CommonTypeSelec
 
 /// might not be symmetrical
 pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
+    ty_match_(got, expected, true)
+}
+
+fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: bool) -> bool {
     let p = primitives();
 
     if got == expected {
@@ -219,13 +259,18 @@ pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
         return SubtypingLevel::select(expected_lvl, got_lvl) != CommonTypeSelection::Mismatch;
     }
 
-    // must be above every non_null `got` value.
-    if let Some(expected) = expected.try_downcast::<ast::OptionTy>() {
-        let expected_inner = expected.inner_ty.downcast_type();
-        return match got.try_downcast::<ast::OptionTy>() {
-            Some(got) => ty_match(got.inner_ty.downcast_type(), expected_inner),
-            None if got.is_non_null() => ty_match(got, expected_inner),
-            None => false,
+    // must be above every non-zero `got` value.
+    if let Some(expected_opt) = expected.try_downcast::<ast::OptionTy>() {
+        let expected_inner = expected_opt.inner_ty.downcast_type();
+        return if allow_opt_coercion
+            && expected.count_optional_nesting() > got.count_optional_nesting()
+            && got.is_non_zero()
+        {
+            ty_match_(got, expected_inner, false)
+        } else if let Some(got_opt) = got.try_downcast::<ast::OptionTy>() {
+            ty_match_(got_opt.inner_ty.downcast_type(), expected_inner, false)
+        } else {
+            false
         };
     }
 
@@ -327,7 +372,7 @@ fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
 
 pub fn remove_type_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
     if let Some(out_opt) = out_ty.try_downcast::<ast::OptionTy>()
-        && expr_ty.is_non_null()
+        && expr_ty.is_non_zero()
     {
         let expr_opt_depth = expr_ty.count_optional_nesting();
         let out_opt_depth = out_ty.count_optional_nesting();
@@ -435,7 +480,7 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
-                if self == p.void_ty || self == p.never || self == p.type_ty {
+                if self == p.void_ty || self == p.never || self == p.type_ty || self == p.any {
                     0
                 } else if self == p.bool {
                     1
@@ -457,7 +502,7 @@ impl ast::Type {
                 Layout::new(union_size(*variants), struct_alignment(variants)),
             ),
             TypeEnum::RangeTy { elem_ty, rkind, .. } => elem_ty.size() * rkind.get_field_count(),
-            TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
+            TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_zero() => {
                 t.downcast_type().size()
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
@@ -470,7 +515,7 @@ impl ast::Type {
         let alignment = match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
-                if self == p.void_ty || self == p.never || self == p.type_ty {
+                if self == p.void_ty || self == p.never || self == p.type_ty || self == p.any {
                     ZST_ALIGNMENT
                 } else if self == p.bool {
                     1
@@ -502,58 +547,9 @@ impl ast::Type {
         Layout::new(self.size(), self.alignment())
     }
 
-    pub fn is_non_null(self: Ptr<Self>) -> bool {
-        //self.first_non_null_field().is_some()
-        match self.matchable().as_ref() {
-            TypeEnum::SimpleTy { .. } => {
-                let p = primitives();
-                if self == p.void_ty || self == p.never { false } else { todo!("{:?}", self) }
-            },
-            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => false,
-            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => true,
-            TypeEnum::ArrayTy { elem_ty, .. } => elem_ty.downcast_type().is_non_null(),
-            //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => fields.iter_types().any(ast::Type::is_non_null),
-            TypeEnum::UnionDef { fields, .. } => fields.iter_types().all(ast::Type::is_non_null),
-            TypeEnum::EnumDef { variant_tags, .. } => !variant_tags.u().contains(&0), // TODO: precompute this?
-            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_non_null(),
-            TypeEnum::OptionTy { .. } => false,
-            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-        }
-    }
-
-    /// (byte_offset, field_type)
-    pub fn first_non_null_field(self: Ptr<Self>) -> Option<(usize, Ptr<ast::Type>)> {
-        match self.matchable().as_ref() {
-            TypeEnum::SimpleTy { .. } => {
-                let p = primitives();
-                if self == p.void_ty || self == p.never { None } else { todo!("{:?}", self) }
-            },
-            TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => None,
-            TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => Some(self),
-            TypeEnum::ArrayTy { elem_ty, .. } => {
-                then!(elem_ty.downcast_type().is_non_null() => elem_ty.downcast_type())
-            },
-            //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => {
-                return fields.iter_types().enumerate().find_map(|(idx, ty)| {
-                    ty.first_non_null_field().map(|(offset, ty)| {
-                        (struct_size(fields.iter_types().take(idx)) + offset, ty)
-                    })
-                });
-            },
-            TypeEnum::UnionDef { fields, .. } => {
-                then!(fields.iter_types().all(ast::Type::is_non_null) => fields[0].var_ty.u())
-            },
-            TypeEnum::EnumDef { variant_tags, tag_ty, .. } => {
-                // TODO: precompute condition
-                then!(!variant_tags.u().contains(&0) => tag_ty.u().upcast_to_type())
-            },
-            TypeEnum::RangeTy { elem_ty, .. } => then!(elem_ty.is_non_null() => *elem_ty),
-            TypeEnum::OptionTy { .. } => None,
-            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-        }
-        .map(|ty| (0, ty))
+    /// `#sizeof(?T) == #sizeof(T)`
+    pub fn is_non_zero(self: Ptr<Self>) -> bool {
+        optional_repr(self).is_non_zero()
     }
 
     /// `not is_primitive`
@@ -561,7 +557,7 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => false,
             TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } | TypeEnum::PtrTy { .. } => false,
-            TypeEnum::OptionTy { inner_ty, .. } if inner_ty.downcast_type().is_non_null() => {
+            TypeEnum::OptionTy { inner_ty, .. } if inner_ty.downcast_type().is_non_zero() => {
                 inner_ty.downcast_type().is_aggregate()
             },
             //TypeEnum::FunctionTy { .. } => todo!(),
@@ -647,6 +643,145 @@ pub fn union_size(fields: DeclList) -> usize {
 #[inline]
 pub fn enum_alignment(variants: &[Ptr<ast::Decl>]) -> usize {
     int_alignment(variant_count_to_tag_size_bits(variants.len())).max(struct_alignment(variants))
+}
+
+#[derive(Debug)]
+pub enum EnumRepr {
+    /// 0 variants
+    Never,
+    /// 1 variant
+    Transparent(Ptr<ast::Type>),
+    /// 2+ variants
+    Tagged,
+}
+
+pub fn enum_repr(variant_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> EnumRepr {
+    let p = primitives();
+    // TODO: deep never check. Replace types like `struct { a: never }` with
+    // `never` to make this deep check cheap.
+    match variant_types.into_iter().filter(|t| *t != p.never).enumerate().last() {
+        None => EnumRepr::Never,
+        Some((0, only_variant)) => EnumRepr::Transparent(only_variant),
+        _ => EnumRepr::Tagged,
+    }
+}
+
+#[derive(Debug)]
+pub enum NonZeroFieldType {
+    Ptr,
+    EnumTag(Ptr<ast::IntTy>),
+}
+
+#[derive(Debug)]
+pub enum OptionalRepr {
+    /// `null` is the only possible value of `?never`. `Some(never)` cannot be constructed.
+    AlwaysNull,
+    /// Iff [`OptionTy::inner_ty`] is [`Type::is_non_zero`] then `0` can be used to represent
+    /// `null`. Thus a seperate tag field is not needed.
+    NullOptimized { offset: usize, field_ty: NonZeroFieldType },
+    /// `Optional :: struct { tag: u8, inner_ty: T }`
+    Tagged,
+}
+
+pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
+    use OptionalRepr::*;
+    match inner_ty.matchable().as_ref() {
+        TypeEnum::SimpleTy { .. } => {
+            let p = primitives();
+            if inner_ty == p.never {
+                AlwaysNull
+            } else if [p.void_ty, p.any, p.bool, p.char].contains(&inner_ty) {
+                // TODO: null optimization for `?bool`
+                Tagged
+            } else {
+                todo!("{}", inner_ty)
+            }
+        },
+        TypeEnum::IntTy { .. } | TypeEnum::FloatTy { .. } => Tagged,
+        TypeEnum::PtrTy { .. } | TypeEnum::SliceTy { .. } | TypeEnum::Fn { .. } => {
+            NullOptimized { offset: 0, field_ty: NonZeroFieldType::Ptr }
+        },
+        TypeEnum::ArrayTy { elem_ty, .. } => optional_repr(elem_ty.downcast_type()),
+        TypeEnum::StructDef { fields, .. } => fields
+            .iter_types()
+            .enumerate()
+            .find_map(|(idx, ty)| match optional_repr(ty) {
+                AlwaysNull => None, // `?never` doesn't require a tag, but can't represent `null`
+                NullOptimized { offset, field_ty } => Some(NullOptimized {
+                    offset: struct_size(fields.iter_types().take(idx)) + offset,
+                    field_ty,
+                }),
+                Tagged => None,
+            })
+            .unwrap_or(Tagged),
+        TypeEnum::UnionDef { fields, .. } => {
+            let mut biggest_field_size = 0;
+            let mut biggest_field = None::<OptionalRepr>;
+
+            for field in fields.iter_types() {
+                let repr = optional_repr(field);
+                if !repr.is_non_zero() {
+                    return Tagged;
+                }
+
+                let field_size = field.size();
+                if field_size > biggest_field_size {
+                    biggest_field_size = field_size;
+                    debug_assert!(
+                        !repr.is_always_null()
+                            || biggest_field.is_none_or(|prev| prev.is_always_null())
+                    );
+                    biggest_field = Some(repr);
+                }
+            }
+
+            match biggest_field {
+                Some(OptionalRepr::AlwaysNull) | None => AlwaysNull,
+                Some(r @ OptionalRepr::NullOptimized { .. }) => r,
+                Some(OptionalRepr::Tagged) => unreachable_debug(),
+            }
+        },
+        TypeEnum::EnumDef { variants, variant_tags, tag_ty, .. } => {
+            // TODO: precompute is_non_zero for enums?
+            let variant_tags = variant_tags.u();
+            debug_assert_eq!(variants.len(), variant_tags.len());
+            match enum_repr(variants.iter_types()) {
+                EnumRepr::Never => AlwaysNull,
+                EnumRepr::Transparent(v) => optional_repr(v),
+                EnumRepr::Tagged => {
+                    debug_assert!(inner_ty.size() > 0);
+                    if variant_tags.contains(&0) {
+                        Tagged
+                    } else {
+                        NullOptimized { offset: 0, field_ty: NonZeroFieldType::EnumTag(tag_ty.u()) }
+                    }
+                },
+            }
+        },
+        TypeEnum::RangeTy { elem_ty, .. } => optional_repr(*elem_ty),
+        TypeEnum::OptionTy { .. } => Tagged,
+        TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+    }
+}
+
+impl OptionalRepr {
+    pub fn is_non_zero(&self) -> bool {
+        match self {
+            OptionalRepr::AlwaysNull => true,
+            OptionalRepr::NullOptimized { .. } => true,
+            OptionalRepr::Tagged => false,
+        }
+    }
+
+    pub fn is_always_null(&self) -> bool {
+        matches!(self, OptionalRepr::AlwaysNull)
+    }
+}
+
+impl ast::OptionTy {
+    pub fn repr(&self) -> OptionalRepr {
+        optional_repr(self.inner_ty.downcast_type())
+    }
 }
 
 #[cfg(test)]

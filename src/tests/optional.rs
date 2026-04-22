@@ -32,13 +32,96 @@ impl<Data> Optional<Data> {
     const NULL: Optional<Data> =
         Optional { tag: 0, data: unsafe { std::mem::MaybeUninit::zeroed().assume_init() } };
 
-    fn is_none(&self) -> bool {
+    fn is_null(&self) -> bool {
         self.tag == 0
     }
 
     fn into_option(self) -> Option<Data> {
         if self.tag == 0 { None } else { Some(self.data) }
     }
+}
+
+#[test]
+fn optional_type_check() {
+    #[track_caller]
+    fn t(ty: &str, expected_ty: &str, res: Result<(), &str>) {
+        #[rustfmt::skip]
+        let t = test(format!("// {ty} -> {expected_ty}
+T :: struct {{ x: i32 }};
+NonNull :: struct {{ x: enum {{ A = 1, B }} }};
+test :: -> {expected_ty} {{ val: {ty}; val }}"
+        ));
+        if let Err(msg) = res {
+            t.error(msg, substr!("val";skip=1));
+        } else {
+            t.compile_no_err();
+        }
+    }
+
+    t("???T", "???T", Ok(()));
+
+    t("?i32", "?never", Err("mismatched types: expected `?never`; got `?i32`")); // int is not assignable to never
+
+    t("?T", "T", Err("mismatched types: expected `T`; got `?T`"));
+    t("?NonNull", "NonNull", Err("mismatched types: expected `NonNull`; got `?NonNull`"));
+
+    t("T", "?T", Err("mismatched types: expected `?T`; got `T`")); // T is not non-null
+    t("NonNull", "?NonNull", Ok(()));
+    t("*NonNull", "*?NonNull", Ok(()));
+
+    t("?NonNull", "??NonNull", Err("mismatched types: expected `??NonNull`; got `?NonNull`")); // Optional is not non-null
+
+    t("?never", "??T", Ok(()));
+    t("never", "?T", Ok(()));
+
+    t("??never", "?T", Err("mismatched types: expected `?T`; got `??never`"));
+
+    t("??T", "?any", Ok(()));
+    t("?T", "any", Ok(()));
+
+    t("T", "?any", Err("mismatched types: expected `?any`; got `T`"));
+    t("NonNull", "?any", Ok(()));
+}
+
+#[test]
+fn optional_common_type() {
+    #[track_caller]
+    fn t(lhs_ty: &str, rhs_ty: &str, res: Result<&str, &str>) {
+        #[rustfmt::skip]
+        let t = test(format!("// {lhs_ty} & {rhs_ty}
+T :: struct {{ x: i32 }};
+NonNull :: struct {{ x: enum {{ A = 1, B }} }};
+test :: -> {{ lhs: {lhs_ty}; rhs: {rhs_ty}; .[lhs, rhs] }}"
+        ));
+        match res {
+            Ok(expected_ret_ty) => {
+                t.compile_no_err().ret_ty(&format!("[2]{expected_ret_ty}"));
+            },
+            Err(msg) => {
+                t.error(msg, substr!("rhs";skip=1));
+            },
+        }
+    }
+
+    t("???T", "???T", Ok("???T"));
+
+    t("T", "?T", Err("mismatched types: expected `T`; got `?T`"));
+    t("?T", "T", Err("mismatched types: expected `?T`; got `T`"));
+
+    t("NonNull", "?NonNull", Ok("?NonNull"));
+    t("?NonNull", "NonNull", Ok("?NonNull"));
+
+    t("?NonNull", "??NonNull", Err("mismatched types: expected `?NonNull`; got `??NonNull`"));
+    t("??NonNull", "?NonNull", Err("mismatched types: expected `??NonNull`; got `?NonNull`"));
+
+    t("??T", "?never", Ok("??T"));
+    t("?never", "??T", Ok("??T"));
+
+    t("?T", "??never", Err("mismatched types: expected `?T`; got `??never`"));
+    t("??never", "?T", Err("mismatched types: expected `??never`; got `?T`"));
+
+    t("??T", "?any", Ok("?any"));
+    t("?any", "??T", Ok("?any"));
 }
 
 #[test]
@@ -106,7 +189,7 @@ fn orelse_unwrapping() {
 
 #[test]
 fn orelse_never() {
-    for lhs in [Optional::NULL, some(123)] {
+    for lhs in [Optional::NULL, some(123_i32)] {
         let res = test_body(format!("a: i32 = {lhs} orelse return 10; a + 1")).get_out::<i32>();
         assert_eq!(res, lhs.into_option().map(|x| x + 1).unwrap_or(10));
     }
@@ -166,7 +249,7 @@ fn error_optional_orelse_optional() {
         .error("mismatched types: expected `i32`; got `?never`", substr!("null orelse null"));
     // `null orelse null` can be valid:
     let res = test("test :: -> ?i32 null orelse null;").get_out::<Optional<i32>>();
-    assert!(res.is_none());
+    assert!(res.is_null());
 }
 
 #[test]
@@ -286,7 +369,216 @@ test :: () -> {
 }
 
 #[test]
+pub(super) fn optional_repr() {
+    #[track_caller]
+    fn test_size(ty: &str, expected_size: usize) {
+        #[rustfmt::skip]
+        let code = format!("
+Ty :: {ty};
+a: struct {{ start: Ty, end: u8 }};
+llvm_size := a.end.&.as(usize) - a.start.&.as(usize);
+struct {{ mylang_size: usize, llvm_size: usize }}.(#sizeof(Ty), llvm_size)
+            ");
+        #[repr(C)]
+        #[derive(Debug, PartialEq, Eq)]
+        struct TypeSizes {
+            mylang_size: usize,
+            llvm_size: usize,
+        }
+        test_body(code)
+            .with_prelude()
+            .ok(TypeSizes { mylang_size: expected_size, llvm_size: expected_size });
+    }
+
+    test_size(" struct { a: i32 }", 4);
+    test_size("?struct { a: i32 }", 8);
+    test_size(" struct { n: never, a: i32 }", 4);
+    test_size("?struct { n: never, a: i32 }", 8);
+    test_size(" struct { a: *i32 }", 8);
+    test_size("?struct { a: *i32 }", 8);
+
+    //test_size(" never", 0); // TODO: Addrof never causes codegen problems
+    test_body("#sizeof( never)").ok(0_usize);
+    test_size("?never", 0);
+
+    test_size(" enum {         }", 0); // []
+    test_size("?enum {         }", 0); // [null]
+    test_size(" enum { A       }", 0); // [0]
+    test_size("?enum { A       }", 1); // [null, 0]
+    test_size(" enum { A = 123 }", 0); // [123]
+    test_size("?enum { A = 123 }", 1); // [null, 123]
+    test_size(" enum { A(i32)  }", 4); // [i32]
+    test_size("?enum { A(i32)  }", 8); // [null, i32]
+    test_size(" enum { A(*i32) }", 8); // [*i32]
+    test_size("?enum { A(*i32) }", 8); // [?*i32]
+
+    test_size("?any", 1);
+}
+
+#[test]
+fn optional_c_ffi_type() {
+    let res = test("test :: -> ?never  null;").compile_no_err();
+    assert!(res.llvm_ir().contains("ret void"));
+}
+
+#[test]
+fn is_some_codegen() {
+    let code = "
+SmallNonNull :: enum { A = 123, B };
+Some(SmallNonNull.A) orelse .B
+";
+    test_body(code).with_prelude().ok(123_u8);
+
+    let code = "
+SmallNonNull :: enum { A = 123, B };
+mut val: union { a: SmallNonNull, x: *i32 };
+val.x = 0x100.as(*i32);
+Some(val) orelse return 1;
+val.x.as(usize)
+";
+    test_body(code).with_prelude().ok(0x100_i32);
+}
+
+#[test]
+fn coerce_orelse_lhs() {
+    // Cannot increase number of wrapped optionals on lhs with coercion
+    let code = "
+NonNullEnum :: enum { A = 123, B };
+a := NonNullEnum.A;
+Some(a) orelse Some(.B)
+//   ^ cannot coerce `T` to `?T`
+";
+    test_body(code)
+        .error("mismatched types: expected `NonNullEnum`; got `?NonNullEnum`", substr!("Some(.B)"))
+        .info("Consider using `or` operator instead", substr!("orelse"));
+
+    let code = "
+NonNullEnum :: enum { A = 123, B };
+a: ?NonNullEnum = Some(NonNullEnum.A);
+a orelse Some(.B)
+";
+    test_body(code)
+        .error("mismatched types: expected `NonNullEnum`; got `?NonNullEnum`", substr!("Some(.B)"))
+        .info("Consider using `or` operator instead", substr!("orelse"));
+
+    let code = "
+NonNullEnum :: enum { A = 123, B };
+Some(NonNullEnum.A) orelse Some(.B)
+";
+    test_body(code)
+        .error("mismatched types: expected `NonNullEnum`; got `?NonNullEnum`", substr!("Some(.B)"))
+        .info("Consider using `or` operator instead", substr!("orelse"));
+
+    // Can do non-optional coercion
+    let code = "
+mut x := 1;
+mut_ptr := &mut x;
+const_ptr := &x;
+Some(mut_ptr) orelse const_ptr
+//   ^ can coerce `*mut T` to `*T`
+";
+    test_body(code).ok_stack_ptr().ret_ty("*i64");
+}
+
+#[test]
+fn infer_in_some() {
+    let code = "
+MyStruct :: struct { a: i32 };
+test :: -> ?MyStruct { Some(.{ a=-123 }) }
+";
+    test(code).ok(some(-123_i32));
+
+    test("test :: -> ??i32 { Some(-123) }").error(
+        "mismatched types: expected `??i32`; got `?{signed integer}`",
+        substr!("Some(-123)"),
+    );
+    /* TODO: decide if these errors are better:
+        .error("mismatched types: expected `?i32`; got `{signed integer}`", substr!("-123"))
+    */
+}
+
+#[test]
+fn no_coercion_to_optional_in_some() {
+    // Can coerce `*mut i64` -> `*i64`
+    let code = "
+test :: -> ?*i64 {
+    mut a := 123;
+    Some(&mut a)
+}";
+    test(code).compile_no_err();
+
+    // Cannot coerce to optional
+    let code = "
+test :: -> ??*mut i64 {
+    mut a := 123;
+    Some(&mut a)
+}";
+    test(code)
+        .error("mismatched types: expected `??*mut i64`; got `?*mut i64`", substr!("Some(&mut a)"));
+}
+
+#[test]
 fn return_nested_optional_null() {
     test("test :: -> ??*u8        null;").ok(Optional::<OPtr<u8>>::NULL);
     test("test :: -> ??*u8 return null;").ok(Optional::<OPtr<u8>>::NULL);
+}
+
+/// Problem: `opt.* orelse ...` creates a stack allocation. Thus the function returns an invalid
+/// pointer.
+/// TODO: `<*?T> orelse <*T>` -> `<*T>`
+/// Idea: disallow accidental stack allocations (only allow `&` for l-values). add something like
+/// `#alloca(r_value)` or `&tmp r_value`
+#[test]
+#[ignore = "todo"]
+fn optional_as_mut() {
+    let code = "
+T :: struct { val: i32 };
+as_mut :: (opt: *mut ?T) -> ?*mut T
+    Some(&mut (opt.* orelse return null));
+test :: -> {
+    mut opt: ?T = Some(.(1));
+    ref := opt.&mut.as_mut();
+    ref := ref orelse return null;
+    ref.*.val = 10;
+    opt
+}";
+    test(code).ok(some(10_i32));
+}
+
+#[test]
+#[ignore = "todo"]
+fn fix_mutated_var_ty_of_const_decl() {
+    let code = "
+A :: Some(1);
+f :: -> Some(&mut A); // TODO: this finalizes A during sema, which is incorrect
+test :: -> { a: ?u32 = A; }";
+    test(code).ok(123_i64);
+
+    let code = "
+A :: Some(1);
+test :: -> {
+    a: i64 = A orelse return 0; // TODO: this finalizes A during codegen, which is incorrect
+    b: ?u32 = A;
+    123
+}";
+    test(code).ok(123_i64);
+}
+
+/// ```llvm
+/// %opt_int = alloca { i8, i32 }, align 4
+/// %opt_never = alloca [0 x i8], align 1
+/// store [0 x i8] zeroinitializer, ptr %opt_never, align 1
+/// call void @llvm.memcpy.p0.p0.i64(ptr align 4 %opt_int, ptr align 4 %opt_never, i64 8, i1 false)
+/// %ret = load i64, ptr %opt_int, align 4
+/// ret i64 %ret
+/// ```
+#[test]
+#[ignore = "todo"]
+fn codegen_bug_tag_uninitialized() {
+    let code = "
+opt_never: ?never = null;
+opt_int: ?i32 = opt_never;
+opt_int
+";
+    test_body(code).ok(Optional::<i32>::NULL);
 }

@@ -13,8 +13,8 @@ use crate::{
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     type_::{
-        enum_alignment, has_no_type_coercion, remove_type_coercion_for_finalize, struct_size,
-        ty_match, union_size,
+        NonZeroFieldType, OptionalRepr, enum_alignment, optional_repr,
+        remove_type_coercion_for_finalize, struct_size, ty_match, union_size,
     },
     util::{
         self, OptionExt, UnwrapDebug, debug_only_assert, debug_only_assert_eq, forget_lifetime,
@@ -87,6 +87,7 @@ pub struct Codegen<'ctx> {
     continue_break_depth: usize,
 
     noundef: Attribute,
+    /// Can be used for ZST fields instead of `void`.
     empty_struct_ty: StructType<'ctx>,
     isize_type: IntType<'ctx>,
 }
@@ -179,7 +180,11 @@ impl<'ctx> Codegen<'ctx> {
         mut expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        debug_assert!(expr.ty.u().is_finalized() || expr.ty == primitives().rec_ret_ty);
+        debug_assert!(
+            expr.ty.u().is_finalized() || expr.ty == primitives().rec_ret_ty,
+            "{} is finalized",
+            expr.ty.u()
+        );
 
         // Don't use the type of the replacement. because the init type of `_: *u8 = nil;` should
         // be `*u8` not `*never`
@@ -491,13 +496,13 @@ impl<'ctx> Codegen<'ctx> {
                     debug_assert_eq!(args.len(), 1);
                     let val = args.get(0).u();
                     let inner_ty = out_ty.downcast::<ast::OptionTy>().inner_ty.downcast_type();
-                    let llvm_ty = self.llvm_type(out_ty);
 
                     finalize_ty(val.as_mut().ty.as_mut().u(), inner_ty, true);
-                    if inner_ty.is_non_null() {
+                    if inner_ty.is_non_zero() {
                         self.compile_expr_with_write_target(val, write_target.take())
                     } else {
                         let tag = self.context.i8_type().const_int(1, false);
+                        let llvm_ty = self.llvm_type(out_ty);
                         self.build_enum_val(llvm_ty, inner_ty.alignment(), tag, Some(val), None)
                     }
                 } else if func.ty == p.enum_variant {
@@ -633,7 +638,7 @@ impl<'ctx> Codegen<'ctx> {
                     lhs_is_some,
                     |self_| {
                         let inner_ty = lhs_ty.inner_ty.downcast_type();
-                        let sym = if inner_ty.is_non_null() {
+                        let sym = if inner_ty.is_non_zero() {
                             lhs_sym
                         } else {
                             let opt_llvm_ty = self_.llvm_type(lhs_ty.upcast_to_type()).struct_ty();
@@ -1040,7 +1045,7 @@ impl<'ctx> Codegen<'ctx> {
             ConstValEnum::OptionalVal { val, .. } => {
                 let inner_ty = ty.downcast::<ast::OptionTy>().inner_ty.downcast_type();
                 match *val {
-                    Some(val) if inner_ty.is_non_null() => self.compile_const_val(val, inner_ty),
+                    Some(val) if inner_ty.is_non_zero() => self.compile_const_val(val, inner_ty),
                     Some(val) => ret(new_raw_const_struct(self.llvm_type(ty).struct_ty(), &mut [
                         self.context.i8_type().const_int(1, true).as_value_ref(),
                         self.compile_const_val(val, inner_ty)?.as_value_ref(),
@@ -1760,7 +1765,7 @@ impl<'ctx> Codegen<'ctx> {
             return Ok(sym);
         }
 
-        if target_ty.kind == AstKind::OptionTy && expr_ty.is_non_null() {
+        if target_ty.kind == AstKind::OptionTy && expr_ty.is_non_zero() {
             return Ok(sym);
         }
 
@@ -1917,6 +1922,7 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         debug_expr!(expr);
+        dbg!(sym);
         todo!("cast {} to {}", expr_ty, target_ty);
     }
 
@@ -1986,33 +1992,39 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// TODO: pass `OptionalRepr` to this function
     fn build_optional_is_some(
         &mut self,
         mut option_sym: Symbol<'ctx>,
         opt_ty: Ptr<ast::OptionTy>,
     ) -> CodegenResult<BoolValue<'ctx>> {
         let inner_ty = opt_ty.inner_ty.downcast_type();
-
-        if let Some((idx, field_ty)) = inner_ty.first_non_null_field() {
-            let llvm_ty = self.llvm_type(inner_ty);
-            debug_assert_eq!(llvm_ty, self.llvm_type(opt_ty.upcast_to_type()));
-            let ptr = self.build_ptr_to_sym(option_sym, inner_ty)?; // build alloca also for simple structs?
-            if idx != 0 {
-                option_sym = Symbol::Stack(self.build_raw_gep(ptr, idx as u64)?);
-            }
-            // TODO: are non pointers possible here?
-            // TODO: use padding in structs to make them non null
-            debug_assert_matches!(field_ty.kind, AstKind::PtrTy | AstKind::SliceTy | AstKind::Fn);
-            //let val = self.sym_as_val(option_sym, field_ty)?.ptr_val();
-            let val = self
-                .sym_as_val_with_llvm_ty(option_sym, self.ptr_type().as_basic_type_enum(), 8)?
-                .ptr_val();
-            Ok(BoolValue::new(self.builder.build_is_not_null(val, "")?))
-        } else {
-            let opt_llvm_ty = self.llvm_type(opt_ty.upcast_to_type()).struct_ty();
-            let tag_sym = self.build_struct_access(opt_llvm_ty, option_sym, 0, "tag")?;
-            self.sym_as_val_to_llvm_ty(tag_sym, self.context.i8_type().as_basic_type_enum(), 1)?
-                .bool_val(self)
+        match optional_repr(inner_ty) {
+            OptionalRepr::AlwaysNull => Ok(self.bool_val(false)),
+            OptionalRepr::NullOptimized { offset, field_ty } => {
+                if offset != 0 {
+                    let ptr = self.build_ptr_to_sym(option_sym, inner_ty)?; // build alloca also for simple structs?
+                    option_sym = Symbol::Stack(self.build_raw_gep(ptr, offset as u64)?);
+                }
+                // TODO: use padding in structs to make them non null
+                Ok(match field_ty {
+                    NonZeroFieldType::Ptr => {
+                        let ptr_ty = self.ptr_type().as_basic_type_enum();
+                        let val = self.sym_as_val_with_llvm_ty(option_sym, ptr_ty, 8)?.ptr_val();
+                        BoolValue::new(self.builder.build_is_not_null(val, "")?)
+                    },
+                    NonZeroFieldType::EnumTag(i) => {
+                        let val = self.sym_as_val(option_sym, i.upcast_to_type())?.int_val();
+                        self.build_int_ne(val, val.get_type().const_zero())?
+                    },
+                })
+            },
+            OptionalRepr::Tagged => {
+                let opt_llvm_ty = self.llvm_type(opt_ty.upcast_to_type()).struct_ty();
+                let tag_sym = self.build_struct_access(opt_llvm_ty, option_sym, 0, "tag")?;
+                self.sym_as_val_to_llvm_ty(tag_sym, self.context.i8_type().as_basic_type_enum(), 1)?
+                    .bool_val(self)
+            },
         }
     }
 
@@ -2272,8 +2284,8 @@ impl<'ctx> Codegen<'ctx> {
             BinOpKind::BitAnd => ret(self.builder.build_and(lhs, rhs, "bitand")?),
             BinOpKind::BitXor => ret(self.builder.build_xor(lhs, rhs, "bitxor")?),
             BinOpKind::BitOr => ret(self.builder.build_or(lhs, rhs, "bitor")?),
-            BinOpKind::Eq => cmp!(EQ, "eq"),
-            BinOpKind::Ne => cmp!(NE, "ne"),
+            BinOpKind::Eq => ret(self.build_int_eq(lhs, rhs)?),
+            BinOpKind::Ne => ret(self.build_int_ne(lhs, rhs)?),
             BinOpKind::Lt if is_signed => cmp!(SLT, "lt"),
             BinOpKind::Lt => cmp!(ULT, "lt"),
             BinOpKind::Le if is_signed => cmp!(SLE, "le"),
@@ -2285,6 +2297,24 @@ impl<'ctx> Codegen<'ctx> {
 
             BinOpKind::And | BinOpKind::Or => unreachable!(),
         }
+    }
+
+    fn build_int_eq<I: IntMathValue<'ctx>>(
+        &self,
+        lhs: I,
+        rhs: I,
+    ) -> CodegenResult<BoolValue<'ctx>> {
+        let ret = self.builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq")?;
+        Ok(BoolValue::new(CodegenValue::new(ret).int_val()))
+    }
+
+    fn build_int_ne<I: IntMathValue<'ctx>>(
+        &self,
+        lhs: I,
+        rhs: I,
+    ) -> CodegenResult<BoolValue<'ctx>> {
+        let ret = self.builder.build_int_compare(IntPredicate::NE, lhs, rhs, "ne")?;
+        Ok(BoolValue::new(CodegenValue::new(ret).int_val()))
     }
 
     pub fn build_float_binop(
@@ -2337,12 +2367,8 @@ impl<'ctx> Codegen<'ctx> {
         let rhs = rhs.int;
 
         match op {
-            BinOpKind::Eq => {
-                ret(self.builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq")?)
-            },
-            BinOpKind::Ne => {
-                ret(self.builder.build_int_compare(IntPredicate::NE, lhs, rhs, "ne")?)
-            },
+            BinOpKind::Eq => ret(self.build_int_eq(lhs, rhs)?),
+            BinOpKind::Ne => ret(self.build_int_ne(lhs, rhs)?),
 
             // false = 0, true = 1
             BinOpKind::Lt => {
@@ -2571,7 +2597,8 @@ impl<'ctx> Codegen<'ctx> {
         name: Option<Ptr<str>>,
     ) -> StructType<'ctx> {
         let mut field_types = tmp_alloc().alloc_capped_vec(fields.len()).unwrap();
-        for ty in fields.iter_types().filter(|ty| ty.size() > 0) {
+        // TODO: for ty in fields.iter_types().filter(|ty| ty.size() > 0) {
+        for ty in fields.iter_types() {
             field_types.push(self.llvm_type(ty).inner);
         }
         self.struct_type_inner(&mut field_types, name, false)
@@ -2684,8 +2711,10 @@ impl<'ctx> Codegen<'ctx> {
             } else if ty == p.type_ty {
                 todo!("type_ty")
             } else if ty == p.any {
-                // TODO: needed for `*any`. Is this correct in general?
-                CodegenType::new(self.context.void_type())
+                // `any` requires that all types can be assigned to it. All types allow values to
+                // be ignored which is like creating a `void`. Thus `void` is a valid
+                // representation of `any`.
+                CodegenType::new(self.empty_struct_ty)
             } else {
                 panic_debug!("cannot compile type: {ty}");
             };
@@ -2713,7 +2742,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             TypeEnum::EnumDef { .. } => CodegenType::new(self.new_enum_type(ty.downcast(), None)),
             TypeEnum::RangeTy { .. } => CodegenType::new(self.range_type(ty.downcast())),
-            TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_null() => {
+            TypeEnum::OptionTy { inner_ty: t, .. } if t.downcast_type().is_non_zero() => {
                 self.llvm_type(t.downcast_type())
             },
             TypeEnum::OptionTy { inner_ty, .. } => {
@@ -2742,7 +2771,7 @@ impl<'ctx> Codegen<'ctx> {
     fn c_ffi_type(&mut self, mut ty: Ptr<ast::Type>) -> CFfiType<'ctx> {
         if let Some(opt_ty) = ty.try_downcast::<ast::OptionTy>() {
             let inner = opt_ty.inner_ty.downcast_type();
-            if inner.is_non_null() {
+            if inner.is_non_zero() {
                 debug_assert_ne!(inner.kind, AstKind::OptionTy);
                 ty = inner;
             } else {
@@ -2860,7 +2889,7 @@ impl<'ctx> Codegen<'ctx> {
 
             if let Some(opt_f) = f.try_downcast::<ast::OptionTy>()
                 && let inner = opt_f.inner_ty.downcast_type()
-                && inner.is_non_null()
+                && inner.is_non_zero()
             {
                 f = inner;
             }
@@ -3593,13 +3622,13 @@ pub fn finalize_ty(
     mut out_ty: Ptr<ast::Type>,
     can_have_type_coercion: bool,
 ) -> Ptr<ast::Type> {
-    debug_assert!(ty_match(*ty, out_ty));
+    debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
     if *ty != primitives().never {
         if can_have_type_coercion {
             remove_type_coercion_for_finalize(*ty, &mut out_ty);
         } else {
             debug_only_assert!(
-                has_no_type_coercion(*ty, out_ty),
+                crate::type_::has_no_type_coercion(*ty, out_ty),
                 "expected no type coercion (got: {ty} -> {out_ty})"
             );
         }

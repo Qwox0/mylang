@@ -645,7 +645,7 @@ impl Display for ast::ConstVal {
     }
 }
 
-const DEBUG_TYPES: bool = true;
+const DEBUG_TYPES: bool = false;
 const DEBUG_SIMPLE_TYPES: bool = false;
 
 impl Debug for ast::Type {

@@ -16,7 +16,10 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeKind, ScopePos},
     scoped_stack::ScopedStack,
-    type_::{common_type, struct_offset, ty_match},
+    type_::{
+        AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
+        ty_match,
+    },
     util::{self, UnwrapDebug, debug_only_assert, then, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
@@ -431,7 +434,7 @@ impl Sema {
                     let mut elem_ty = *self.analyze(elem, &None, is_const)?;
                     for elem in elem_iter {
                         let ty = *self.analyze(elem, &Some(elem_ty), is_const)?;
-                        let Some(common_ty) = common_type(ty, elem_ty) else {
+                        let Some(common_ty) = common_type(elem_ty, ty) else {
                             return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
                         };
                         elem_ty = common_ty;
@@ -1056,7 +1059,12 @@ impl Sema {
                 );
                 let rhs_hint = if lhs_inner != p.never { &Some(lhs_inner) } else { ty_hint };
                 let rhs_ty = *self.analyze(*rhs, rhs_hint, is_const)?;
-                let common_ty = common_type(lhs_inner, rhs_ty).unwrap_or_else(|| {
+                let common_ty = common_type_restrict_optional_coerction(
+                    lhs_inner,
+                    rhs_ty,
+                    AllowOptionalCoercion::RHS,
+                )
+                .unwrap_or_else(|| {
                     error_mismatched_types(rhs.full_span(), lhs_inner, rhs_ty);
                     if let Some(rhs_optional_depth) = rhs.ty.map(ast::Type::count_optional_nesting)
                         && let lhs_optional_depth = lhs_ty.count_optional_nesting()
