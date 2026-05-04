@@ -256,7 +256,8 @@ fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: 
     if let Some(expected_lvl) = number_subtyping_level(expected) {
         let Some(got_lvl) = number_subtyping_level(got) else { return false };
         debug_assert_ne!(expected, got, "exact equality was already checked above");
-        return SubtypingLevel::select(expected_lvl, got_lvl) != CommonTypeSelection::Mismatch;
+        let selection = SubtypingLevel::select(expected_lvl, got_lvl);
+        return !matches!(selection, CommonTypeSelection::Mismatch | CommonTypeSelection::Rhs);
     }
 
     // must be above every non-zero `got` value.
@@ -741,22 +742,17 @@ pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
                 Some(OptionalRepr::Tagged) => unreachable_debug(),
             }
         },
-        TypeEnum::EnumDef { variants, variant_tags, tag_ty, .. } => {
-            // TODO: precompute is_non_zero for enums?
-            let variant_tags = variant_tags.u();
-            debug_assert_eq!(variants.len(), variant_tags.len());
-            match enum_repr(variants.iter_types()) {
-                EnumRepr::Never => AlwaysNull,
-                EnumRepr::Transparent(v) => optional_repr(v),
-                EnumRepr::Tagged => {
-                    debug_assert!(inner_ty.size() > 0);
-                    if variant_tags.contains(&0) {
-                        Tagged
-                    } else {
-                        NullOptimized { offset: 0, field_ty: NonZeroFieldType::EnumTag(tag_ty.u()) }
-                    }
-                },
-            }
+        TypeEnum::EnumDef { variants, tag_ty, .. } => match enum_repr(variants.iter_types()) {
+            EnumRepr::Never => AlwaysNull,
+            EnumRepr::Transparent(v) => optional_repr(v),
+            EnumRepr::Tagged => {
+                debug_assert!(inner_ty.size() > 0);
+                if variants.into_iter().any(|v| v.init.u().int::<i64>() == 0) {
+                    Tagged
+                } else {
+                    NullOptimized { offset: 0, field_ty: NonZeroFieldType::EnumTag(tag_ty.u()) }
+                }
+            },
         },
         TypeEnum::RangeTy { elem_ty, .. } => optional_repr(*elem_ty),
         TypeEnum::OptionTy { .. } => Tagged,

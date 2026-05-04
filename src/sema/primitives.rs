@@ -136,6 +136,7 @@ impl Primitives {
             d.var_ty = Some(t);
             //d.ident.ty = Some(t); // TODO: include this?
             d.init = init;
+            d.has_init_expr = true;
             if let Some(init) = init {
                 init.as_mut().ty = Some(t);
             }

@@ -460,6 +460,7 @@ ast_variants! {
     /// otherwise only the start is important
     Decl {
         is_const: bool,
+        has_init_expr: bool,
         markers: DeclMarkers,
         ident: Ptr<Ident>,
         /// `MyStruct.abc :: /* ... */;`
@@ -635,8 +636,6 @@ ast_variants! {
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `variant_count`
         variants: Ptr<[Ptr<Decl>]>,
         finished_members: usize,
-        /// is present after sema of this ast node. always has the same length as `variants`.
-        variant_tags: OPtr<[isize]>,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
@@ -829,7 +828,7 @@ impl Ptr<Ast> {
     #[track_caller]
     pub fn downcast_const_val(self) -> Ptr<ConstVal> {
         let p = self.rep();
-        debug_assert!(p.is_const_val());
+        debug_assert!(p.kind.is_const_val_kind());
         p.cast()
     }
 
@@ -876,6 +875,7 @@ impl Ptr<Ast> {
         then!(self.rep().kind == AstKind::IntVal => self.int())
     }
 
+    #[track_caller]
     pub fn int<Int: TryFrom<i64>>(self) -> Int
     where Int::Error: fmt::Debug {
         let int = self.downcast::<IntVal>().val;
@@ -1105,7 +1105,7 @@ impl Ast {
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
-            AstEnum::Decl { init, .. } => match &init {
+            AstEnum::Decl { has_init_expr, init, .. } => match init.filter(|_| *has_init_expr) {
                 Some(e) => span.join(e.full_span()),
                 None => span,
             },
@@ -1340,6 +1340,7 @@ impl Decl {
         ast_new!(local Decl {
             span,
             is_const: false,
+            has_init_expr: false,
             markers: DeclMarkers::default(),
             ident,
             on_type: associated_type_expr,
@@ -1434,10 +1435,14 @@ impl Block {
 }
 
 impl EnumDef {
+    /// TODO: handle duplicate tags
     #[cfg(debug_assertions)]
     pub fn find_variant_ty_for_tag(&self, tag_val: isize) -> Ptr<Type> {
-        let idx = self.variant_tags.u().iter().position(|tag| *tag == tag_val).u();
-        self.variants[idx].var_ty.u()
+        let variant = self.variants.into_iter().find(|v| {
+            debug_assert!(!v.is_const);
+            v.init.u().int::<isize>() == tag_val
+        });
+        variant.u().var_ty.u()
     }
 }
 

@@ -51,11 +51,6 @@ pub fn error_unknown_field(field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> Handle
 }
 
 #[track_caller]
-pub fn error_unknown_variant(variant: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> HandledErr {
-    cerror!(variant.span, "no variant `{}` on enum type `{}`", variant.sym, ty)
-}
-
-#[track_caller]
 pub fn error_cannot_apply_initializer(
     analyzed_lhs: Ptr<ast::Ast>,
     initializer_expr: Ptr<ast::Ast>,

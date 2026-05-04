@@ -1,5 +1,5 @@
 use crate::{
-    tests::{fields, substr, test, test_body},
+    tests::{TestSpan, arr, fields, substr, test, test_body},
     util::transmute_unchecked,
 };
 
@@ -266,7 +266,7 @@ fn good_error_message3() {
 #[test]
 fn good_error_message4() {
     test("A :: enum { B }; test :: -> A { .B.(1) };")
-        .error("Cannot infer enum type", substr!(".B.(1)";.start_with_len(2)));
+        .error("Cannot infer enum variant or type of associated constant", substr!(".B"));
 
     test("A :: enum { B }; test :: -> A { .B(1) };").error(
         "Cannot call value of type 'A'; expected function",
@@ -312,4 +312,58 @@ fn non_null_enum() {
     // size(enum) == 0 => 0 is invalid => not non-null
     test_body("E :: enum { A = 123 }; opt: ?E = E.A")
         .error("mismatched types: expected `?E`; got `E`", substr!("E.A"));
+}
+
+/// During EnumDef sema I incorrectly used analyze_scope with a local used_tags array. On following
+/// sema passes only the new used_tags were set, meaning the order and values of the variant tags
+/// were incorrect.
+#[test]
+fn correct_variant_tags_on_sema_pause() {
+    let code = "
+E :: enum {
+    A,
+    B,
+    C = C_TAG, // Sema pauses here
+    D,
+    E = 11,
+};
+C_TAG : i32 : 10;
+test :: -> E.[.A, .B, .C, .D, .E];
+";
+    test(code).ok(arr([0_i32, 1, 10, 11, 11]));
+}
+
+#[test]
+fn const_on_enum() {
+    // use variant in const
+    let code = "
+E :: enum {
+    CONST :: E.A;
+    A,
+    B = 10,
+    C(i64),
+    D(f64) = 20,
+}";
+    test(code).compile_no_err();
+
+    // use const in variant
+    let code = "
+E :: enum {
+    START_TAG :: 5;
+    A = START_TAG,
+    B = 10,
+    C(i64),
+    D(f64) = 20,
+}
+test :: -> E.A;
+";
+    test(code).ok(5_u8);
+
+    // cycle
+    let code = "
+E :: enum {
+    CONST :: E.A.as(i8);
+    A = CONST,
+}";
+    test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);
 }

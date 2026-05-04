@@ -522,7 +522,7 @@ impl<'ctx> Codegen<'ctx> {
                 let sym = self.compile_expr(*operand)?;
                 match op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
-                        reg(self.build_ptr_to_sym(sym, out_ty)?)
+                        reg(self.build_ptr_to_sym(sym, operand.ty.u())?)
                     },
                     UnaryOpKind::Deref => {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
@@ -1295,8 +1295,8 @@ impl<'ctx> Codegen<'ctx> {
         data: OPtr<Ast>,
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        let variant_idx = enum_def.variants.find_field(variant_sym).u().0;
-        let variant_tag = *enum_def.variant_tags.u().get(variant_idx).u() as i64;
+        let (variant_idx, variant) = enum_def.variants.find_field(variant_sym).u();
+        let variant_tag = variant.init.u().int();
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].basic_ty();
         if write_target.is_some() || data.is_some() {
             let align = enum_alignment(&enum_def.variants);

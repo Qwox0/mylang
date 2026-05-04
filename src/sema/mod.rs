@@ -385,7 +385,7 @@ impl Sema {
                     && struct_ty.kind.is_struct_kind()
                 {
                     let const_values =
-                        self.validate_initializer(struct_ty, *values, is_const, span)?;
+                        self.validate_named_initializer(struct_ty, *values, is_const, span)?;
                     debug_assert_eq!(const_values.is_some(), is_const);
                     expr.ty = Some(struct_ty);
                     if let Some(elements) = const_values {
@@ -400,7 +400,7 @@ impl Sema {
                     if is_const {
                         return error_const_ptr_initializer(expr).into();
                     } else {
-                        self.validate_initializer(struct_ty, *values, is_const, span)?;
+                        self.validate_named_initializer(struct_ty, *values, is_const, span)?;
                         expr.ty = Some(ptr_ty.upcast_to_type());
                     }
                 } else if lhs.ty.u().propagates_out() {
@@ -502,9 +502,9 @@ impl Sema {
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
-                    && let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym)
                 {
-                    self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?
+                    self.analyze_enum_tag(expr, enum_ty, variant, is_const)?
                 } else if lhs_ty == p.type_ty
                     && let TypeEnum::StructDef { consts, .. }
                     | TypeEnum::UnionDef { consts, .. }
@@ -623,12 +623,13 @@ impl Sema {
                     debug_assert!(expr.ty.is_some());
                     return Ok(());
                 }
-                expr.ty = Some(if let Some(enum_ty) = ty_hint.try_downcast::<ast::EnumDef>() {
-                    let Some((v_idx, _)) = enum_ty.variants.find_field(rhs.sym) else {
-                        return error_unknown_variant(*rhs, enum_ty.upcast_to_type()).into();
-                    };
+                let enum_hint = ty_hint.try_downcast::<ast::EnumDef>();
+                let ty = if let Some(enum_ty) = enum_hint
+                    && let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym)
+                {
+                    let ty = self.analyze_enum_tag(expr, enum_ty, variant, is_const)?;
                     *lhs = Some(enum_ty.upcast());
-                    self.analyze_enum_tag(expr, enum_ty, v_idx, is_const)?
+                    ty
                 } else if let Some(t) = ty_hint
                     && let Some(consts) = t.get_associated_consts()
                     && let Some((_, const_mem)) = consts.find_field(rhs.sym)
@@ -637,11 +638,27 @@ impl Sema {
                     debug_assert!(const_mem.is_const);
                     expr.set_replacement(const_mem.const_val());
                     ty
+                } else if let Some(t) = ty_hint
+                    && t.propagates_out()
+                {
+                    *t
                 } else {
-                    ty_hint
-                        .filter(|t| t.propagates_out())
-                        .ok_or_else(|| cerror!(expr.full_span(), "Cannot infer enum type"))?
-                });
+                    return Err(match *ty_hint {
+                        Some(t) if t.kind == AstKind::EnumDef => cerror!(
+                            rhs.span,
+                            "no variant or associated constant `{}` on enum type `{t}`",
+                            rhs.sym,
+                        ),
+                        Some(t) => {
+                            cerror!(rhs.span, "no associated constant `{}` on type `{t}`", rhs.sym)
+                        },
+                        None => cerror!(
+                            expr.full_span(),
+                            "Cannot infer enum variant or type of associated constant"
+                        ),
+                    });
+                };
+                expr.ty = Some(ty);
             },
             AstEnum::Index { mut_access, lhs, idx, .. } => {
                 let idx_ty = self.analyze(*idx, &None, is_const)?.finalize();
@@ -817,21 +834,17 @@ impl Sema {
                 };
             },
             AstEnum::UnaryOp { op, operand, .. } => {
-                let expr_ty;
-
-                macro_rules! simple_unary_op {
+                macro_rules! simple_unary_op_const {
                     ($op:tt $ast_node:ident) => {{
                         if is_const {
                             let const_val = operand.downcast_const_val();
                             let val = const_val.downcast::<ast::$ast_node>().val;
-                            debug_assert!(expr.replacement.is_none());
                             // TODO: no allocation
-                            expr.replacement = Some(self.alloc(ast_new!($ast_node {
+                            expr.set_replacement(self.alloc(ast_new!($ast_node {
                                 val: $op val,
                                 span: expr.full_span(),
                             }))?.upcast());
                         }
-                        expr_ty
                     }};
                 }
 
@@ -843,18 +856,20 @@ impl Sema {
                     SemaResult::HandledErr
                 };
 
-                expr.ty = Some(match *op {
+                match *op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let ty_hint = ty_hint
                             .try_downcast_ty_hint::<ast::PtrTy>()
                             .map(|ptr_ty| ptr_ty.pointee.downcast_type());
-                        expr_ty = *analyze!(*operand, ty_hint);
+                        let pointee = *analyze!(*operand, ty_hint);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         if is_mut {
                             self.validate_mutation(MutationKind::AddrOf, *operand, expr)?;
                         }
-                        let pointee = expr_ty.upcast();
-                        if expr_ty.kind == AstKind::Fn {
+                        expr.ty = Some(
+                            type_new!(PtrTy { pointee: pointee.upcast(), is_mut }).upcast_to_type(),
+                        );
+                        if pointee.kind == AstKind::Fn {
                             if is_mut {
                                 return cerror2!(
                                     expr.full_span(),
@@ -871,14 +886,13 @@ impl Sema {
                                  compile time"
                             );
                         }
-                        type_new!(PtrTy { pointee, is_mut }).upcast_to_type()
                     },
                     UnaryOpKind::Deref => {
-                        expr_ty = *analyze!(*operand, None);
-                        let Some(ptr_ty) = expr_ty.try_downcast::<ast::PtrTy>() else {
+                        let operand_ty = *analyze!(*operand, None);
+                        let Some(ptr_ty) = operand_ty.try_downcast::<ast::PtrTy>() else {
                             return cerror2!(
                                 expr.full_span(),
-                                "Cannot dereference value of type `{expr_ty}`",
+                                "Cannot dereference value of type `{operand_ty}`",
                             );
                         };
                         if is_const {
@@ -888,33 +902,37 @@ impl Sema {
                                  compile time"
                             );
                         }
-                        ptr_ty.pointee.downcast_type()
+                        expr.ty = Some(ptr_ty.pointee.downcast_type());
                     },
                     UnaryOpKind::Not => {
-                        expr_ty = *analyze!(*operand, ty_hint);
-                        if expr_ty == p.bool {
-                            simple_unary_op!(!BoolVal)
-                        } else if expr_ty.kind == AstKind::IntTy {
-                            simple_unary_op!(!IntVal)
+                        let operand_ty = *analyze!(*operand, ty_hint);
+                        if operand_ty == p.bool {
+                            expr.ty = Some(operand_ty);
+                            simple_unary_op_const!(!BoolVal);
+                        } else if operand_ty.kind == AstKind::IntTy {
+                            expr.ty = Some(operand_ty);
+                            simple_unary_op_const!(!IntVal);
                         } else {
-                            return err(expr_ty);
+                            return err(operand_ty);
                         }
                     },
                     UnaryOpKind::Neg => {
-                        expr_ty = *analyze!(*operand, ty_hint);
-                        if expr_ty.is_sint() {
-                            simple_unary_op!(-IntVal)
-                        } else if expr_ty == p.int_lit.upcast_to_type() {
-                            simple_unary_op!(-IntVal);
-                            p.sint_lit.upcast_to_type()
-                        } else if expr_ty.kind == AstKind::FloatTy {
-                            simple_unary_op!(-FloatVal)
+                        let operand_ty = *analyze!(*operand, ty_hint);
+                        if operand_ty.is_sint() {
+                            expr.ty = Some(operand_ty);
+                            simple_unary_op_const!(-IntVal);
+                        } else if operand_ty == p.int_lit.upcast_to_type() {
+                            expr.ty = Some(p.sint_lit.upcast_to_type());
+                            simple_unary_op_const!(-IntVal);
+                        } else if operand_ty.kind == AstKind::FloatTy {
+                            expr.ty = Some(operand_ty);
+                            simple_unary_op_const!(-FloatVal);
                         } else {
-                            return err(expr_ty);
+                            return err(operand_ty);
                         }
                     },
                     UnaryOpKind::Try => todo!("try"),
-                });
+                }
             },
             AstEnum::BinOp { lhs, op, rhs, .. } => {
                 let lhs_ty = *self.analyze(*lhs, &None, is_const)?;
@@ -1523,46 +1541,53 @@ impl Sema {
             AstEnum::EnumDef {
                 scope,
                 variants,
+                consts,
                 finished_members,
-                variant_tags,
                 is_simple_enum,
                 tag_ty,
                 ..
             } => {
-                let mut repr_ty = Some(p.int_lit.upcast_to_type());
-                let mut used_tags = self.cctx.alloc.alloc_uninit_slice(variants.len())?;
-                let mut tag = 0;
-                *is_simple_enum = true;
+                let mut repr_ty = Some(tag_ty.get_or_insert(p.int_lit).upcast_to_type());
 
                 scope.verify_no_duplicates();
                 self.allow_unfinished_use(expr, p.type_ty);
                 let osh = self.open_scope(scope);
-                let mut idx = 0;
                 let res = analyze_scope(scope.decls.as_mut(), finished_members, |member| {
+                    debug_assert!(member.is_const == consts.contains(&member));
                     if member.is_const {
-                        return Ok(());
+                        return self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field));
                     }
                     if member.var_ty_expr.is_none() {
                         member.as_mut().var_ty = Some(p.void_ty);
                     }
 
-                    let variant_idx = member.as_mut().init.take();
-                    let _ = self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))?;
-                    member.as_mut().init = variant_idx;
+                    let variant_tag = member.as_mut().init.take();
+                    let res = self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field));
+                    member.as_mut().init = variant_tag;
+                    res?;
                     if member.var_ty != p.void_ty {
                         *is_simple_enum = false;
                     }
-                    if let Some(variant_idx) = variant_idx {
-                        let variant_idx_ty = *self.analyze(variant_idx, &repr_ty, true)?;
-                        check_or_infer_target!(
+                    let tag = if let Some(variant_tag) = variant_tag {
+                        let variant_idx_ty = *self.analyze(variant_tag, &repr_ty, true)?;
+                        let new_repr_ty = check_or_infer_target!(
                             variant_idx_ty,
                             &mut repr_ty,
                             false,
-                            variant_idx.full_span()
+                            variant_tag.full_span()
                         );
-                        tag = variant_idx.int();
-                    }
+                        *tag_ty = Some(new_repr_ty.downcast::<ast::IntTy>());
+                        variant_tag.downcast::<ast::IntVal>().val
+                    } else {
+                        // PERF: terrible implementation but works for now
+                        let v_idx = variants.into_iter().position(|v| v == member).u();
+                        match v_idx.checked_sub(1).map(|i| variants[i]) {
+                            Some(prev_variant) => get_enum_variant_tag(prev_variant)?.val + 1,
+                            None => 0,
+                        }
+                    };
 
+                    /*
                     const ALLOW_DUPLICATE_TAG: bool = true;
 
                     // TODO: replace linear search?
@@ -1571,15 +1596,20 @@ impl Sema {
                     {
                         return cerror2!(member.ident.span, "Duplicate enum variant tag");
                     }
-                    used_tags[idx].write(tag);
-                    tag += 1;
-                    idx += 1;
+                    */
+
+                    debug_assert_eq!(member.init.is_some(), member.has_init_expr);
+                    match &mut member.as_mut().init {
+                        Some(init) => debug_assert_eq!(init.rep().kind, AstKind::IntVal),
+                        i @ None => {
+                            *i = Some(ast_new!(IntVal { val: tag as i64 }, Span::ZERO).upcast());
+                        },
+                    }
+
                     Ok(())
                 });
                 self.close_scope(osh);
                 res?;
-                debug_assert_eq!(variants.len(), used_tags.len());
-                *variant_tags = Some(Ptr::from_ref(unsafe { used_tags.assume_init_ref() }));
 
                 let repr_ty = repr_ty.u().downcast::<ast::IntTy>();
                 *tag_ty = Some(if repr_ty.bits.is_none() {
@@ -1648,18 +1678,23 @@ impl Sema {
         &mut self,
         expr: Ptr<Ast>,
         enum_ty: Ptr<ast::EnumDef>,
-        v_idx: usize,
+        variant: Ptr<ast::Decl>,
         is_const: bool,
     ) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
+        debug_assert!(enum_ty.variants.contains(&variant));
+        debug_assert!(!variant.is_const);
         if is_const {
-            let tag = enum_ty.variant_tags.u()[v_idx] as i64;
-            let tag = ast_new!(IntVal { val: tag }, Span::ZERO).upcast();
-            tag.as_mut().ty = Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
+            let val = get_enum_variant_tag(variant)?.val;
+            let tag = ast_new!(IntVal { val }, Span::ZERO).upcast();
+            tag.as_mut().ty =
+                Some(if val.is_negative() { p.sint_lit } else { p.int_lit }.upcast_to_type());
+            // TODO: use correct tag_ty:
+            //tag.as_mut().ty = Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
             expr.set_replacement(tag);
         }
         // enum variant
-        Ok(if enum_ty.variants[v_idx].var_ty.u() == p.void_ty {
+        Ok(if variant.var_ty.or_not_finished()? == p.void_ty {
             enum_ty.upcast_to_type()
         } else {
             p.enum_variant
@@ -1679,7 +1714,6 @@ impl Sema {
 
     /// To allow recursive (or indirectly recursive) functions and types, we need to set the
     /// `var_ty` of these symbols
-    /// may be recursive directly or indirectly. To allow this
     fn allow_unfinished_use(&self, expr: Ptr<Ast>, ty: Ptr<ast::Type>) {
         expr.as_mut().ty = Some(ty);
         if let Some(decl) = self.decl_stack.last()
@@ -1801,7 +1835,7 @@ impl Sema {
         Ok(())
     }
 
-    pub fn validate_initializer(
+    pub fn validate_named_initializer(
         &mut self,
         struct_ty: Ptr<ast::Type>,
         initializer_values: Ptr<[(Ptr<ast::Ident>, Option<Ptr<Ast>>)]>,
@@ -2592,3 +2626,7 @@ enum VarDeclSpecialCase {
 }
 
 const _: () = assert!(size_of::<Option<VarDeclSpecialCase>>() == 1);
+
+fn get_enum_variant_tag(variant: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::IntVal>> {
+    variant.init.u().try_downcast::<ast::IntVal>().or_not_finished()
+}

@@ -358,6 +358,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Enum) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
                 let mut variants = Vec::new();
+                let mut consts = Vec::new();
                 //let consts = Vec::new(); // TODO: allow constants in enum block
                 parse_in_block!(
                     self,
@@ -367,34 +368,44 @@ impl Parser {
                         let Some(variant_ident) = opt!(self, ident(), MIN_PRECEDENCE)? else {
                             break;
                         };
-                        let ty = then!(
+                        let decl = self.alloc(ast::Decl::from_ident(variant_ident))?;
+                        let mut decl = self.decl_assign(decl, true)?;
+                        if decl.var_ty_expr.is_none() && decl.init.is_none() {
+                            let ty = then!(
                             self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
-                            let ty_expr = self.expr()?;
-                            self.tok(TokenKind::CloseParenthesis)?;
-                            ty_expr
-                        });
-                        let variant_index = then!(
-                            self.lex.advance_if_kind(TokenKind::Eq)
-                            => self.expr()?
-                        );
-                        let mut decl = self.alloc(ast::Decl::new(variant_ident, None, span))?;
-                        decl.var_ty_expr = ty;
-                        decl.init = variant_index;
-                        variants.push(decl);
-                        decl.upcast() // Note: variants are not constant and thus always expect a trailing seperator
+                                let ty_expr = self.expr()?;
+                                self.tok(TokenKind::CloseParenthesis)?;
+                                ty_expr
+                            });
+                            let variant_index =
+                                then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
+                            decl.var_ty_expr = ty;
+                            decl.init = variant_index;
+                            decl.has_init_expr = decl.init.is_some();
+                            variants.push(decl);
+                        } else {
+                            if !decl.is_const {
+                                return cerror2!(
+                                    decl.full_span(),
+                                    "expected variant or constant declaration; got variable \
+                                     declaration"
+                                );
+                            }
+                            consts.push(decl);
+                        }
+                        decl.upcast()
                     }
                 );
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 let ScopeAndAggregateInfo { scope, fields, consts } =
-                    Scope::for_aggregate(variants, vec![], &self.cctx.alloc, ScopeKind::Enum)?;
+                    Scope::for_aggregate(variants, consts, &self.cctx.alloc, ScopeKind::Enum)?;
                 expr!(
                     EnumDef {
                         scope,
                         variants: fields,
                         finished_members: 0,
-                        variant_tags: None,
                         consts,
-                        is_simple_enum: false,
+                        is_simple_enum: true,
                         tag_ty: None,
                     },
                     span.join(close_b.span)
@@ -1068,6 +1079,14 @@ impl Parser {
         let lhs = self.expr_(ASSIGN_PRECEDENCE)?;
         let decl = self.alloc(ast::Decl::from_lhs(lhs)?)?;
         decl.as_mut().markers = markers;
+        self.decl_assign(decl, allow_ident_only)
+    }
+
+    fn decl_assign(
+        &mut self,
+        decl: Ptr<ast::Decl>,
+        allow_ident_only: bool,
+    ) -> ParseResult<Ptr<ast::Decl>> {
         let t = self.lex.peek_or_eof();
         let kind = match t.kind {
             TokenKind::Colon => DeclTailKind::Typed,
@@ -1138,6 +1157,7 @@ impl Parser {
                 decl.init = then!(eq.is_some() => self.expr()?);
             },
         }
+        decl.has_init_expr = decl.init.is_some();
         Ok(decl)
     }
 

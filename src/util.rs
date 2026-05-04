@@ -1,9 +1,4 @@
-use crate::{
-    ast::DeclList,
-    context::primitives,
-    parser::lexer::Code,
-    ptr::{OPtr, Ptr},
-};
+use crate::{ast::DeclList, context::primitives, parser::lexer::Code, ptr::Ptr};
 use core::fmt;
 use std::{
     hash::{BuildHasher, Hash},
@@ -117,11 +112,12 @@ impl<T, E: fmt::Debug> UnwrapDebug for Result<T, E> {
     }
 }
 
-impl<T> UnwrapDebug for Ptr<[OPtr<T>]> {
-    type Unwrapped = Ptr<[Ptr<T>]>;
+impl<T> UnwrapDebug for Ptr<[Option<T>]> {
+    type Unwrapped = Ptr<[T]>;
 
     fn u(self) -> Self::Unwrapped {
         debug_assert!(self.iter().all(Option::is_some));
+        const { assert!(std::mem::size_of::<Option<T>>() == std::mem::size_of::<T>()) };
         unsafe { std::mem::transmute::<Self, Self::Unwrapped>(self) }
     }
 }

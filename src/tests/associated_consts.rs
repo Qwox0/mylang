@@ -205,17 +205,35 @@ fn mangle_function_in_anon_struct() {
 
 #[test]
 fn infer_const_namespace() {
-    let code = "
-MyStruct :: struct {
-    val: i32;
+    for (ty, val) in [
+        ("struct { val: i8 }", ".{ val=2 }"),
+        ("union { val: i8 }", "{ mut u: MyType; u.val = 2; u }"),
+        ("enum { A, B, C }", ".C"),
+    ] {
+        #[rustfmt::skip]
+        let code = format!("
+MyType :: {ty};
+MyType.create :: -> MyType {val};
+test :: -> MyType {{ .create() }};"
+        );
+        test(code).ok(2_i8);
 
-    MIN :: MyStruct.(-10);
-    MAX :: MyStruct.(10);
-}
-get_val :: (s: MyStruct) -> s.val;
-test :: -> get_val(.MIN);
-";
-    test(code).ok(-10_i32);
+        // better error if type is known
+        let code = format!("MyType :: {ty}; test :: -> MyType {{ .unknown() }};");
+        test(code).error(
+            if ty.starts_with("enum") {
+                "no variant or associated constant `unknown` on enum type `MyType`"
+            } else {
+                "no associated constant `unknown` on type `MyType`"
+            },
+            substr!("unknown"),
+        );
+    }
+
+    // general error
+    let code = format!("test :: -> {{ .unknown() }};");
+    test(code)
+        .error("Cannot infer enum variant or type of associated constant", substr!(".unknown"));
 }
 
 #[test]
