@@ -37,3 +37,6 @@ try_align_up :: (x: uint, alignment: uint) -> {
 align_up :: (x: uint, alignment: uint) ->
     try_align_up(x, alignment) orelse std.panic("align_up overflowed!");
 
+/// doesn't change endianness.
+from_bytes_u32 :: (bytes: [4]u8) -> bytes.&.as(*u32).*;
+as_bytes_u32 :: (val: u32) -> val.&.as(*[4]u8).*;

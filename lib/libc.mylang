@@ -6,9 +6,11 @@
 
 // x86_64 Linux
 pub c_char :: u8;
+pub c_short :: i16;
 pub c_int :: i32;
 pub c_long :: i64;
 pub c_size_t :: usize;
+pub c_ssize_t :: isize;
 pub c_off_t :: i64;
 pub c_off64_t :: i64;
 pub c_float :: f32;
@@ -24,11 +26,6 @@ pub c_double :: f64;
 
 // ===== <ctype.h> =====
 
-
-// ===== <errno.h> =====
-
-__errno_location : -> *i32 : #extern;
-get_errno :: -> __errno_location().*;
 
 // ===== <fenv.h> =====
 
@@ -106,6 +103,11 @@ putchar : (ch: u8) -> c_int : #extern;
 /// writes a character string to stdout
 puts : (str: *u8) -> c_int : #extern;
 
+fgetc : (stream: ?*mut FILE) -> i32 : #extern;
+getc : (stream: ?*mut FILE) -> i32 : #extern;
+getchar : () -> i32 : #extern;
+fgets : (buf: ?*mut u8, buf_size: i32, stream: *FILE) -> ?*mut u8 : #extern;
+
 static EOF : c_int = #extern;
 
 fopen : (pathname: *c_char, mode: *u8) -> ?*FILE : #extern;
@@ -115,6 +117,8 @@ fclose : (stream: *FILE) -> c_int : #extern;
 fcloseall : (stream: *FILE) -> c_int : #extern;
 ftell : (stream: *FILE) -> c_long : #extern;
 fseek : (stream: *FILE, offset: c_long, whence: c_int) -> c_int : #extern;
+
+fflush : (stream: ?*FILE) -> i32 : #extern;
 
 // see <https://github.com/bminor/glibc/blob/3374de90386f1814cec58567248d43a4632b16f0/libio/stdio.h#L110-L112>
 pub SEEK_SET : c_int : 0;
@@ -148,6 +152,7 @@ qsort : (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *a
 
 memcpy : (dest: ?*any, src: ?*any, len: c_size_t) -> *any : #extern;
 memset : (ptr: ?*any, byte: u8, len: c_size_t) -> *any : #extern;
+memchr : (ptr: ?*any, byte: u8, len: c_size_t) -> ?*mut any : #extern;
 
 strlen : (str: *c_char) -> c_size_t : #extern;
 
@@ -155,6 +160,12 @@ strcmp : (s1: *c_char, s2: *c_char) -> c_int : #extern;
 strncmp : (s1: *c_char, s2: *c_char, len: c_size_t) -> c_int : #extern;
 
 strerror : (errnum: c_int) -> *c_char : #extern;
+strerrorname_np : (errnum: c_int) -> *c_char : #extern;
+
+// ===== <errno.h> =====
+
+__errno_location : -> *i32 : #extern;
+get_errno :: -> __errno_location().*;
 
 // ===== <tgmath.h> =====
 
@@ -179,6 +190,10 @@ sleep : (__seconds: u32) -> u32 : #extern;
 
 sysconf : (name: c_int) -> c_long : #extern;
 _SC_PAGESIZE :: 30;
+
+close : (__fd: i32) -> i32 : #extern;
+read : (__fd: i32, __buf: ?*mut any, __nbytes: c_size_t) -> c_ssize_t : #extern;
+write : (__fd: i32, __buf: ?*any, __n: c_size_t) -> c_ssize_t : #extern;
 
 // ===== <sys/mman.h> =====
 
@@ -239,3 +254,230 @@ MAP_HUGE_512MB      :: 29 << MAP_HUGE_SHIFT;
 MAP_HUGE_1GB        :: 30 << MAP_HUGE_SHIFT;
 MAP_HUGE_2GB        :: 31 << MAP_HUGE_SHIFT;
 MAP_HUGE_16GB       :: 34 << MAP_HUGE_SHIFT;
+// ===== <pthread.h> =====
+
+pthread_t :: u64;
+pthread_attr_t :: union { __size: [56]u8; __align: i64; };
+
+pthread_create         : (newthread: ?*mut pthread_t, attr: ?*pthread_attr_t, start_routine: *(_0: ?*mut any) -> ?*mut any, arg: ?*mut any) -> i32 : #extern;
+pthread_exit           : (retval: ?*mut any) -> never : #extern;
+pthread_join           : (th: pthread_t, thread_return: ?*mut ?*mut any) -> i32 : #extern;
+pthread_detach         : (th: pthread_t) -> i32 : #extern;
+pthread_self           : () -> pthread_t : #extern;
+pthread_equal          : (thread1: pthread_t, thread2: pthread_t) -> i32 : #extern;
+pthread_setcancelstate : (state: i32, oldstate: ?*mut i32) -> i32 : #extern;
+pthread_setcanceltype  : (type: i32, oldtype: ?*mut i32) -> i32 : #extern;
+pthread_cancel         : (th: pthread_t) -> i32 : #extern;
+pthread_testcancel     : () -> void : #extern;
+
+// ===== <sys/socket.h> =====
+
+AF_LOCAL :: 1;
+AF_UNIX :: AF_LOCAL;
+AF_INET :: 2;
+AF_INET6 :: 10;
+
+AF :: enum {
+    LOCAL = AF_LOCAL;
+    UNIX = AF_UNIX;
+    INET = AF_INET;
+    INET6 = AF_INET6;
+}
+
+SOL_SOCKET :: 1;
+
+SO :: enum {
+    DEBUG = 1;
+    REUSEADDR = 2;
+    TYPE = 3;
+    ERROR = 4;
+    DONTROUTE = 5;
+    BROADCAST = 6;
+    SNDBUF = 7;
+    RCVBUF = 8;
+    SNDBUFFORCE = 32;
+    RCVBUFFORCE = 33;
+    KEEPALIVE = 9;
+    OOBINLINE = 10;
+    NO_CHECK = 11;
+    PRIORITY = 12;
+    LINGER = 13;
+    BSDCOMPAT = 14;
+    REUSEPORT = 15;
+    PASSCRED = 16;
+    PEERCRED = 17;
+    RCVLOWAT = 18;
+    SNDLOWAT = 19;
+    RCVTIMEO_OLD = 20;
+    SNDTIMEO_OLD = 21;
+    SECURITY_AUTHENTICATION = 22;
+    SECURITY_ENCRYPTION_TRANSPORT = 23;
+    SECURITY_ENCRYPTION_NETWORK = 24;
+    BINDTODEVICE = 25;
+    ATTACH_FILTER = 26;
+    DETACH_FILTER = 27;
+    GET_FILTER :: SO.ATTACH_FILTER;
+    PEERNAME = 28;
+    ACCEPTCONN = 30;
+    PEERSEC = 31;
+    PASSSEC = 34;
+    MARK = 36;
+    PROTOCOL = 38;
+    DOMAIN = 39;
+    RXQ_OVFL = 40;
+    WIFI_STATUS = 41;
+    PEEK_OFF = 42;
+    NOFCS = 43;
+    LOCK_FILTER = 44;
+    SELECT_ERR_QUEUE = 45;
+    BUSY_POLL = 46;
+    MAX_PACING_RATE = 47;
+    BPF_EXTENSIONS = 48;
+    INCOMING_CPU = 49;
+    ATTACH_BPF = 50;
+    DETACH_BPF :: SO.DETACH_FILTER;
+    ATTACH_REUSEPORT_CBPF = 51;
+    ATTACH_REUSEPORT_EBPF = 52;
+    CNX_ADVICE = 53;
+    MEMINFO = 55;
+    INCOMING_NAPI_ID = 56;
+    COOKIE = 57;
+    PEERGROUPS = 59;
+    ZEROCOPY = 60;
+}
+
+iovec :: struct {
+    iov_base: ?*mut any;
+    iov_len: c_size_t;
+};
+
+socklen_t :: u32;
+
+SOCK_STREAM :: 1;
+SOCK_DGRAM :: 2;
+SOCK_RAW :: 3;
+SOCK_RDM :: 4;
+SOCK_SEQPACKET :: 5;
+SOCK_DCCP :: 6;
+SOCK_PACKET :: 10;
+SOCK_CLOEXEC :: 524288;
+SOCK_NONBLOCK :: 2048;
+
+sa_family_t :: u16;
+sockaddr :: struct {
+    sa_family: sa_family_t;
+    sa_data: [14]u8;
+};
+sockaddr_storage :: struct {
+    ss_family: sa_family_t;
+    __ss_padding: [118]u8;
+    __ss_align: u64;
+};
+
+MSG_OOB :: 1;
+MSG_PEEK :: 2;
+MSG_DONTROUTE :: 4;
+MSG_CTRUNC :: 8;
+MSG_PROXY :: 16;
+MSG_TRUNC :: 32;
+MSG_DONTWAIT :: 64;
+MSG_EOR :: 128;
+MSG_WAITALL :: 256;
+MSG_FIN :: 512;
+MSG_SYN :: 1024;
+MSG_CONFIRM :: 2048;
+MSG_RST :: 4096;
+MSG_ERRQUEUE :: 8192;
+MSG_NOSIGNAL :: 16384;
+MSG_MORE :: 32768;
+MSG_WAITFORONE :: 65536;
+MSG_BATCH :: 262144;
+MSG_SOCK_DEVMEM :: 33554432;
+MSG_ZEROCOPY :: 67108864;
+MSG_FASTOPEN :: 536870912;
+
+msghdr :: struct {
+    msg_name: ?*mut any;
+    msg_namelen: socklen_t;
+    msg_iov: ?*mut iovec;
+    msg_iovlen: c_size_t;
+    msg_control: ?*mut any;
+    msg_controllen: c_size_t;
+    msg_flags: i32;
+};
+
+SHUT_RD :: 0;
+SHUT_WR :: 1;
+SHUT_RDWR :: 2;
+
+socket      : (domain: c_int, type: c_int, protocol: c_int) -> c_int : #extern;
+socketpair  : (domain: c_int, type: c_int, protocol: c_int, fds: [2]c_int) -> c_int : #extern;
+bind        : (fd: c_int, addr: ?*sockaddr, len: socklen_t) -> c_int : #extern;
+getsockname : (fd: c_int, addr: ?*mut sockaddr, len: ?*mut socklen_t) -> c_int : #extern;
+connect     : (fd: c_int, addr: ?*sockaddr, len: socklen_t) -> c_int : #extern;
+getpeername : (fd: c_int, addr: ?*mut sockaddr, len: ?*mut socklen_t) -> c_int : #extern;
+send        : (fd: c_int, buf: ?*any, n: c_size_t, flags: c_int) -> c_ssize_t : #extern;
+recv        : (fd: c_int, buf: ?*mut any, n: c_size_t, flags: c_int) -> c_ssize_t : #extern;
+sendto      : (fd: c_int, buf: ?*any, n: c_size_t, flags: c_int, addr: ?*sockaddr, addr_len: socklen_t) -> c_ssize_t : #extern;
+recvfrom    : (fd: c_int, buf: ?*mut any, n: c_size_t, flags: c_int, addr: ?*mut sockaddr, addr_len: ?*mut socklen_t) -> c_ssize_t : #extern;
+sendmsg     : (fd: c_int, message: ?*msghdr, flags: c_int) -> c_ssize_t : #extern;
+recvmsg     : (fd: c_int, message: ?*mut msghdr, flags: c_int) -> c_ssize_t : #extern;
+getsockopt  : (fd: c_int, level: c_int, optname: c_int, optval: ?*mut any, optlen: ?*mut socklen_t) -> c_int : #extern;
+setsockopt  : (fd: c_int, level: c_int, optname: c_int, optval: ?*any, optlen: socklen_t) -> c_int : #extern;
+listen      : (fd: c_int, n: c_int) -> c_int : #extern;
+accept      : (fd: c_int, addr: ?*mut sockaddr, addr_len: ?*mut socklen_t) -> c_int : #extern;
+shutdown    : (fd: c_int, how: c_int) -> c_int : #extern;
+
+// ===== <netinet/in.h> =====
+
+in_addr_t :: u32;
+in_addr :: in_addr_t;
+in_pktinfo :: struct {
+    ipi_ifindex: i32;
+    ipi_spec_dst: in_addr;
+    ipi_addr: in_addr;
+};
+
+in6_addr :: [16]u8;
+in_port_t :: u16;
+
+static in6addr_any: in6_addr = #extern;
+static in6addr_loopback: in6_addr = #extern;
+
+sockaddr_in :: struct {
+    sin_family: sa_family_t;
+    sin_port: in_port_t;
+    sin_addr: in_addr;
+    sin_zero: [8]u8 = .[0; 8];
+};
+sockaddr_in6 :: struct {
+    sin6_family: sa_family_t;
+    sin6_port: in_port_t;
+    sin6_flowinfo: u32;
+    sin6_addr: in6_addr;
+    sin6_scope_id: u32;
+};
+
+ntohl : (netlong: u32) -> u32 : #extern;
+ntohs : (netshort: u16) -> u16 : #extern;
+htonl : (hostlong: u32) -> u32 : #extern;
+htons : (hostshort: u16) -> u16 : #extern;
+bindresvport  : (sockfd: i32, sock_in: ?*mut sockaddr_in ) -> i32 : #extern;
+bindresvport6 : (sockfd: i32, sock_in: ?*mut sockaddr_in6) -> i32 : #extern;
+
+// ===== <arpa/inet.h> =====
+
+inet_addr      : (cp: ?*u8) -> in_addr_t : #extern;
+inet_lnaof     : (in: in_addr) -> in_addr_t : #extern;
+inet_makeaddr  : (net: in_addr_t, host: in_addr_t) -> in_addr : #extern;
+inet_netof     : (in: in_addr) -> in_addr_t : #extern;
+inet_network   : (cp: ?*u8) -> in_addr_t : #extern;
+inet_ntoa      : (in: in_addr) -> ?*mut u8 : #extern;
+inet_pton      : (af: i32, cp: ?*u8, buf: ?*mut any) -> i32 : #extern;
+inet_ntop      : (af: i32, cp: ?*any, buf: ?*mut u8, len: socklen_t) -> ?*u8 : #extern;
+inet_aton      : (cp: ?*u8, inp: ?*mut in_addr) -> i32 : #extern;
+inet_neta      : (net: in_addr_t, buf: ?*mut u8, len: c_size_t) -> ?*mut u8 : #extern;
+inet_net_ntop  : (af: i32, cp: ?*any, bits: i32, buf: ?*mut u8, len: c_size_t) -> ?*mut u8 : #extern;
+inet_net_pton  : (af: i32, cp: ?*u8, buf: ?*mut any, len: c_size_t) -> i32 : #extern;
+inet_nsap_addr : (cp: ?*u8, buf: ?*mut u8, len: i32) -> u32 : #extern;
+inet_nsap_ntoa : (len: i32, cp: ?*u8, buf: ?*mut u8) -> ?*mut u8 : #extern;

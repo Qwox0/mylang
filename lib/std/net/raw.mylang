@@ -1,0 +1,98 @@
+std :: #import "std";
+libc :: #import "libc";
+c_int :: libc.c_int;
+
+RawSocket :: struct {
+    fd: c_int;
+
+    new :: (domain: libc.AF, type: c_int, protocol: c_int = 0) -> RawSocket {
+        fd := libc.socket(domain.as(c_int), type, protocol);
+        if fd == -1  std.fail_errno("RawSocket.new()"); // TODO: error handling
+        .{ fd }
+    }
+
+    close :: (self: RawSocket) -> {
+        if libc.close(self.fd) == -1
+            std.fail_errno("RawSocket.close()"); // TODO: error handling
+    }
+
+    set_option :: (self: RawSocket, name: libc.SO, value: c_int) -> {
+        out := libc.setsockopt(self.fd, libc.SOL_SOCKET, name.as(c_int), &value, #sizeof_val(value));
+        if out == -1  std.fail_errno("RawSocket.set_option()"); // TODO: error handling
+        out
+    }
+
+    set_reuse_address :: (self: RawSocket) -> {
+        self.set_option(.REUSEADDR, 1);
+        self.set_option(.REUSEPORT, 1);
+    }
+
+    bind :: (self: RawSocket, ip_addr: std.net.IpAddress.IPv4, port: u16) -> {
+        c_sockaddr := ip_addr.to_c_sockaddr(port);
+        if libc.bind(self.fd, xx &c_sockaddr.addr, c_sockaddr.addrlen) == -1
+            std.fail_errno("RawSocket.bind()"); // TODO: error handling
+    }
+
+    connect :: (self: RawSocket, ip_addr: std.net.IpAddress.IPv4, port: u16) -> {
+        c_sockaddr := ip_addr.to_c_sockaddr(port);
+        if libc.connect(self.fd, xx &c_sockaddr.addr, c_sockaddr.addrlen) == -1
+            std.fail_errno("RawSocket.connect()"); // TODO: error handling
+    }
+
+    listen :: (self: RawSocket, backlog: c_int = 16) -> {
+        if libc.listen(self.fd, backlog) == -1
+            std.fail_errno("RawSocket.listen()"); // TODO: error handling
+    }
+
+    accept :: (self: RawSocket) -> struct { socket: RawSocket, peer_addr: std.net.IpAddress } {
+        mut peer_addr: libc.sockaddr_storage;
+        mut peer_addrlen: libc.socklen_t = #sizeof(libc.sockaddr_storage);
+
+        connection_fd := libc.accept(self.fd, peer_addr.&.as(*mut libc.sockaddr), &mut peer_addrlen);
+        if connection_fd == -1  std.fail_errno("RawSocket.accept()"); // TODO: error handling
+
+        .{
+            peer_addr = .from_c_sockaddr(&peer_addr, peer_addrlen),
+            socket = .{ fd = connection_fd },
+        }
+    }
+
+    Shutdown :: enum {
+        Read = libc.SHUT_RD;
+        Write = libc.SHUT_WR;
+        ReadWrite = libc.SHUT_RDWR;
+    };
+
+    shutdown :: (self: RawSocket, how: Shutdown) -> {
+        if libc.shutdown(self.fd, how.as(c_int)) == -1
+            std.fail_errno("RawSocket.shutdown()"); // TODO: error handling
+    }
+
+    send :: (self: RawSocket, data: []u8, flags: c_int = 0) -> {
+        sent := libc.send(self.fd, data.ptr, data.len, flags);
+        if sent == -1  std.fail_errno("RawSocket.send()"); // TODO: error handling
+        sent.as(libc.c_size_t)
+    }
+
+    receive :: (self: RawSocket, buf: []mut u8, flags: c_int = 0) -> {
+        read_count := libc.recv(self.fd, buf.ptr, buf.len, flags);
+        if read_count == -1  std.fail_errno("RawSocket.receive()"); // TODO: error handling
+        if read_count == 0 return null;
+        buf[..read_count]
+    }
+
+    /*
+    write :: (self: RawSocket, data: []u8) -> {
+        written := libc.write(self.fd, data.ptr, data.len);
+        if written == -1  std.fail_errno("RawSocket.write()"); // TODO: error handling
+        written
+    }
+
+    read :: (self: RawSocket, buf: []mut u8) -> {
+        read_count := libc.read(self.fd, buf.ptr, buf.len);
+        if read_count == -1  std.fail_errno("RawSocket.read()"); // TODO: error handling
+        if read_count == 0 return null;
+        buf[..read_count]
+    }
+     */
+}

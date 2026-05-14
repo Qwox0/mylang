@@ -1,0 +1,65 @@
+std :: #import "std";
+libc :: #import "libc";
+c_int :: libc.c_int;
+
+addr :: #import "addr.mylang";
+
+RawSocket :: #import "raw.mylang".RawSocket;
+
+Server :: struct {
+    socket: RawSocket;
+
+    ListenOptions :: struct {
+        reuse_address := true;
+    }
+
+    // TODO: IPv6
+    listen :: (addr: std.net.IpAddress.IPv4, port: u16, options := ListenOptions.{}) -> Server {
+        socket := RawSocket.new(.INET, libc.SOCK_STREAM, 0);
+
+        if options.reuse_address then socket.set_reuse_address();
+
+        socket.bind(addr, port);
+        socket.listen();
+
+        .{ socket }
+    };
+
+    close :: (self: Server) -> self.socket.close();
+
+    accept :: (self: Server) -> struct { stream: Stream, peer_addr: std.net.IpAddress } {
+        res := self.socket.accept();
+        .{ stream = .{ socket = res.socket }, peer_addr = res.peer_addr }
+    }
+}
+
+Stream :: struct {
+    socket: RawSocket;
+
+    close :: (self: Stream) -> self.socket.close();
+
+    connect :: (addr: std.net.IpAddress.IPv4, port: u16) -> Stream {
+        socket := RawSocket.new(.INET, libc.SOCK_STREAM, 0);
+        socket.connect(addr, port);
+        .{ socket }
+    }
+
+    send :: (self: Stream, data: []u8) -> self.socket.send(data, libc.MSG_NOSIGNAL);
+
+    // TODO: move to some generic `Write` interface
+    send_all :: (self: Stream, mut data: []u8) -> {
+        while data.len > 0 {
+            res := self.send(data);
+            // TODO: handle EINTR
+            std.assert(res <= data.len);
+            data = data[res..];
+        }
+    }
+
+    receive :: (self: Stream, buf: []mut u8) -> self.socket.receive(buf);
+
+    shutdown :: (self: Stream, how: RawSocket.Shutdown) -> self.socket.shutdown(how);
+}
+
+pub listen :: Server.listen;
+pub connect :: Stream.connect;

@@ -1,0 +1,76 @@
+std :: #import "std";
+libc :: #import "libc";
+
+IpAddress :: enum {
+    V4(IpAddress.IPv4),
+    V6(IpAddress.IPv6),
+
+    IPv4 :: struct {
+        /// big endian (e.g. `.[127, 0, 0, 1]`)
+        bytes: [4]u8;
+
+        ANY :: IPv4.(.[0; 4]);
+        LOOPBACK :: IPv4.(.[127, 0, 0, 1]);
+        LOCALHOST :: LOOPBACK;
+
+        /// `text` must be 0-terminated. TODO
+        parse :: (text: []u8) -> IPv4 {
+            mut bytes := u8.[0; 4];
+            res := libc.inet_pton(libc.AF_INET, text.ptr, &mut bytes);
+            if res == -1  std.fail_errno("inet_pton()"); // TODO: return error
+            if res == 0 return std.panic("invalid IPv4 address"); // TODO: return error
+            .{ bytes }
+        }
+
+        CSockAddr :: struct { addr: libc.sockaddr_in, addrlen: libc.socklen_t };
+        to_c_sockaddr :: (self: IPv4, port: u16) -> CSockAddr.{
+            addr = .{
+                sin_family = libc.AF_INET,
+                sin_port = libc.htons(port),
+                sin_addr = std.num.from_bytes_u32(self.bytes),
+            },
+            addrlen = #sizeof(libc.sockaddr_in),
+        };
+
+        from_c :: (addr: libc.in_addr) -> IPv4.(std.num.as_bytes_u32(addr));
+    }
+
+    IPv6 :: struct {
+        bytes: [16]u8;
+
+        ANY :: IPv6.(.[0; 16]);
+        LOOPBACK :: IPv6.(.[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        LOCALHOST :: LOOPBACK;
+
+        /// `text` must be 0-terminated. TODO
+        parse :: (text: []u8) -> IPv6 {
+            mut bytes := u8.[0; 16];
+            res := libc.inet_pton(libc.AF_INET6, text.ptr, &mut bytes);
+            if res == -1  std.fail_errno("inet_pton()"); // TODO: return error
+            if res == 0 return std.panic("invalid IPv6 address"); // TODO: return error
+            .{ bytes }
+        }
+
+        CSockAddr :: struct { addr: libc.sockaddr_in, addrlen: libc.socklen_t };
+        to_c_sockaddr :: (self: IPv4, port: u16) -> CSockAddr.{
+            addr = .{
+                sin_family = libc.AF_INET,
+                sin_port = libc.htons(port),
+                sin_addr = std.num.from_bytes_u32(self.bytes),
+            },
+            addrlen = #sizeof(libc.sockaddr_in),
+        };
+
+        from_c :: (addr: libc.in6_addr) -> IPv6.(addr);
+    }
+
+    from_c_sockaddr :: (storage: *libc.sockaddr_storage, len: libc.socklen_t) -> IpAddress {
+        if storage.*.ss_family == libc.AF_INET {
+            std.assert(#sizeof(libc.sockaddr_in) <= len);
+            .V4(.from_c(storage.as(*libc.sockaddr_in).*.sin_addr))
+        } else if storage.*.ss_family == libc.AF_INET6 {
+            std.assert(#sizeof(libc.sockaddr_in6) <= len);
+            .V6(.from_c(storage.as(*libc.sockaddr_in6).*.sin6_addr))
+        } else std.panic("unreachable")
+    }
+}

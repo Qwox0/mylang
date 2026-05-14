@@ -49,3 +49,20 @@ pub is_null_terminated :: (str: []u8) -> str[str.len] == 0;
 
 /// 0x9 = \t; 0xA = \n; 0xB = vertical tab; 0xC = form feed; 0xD = \r; 0x20 = space
 pub is_ascii_whitespace :: (char: u8) -> (0x9 <= char and char <= 0xD) or char == ' ';
+
+pub find_byte :: (str: []u8, byte: u8) -> {
+    found := libc.memchr(str.ptr, byte, str.len) orelse return null;
+    Some(std.ptr.difference(found, str.ptr))
+}
+
+trim_start :: (mut str: []u8) -> {
+    while str.len > 0 and std.str.is_ascii_whitespace(str[0]) do str = str[1..];
+    str
+}
+
+trim_end :: (mut str: []u8) -> {
+    while str.len > 0 and std.str.is_ascii_whitespace(str[str.len - 1]) do str.len -= 1;
+    str
+}
+
+trim :: (str: []u8) -> str.trim_start().trim_end();

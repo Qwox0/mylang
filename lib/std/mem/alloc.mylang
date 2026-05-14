@@ -23,8 +23,8 @@ Allocator :: struct {
         return self.impl.*(self.data, .Alloc, min_size, alignment, null);
     }
 
-    free :: (self: Allocator, ptr: ?*mut u8) -> {
-        self.impl.*(self.data, .Free, 0, 0, ptr);
+    free :: (self: Allocator, ptr: ?*mut any) -> {
+        self.impl.*(self.data, .Free, 0, 0, ptr.as(?*mut u8));
     }
 
     free_all :: (self: Allocator) -> {

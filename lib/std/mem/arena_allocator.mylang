@@ -9,6 +9,8 @@ ArenaAllocator :: struct {
 
     new :: (backing_allocator: Allocator) -> ArenaAllocator.{ backing_allocator };
 
+    destroy :: (mut self: ArenaAllocator) -> self.&mut.reset(.FreeAllBlocks);
+
     allocator :: (data: *mut ArenaAllocator) -> Allocator.{ impl = &impl, data };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
@@ -89,14 +91,14 @@ ArenaAllocator :: struct {
     };
 
     reset :: (self: *mut ArenaAllocator, mode := ResetMode.KeepCurrentBlock) -> {
-        first_block := self.*.cur_block orelse return;
+        cur_block := self.*.cur_block orelse return;
 
-        mut block_to_free := if mode == ResetMode.FreeAllBlocks then {
+        mut block_to_free := if mode == ResetMode.FreeAllBlocks {
             self.*.cur_block = null;
-            first_block
+            cur_block
         } else {
-            first_block.reset();
-            first_block.*.prev_block
+            cur_block.reset();
+            cur_block.*.prev_block
         };
 
         while true {

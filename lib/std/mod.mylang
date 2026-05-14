@@ -3,6 +3,7 @@ pub env :: #import "env.mylang";
 pub fmt :: #import "fmt.mylang";
 pub fs :: #import "fs.mylang";
 pub mem :: #import "mem/mod.mylang";
+pub net :: #import "net/mod.mylang";
 pub num :: #import "num.mylang";
 pub ptr :: #import "ptr.mylang";
 pub set :: #import "set.mylang";
@@ -32,19 +33,35 @@ open_file :: (pathname: []u8, mode: []u8) -> *libc.FILE {
     libc.fopen(pathname.ptr, mode.ptr) orelse panic("No such file or directory")
 }
 
+get_file_size :: (file: *libc.FILE) -> u64 {
+    cur_pos := libc.ftell(file);
+
+    libc.fseek(file, 0, libc.SEEK_END);
+    size := libc.ftell(file);
+    if size < 0 do panic("Cannot get file size");
+
+    libc.fseek(file, cur_pos, libc.SEEK_SET);
+    size.as(u64)
+}
+
 /// The `ptr` on the returned slice must be `free`d by the caller.
 read_file_as_string_slice :: (pathname: []u8) -> []u8 {
     file := open_file(pathname, "rb");
     defer libc.fclose(file);
 
-    libc.fseek(file, 0, libc.SEEK_END);
-    length := libc.ftell(file).as(u64);
-    if length < 0 do panic("Cannot get file size");
-    libc.fseek(file, 0, libc.SEEK_SET);
-
+    length := get_file_size(file);
     s := str.malloc_str(length);
     libc.fread(s.ptr, 1, length, file);
     s
+}
+
+read_file :: (file: *libc.FILE, buf: []mut u8) -> {
+    length := get_file_size(file);
+    if buf.len < length then panic("buffer too small");
+    read := libc.fread(buf.ptr, 1, length, file);
+    if read < length then panic("read failed");
+    assert(read == length);
+    buf[..length]
 }
 
 print :: (str: []u8) -> void {
@@ -57,3 +74,10 @@ println :: (str: []u8) -> void {
     print(str);
     libc.putchar('\n'); // handle output == EOF?
 }
+
+fail_errno :: (thing: []u8) -> never {
+    errno := libc.get_errno();
+    libc.printf("%.*s failed. %s: %s\n".ptr, thing.len, thing.ptr, libc.strerrorname_np(errno), libc.strerror(errno));
+    libc.abort()
+}
+
