@@ -138,7 +138,7 @@ impl BuildArgs {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TestArgsOptions {
     pub print_source: bool,
     pub debug_ast: bool,

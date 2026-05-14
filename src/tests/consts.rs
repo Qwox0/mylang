@@ -1,4 +1,4 @@
-use crate::tests::{arr, substr, test, test_body};
+use crate::tests::{TestSpan, arr, substr, test, test_body};
 
 /// more tests about associated constants: [`crate::tests::associated_consts`]
 #[test]
@@ -198,4 +198,114 @@ test :: -> {
 #[test]
 fn const_cast_num_to_ptr() {
     test("NULL :: 0.as(*never); test :: -> ?*u8 NULL;").ok(std::ptr::null::<()>());
+}
+
+#[test]
+fn const_addr_of() {
+    let res = test_body("a :: 1 + 1; const_addr :: &a; const_addr.*").ok(2_i64);
+    assert!(res.llvm_ir().contains("@test.a = private unnamed_addr constant i64 2, align 8"));
+    assert!(res.llvm_ir().contains("load i64, ptr @test.a, align 8"));
+    drop(res);
+
+    let res = test_body("static a := 1 + 1; const_addr :: &a; const_addr.*").ok(2_i64);
+    assert!(res.llvm_ir().contains("@test.a = internal constant i64 2, align 8"));
+    assert!(res.llvm_ir().contains("load i64, ptr @test.a, align 8"));
+    drop(res);
+
+    let res = test_body("mut static a := 1 + 1; const_addr :: &mut a; const_addr.*").ok(2_i64);
+    assert!(res.llvm_ir().contains("@test.a = internal global i64 2, align 8"));
+    assert!(res.llvm_ir().contains("load i64, ptr @test.a, align 8"));
+    drop(res);
+
+    test_body("a := 1 + 1; const_addr :: &a; const_addr.*").error(
+        "Can only take the address of a static or constant value at compile time",
+        substr!("&a"),
+    );
+    test_body("const_addr :: &1; const_addr.*").error(
+        "Can only take the address of a static or constant value at compile time",
+        substr!("&1"),
+    );
+}
+
+#[test]
+fn codegen_duplicate_const_alloc() {
+    let code = "
+a :: 1 + 1;
+const_addr_f32 : *f32 : &a;
+const_addr_i32 : *i32 : &a;
+b := const_addr_f32.*;          // creates first global const
+c := const_addr_i32.*;          // creates second global const
+c
+    ";
+    let res = test_body(code).ok(2_i32);
+    assert!(
+        res.llvm_ir()
+            .contains("@test.a = private unnamed_addr constant float 2.000000e+00, align 4")
+    );
+    assert!(
+        res.llvm_ir()
+            .contains("@test.a.1 = private unnamed_addr constant i32 2, align 4")
+    );
+    drop(res);
+
+    let code = "
+a :: 1 + 1;
+const_addr_1 : *f32 : &a;
+const_addr_2 : *f32 : &a;
+b := const_addr_1.*;            // creates global const
+c := const_addr_2.*;            // uses global const
+c
+    ";
+    let res = test_body(code).ok(2_f32);
+    assert!(
+        res.llvm_ir()
+            .contains("@test.a = private unnamed_addr constant float 2.000000e+00, align 4")
+    );
+    assert!(!res.llvm_ir().contains("@test.a.1"));
+    drop(res);
+
+    // theoretical duplicate const alloc problem. Doesn't exist in reality because constant values
+    // must not contain cycles
+    let code = "
+MyStruct :: struct { val: *MyStruct };
+val :: MyStruct.{ val=&val };   // 2: create global const for `val`
+const_addr :: &val;
+test :: -> const_addr.*;        // 1: doesn't find global for `val` > compiles `val` init > 2 >
+                                //    global for `val` exists now > don't create second global!
+    ";
+    let res = test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);
+    drop(res);
+}
+
+/// ```llvm
+/// @alloc_ddadadacd92a4149d036d1533e90cb9e = private unnamed_addr constant [8 x i8] c"\0A\00\00\00\00\00\00\00", align 8
+///
+/// ; [...]
+///
+/// define void @example[d797943fde5fa4b6]::test2() unnamed_addr {
+/// start:
+///   call void @example[d797943fde5fa4b6]::f2(i64 10)
+///   call void @example[d797943fde5fa4b6]::f(ptr align 8 @alloc_ddadadacd92a4149d036d1533e90cb9e)
+///   call void @example[d797943fde5fa4b6]::f(ptr align 8 @alloc_ddadadacd92a4149d036d1533e90cb9e)
+///   ret void
+/// }
+/// ```
+#[test]
+#[ignore = "todo"]
+fn addr_of_const() {
+    let code = "
+C: i64 : 10;
+
+f :: (x: *i64) -> {}
+f2 :: (x: i64) -> {}
+
+test :: -> {
+    f2(C);
+    f(&C);
+    f(&C);
+}
+        ";
+    let res = test(code).compile_no_err();
+    assert!(!res.llvm_ir().contains("alloca"));
+    drop(res);
 }

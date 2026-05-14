@@ -338,3 +338,14 @@ fn fix_parse_error() {
     test("FnTy :: *i32 -> i32;").parse();
     test("FnTy :: (*i32) -> i32;").parse();
 }
+
+#[test]
+#[ignore = "TODO"]
+fn todo_fix_function_decl_with_explicit_type_annotation() {
+    let code = "
+FnType :: () -> void;
+f : FnType : () -> {}
+alias :: f;
+";
+    test(code).compile_no_err();
+}

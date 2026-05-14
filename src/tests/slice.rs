@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::{stack_ptr, test_body};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -34,25 +34,17 @@ slice2";
     assert_eq!(out.len, 2 - 0);
 }
 
-/*
 #[test]
-fn arr_to_slice() {
-    let out = jit_run_test::<Slice>("
-slice: []i32 = .[1, 2, 4, 8, 16, 32, 64].&;
-slice" )
-    .unwrap();
-
-    assert!(!out.ptr.is_null());
-    assert_eq!(out.len, 7);
+fn reslice_codegen_different_int_type() {
+    // TODO: prevent bigger ints during sema (e.g u128)
+    let code = "
+arr := .[0; 10];
+idx: u16 = 2;
+mut slice := arr[..];
+slice = slice[2.as(u16)..8];
+slice = slice[..4.as(u8)];
+slice = slice[1.as(u32)..];
+slice
+";
+    test_body(code).ok((stack_ptr(), 3usize));
 }
-
-#[test]
-fn empty_slice() {
-    let out = jit_run_test::<Slice>("
-slice: []i32 = &.[];
-slice" )
-    .unwrap();
-
-    assert_eq!(out.len, 0);
-}
-*/

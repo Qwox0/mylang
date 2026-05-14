@@ -52,8 +52,12 @@ use inkwell::{
     },
 };
 use std::{
-    assert_matches::debug_assert_matches, borrow::Cow, collections::HashMap, fmt::Debug,
-    marker::PhantomData, path::Path,
+    assert_matches::debug_assert_matches,
+    borrow::Cow,
+    collections::{HashMap, hash_map::Entry},
+    fmt::Debug,
+    marker::PhantomData,
+    path::Path,
 };
 
 mod bindings;
@@ -78,6 +82,8 @@ pub struct Codegen<'ctx> {
     type_table: HashMap<Ptr<ast::Type>, CodegenType<'ctx>>,
     fn_table: HashMap<Ptr<ast::Fn>, FunctionValue<'ctx>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
+    /// Taking the address of a global creates a [`GlobalValue`] which is stored here.
+    const_allocs: HashMap<(Ptr<ast::Decl>, Ptr<ast::Type>), GlobalValue<'ctx>>,
 
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_loop: Option<Loop<'ctx>>,
@@ -102,6 +108,7 @@ impl<'ctx> Codegen<'ctx> {
             type_table: HashMap::new(),
             fn_table: HashMap::new(),
             defer_stack: ScopedStack::default(),
+            const_allocs: HashMap::new(),
             cur_fn: None,
             cur_loop: None,
             sret_ptr: None,
@@ -397,6 +404,7 @@ impl<'ctx> Codegen<'ctx> {
                                     .build_extract_value(range_val, 0, "start")?
                                     .into_int_value();
                                 let ptr = self.build_gep(llvm_elem_ty, ptr, &[start])?;
+                                let start = self.build_uint_extend(start, self.isize_type)?;
                                 let len = self.builder.build_int_sub(len, start, "")?;
                                 (ptr, len)
                             },
@@ -405,6 +413,7 @@ impl<'ctx> Codegen<'ctx> {
                                     .builder
                                     .build_extract_value(range_val, 0, "end")?
                                     .into_int_value();
+                                end = self.build_uint_extend(end, self.isize_type)?;
                                 if rkind.is_inclusive() {
                                     end = self.builder.build_int_add(
                                         end,
@@ -435,7 +444,7 @@ impl<'ctx> Codegen<'ctx> {
                                 (ptr, len)
                             },
                         };
-                        reg(self.build_slice(ptr, len, false)?)
+                        reg(self.build_slice(ptr, len)?)
                     },
                     _ => unreachable_debug(),
                 }
@@ -884,7 +893,8 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::BoolVal { .. }
             | AstEnum::CharVal { .. }
             | AstEnum::StrVal { .. }
-            | AstEnum::PtrVal { .. }
+            | AstEnum::RawPtrVal { .. }
+            | AstEnum::StaticPtrVal { .. }
             | AstEnum::AggregateVal { .. }
             | AstEnum::OptionalVal { .. } => {
                 reg(self.compile_const_val(expr.downcast_const_val(), out_ty)?)
@@ -987,11 +997,10 @@ impl<'ctx> Codegen<'ctx> {
             ConstValEnum::StrVal { text, .. } => {
                 debug_assert!(ty.matches_str());
                 let value = replace_escape_chars(&text);
-                let ptr = self.add_global_const_string(&value)?;
-                let len = self.int_type(64).const_int(value.len() as u64, false);
-                ret(self.build_slice(ptr.as_pointer_value(), len, true)?)
+                let ptr = self.add_global_const_string(&value);
+                ret(self.const_slice(ptr.as_pointer_value(), value.len() as u64))
             },
-            ConstValEnum::PtrVal { val, .. } => {
+            ConstValEnum::RawPtrVal { val, .. } => {
                 debug_assert!(match ty.matchable().as_ref() {
                     TypeEnum::PtrTy { .. } => true,
                     TypeEnum::OptionTy { inner_ty, .. } =>
@@ -1004,6 +1013,40 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     ret(self.isize_type.const_int(*val, false).const_to_pointer(ptr_ty))
                 }
+            },
+            &ConstValEnum::StaticPtrVal { sym, .. } => {
+                let global = if sym.is_const {
+                    let ty = ty.downcast::<ast::PtrTy>().pointee.downcast_type();
+                    match self.const_allocs.entry((sym, ty)) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(_) => {
+                            // Cannot use the vacant slot because compile_const_val might mutate
+                            // const_allocs which invalidates it.
+                            let val =
+                                self.compile_const_val(sym.init.u().downcast_const_val(), ty)?;
+                            // The compile_const_val cannot compile the same sym (see `codegen_duplicate_const_alloc`)
+
+                            let llvm_ty = self.llvm_type(ty).basic_ty();
+                            let gv = self.add_global(
+                                self.mangle_symbol(sym).as_ref(),
+                                llvm_ty,
+                                true,
+                                Some(Linkage::Private),
+                                false,
+                                ty.alignment() as u32,
+                                val.basic_val(),
+                            );
+
+                            let old = self.const_allocs.insert((sym, ty), gv);
+                            debug_assert!(old.is_none());
+                            gv
+                        },
+                    }
+                } else {
+                    debug_assert!(sym.markers.get(DeclMarkers::IS_STATIC_MASK));
+                    self.get_symbol(sym).global()
+                };
+                ret(global.as_pointer_value())
             },
             ConstValEnum::AggregateVal { elements, .. } => {
                 match ty.matchable().as_ref() {
@@ -1053,7 +1096,7 @@ impl<'ctx> Codegen<'ctx> {
                     None => ret(self.llvm_type(ty).basic_ty().const_zero()),
                 }
             },
-            _ => todo!(),
+            _ => todo!("compile_const_val({cv:?})"),
         }
     }
 
@@ -2451,22 +2494,37 @@ impl<'ctx> Codegen<'ctx> {
         BoolValue::new(if val { b_ty.const_all_ones() } else { b_ty.const_zero() })
     }
 
+    fn const_slice(&mut self, ptr: PointerValue<'ctx>, len: u64) -> StructValue<'ctx> {
+        debug_assert!(ptr.is_const());
+        let len = self.isize_type.const_int(len, false);
+        self.context
+            .const_struct(&[ptr.as_basic_value_enum(), len.as_basic_value_enum()], false)
+    }
+
     fn build_slice(
         &mut self,
         ptr: PointerValue<'ctx>,
         len: IntValue<'ctx>,
-        is_const: bool,
     ) -> CodegenResult<StructValue<'ctx>> {
-        debug_assert!(!is_const || ptr.is_const());
-        debug_assert!(!is_const || len.is_const());
-        Ok(if is_const {
-            self.context
-                .const_struct(&[ptr.as_basic_value_enum(), len.as_basic_value_enum()], false)
-        } else {
-            let slice = self.slice_ty().get_undef();
-            let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
-            self.builder.build_insert_value(slice, len, 1, "slice")?.into_struct_value()
-        })
+        let len = self.build_uint_extend(len, self.isize_type)?;
+        let slice = self.slice_ty().get_undef();
+        let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
+        Ok(self.builder.build_insert_value(slice, len, 1, "slice")?.into_struct_value())
+    }
+
+    fn build_uint_extend(
+        &self,
+        val: IntValue<'ctx>,
+        ty: IntType<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        debug_assert!(
+            val.get_type().get_bit_width() <= ty.get_bit_width(),
+            "{} <= {}",
+            val.get_type().get_bit_width(),
+            ty.get_bit_width()
+        );
+        // ..._or_bit_cast emits noop when source bit-width == target bit-width
+        Ok(self.builder.build_int_z_extend_or_bit_cast(val, self.isize_type, "")?)
     }
 
     /// # Usage
@@ -2539,16 +2597,48 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    fn add_uninit_global(
+        &self,
+        name: &str,
+        ty: impl BasicType<'ctx>,
+        is_const: bool,
+        linkage: Option<Linkage>,
+        is_addr_relevant: bool,
+        align: u32,
+    ) -> GlobalValue<'ctx> {
+        let gv = self.module().add_global(ty, None, name);
+        gv.set_constant(is_const);
+        if let Some(linkage) = linkage {
+            gv.set_linkage(linkage);
+        }
+        gv.set_unnamed_address(if is_addr_relevant {
+            UnnamedAddress::None
+        } else {
+            UnnamedAddress::Global
+        });
+        gv.set_alignment(align);
+        gv
+    }
+
+    fn add_global(
+        &self,
+        name: &str,
+        ty: impl BasicType<'ctx>,
+        is_const: bool,
+        linkage: Option<Linkage>,
+        is_addr_relevant: bool,
+        align: u32,
+        init: impl BasicValue<'ctx>,
+    ) -> GlobalValue<'ctx> {
+        let gv = self.add_uninit_global(name, ty, is_const, linkage, is_addr_relevant, align);
+        gv.set_initializer(&init);
+        gv
+    }
+
     /// See `IRBuilderBase::CreateGlobalString` in `llvm/lib/IR/IRBuilder.cpp`
-    fn add_global_const_string(&mut self, str: &str) -> CodegenResult<GlobalValue<'ctx>> {
+    fn add_global_const_string(&self, str: &str) -> GlobalValue<'ctx> {
         let str_const = self.context.const_string(str.as_bytes(), true);
-        let gv = self.module().add_global(str_const.get_type(), Some(AddressSpace::from(0)), "");
-        gv.set_constant(true);
-        gv.set_linkage(Linkage::Private);
-        gv.set_initializer(&str_const);
-        gv.set_unnamed_address(UnnamedAddress::Global);
-        gv.set_alignment(1);
-        Ok(gv)
+        self.add_global("", str_const.get_type(), true, Some(Linkage::Private), false, 1, str_const)
     }
 
     fn max_int(&self, int_ty: IntType<'ctx>, is_signed: bool) -> CodegenResult<IntValue<'ctx>> {
@@ -3172,28 +3262,41 @@ impl<'ctx> Codegen<'ctx> {
 
             let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
             let sym = if is_static {
-                if !during_precompile {
-                    debug_assert_matches!(self.symbols.get(decl), Some(Symbol::Global(_)));
+                if during_precompile {
+                    let ty = self.llvm_type(var_ty).basic_ty();
+
+                    Symbol::Global(self.add_uninit_global(
+                        self.mangle_symbol(decl).as_ref(),
+                        ty,
+                        ctx().do_mut_checks && !decl.markers.get(DeclMarkers::IS_MUT_MASK),
+                        Some(Linkage::Internal),
+                        true,
+                        var_ty.alignment() as u32,
+                    ))
+                } else {
+                    let global = self.get_symbol(decl).global();
+
+                    if !init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
+                        let val = match init {
+                            Some(i) => {
+                                self.compile_const_val(i.downcast_const_val(), var_ty)?.basic_val()
+                            },
+                            None => {
+                                // TODO: error
+                                CodegenType::new(global.get_value_type()).basic_ty().const_zero()
+                            },
+                        };
+                        global.set_initializer(&val);
+                        if !init.is_none() {
+                            if self.cur_fn.is_some() {
+                                // C does this for all `static`s
+                                global.set_linkage(Linkage::Internal);
+                            }
+                        }
+                    }
+
                     return Ok(());
                 }
-                let ty = self.llvm_type(var_ty).basic_ty();
-                let name = self.mangle_symbol(decl);
-                let global = self.module().add_global(ty, None, name.as_ref());
-                if !init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
-                    global.set_initializer(&match init.and_then(|i| i.try_downcast_const_val()) {
-                        Some(cv) => self.compile_const_val(cv, var_ty)?.basic_val(),
-                        None => ty.const_zero(),
-                    });
-                    if self.cur_fn.is_some() {
-                        // C does this for all `static`s
-                        global.set_linkage(Linkage::Internal);
-                    }
-                    global.set_constant(
-                        ctx().do_mut_checks && !markers.get(DeclMarkers::IS_MUT_MASK),
-                    );
-                }
-                global.set_alignment(var_ty.alignment() as u32);
-                Symbol::Global(global)
             } else if ENABLE_NON_MUT_TO_REG
                 && let Some(init) = init
                 && !markers.get(DeclMarkers::IS_MUT_MASK)

@@ -880,10 +880,17 @@ impl Sema {
                             debug_assert!(const_val.kind == AstKind::Fn);
                             expr.set_replacement(const_val.upcast());
                         } else if is_const {
-                            return cerror2!(
-                                expr.full_span(),
-                                "The \"address of\" operator is currently not supported at \
-                                 compile time"
+                            let Some(sym) =
+                                operand.try_get_symbol_decl().filter(|d| d.is_allowed_in_const())
+                            else {
+                                return cerror2!(
+                                    expr.full_span(),
+                                    "Can only take the address of a static or constant value at \
+                                     compile time"
+                                );
+                            };
+                            expr.set_replacement(
+                                ast_new!(StaticPtrVal { sym }, Span::ZERO).upcast(),
                             );
                         }
                     },
@@ -1391,7 +1398,7 @@ impl Sema {
             },
             */
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
-            AstEnum::PtrVal { .. } => todo!(),
+            AstEnum::RawPtrVal { .. } | AstEnum::StaticPtrVal { .. } => todo!(),
             AstEnum::AggregateVal { .. } => todo!(),
             AstEnum::Fn { params_scope, ret_ty_expr, ret_ty, body, has_known_ret_ty, .. } => {
                 params_scope.verify_no_duplicates();
@@ -1817,14 +1824,14 @@ impl Sema {
                 // TODO: remove this int -> ptr cast?
                 (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
+                    let ptr_val = ast_new!(RawPtrVal { val: i_val.val as u64 }, i_val.span);
                     expr.set_replacement(ptr_val.upcast());
                 },
                 (TypeMatch::IntTy(_), TypeMatch::OptionTy(o))
                     if o.inner_ty.downcast_type().kind == AstKind::PtrTy =>
                 {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(PtrVal { val: i_val.val as u64 }, i_val.span);
+                    let ptr_val = ast_new!(RawPtrVal { val: i_val.val as u64 }, i_val.span);
                     expr.set_replacement(ptr_val.upcast());
                 },
                 // TODO: correctly handle other cases
@@ -2261,6 +2268,7 @@ impl Sema {
         expr: Ptr<Ast>,
     ) -> SemaResult<()> {
         if !self.cctx.do_mut_checks {
+            // TODO: assigning to const is never valid
             return Ok(());
         }
 

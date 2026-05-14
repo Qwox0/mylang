@@ -336,7 +336,10 @@ impl DebugAst for Ast {
             AstEnum::BoolVal { val, .. } => lines.write(if *val { "true" } else { "false" }),
             AstEnum::CharVal { val, .. } => lines.write(&format!("'{}'", *val)),
             AstEnum::StrVal { text, .. } => lines.write(&format!("\"{}\"", text.as_ref())),
-            AstEnum::PtrVal { val, .. } => lines.write(&format!("{:p}", *val as *const ())),
+            AstEnum::RawPtrVal { val, .. } => lines.write(&format!("{:p}", *val as *const ())),
+            AstEnum::StaticPtrVal { sym, .. } => {
+                lines.write(&format!("{{ptr to {}}}", sym.ident.sym))
+            },
             AstEnum::AggregateVal { elements, .. } => match ty.matchable().as_ref() {
                 TypeEnum::ArrayTy { elem_ty, .. } => {
                     lines.write_tree(elem_ty);

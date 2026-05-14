@@ -44,6 +44,7 @@ mod range;
 mod realistic;
 mod sema;
 mod slice;
+mod statics;
 mod string;
 mod struct_;
 mod todo;
@@ -55,7 +56,7 @@ mod vararg;
 mod while_loop;
 mod zst;
 
-const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
+const DEFAULT_TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     print_source: true,
     debug_ast: false,
     debug_types: false,
@@ -66,7 +67,7 @@ const TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
 };
 
 fn test(code: impl ToString) -> NewTest {
-    NewTest { code: code.to_string(), load_prelude: false }
+    NewTest { code: code.to_string(), load_prelude: false, options: DEFAULT_TEST_OPTIONS }
 }
 
 fn test_body(code_body: impl Display) -> NewTest {
@@ -76,6 +77,7 @@ fn test_body(code_body: impl Display) -> NewTest {
 struct NewTest {
     code: String,
     load_prelude: bool,
+    options: TestArgsOptions,
 }
 
 struct TestCtx {
@@ -134,11 +136,16 @@ impl NewTest {
         self
     }
 
+    fn print_llvm_module(mut self, print_llvm_module: bool) -> Self {
+        self.options.print_llvm_module = print_llvm_module;
+        self
+    }
+
     #[track_caller]
     fn prepare(self) -> TestResult<()> {
         let code = Ptr::from_ref(self.code.as_str());
-        let args = BuildArgs::test_args(TEST_OPTIONS);
-        if TEST_OPTIONS.print_source {
+        let args = BuildArgs::test_args(self.options);
+        if self.options.print_source {
             println!("##### TEST SOURCE {} #####", args.path.display());
             println!("{code}");
             println!("##### END TEST SOURCE #####");
@@ -206,13 +213,6 @@ impl NewTest {
             );
         }
         assert_eq!(res.data.ret, expected);
-        res
-    }
-
-    fn ok_stack_ptr(self) -> TestResult<Ok<*const ()>> {
-        let res = self._ok::<*const ()>();
-        let stack_alloc = ();
-        assert!(unsafe { res.data.ret.byte_offset_from(&stack_alloc) }.unsigned_abs() < 0x800);
         res
     }
 
@@ -505,4 +505,18 @@ pub struct Fields<T>(T);
 
 fn fields<T, const LEN: usize>(values: [T; LEN]) -> Fields<[T; LEN]> {
     Fields(values)
+}
+
+#[derive(Debug)]
+struct ExpectStackPtr(*const ());
+
+fn stack_ptr() -> ExpectStackPtr {
+    let stack_alloc = ();
+    ExpectStackPtr(&raw const stack_alloc)
+}
+
+impl PartialEq for ExpectStackPtr {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { self.0.byte_offset_from(other) }.unsigned_abs() < 0x800
+    }
 }

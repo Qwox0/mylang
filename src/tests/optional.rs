@@ -1,7 +1,7 @@
 use crate::{
     ast::debug::DebugAst,
     ptr::OPtr,
-    tests::{substr, test, test_body},
+    tests::{stack_ptr, substr, test, test_body},
 };
 use std::fmt;
 
@@ -144,8 +144,14 @@ static a: ?i8 = VAL; // VAL can be any ?<int>
 static b: ?i64 = VAL;
 test :: -> ?i32 VAL;";
     let res = test(code).ok(some(123_i32));
-    assert!(res.llvm_ir().contains("@a = constant { i8, i8 } { i8 1, i8 123 }, align 1"));
-    assert!(res.llvm_ir().contains("@b = constant { i8, i64 } { i8 1, i64 123 }, align 8"));
+    assert!(
+        res.llvm_ir()
+            .contains("@a = internal constant { i8, i8 } { i8 1, i8 123 }, align 1")
+    );
+    assert!(
+        res.llvm_ir()
+            .contains("@b = internal constant { i8, i64 } { i8 1, i64 123 }, align 8")
+    );
     assert!(res.llvm_ir().contains("define i64 @test()"));
 }
 
@@ -477,7 +483,7 @@ const_ptr := &x;
 Some(mut_ptr) orelse const_ptr
 //   ^ can coerce `*mut T` to `*T`
 ";
-    test_body(code).ok_stack_ptr().ret_ty("*i64");
+    test_body(code).ok(stack_ptr()).ret_ty("*i64");
 }
 
 #[test]

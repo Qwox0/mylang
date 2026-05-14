@@ -537,7 +537,10 @@ ast_variants! {
     CharVal { val: char },
     // BCharLit { val: u8 },
     StrVal { text: Ptr<str> }, // TODO?: add string interning?
-    PtrVal { val: u64 },
+
+    RawPtrVal { val: u64 },
+    StaticPtrVal { sym: Ptr<Decl> },
+
     /// used for constant `struct` values, `union` values, `enum` values and `array` values
     AggregateVal {
         /// Always contains all fields in the same order as defined.
@@ -907,6 +910,14 @@ impl Ptr<Ast> {
             AstMatch::Decl(decl) => Ok(Some(decl)),
             AstMatch::Ident(i) => ctx().alloc.alloc(Decl::from_ident(i)).map(Some),
             _ => Ok(None),
+        }
+    }
+
+    pub fn try_get_symbol_decl(self) -> OPtr<Decl> {
+        match self.matchable2() {
+            AstMatch::Ident(i) => Some(i.decl.u()),
+            AstMatch::Dot(d) => Some(d.rhs.decl.u()),
+            _ => None,
         }
     }
 }
@@ -1415,6 +1426,10 @@ impl Decl {
 
     #[inline]
     pub fn might_need_precompilation(&self) -> bool {
+        self.is_allowed_in_const()
+    }
+
+    pub fn is_allowed_in_const(&self) -> bool {
         self.is_const || self.markers.get(DeclMarkers::IS_STATIC_MASK)
     }
 }

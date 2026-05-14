@@ -33,15 +33,15 @@ test :: -> {{
 
 #[test]
 fn addr_of_to_optional() {
-    test_all_coercion_sites("&a", "i32", "?*i32").ok(());
+    test_all_coercion_sites("&a", "i32", "?*i32").compile_no_err();
 }
 
 #[test]
 fn deref_ptr_to_optional() {
-    test_all_coercion_sites("a.*", "**i32", "?*i32").ok(());
+    test_all_coercion_sites("a.*", "**i32", "?*i32").compile_no_err();
 
     // In this case the optional is not produces by type coercion
-    test_all_coercion_sites("a.*", "*?i32", "?i32").ok(());
+    test_all_coercion_sites("a.*", "*?i32", "?i32").compile_no_err();
 }
 
 #[test]
