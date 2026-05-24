@@ -963,11 +963,7 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::RangeTy { .. }
             | AstEnum::OptionTy { .. } => Ok(Symbol::Void),
             AstEnum::Fn { .. } => {
-                let f = expr.downcast::<ast::Fn>();
-                Ok(Symbol::Function(match self.fn_table.get(&f) {
-                    Some(val) => *val,
-                    None => self.compile_fn(f, FnKind::Lambda)?,
-                }))
+                Ok(Symbol::Function(self.get_or_compile_fn(expr.downcast::<ast::Fn>())?))
             },
             AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
         };
@@ -1129,6 +1125,7 @@ impl<'ctx> Codegen<'ctx> {
                     None => ret(self.llvm_type(ty).basic_ty().const_zero()),
                 }
             },
+            ConstValEnum::Fn { .. } => ret(self.get_or_compile_fn(cv.downcast::<ast::Fn>())?),
             _ => todo!("compile_const_val({cv:?})"),
         }
     }
@@ -1447,6 +1444,13 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         stack_val(enum_ptr)
+    }
+
+    fn get_or_compile_fn(&mut self, f: Ptr<ast::Fn>) -> CodegenResult<FunctionValue<'ctx>> {
+        match self.fn_table.get(&f) {
+            Some(val) => Ok(*val),
+            None => self.compile_fn(f, FnKind::Lambda),
+        }
     }
 
     fn compile_fn(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> CodegenResult<FunctionValue<'ctx>> {

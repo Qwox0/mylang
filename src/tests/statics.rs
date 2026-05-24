@@ -82,3 +82,15 @@ static b: B = .{ a = &a };
 ";
     test(code).compile_no_err();
 }
+
+#[test]
+fn fn_ptr_in_static() {
+    let code = "
+f :: -> 1;
+static f_ptr := &f;
+static lambda_ptr := & -> 2;
+
+test :: -> f_ptr.*() + lambda_ptr.*();
+";
+    test(code).ok(3_i64);
+}

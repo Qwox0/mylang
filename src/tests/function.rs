@@ -1,6 +1,7 @@
 use crate::{
     ast,
-    tests::{TestSpan, substr, test, test_body},
+    ptr::{OPtr, Ptr},
+    tests::{TestResult, TestSpan, substr, test, test_body},
 };
 
 #[test]
@@ -164,6 +165,57 @@ fn function_currying() {
 #[test]
 fn duplicate_parameter() {
     test_body("f :: (a: i32, a: f64) -> {}").error("duplicate parameter 'a'", substr!("a";skip=1));
+}
+
+#[test]
+fn parse_precedence() {
+    fn fn_body(expr: OPtr<ast::Ast>) -> Ptr<ast::Ast> {
+        expr.unwrap().downcast::<ast::Fn>().body.unwrap()
+    }
+
+    {
+        fn check<T>(res: TestResult<T>) {
+            let f = res.one_stmt::<ast::Decl>();
+            assert_eq!(fn_body(f.var_ty_expr).downcast::<ast::Ident>().sym.text(), "i32");
+            assert_eq!(fn_body(f.init).downcast::<ast::IntVal>().val, 1);
+        }
+        // don't parse       `i32 : ...` as decl
+        check(test("f :          -> i32 : -> 1;").parse());
+        check(test("f : (x: any) -> i32 : -> 1;").parse());
+        //             (               ) (    )
+    }
+
+    // precedence(&) > precedence(!=)
+    {
+        fn check<T>(res: TestResult<T>) {
+            let addr_of = res.one_decl_init::<ast::UnaryOp>();
+            assert_eq!(addr_of.op, ast::UnaryOpKind::AddrOf);
+
+            let ne = fn_body(Some(addr_of.operand)).downcast::<ast::BinOp>();
+            assert_eq!(ne.op, ast::BinOpKind::Ne);
+
+            assert_eq!(ne.lhs.downcast::<ast::IntVal>().val, 0);
+            assert_eq!(ne.rhs.downcast::<ast::IntVal>().val, 1);
+        }
+        check(test("_ :: &          -> 0 != 1;").parse());
+        check(test("_ :: & (x: any) -> 0 != 1;").parse());
+        //               &(                  )
+    }
+
+    {
+        fn check<T>(res: TestResult<T>) {
+            let f = res.one_stmt::<ast::Decl>();
+            let opt_inner = f.var_ty_expr.unwrap().downcast::<ast::OptionTy>().inner_ty;
+            let pointee_ty = opt_inner.downcast::<ast::PtrTy>().pointee;
+            assert_eq!(fn_body(Some(pointee_ty)).downcast::<ast::Ident>().sym.text(), "i32");
+            assert_eq!(f.init.unwrap().downcast::<ast::Ident>().sym.text(), "null");
+        }
+        check(test("f : ?*          -> i32 = null;").parse());
+        check(test("f : ?* (x: any) -> i32 = null;").parse());
+        check(test("f : ?*          -> i32 : null;").parse());
+        check(test("f : ?* (x: any) -> i32 : null;").parse());
+        //              ?*(               )
+    }
 }
 
 #[test]

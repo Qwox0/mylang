@@ -1120,9 +1120,11 @@ impl Ast {
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
-            AstEnum::Decl { has_init_expr, init, .. } => match init.filter(|_| *has_init_expr) {
-                Some(e) => span.join(e.full_span()),
-                None => span,
+            AstEnum::Decl { has_init_expr, init, var_ty_expr, .. } => {
+                match init.filter(|_| *has_init_expr) {
+                    Some(e) => span.join(e.full_span()),
+                    None => span.maybe_join(var_ty_expr.map(|e| e.full_span())),
+                }
             },
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
                 let r_span = else_body.unwrap_or(*then_body).full_span();

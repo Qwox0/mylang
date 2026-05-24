@@ -105,3 +105,9 @@ fn decl_in_weird_places_panic() {
     "#;
     test_body(code).ok(());
 }
+
+#[test]
+fn correct_span_without_init() {
+    test("_: i32").parse().error("expected `;`", substr!("i32";.after()));
+    //     ^ old error was pointing here
+}

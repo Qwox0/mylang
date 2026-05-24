@@ -885,12 +885,15 @@ impl Parser {
         &mut self,
         params: DeclList,
         start_span: Span,
-        min_precedence: u8,
+        mut outer_prec: u8,
     ) -> ParseResult<Ptr<ast::Fn>> {
-        let expr = self.expr_(min_precedence)?;
+        if !is_type_prec(outer_prec) {
+            outer_prec = MIN_PRECEDENCE;
+        }
+        let expr = self.expr_(outer_prec)?;
         let between_expr_state = self.lex.get_state();
         let (ret_ty_expr, body) = if expr.kind != AstKind::Block
-            && let Some(body) = opt!(self, expr(), min_precedence)?
+            && let Some(body) = opt!(self, expr(), outer_prec)?
             && {
                 debug_assert!(!AstKind::Block.is_allowed_top_level());
                 let is_invalid_body = body.kind.is_allowed_top_level();
@@ -1455,6 +1458,11 @@ impl BinOpKind {
             BinOpKind::Or => 11,
         }
     }
+}
+
+// An explicit state flag might be better.
+fn is_type_prec(prec: u8) -> bool {
+    [DECL_TYPE_PRECEDENCE, TY_PREFIX_PRECEDENCE].contains(&prec)
 }
 
 type HasTrailingSemicolon = bool;

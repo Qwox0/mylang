@@ -196,7 +196,7 @@ macro_rules! debug_expr {
         }
         use crate::util::OptionExt;
         println!("  ty: {}", expr.ty.display());
-        println!("  {:x?}\n", expr.as_ref());
+        println!("  {:x?}\n", ::std::ops::Deref::deref(expr));
     }};
 }
 #[allow(unused)]

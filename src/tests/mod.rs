@@ -303,20 +303,21 @@ impl<Res> TestResult<Res> {
         self.ctx.ctx.stmts.as_ref().unwrap()
     }
 
-    pub fn one_stmt<V: ast::AstVariant>(&self) -> Ptr<V> {
+    pub fn one_stmt<V: ast::AstVariant>(&self) -> &V {
         let stmts = self.stmts();
         assert_eq!(stmts.len(), 1, "Expected exactly one parsed statement/expression");
-        stmts[0].downcast::<V>()
+        stmts[0].downcast::<V>().as_ref()
     }
 
-    pub fn one_decl_init<V: ast::AstVariant>(&self) -> Ptr<V> {
+    pub fn one_decl_init<V: ast::AstVariant>(&self) -> &V {
         self.one_stmt::<ast::Decl>()
             .init
             .expect("expected Decl to have `init`")
             .downcast::<V>()
+            .as_ref()
     }
 
-    pub fn test_fn(&self) -> Ptr<ast::Fn> {
+    pub fn test_fn(&self) -> &ast::Fn {
         let mut test_decls = self
             .stmts()
             .iter()
@@ -324,11 +325,11 @@ impl<Res> TestResult<Res> {
             .filter(|d| d.ident.sym.text() == "test");
         let test_decl = test_decls.next().expect("has a \"test\" decl");
         assert_eq!(test_decls.count(), 0, "Has only one \"test\" decl");
-        test_decl.init.unwrap().downcast::<ast::Fn>()
+        test_decl.init.unwrap().downcast::<ast::Fn>().as_ref()
     }
 
-    fn get_ret_ty(&self) -> Ptr<ast::Type> {
-        self.test_fn().ret_ty.expect("\"test\" fn must have a ret_ty")
+    fn get_ret_ty(&self) -> &ast::Type {
+        self.test_fn().ret_ty.expect("\"test\" fn must have a ret_ty").as_ref()
     }
 
     #[track_caller]
