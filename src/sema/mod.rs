@@ -20,7 +20,7 @@ use crate::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
         ty_match,
     },
-    util::{self, UnwrapDebug, debug_only_assert, then, unreachable_debug},
+    util::{self, UnwrapDebug, VecExt, debug_only_assert, then, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
 use err::SemaResult::*;
@@ -188,6 +188,7 @@ pub struct Sema {
     function_stack: Vec<Ptr<ast::Fn>>,
     decl_stack: Vec<Ptr<ast::Decl>>,
     defer_stack: ScopedStack<Ptr<Ast>>,
+    loop_stack: Vec<Ptr<ast::Ast>>,
 
     cctx: Ptr<CompilationContextInner>,
     cur_scope: Ptr<Scope>,
@@ -203,6 +204,7 @@ impl Sema {
             function_stack: vec![],
             decl_stack: vec![],
             defer_stack: ScopedStack::default(),
+            loop_stack: vec![],
             cctx,
             cur_scope: cctx.primitives_scope,
             cur_scope_pos: ScopePos(0),
@@ -1198,6 +1200,7 @@ impl Sema {
                 };
 
                 let osh = self.open_scope(scope);
+                self.loop_stack.push(expr);
                 let res = (|| {
                     iter_var.var_ty = Some(elem_ty);
                     self.analyze_decl(*iter_var, false, None)?;
@@ -1208,6 +1211,7 @@ impl Sema {
                     }
                     Ok(())
                 })();
+                self.loop_stack.pop_expect(expr);
                 self.close_scope(osh);
                 res?;
                 expr.ty = Some(p.void_ty);
@@ -1218,15 +1222,27 @@ impl Sema {
                 self.ty_match(*condition, bool_ty)?;
 
                 //self.open_scope(); // currently not needed
+                self.loop_stack.push(expr);
                 let res: SemaResult<()> = try {
                     self.analyze(*body, &Some(p.void_ty), is_const)?; // TODO: check if scope is closed on `NotFinished?`
                     if !body.can_ignore_yielded_value() {
                         Err(error_cannot_yield_from_loop_block(body.return_val_span()))?
                     }
                 };
+                self.loop_stack.pop_expect(expr);
                 //self.close_scope();
                 res?;
                 expr.ty = Some(p.void_ty);
+            },
+            AstEnum::Loop { body, break_ty, .. } => {
+                self.loop_stack.push(expr);
+                let res = self.analyze(*body, &Some(p.void_ty), is_const); // TODO: check if scope is closed on `NotFinished?`
+                self.loop_stack.pop_expect(expr);
+                res?;
+                if !body.can_ignore_yielded_value() {
+                    return Err(error_cannot_yield_from_loop_block(body.return_val_span()));
+                }
+                expr.ty = Some(break_ty.unwrap_or(p.never));
             },
             // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { stmt, .. } => {
@@ -1256,6 +1272,17 @@ impl Sema {
             AstEnum::Break { val, .. } => {
                 if val.is_some() {
                     todo!("break with value")
+                }
+                let Some(loop_) = self.loop_stack.last() else {
+                    return cerror2!(expr.span, "`break` can only be used inside a loop");
+                };
+                match loop_.matchable2() {
+                    AstMatch::For(_f) => {},
+                    AstMatch::While(_w) => {},
+                    AstMatch::Loop(l) => {
+                        l.as_mut().break_ty = Some(p.void_ty);
+                    },
+                    _ => unreachable_debug(),
                 }
                 // TODO: check if in loop
                 expr.ty = Some(p.never)

@@ -276,6 +276,10 @@ impl DebugAst for Ast {
                 lines.write(" ");
                 lines.write_tree(body);
             },
+            AstEnum::Loop { body, .. } => {
+                lines.write("loop ");
+                lines.write_tree(body);
+            },
             // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { stmt, .. } => {
                 lines.write("defer ");

@@ -175,6 +175,25 @@ impl<T> OptionExt<T> for Option<T> {
     }
 }
 
+pub trait VecExt<T> {
+    fn pop_expect_opt(&mut self, t: Option<T>) -> Option<T>
+    where T: std::cmp::PartialEq + std::fmt::Debug;
+
+    fn pop_expect(&mut self, t: T) -> Option<T>
+    where T: std::cmp::PartialEq + std::fmt::Debug {
+        self.pop_expect_opt(Some(t))
+    }
+}
+
+impl<T> VecExt<T> for Vec<T> {
+    fn pop_expect_opt(&mut self, t: Option<T>) -> Option<T>
+    where T: std::cmp::PartialEq + std::fmt::Debug {
+        let val = self.pop();
+        debug_assert_eq!(val, t);
+        val
+    }
+}
+
 #[inline]
 pub unsafe fn forget_lifetime<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }

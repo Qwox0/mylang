@@ -442,6 +442,10 @@ impl Parser {
                 let body = self.expr()?;
                 expr!(While { condition, body, was_piped: false }, span)
             },
+            TokenKind::Keyword(Keyword::Loop) => {
+                let body = self.advanced().expr()?;
+                expr!(Loop { body, break_ty: None }, span)
+            },
             TokenKind::Keyword(Keyword::Return) => {
                 let val = opt!(self.advanced(), expr(), MIN_PRECEDENCE)?;
                 expr!(Return { val, parent_fn: None }, span)

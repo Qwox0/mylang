@@ -505,6 +505,10 @@ ast_variants! {
         body: Ptr<Ast>,
         // currently no `Scope` needed. This will change when declarations are allowed in `condition`
     },
+    Loop {
+        body: Ptr<Ast>,
+        break_ty: OPtr<Type>,
+    },
 
     /*
     /// `lhs catch ...`
@@ -1078,9 +1082,9 @@ impl Ast {
                 else_body.unwrap_or(then_body).block_expects_trailing_sep()
             },
             AstEnum::Match { .. } => todo!(),
-            AstEnum::For { body, .. } | AstEnum::While { body, .. } => {
-                body.block_expects_trailing_sep()
-            },
+            AstEnum::For { body, .. }
+            | AstEnum::While { body, .. }
+            | AstEnum::Loop { body, .. } => body.block_expects_trailing_sep(),
             AstEnum::Empty { .. } => false,
             _ => true,
         }
@@ -1129,8 +1133,9 @@ impl Ast {
             | AstEnum::While { condition: l, body, was_piped, .. } => {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },
-            // AstEnum::Catch { .. } => todo!(),
-            AstEnum::Defer { stmt, .. } => span.join(stmt.full_span()),
+            AstEnum::Loop { body, .. } | AstEnum::Defer { stmt: body, .. } => {
+                span.join(body.full_span())
+            },
             AstEnum::Return { val, .. } => match val {
                 Some(val) => span.join(val.full_span()),
                 None => span,

@@ -849,6 +849,39 @@ impl<'ctx> Codegen<'ctx> {
                 debug_assert!(out_ty.matches_void());
                 Ok(Symbol::Void)
             },
+            AstEnum::Loop { body, .. } => {
+                let func = self.cur_fn.u();
+                let loop_bb = self.context.append_basic_block(func, "loop");
+                let end_bb = self.context.append_basic_block(func, "loop.end");
+
+                let outer_continue_break_depth = self.continue_break_depth;
+                self.continue_break_depth = 0;
+
+                let outer_loop = self.cur_loop.replace(Loop { continue_bb: loop_bb, end_bb });
+
+                let res: CodegenResultAndControlFlow<()> = try {
+                    self.builder.build_unconditional_branch(loop_bb)?;
+
+                    self.builder.position_at_end(loop_bb);
+                    debug_assert!(body.ty.u().matches_void());
+                    let out = self.compile_expr(*body).handle_unreachable()?;
+                    if out.is_some() {
+                        self.builder.build_unconditional_branch(loop_bb)?;
+                    }
+
+                    // end
+                    self.builder.position_at_end(end_bb);
+                };
+                self.cur_loop = outer_loop;
+                self.continue_break_depth = outer_continue_break_depth;
+                res?;
+                if out_ty == p.never {
+                    self.build_unreachable()
+                } else {
+                    debug_assert!(out_ty.matches_void());
+                    Ok(Symbol::Void)
+                }
+            },
             // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { stmt, .. } => {
                 self.defer_stack.push(*stmt);

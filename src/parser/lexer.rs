@@ -390,6 +390,7 @@ keywords! {
     Match = "match",
     For = "for",
     While = "while",
+    Loop = "loop",
     Do = "do",
     Return = "return",
     Break = "break",
