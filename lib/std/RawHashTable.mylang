@@ -1,0 +1,287 @@
+std :: #import "std";
+libc :: #import "libc";
+Allocator :: std.mem.Allocator;
+Layout :: std.mem.Layout;
+max :: std.num.max_u32;
+
+Hash :: u32;
+Size :: u32;
+
+// TODO: benchmark AOS vs SOA hash maps
+RawHashTable :: struct {
+    /// points to `[Entry * slots, Tag * slots]`
+    ///                            ^
+    ptr: ?*mut Tag,
+    /// The number of elements in the set.
+    size: Size,
+    /// The number of elements which can be inserted before `MAX_LOAD_PERCENTAGE` is exceeded.
+    available: Size,
+    /// The mask used to access elements in the buffer. One less than the number of allocated slots.
+    mask: Size,
+
+    pub EMPTY :: RawHashTable.{ ptr=null, size=0, available=0, mask=!0 };
+
+    MAX_LOAD_PERCENTAGE :: 85;
+    MIN_CAPACITY :: 8;
+
+    /// stores 1 bit to indicate whether a value is present and if present the 7 upper bits of the
+    /// hash.
+    Tag :: struct {
+        val: u8,
+
+        //#assert(#sizeof(Tag) == 1);
+
+        empty :: Tag.(0);
+        deleted :: Tag.(1);
+        //#assert(!empty.is_used());
+        //#assert(!deleted.is_used());
+
+        IS_USED_MASK : u8 : 0b1000_0000;
+
+        is_used :: (tag: Tag) -> (tag.val & IS_USED_MASK) != 0;
+
+        from_hash :: (hash: Hash) -> Tag.((hash >> 8 * #sizeof(Hash) - 7).as(u8) | IS_USED_MASK);
+
+        eq :: (self: Tag, other: Tag) -> self.val == other.val;
+    };
+
+    pub new :: (capacity: Size, alloc: Allocator, entry_layout: Layout) ->
+        RawHashTable.with_slots(capacity_to_slots(capacity), alloc, entry_layout);
+
+    with_slots :: (slots: Size, alloc: Allocator, entry_layout: Layout) -> {
+        std.assert(std.num.is_power_of_2(slots.as(u64)));
+        buf_size := buf_size(entry_layout.size, slots);
+        ptr := alloc.alloc(buf_size, entry_layout.align)
+            orelse std.panic("RawHashTable allocation failed!");
+        libc.memset(ptr, 0, buf_size);
+        ptr := ptr.as(usize) + entry_layout.size * slots.as(usize);
+        available := slots * MAX_LOAD_PERCENTAGE / 100;
+        RawHashTable.{ ptr = xx ptr, size = 0, available, mask = slots - 1 }
+    }
+
+    pub destroy :: (self: RawHashTable, alloc: Allocator, entry_size: usize) -> {
+        if self.ptr != null then alloc.free(self.&.buf_start(entry_size));
+    }
+
+    /// Returns the number of slots needed to allow inserting `capacity` items without reallocating.
+    capacity_to_slots :: (capacity: Size) -> std.num.ceil_pow_of_2(capacity * 100 / MAX_LOAD_PERCENTAGE + 1);
+
+    buf_start :: (self: *RawHashTable, entry_size: usize) ->
+        (self.*.ptr.as(usize) - entry_size * self.slots().as(usize)).as(*mut any);
+
+    buf_size :: (entry_size: usize, slots: Size) -> {
+        std.assert(slots == 0 or std.num.is_power_of_2_u32(slots));
+        std.assert(#alignof(Tag) == 1, "no padding needed"); // TODO: `#assert`
+        (entry_size + #sizeof(Tag)) * slots.as(usize)
+    }
+
+    buf_info :: (self: *mut RawHashTable, entry_size: usize) -> []mut u8.{
+        ptr = self.buf_start(entry_size).as(*mut u8),
+        len = buf_size(entry_size, self.slots()),
+    };
+
+    /// The number of elements the set can hold without reallocating.
+    pub capacity :: (self: *RawHashTable) -> self.*.size + self.*.available;
+
+    /// The number of allocated slots.
+    /// `capacity * 100 / slots <= MAX_LOAD_PERCENTAGE`
+    pub slots :: (self: *RawHashTable) -> self.*.mask + 1;
+
+    T :: any;
+
+    pub reserve :: (
+        self: *mut RawHashTable,
+        additional: Size,
+        hash: *(entry: *T) -> Hash,
+        alloc: Allocator,
+        entry_layout: Layout,
+    ) -> {
+        if (self.*.available >= additional) return;
+
+        // TODO: overflow check for `+`
+        new_capacity := std.num.ceil_pow_of_2(self.*.size + additional).max(MIN_CAPACITY);
+        mut new_table := RawHashTable.new(new_capacity, alloc, entry_layout);
+
+        for idx in 0..self.slots() {
+            if not self.tag(idx).*.is_used() continue;
+            entry := self.entry(idx, entry_layout.size);
+            hash := hash.*(entry);
+
+            new_idx := new_table.&.find_realloc_slot(hash);
+            new_table.&mut.tag(new_idx).* = Tag.from_hash(hash);
+            libc.memcpy(
+                new_table.&mut.entry(new_idx, entry_layout.size),
+                entry,
+                entry_layout.size,
+            );
+        }
+
+        std.assert(new_table.available >= self.*.size);
+        new_table.available -= self.*.size;
+        new_table.size = self.*.size;
+
+        self.*.destroy(alloc, entry_layout.size);
+        self.* = new_table;
+    }
+
+    // TODO: implement real capturing closures
+    EqClosure :: struct {
+        fn: *(entry_ptr: *T, capture: *any) -> bool,
+        capture: *any,
+
+        call :: (self: EqClosure, entry_ptr: *T) -> self.fn.*(entry_ptr, self.capture);
+    }
+
+    pub find :: (
+        self: *RawHashTable,
+        hash: Hash,
+        eq: EqClosure,
+        entry_size: usize,
+    ) -> ?Size {
+        std.assert(self.*.mask != !0);
+        tag := Tag.from_hash(hash);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        loop {
+            slot_tag := self.tag(idx).*;
+            if slot_tag.eq(tag) and eq.call(self.entry(idx, entry_size)) return Some(idx);
+            if slot_tag.eq(Tag.empty) return null;
+
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    pub find_or_insert_slot :: (
+        self: *RawHashTable,
+        hash: Hash,
+        eq: EqClosure,
+        entry_size: usize,
+    ) -> Size {
+        std.assert(self.*.available > 0);
+        std.assert(self.*.mask != !0);
+        tag := Tag.from_hash(hash);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        mut deleted_tag_idx: ?Size = null;
+
+        loop {
+            slot_tag := self.tag(idx).*;
+            if slot_tag.eq(tag) and eq.call(self.entry(idx, entry_size)) return idx
+            else if slot_tag.eq(Tag.deleted) then deleted_tag_idx = Some(idx)
+            else if slot_tag.eq(Tag.empty) break;
+
+            idx = (idx + 1) & mask;
+        }
+
+        deleted_tag_idx orelse idx
+    }
+
+    /// assumes val is not in the set.
+    /// assumes that no deleted items are in the set
+    find_realloc_slot :: (self: *RawHashTable, hash: Hash) -> Size {
+        std.assert(self.*.available > 0);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        while not self.tag(idx).*.eq(Tag.empty) {
+            idx = (idx + 1) & mask;
+        }
+
+        idx
+    }
+
+    pub get :: (self: *RawHashTable, hash: Hash, eq: EqClosure, entry_size: usize) -> ?*T {
+        idx := self.find(hash, eq, entry_size) orelse return null;
+        self.entry(idx, entry_size)
+    }
+
+    InsertSlot :: struct {
+        entry: *mut T,
+        occupied: bool,
+    }
+
+    pub insert_slot_assume_capacity :: (self: *mut RawHashTable, hash: Hash, eq: EqClosure, entry_size: usize) -> {
+        idx := self.find_or_insert_slot(hash, eq, entry_size);
+        self.insert_slot_at(idx, hash, entry_size)
+    }
+
+    pub insert_slot_at :: (self: *mut RawHashTable, idx: Size, hash: Hash, entry_size: usize) -> InsertSlot {
+        occupied := self.tag(idx).*.is_used();
+        entry := if occupied {
+            std.assert(self.tag(idx).*.eq(Tag.from_hash(hash)));
+            self.entry(idx, entry_size)
+        } else {
+            self.insert_slot_at_assume_empty(idx, hash, entry_size)
+        };
+        .{ entry, occupied }
+    }
+
+    pub insert_slot_at_assume_empty :: (self: *mut RawHashTable, idx: Size, hash: Hash, entry_size: usize) -> *mut T {
+        std.assert(self.*.available > 0);
+        std.assert(not self.tag(idx).*.is_used());
+
+        self.tag(idx).* = Tag.from_hash(hash);
+        self.*.size += 1;
+        self.*.available -= 1;
+        self.entry(idx, entry_size)
+    }
+
+    pub remove :: (self: *mut RawHashTable, hash: Hash, eq: EqClosure, entry_size: usize) -> ?*T {
+        idx := self.find(hash, eq, entry_size) orelse return null;
+        self.remove_at(idx, entry_size)
+    }
+
+    pub remove_at :: (self: *mut RawHashTable, idx: Size, entry_size: usize) -> *T {
+        std.assert(self.tag(idx).*.is_used());
+
+        self.tag(idx).* = Tag.deleted;
+        self.*.size -= 1;
+        self.*.available += 1;
+        self.entry(idx, entry_size)
+    }
+
+    pub reset :: (self: *mut RawHashTable, entry_size: usize) -> {
+        buf := self.buf_info(entry_size);
+        libc.memset(buf.ptr, 0, buf.len);
+        self.*.available += self.*.size;
+        self.*.size = 0;
+    }
+
+    pub tag :: (self: *RawHashTable, idx: Size) -> *mut Tag {
+        std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(usize) + idx.as(usize)).as(*mut Tag)
+    };
+
+    pub entry :: (self: *RawHashTable, idx: Size, entry_size: usize) -> *mut any {
+        std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(usize) - entry_size * (self.slots() - idx).as(usize)).as(*mut any)
+    }
+
+    pub debug :: (
+        self: *RawHashTable,
+        entry_size: usize,
+        format_entry: *(entry: *any) -> []u8,
+        free_text: ?*(text: []u8) -> void = null,
+    ) -> {
+        libc.printf("RawHashTable (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask);
+        for idx in 0..self.slots() {
+            tag := self.tag(idx).*;
+            text := if tag.is_used() then format_entry.*(self.entry(idx, entry_size))
+            else if tag.eq(Tag.empty) then "EMPTY"
+            else "DELETED";
+
+            libc.printf("  %.*s (%08b),\n".ptr, text.len, text.ptr, tag.val);
+
+            if tag.is_used() {
+                free_text := free_text orelse continue;
+                free_text.*(text);
+            }
+        }
+        std.println("}");
+    }
+}

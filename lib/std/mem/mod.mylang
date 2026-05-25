@@ -19,3 +19,8 @@ pub pagesize :: () -> {
     }
     pagesize
 }
+
+pub Layout :: struct {
+    size: usize;
+    align: usize;
+}

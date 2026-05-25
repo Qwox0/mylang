@@ -1,0 +1,216 @@
+/*
+ * rapidhash V3 - Very fast, high quality, platform-independent hashing algorithm.
+ *
+ * Based on 'wyhash', by Wang Yi <godspeed_china@yeah.net>
+ *
+ * Copyright (C) 2025 Nicolas De Carli
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * You can contact the author at:
+ *   - rapidhash source repository: https://github.com/Nicoshev/rapidhash
+ */
+
+libc :: #import "libc";
+
+/// RAPIDHASH_COMPACT: Normal behavior.
+RAPIDHASH_COMPACT :: true;
+/// RAPIDHASH_UNROLLED:
+RAPIDHASH_UNROLLED :: false;
+
+/// RAPIDHASH_FAST: Normal behavior, max speed.
+RAPIDHASH_FAST :: true;
+/// RAPIDHASH_PROTECTED: Extra protection against entropy loss.
+RAPIDHASH_PROTECTED :: false;
+
+// TODO: implement these intrinsics
+_likely_ :: (x: bool) -> x;
+_unlikely_ :: (x: bool) -> x;
+
+RAPIDHASH_LITTLE_ENDIAN :: true;
+RAPIDHASH_BIG_ENDIAN :: false;
+
+/// Default secret parameters.
+static SECRET: [8]u64 = .[
+    0x2d358dccaa6c78a5,
+    0x8bb84b93962eacc9,
+    0x4b33a62ed433d4a3,
+    0x4d5a2da51de1aa47,
+    0xa0761d6478bd642f,
+    0xe7037ed1a0b428db,
+    0x90ed1765281c388c,
+    0xaaaaaaaaaaaaaaaa,
+];
+
+/// 64*64 -> 128bit multiply function.
+///
+/// @param A  Address of 64-bit number.
+/// @param B  Address of 64-bit number.
+///
+/// Calculates 128-bit C = *A * *B.
+///
+/// When RAPIDHASH_FAST is defined:
+/// Overwrites A contents with C's low 64 bits.
+/// Overwrites B contents with C's high 64 bits.
+///
+/// When RAPIDHASH_PROTECTED is defined:
+/// Xors and overwrites A contents with C's low 64 bits.
+/// Xors and overwrites B contents with C's high 64 bits.
+mum :: (a: *mut u64, b: *mut u64) -> void {
+    mut r := a.*.as(u128);
+    r *= b.*.as(u128);
+    a.* = r.as(u64);
+    b.* = (r >> 64).as(u64);
+}
+
+/*
+ *  Multiply and xor mix function.
+ *
+ *  @param A  64-bit number.
+ *  @param B  64-bit number.
+ *
+ *  Calculates 128-bit C = A * B.
+ *  Returns 64-bit xor between high and low 64 bits of C.
+ */
+mix :: (mut a: u64, mut b: u64) -> u64 {
+    mum(&mut a, &mut b);
+    return a ^ b;
+}
+
+read64 :: (p: usize) -> u64 { mut v: u64; libc.memcpy(&mut v, p.as(*u8), #sizeof(u64)); v }
+read32 :: (p: usize) -> u64 { mut v: u32; libc.memcpy(&mut v, p.as(*u8), #sizeof(u32)); v.as(u64) }
+
+/*
+ *  rapidhash main function.
+ *
+ *  @param key     Buffer to be hashed.
+ *  @param len     @key length, in bytes.
+ *  @param seed    64-bit seed used to alter the hash result predictably.
+ *  @param secret  Triplet of 64-bit secrets used to alter hash result predictably.
+ *
+ *  Returns a 64-bit hash.
+ */
+rapidhash_v3_internal :: (key: *u8, len: usize, mut seed: u64, secret: *[8]u64) -> u64 {
+    mut p := key.as(usize);
+    seed ^= mix(seed ^ secret.*[2], secret.*[1]);
+    mut a: u64 = 0;
+    mut b: u64 = 0;
+    mut i := len;
+    if (_likely_(len <= 16)) {
+        if (len >= 4) {
+            seed ^= len;
+            if (len >= 8) {
+                plast := p + len - 8;
+                a = read64(p);
+                b = read64(plast);
+            } else {
+                plast := p + len - 4;
+                a = read32(p);
+                b = read32(plast);
+            }
+        } else if (len > 0) {
+            a = ((p.as(*u8).*.as(u64)) << 45) | (p + (len - 1)).as(*u8).*.as(u64);
+            b = (p + (len >> 1)).as(*u8).*.as(u64);
+        } else {
+            a = 0;
+            b = 0;
+        }
+    } else {
+        if (len > 112) {
+            mut see1 := seed;
+            mut see2 := seed;
+            mut see3 := seed;
+            mut see4 := seed;
+            mut see5 := seed;
+            mut see6 := seed;
+            while {
+                seed = mix(read64(p     ) ^ secret.*[0], read64(p +   8) ^ seed);
+                see1 = mix(read64(p + 16) ^ secret.*[1], read64(p +  24) ^ see1);
+                see2 = mix(read64(p + 32) ^ secret.*[2], read64(p +  40) ^ see2);
+                see3 = mix(read64(p + 48) ^ secret.*[3], read64(p +  56) ^ see3);
+                see4 = mix(read64(p + 64) ^ secret.*[4], read64(p +  72) ^ see4);
+                see5 = mix(read64(p + 80) ^ secret.*[5], read64(p +  88) ^ see5);
+                see6 = mix(read64(p + 96) ^ secret.*[6], read64(p + 104) ^ see6);
+                p += 112;
+                i -= 112;
+                i > 112
+            } {}
+            seed ^= see1;
+            see2 ^= see3;
+            see4 ^= see5;
+            seed ^= see6;
+            see2 ^= see4;
+            seed ^= see2;
+        }
+        if (i > 16) {
+            seed = mix(read64(p) ^ secret.*[2], read64(p + 8) ^ seed);
+            if (i > 32) {
+                seed = mix(read64(p + 16) ^ secret.*[2], read64(p + 24) ^ seed);
+                if (i > 48) {
+                    seed = mix(read64(p + 32) ^ secret.*[1], read64(p + 40) ^ seed);
+                    if (i > 64) {
+                        seed = mix(read64(p + 48) ^ secret.*[1], read64(p + 56) ^ seed);
+                        if (i > 80) {
+                            seed = mix(read64(p + 64) ^ secret.*[2], read64(p + 72) ^ seed);
+                            if (i > 96) {
+                                seed = mix(read64(p + 80) ^ secret.*[1], read64(p + 88) ^ seed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        a = read64(p + i - 16) ^ i;
+        b = read64(p + i - 8);
+    }
+    a ^= secret.*[1];
+    b ^= seed;
+    mum(&mut a, &mut b);
+    return mix(a ^ secret.*[7], b ^ secret.*[1] ^ i);
+}
+
+/// rapidhash general purpose hash function or
+/// rapidhash seeded hash function.
+///
+/// Returns a 64-bit hash.
+rapidhash_v3 :: (data: []u8, seed: u64 = 0) ->
+    rapidhash_v3_internal(data.ptr, data.len, seed, &SECRET);
+
+test :: -> {
+    std :: #import "std";
+
+    buf := u8.[0; 128];
+    tests := struct { len: usize, expected: u64 }.[
+        .(  8, 0x9efc171aebcea1f3),
+        .( 16, 0xa4096b29990c1731),
+        .( 32, 0x51c91c8f3d6946a3),
+        .( 64, 0x4edfc2260f49cc02),
+        .(128, 0x5272da7a0a54ae65),
+    ];
+
+    for t in tests {
+        hash := rapidhash_v3(buf[..t.len]);
+        libc.printf("rapidhash_v3([0; %3d]) = 0x%016lx\n".ptr, t.len, hash);
+        std.assert(hash == t.expected);
+    }
+
+    hash := rapidhash_v3(.[1, 2, 3, 4, 5][..]);
+    libc.printf("rapidhash_v3(.[1, 2, 3, 4, 5]) = 0x%016lx\n".ptr, hash);
+    std.assert(hash == 0xf18eb25768655290);
+}

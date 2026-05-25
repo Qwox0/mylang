@@ -13,7 +13,7 @@ pub malloc_str :: (len: u64) -> []mut u8 {
 pub concat :: (str1: []u8, str2: []u8) -> {
     out := malloc_str(str1.len + str2.len);
     libc.memcpy(out.ptr, str1.ptr, str1.len);
-    libc.memcpy(out[str1.len..].ptr, str2.ptr, str2.len);
+    libc.memcpy(out[str1.len..]mut.ptr, str2.ptr, str2.len);
     out
 }
 
@@ -66,3 +66,15 @@ trim_end :: (mut str: []u8) -> {
 }
 
 trim :: (str: []u8) -> str.trim_start().trim_end();
+
+from_cstr :: (cstr: ?*u8) -> []u8 {
+    cstr := cstr orelse return "";
+    .{ ptr=cstr, len=libc.strlen(cstr) }
+};
+
+strdup :: (str: []u8, alloc := std.ctx.alloc) -> ?[]mut u8 {
+    buf := alloc.alloc(str.len + 1, 1) orelse return null;
+    buf |> std.ptr.add_bytes_mut(str.len).* = 0;
+    libc.memcpy(buf, str.ptr, str.len);
+    Some(.{ ptr=buf, len=str.len })
+}

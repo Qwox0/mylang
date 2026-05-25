@@ -1,16 +1,26 @@
-pub bindgen :: #import "bindgen/mod.mylang";
-pub env :: #import "env.mylang";
-pub fmt :: #import "fmt.mylang";
-pub fs :: #import "fs.mylang";
-pub mem :: #import "mem/mod.mylang";
-pub net :: #import "net/mod.mylang";
-pub num :: #import "num.mylang";
-pub ptr :: #import "ptr.mylang";
-pub set :: #import "set.mylang";
-pub slice :: #import "slice.mylang";
-pub str :: #import "str.mylang";
+pub bindgen :: #import "./bindgen/mod.mylang";
+pub RawHashTable :: #import "./RawHashTable.mylang".RawHashTable;
+pub env :: #import "./env.mylang";
+pub fmt :: #import "./fmt.mylang";
+pub fs :: #import "./fs.mylang";
+pub hash :: #import "./hash/mod.mylang";
+pub hashmap :: #import "./hashmap.mylang";
+pub mem :: #import "./mem/mod.mylang";
+pub net :: #import "./net/mod.mylang";
+pub num :: #import "./num.mylang";
+pub ptr :: #import "./ptr.mylang";
+pub set :: #import "./set.mylang";
+pub slice :: #import "./slice.mylang";
+pub str :: #import "./str.mylang";
 
 libc :: #import "libc";
+
+// TODO: add real context.
+static ctx := struct {
+    alloc: mem.Allocator;
+}.{
+    alloc = mem.c_allocator,
+};
 
 panic :: (msg: []u8) -> never {
     print("PANIC: ");
