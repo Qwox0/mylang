@@ -20,10 +20,11 @@ use crate::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
         ty_match,
     },
-    util::{self, UnwrapDebug, VecExt, debug_only_assert, then, unreachable_debug},
+    util::{self, BigIntExt, UnwrapDebug, VecExt, debug_only_assert, then, ui, unreachable_debug},
 };
 pub(crate) use err::SemaResult;
 use err::SemaResult::*;
+use num::BigInt;
 use std::{fmt::Write, iter};
 
 mod err;
@@ -446,8 +447,8 @@ impl Sema {
 
                 //debug_assert!(expr.ty.is_none());
                 if expr.ty.is_none() {
-                    let len = elements.len() as i64;
-                    let len = ast_new!(IntVal { val: len }, Span::ZERO).upcast();
+                    let len = elements.len();
+                    let len = ast_new!(IntVal { val: BigInt::from(len) }, Span::ZERO).upcast();
                     let arr_ty = type_new!(ArrayTy { len, elem_ty: elem_ty.upcast() });
                     expr.ty = Some(arr_ty.upcast_to_type());
                 }
@@ -462,8 +463,9 @@ impl Sema {
                 let len = *count;
                 let len_val = len
                     .try_downcast_const_val()
-                    .and_then(|x| x.upcast().try_int())
-                    .ok_or_else(|| error_non_const(*count, "array length"))?;
+                    .ok_or_else(|| error_non_const(*count, "array length"))?
+                    .upcast()
+                    .int();
 
                 let mut elem_ty = self.analyze_array_initializer_lhs(expr, len_val, *ty_hint)?;
 
@@ -717,14 +719,16 @@ impl Sema {
                                 )
                             }
                             let arr = lhs.downcast::<ast::AggregateVal>();
-                            let idx = idx.int::<usize>();
-                            if idx >= arr.elements.len() {
+                            let idx = &idx.downcast::<ast::IntVal>().val;
+                            let Some(idx) =
+                                usize::try_from(idx).ok().filter(|idx| *idx < arr.elements.len())
+                            else {
                                 return cerror2!(
                                     expr.full_span(),
                                     "index out of bounds: the length is {} but the index is {idx}",
                                     arr.elements.len(),
                                 );
-                            }
+                            };
                             expr.set_replacement(arr.elements[idx].upcast());
                         }
                     },
@@ -840,7 +844,7 @@ impl Sema {
                     ($op:tt $ast_node:ident) => {{
                         if is_const {
                             let const_val = operand.downcast_const_val();
-                            let val = const_val.downcast::<ast::$ast_node>().val;
+                            let val = const_val.downcast::<ast::$ast_node>().val.clone();
                             // TODO: no allocation
                             expr.set_replacement(self.alloc(ast_new!($ast_node {
                                 val: $op val,
@@ -996,10 +1000,11 @@ impl Sema {
                     })?;
 
                     macro_rules! calc_num_binop {
-                        ($op:tt $(, allow $float_val:ident)?) => {
+                        ($op:tt $(, allow $float_val:ident)? $(, convert_rhs $convert_rhs:ident)?) => {
                             if common_ty.kind == AstKind::IntTy {
-                                let val = lhs.downcast::<ast::IntVal>().val
-                                    $op rhs.downcast::<ast::IntVal>().val;
+                                let rhs = &rhs.downcast::<ast::IntVal>().val;
+                                $( let rhs = $convert_rhs(rhs); )?
+                                let val = &lhs.downcast::<ast::IntVal>().val $op rhs;
                                 Some(self.alloc(ast_new!(IntVal { val, span: expr.full_span() }))?
                                     .upcast())
                             } $( else if common_ty.kind == AstKind::FloatTy {
@@ -1012,14 +1017,18 @@ impl Sema {
                         };
                     }
 
+                    fn to_isize(big_int: &BigInt) -> isize {
+                        isize::try_from(big_int).expect("value too big")
+                    }
+
                     let Some(out_val) = (match op {
                         BinOpKind::Mul => calc_num_binop!(*, allow FloatVal),
                         BinOpKind::Div => calc_num_binop!(/, allow FloatVal),
                         BinOpKind::Mod => calc_num_binop!(%, allow FloatVal),
                         BinOpKind::Add => calc_num_binop!(+, allow FloatVal),
                         BinOpKind::Sub => calc_num_binop!(-, allow FloatVal),
-                        BinOpKind::ShiftL => calc_num_binop!(<<),
-                        BinOpKind::ShiftR => calc_num_binop!(>>),
+                        BinOpKind::ShiftL => calc_num_binop!(<<, convert_rhs to_isize),
+                        BinOpKind::ShiftR => calc_num_binop!(>>, convert_rhs to_isize),
                         BinOpKind::BitAnd => calc_num_binop!(&),
                         BinOpKind::BitXor => calc_num_binop!(^),
                         BinOpKind::BitOr => calc_num_binop!(|),
@@ -1375,17 +1384,17 @@ impl Sema {
             AstEnum::SizeOfDirective { type_, .. } => {
                 let size = self.analyze_type(*type_)?.size();
                 expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
+                expr.set_replacement(ast::IntVal::new(size)?.upcast());
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let size = analyze!(*val, None).size();
                 expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast_new!(IntVal { val: size as i64 }, Span::ZERO).upcast());
+                expr.set_replacement(ast::IntVal::new(size)?.upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 let align = self.analyze_type(*type_)?.alignment();
                 expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast_new!(IntVal { val: align as i64 }, Span::ZERO).upcast());
+                expr.set_replacement(ast::IntVal::new(align)?.upcast());
             },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
                 let ty = self.analyze_type(*type_)?;
@@ -1397,7 +1406,7 @@ impl Sema {
                 };
                 let offset = struct_offset(&s_def.fields, f_idx);
                 expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast_new!(IntVal { val: offset as i64 }, Span::ZERO).upcast());
+                expr.set_replacement(ast::IntVal::new(offset)?.upcast());
             },
             AstEnum::SimpleDirective { ret_ty, .. } => {
                 expr.ty = Some(*ret_ty);
@@ -1611,13 +1620,15 @@ impl Sema {
                             variant_tag.full_span()
                         );
                         *tag_ty = Some(new_repr_ty.downcast::<ast::IntTy>());
-                        variant_tag.downcast::<ast::IntVal>().val
+                        variant_tag.downcast::<ast::IntVal>().val.clone()
                     } else {
                         // PERF: terrible implementation but works for now
                         let v_idx = variants.into_iter().position(|v| v == member).u();
                         match v_idx.checked_sub(1).map(|i| variants[i]) {
-                            Some(prev_variant) => get_enum_variant_tag(prev_variant)?.val + 1,
-                            None => 0,
+                            Some(prev_variant) => {
+                                get_enum_variant_tag(prev_variant)?.val.clone() + 1
+                            },
+                            None => num::BigInt::ZERO,
                         }
                     };
 
@@ -1636,7 +1647,7 @@ impl Sema {
                     match &mut member.as_mut().init {
                         Some(init) => debug_assert_eq!(init.rep().kind, AstKind::IntVal),
                         i @ None => {
-                            *i = Some(ast_new!(IntVal { val: tag as i64 }, Span::ZERO).upcast());
+                            *i = Some(ast_new!(IntVal { val: tag }, Span::ZERO).upcast());
                         },
                     }
 
@@ -1719,8 +1730,9 @@ impl Sema {
         debug_assert!(enum_ty.variants.contains(&variant));
         debug_assert!(!variant.is_const);
         if is_const {
-            let val = get_enum_variant_tag(variant)?.val;
-            let tag = ast_new!(IntVal { val }, Span::ZERO).upcast();
+            let val = &get_enum_variant_tag(variant)?.val;
+            // TODO: is this IntVal duplication really needed?
+            let tag = ast_new!(IntVal { val: val.clone() }, Span::ZERO).upcast();
             tag.as_mut().ty =
                 Some(if val.is_negative() { p.sint_lit } else { p.int_lit }.upcast_to_type());
             // TODO: use correct tag_ty:
@@ -1851,14 +1863,14 @@ impl Sema {
                 // TODO: remove this int -> ptr cast?
                 (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(RawPtrVal { val: i_val.val as u64 }, i_val.span);
+                    let ptr_val = ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span);
                     expr.set_replacement(ptr_val.upcast());
                 },
                 (TypeMatch::IntTy(_), TypeMatch::OptionTy(o))
                     if o.inner_ty.downcast_type().kind == AstKind::PtrTy =>
                 {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(RawPtrVal { val: i_val.val as u64 }, i_val.span);
+                    let ptr_val = ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span);
                     expr.set_replacement(ptr_val.upcast());
                 },
                 // TODO: correctly handle other cases

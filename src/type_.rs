@@ -6,8 +6,9 @@ use crate::{
     ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     util::{
-        Layout, UnwrapDebug, aligned_add, is_simple_enum, panic_debug, round_up_to_alignment,
-        round_up_to_nearest_power_of_two, unreachable_debug, variant_count_to_tag_size_bits,
+        BigIntExt, Layout, UnwrapDebug, aligned_add, is_simple_enum, panic_debug,
+        round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
+        variant_count_to_tag_size_bits,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -747,7 +748,8 @@ pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
             EnumRepr::Transparent(v) => optional_repr(v),
             EnumRepr::Tagged => {
                 debug_assert!(inner_ty.size() > 0);
-                if variants.into_iter().any(|v| v.init.u().int::<i64>() == 0) {
+                if variants.into_iter().any(|v| v.init.u().downcast::<ast::IntVal>().val.is_zero())
+                {
                     Tagged
                 } else {
                     NullOptimized { offset: 0, field_ty: NonZeroFieldType::EnumTag(tag_ty.u()) }

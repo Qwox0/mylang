@@ -6,10 +6,11 @@ use crate::{
     },
     codegen::llvm::bindings::*,
     context::{ctx, primitives, tmp_alloc},
-    diagnostics::{cerror_fatal, ctodo},
+    diagnostics::{cerror_fatal, ctodo, cwarn},
     display_code::debug_expr,
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
+    parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     type_::{
@@ -17,8 +18,9 @@ use crate::{
         remove_type_coercion_for_finalize, struct_size, ty_match, union_size,
     },
     util::{
-        self, OptionExt, UnwrapDebug, debug_only_assert, debug_only_assert_eq, forget_lifetime,
-        is_simple_enum, panic_debug, round_up_to_alignment, unreachable_debug,
+        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, debug_only_assert_eq,
+        forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment, to_f64,
+        unreachable_debug,
     },
 };
 use error::{
@@ -51,6 +53,7 @@ use inkwell::{
         PointerValue, StructValue, UnnamedAddress,
     },
 };
+use num::BigInt;
 use std::{
     assert_matches::debug_assert_matches,
     borrow::Cow,
@@ -989,28 +992,24 @@ impl<'ctx> Codegen<'ctx> {
             //ConstValEnum::IntVal { val, .. } => match ty.finalize().matchable().as_ref() {
             ConstValEnum::IntVal { val, .. } => match ty.matchable().as_ref() {
                 TypeEnum::IntTy { bits, is_signed, .. } => {
-                    ret(self.int_type(bits.u()).const_int(*val as u64, *is_signed))
+                    _ = is_signed;
+                    ret(const_int(self.int_type(bits.u()), val))
                 },
                 TypeEnum::FloatTy { bits, .. } => {
-                    let float = *val as f64;
-                    if float as i64 != *val {
-                        panic!("literal precision loss")
-                    }
-                    ret(self.float_type(bits.u()).const_float(float))
+                    // TODO: handle precision loss with compiletime checks
+                    ret(self.float_type(bits.u()).const_float(to_f64(val)))
                 },
                 TypeEnum::EnumDef { .. } => {
                     let int_val = cv.downcast::<ast::IntVal>();
                     let enum_def = ty.downcast::<ast::EnumDef>();
-                    debug_only_assert_eq!(
-                        enum_def.find_variant_ty_for_tag(*val as isize),
-                        p.void_ty
-                    );
+                    debug_only_assert_eq!(enum_def.find_variant_ty_for_tag(val), p.void_ty);
                     ret(self.const_enum_val(enum_def, int_val.upcast_to_const_val(), None)?)
                 },
                 _ => panic_debug!("invalid ty for IntVal: {ty}"),
             },
             ConstValEnum::FloatVal { val, .. } => {
                 let float_ty = ty.downcast::<ast::FloatTy>();
+                // TODO: handle precision loss with compiletime checks
                 ret(self.float_type(float_ty.bits.u()).const_float(*val))
             },
             ConstValEnum::BoolVal { val, .. } => {
@@ -1020,7 +1019,7 @@ impl<'ctx> Codegen<'ctx> {
             ConstValEnum::CharVal { val, .. } => {
                 //debug_assert!(expr.ty == p.char);
                 debug_assert!(ty == p.u8);
-                ret(self.context.i8_type().const_int(*val as u8 as u64, false)) // TODO: real char type
+                ret(self.context.i8_type().const_int((*val as u8).into(), false)) // TODO: real char type
             },
             // ConstValEnum::BCharLit { val, .. } => ret(self.int_type(8).const_int(*val as u64, false)),
             ConstValEnum::StrVal { text, .. } => {
@@ -1340,23 +1339,19 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    fn enum_tag_val(&self, enum_def: Ptr<ast::EnumDef>, tag_val: i64) -> BasicValueEnum<'ctx> {
+    fn enum_tag_val(&self, enum_def: Ptr<ast::EnumDef>, tag_val: &BigInt) -> BasicValueEnum<'ctx> {
         match self.enum_tag_type(enum_def) {
             EnumTagType::Zero => panic_debug!("Enum has no variants"),
             EnumTagType::One { .. } => self.empty_struct_ty.const_zero().as_basic_value_enum(),
-            EnumTagType::IntTy(int_type) => {
-                int_type.const_int(tag_val as u64, tag_val.is_negative()).as_basic_value_enum()
-            },
+            EnumTagType::IntTy(int_type) => const_int(int_type, tag_val).as_basic_value_enum(),
         }
     }
 
-    fn enum_tag_sym(&self, enum_def: Ptr<ast::EnumDef>, tag_val: i64) -> Symbol<'ctx> {
+    fn enum_tag_sym(&self, enum_def: Ptr<ast::EnumDef>, tag_val: &BigInt) -> Symbol<'ctx> {
         match self.enum_tag_type(enum_def) {
             EnumTagType::Zero => panic_debug!("Enum has no variants"),
             EnumTagType::One { .. } => Symbol::Void,
-            EnumTagType::IntTy(int_type) => {
-                reg_sym(int_type.const_int(tag_val as u64, tag_val.is_negative()))
-            },
+            EnumTagType::IntTy(int_type) => reg_sym(const_int(int_type, tag_val)),
         }
     }
 
@@ -1404,7 +1399,7 @@ impl<'ctx> Codegen<'ctx> {
         tag: Ptr<ast::ConstVal>,
         data: OPtr<ast::ConstVal>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let variant_tag = tag.downcast::<ast::IntVal>().val;
+        let variant_tag = &tag.downcast::<ast::IntVal>().val;
 
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].basic_ty();
         let tag_val = self.enum_tag_val(enum_def, variant_tag);
@@ -1414,7 +1409,7 @@ impl<'ctx> Codegen<'ctx> {
 
         #[cfg(debug_assertions)]
         // special case: the type of `data` const val is set during sema
-        debug_assert_eq!(data.ty.u(), enum_def.find_variant_ty_for_tag(variant_tag as isize));
+        debug_assert_eq!(data.ty.u(), enum_def.find_variant_ty_for_tag(variant_tag));
         let data = self.compile_const_val(data, data.ty.u())?;
         let val = enum_ty.const_named_struct(&[tag_val.as_basic_value_enum(), data.basic_val()]);
         Ok(val.as_basic_value_enum())
@@ -1596,7 +1591,7 @@ impl<'ctx> Codegen<'ctx> {
                 let s = match self.c_ffi_type(param_ty) {
                     CFfiType::Zst => {
                         debug_assert_ne!(param_def.var_ty, primitives().never);
-                        continue;
+                        Symbol::Void
                     },
                     CFfiType::Simple(simple_ty) => {
                         let param = param_val_iter.next().u();
@@ -1801,17 +1796,12 @@ impl<'ctx> Codegen<'ctx> {
             finalize_ty(val.as_mut().ty.as_mut().u(), arr_ty.elem_ty.downcast_type(), true);
         let elem_val = try_compile_expr_as_val!(self, val);
 
-        let len: u32 = count.int();
-        debug_assert_eq!(len, arr_ty.len.int());
+        let len = &count.downcast::<ast::IntVal>().val;
+        debug_assert_eq!(len, &arr_ty.len.downcast::<ast::IntVal>().val);
 
         let idx_ty = self.isize_type;
-        let for_info = self.build_for(
-            idx_ty,
-            false,
-            idx_ty.const_zero(),
-            idx_ty.const_int(len as u64, false),
-            false,
-        )?;
+        let for_info =
+            self.build_for(idx_ty, false, idx_ty.const_zero(), const_int(idx_ty, len), false)?;
 
         let elem_ptr =
             self.build_gep(arr_llvm_ty, arr_ptr, &[idx_ty.const_zero(), for_info.idx_int])?;
@@ -3952,3 +3942,15 @@ unsafe impl<'ctx> AsValueRef for BoolValue<'ctx> {
 unsafe impl<'ctx> AnyValue<'ctx> for BoolValue<'ctx> {}
 
 unsafe impl<'ctx> BasicValue<'ctx> for BoolValue<'ctx> {}
+
+fn const_int<'ctx>(ty: IntType<'ctx>, val: &BigInt) -> IntValue<'ctx> {
+    if val.bits() > ty.get_bit_width() as u64 {
+        // TODO: compiletime overflow/underflow checks
+        cwarn!(Span::ZERO, "{val} is too big for type {ty}")
+    }
+
+    let digits = val.inner().uint.inner().data.as_slice();
+    let digits = if digits.len() == 0 { &[0] } else { digits };
+    let unsigned = ty.const_int_arbitrary_precision(digits);
+    if val.is_negative() { unsigned.const_neg() } else { unsigned }
+}

@@ -272,7 +272,7 @@ impl Primitives {
             },
             empty_array_ty: {
                 let arr = ast_new!(ArrayTy {
-                    len: ast_new!(IntVal { val: 0 }).upcast(),
+                    len: ast_new!(IntVal { val: num::BigInt::ZERO }).upcast(),
                     elem_ty: never.upcast(),
                 });
                 init_ty(arr.upcast_to_type());

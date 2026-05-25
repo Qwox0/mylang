@@ -4,7 +4,7 @@ use std::{
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
     iter::FusedIterator,
-    mem::MaybeUninit,
+    mem::{MaybeUninit, size_of, transmute},
     path::Path,
 };
 
@@ -19,6 +19,7 @@ macro_rules! round_up_to_alignment {
         ($offset + (alignment - 1)) & alignment.wrapping_neg()
     }};
 }
+use num::BigInt;
 pub(crate) use round_up_to_alignment;
 
 #[derive(Debug, Clone, Copy)]
@@ -117,7 +118,7 @@ impl<T> UnwrapDebug for Ptr<[Option<T>]> {
 
     fn u(self) -> Self::Unwrapped {
         debug_assert!(self.iter().all(Option::is_some));
-        const { assert!(std::mem::size_of::<Option<T>>() == std::mem::size_of::<T>()) };
+        const { assert!(size_of::<Option<T>>() == size_of::<T>()) };
         unsafe { std::mem::transmute::<Self, Self::Unwrapped>(self) }
     }
 }
@@ -347,3 +348,79 @@ macro_rules! debug_only_assert_eq {
     };
 }
 pub(crate) use debug_only_assert_eq;
+
+pub trait BigIntExt {
+    type Inner;
+
+    fn is_negative(&self) -> bool;
+
+    fn is_zero(&self) -> bool;
+
+    fn inner(&self) -> &Self::Inner;
+}
+
+impl BigIntExt for num::BigInt {
+    type Inner = BigIntInner;
+
+    fn is_negative(&self) -> bool {
+        matches!(self.sign(), num::bigint::Sign::Minus)
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == num::BigInt::ZERO
+    }
+
+    fn inner(&self) -> &Self::Inner {
+        let ptr = self as *const _;
+
+        const { assert!(cfg!(target_pointer_width = "64")) }
+        const { assert!(size_of::<num::BigInt>() == size_of::<BigIntInner>()) }
+        unsafe { &*transmute::<*const num::BigInt, *const BigIntInner>(ptr) }
+    }
+}
+
+impl BigIntExt for num::BigUint {
+    type Inner = BigUintInner;
+
+    fn is_negative(&self) -> bool {
+        false
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == num::BigUint::ZERO
+    }
+
+    fn inner(&self) -> &Self::Inner {
+        let ptr = self as *const _;
+
+        const { assert!(cfg!(target_pointer_width = "64")) }
+        const { assert!(size_of::<num::BigUint>() == size_of::<BigUintInner>()) }
+        unsafe { &*transmute::<*const num::BigUint, *const BigUintInner>(ptr) }
+    }
+}
+
+#[derive(Debug)]
+pub struct BigIntInner {
+    #[allow(unused)]
+    pub sign: num::bigint::Sign,
+    pub uint: num::BigUint,
+}
+
+#[derive(Debug)]
+pub struct BigUintInner {
+    pub data: Vec<u64>,
+}
+
+#[track_caller]
+pub fn ui<'a, T>(big_int: &'a BigInt) -> T
+where
+    T: num::Unsigned + num::Integer + num::traits::WrappingNeg + TryFrom<&'a num::BigUint>,
+    T::Error: fmt::Debug,
+{
+    let a = T::try_from(&big_int.inner().uint).expect("value too big");
+    if big_int.is_negative() { a.wrapping_neg() } else { a }
+}
+
+pub fn to_f64(val: &BigInt) -> f64 {
+    num::ToPrimitive::to_f64(val).expect("can't fail")
+}

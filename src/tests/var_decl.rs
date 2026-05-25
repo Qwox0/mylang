@@ -2,6 +2,7 @@ use crate::{
     ast::{self, AstKind},
     tests::{substr, test, test_body},
 };
+use num::ToPrimitive;
 
 #[test]
 fn error_invalid_lhs() {
@@ -84,7 +85,7 @@ fn parse_colon() {
         let x = v.init.unwrap().downcast::<ast::Decl>();
         assert_eq!(x.ident.sym.text(), "x");
         assert_eq!(x.var_ty_expr.unwrap().downcast::<ast::Ident>().sym.text(), "i32");
-        assert_eq!(x.init.unwrap().downcast::<ast::IntVal>().val, 3);
+        assert_eq!(x.init.unwrap().downcast::<ast::IntVal>().val.to_i32().unwrap(), 3);
     }
 }
 

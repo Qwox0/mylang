@@ -8,7 +8,7 @@ use crate::{
         self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, primitives},
-    diagnostics::{cerror, cerror2, chint, cwarn},
+    diagnostics::{cerror, cerror2, chint},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
@@ -19,6 +19,7 @@ use crate::{
 use core::str;
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind, is_ascii_space_or_tab};
+use num::BigInt;
 use parser_helper::ParserInterface;
 use std::ops::DerefMut;
 
@@ -467,27 +468,8 @@ impl Parser {
                 expr!(Defer { stmt }, span)
             },
             TokenKind::IntLit => {
-                use std::num::IntErrorKind;
-                let val = match literals::parse_int_lit(&self.advanced().get_text_from_span(span)) {
-                    Ok(val) => val,
-                    Err(e) if *e.kind() == IntErrorKind::PosOverflow => {
-                        cwarn!(
-                            span,
-                            "Currently, the compiler cannot store a literal this big internally. \
-                             Using i64::MAX instead."
-                        );
-                        i64::MAX
-                    },
-                    Err(e) if *e.kind() == IntErrorKind::NegOverflow => {
-                        cwarn!(
-                            span,
-                            "Currently, the compiler cannot store a literal this small \
-                             internally. Using i64::MIN instead."
-                        );
-                        i64::MIN
-                    },
-                    Err(e) => return cerror2!(span, "invalid integer literal: {e}"),
-                };
+                let val = literals::parse_int_lit(&self.advanced().get_text_from_span(span))
+                    .ok_or_else(|| cerror!(span, "invalid integer literal"))?; // TODO: better error
                 expr!(IntVal { val }, span)
             },
             TokenKind::FloatLit => {
@@ -534,7 +516,7 @@ impl Parser {
                     return cerror2!(span, "byte character literal contains more than one byte");
                 }
                 //expr!(BCharLit { val: byte }, span)
-                expr!(IntVal { val: byte as i64 }, span)
+                expr!(IntVal { val: BigInt::from(byte) }, span)
             },
             TokenKind::StrLit => {
                 let lit = self.advanced().get_text_from_span(span);

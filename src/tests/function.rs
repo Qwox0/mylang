@@ -3,6 +3,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     tests::{TestResult, TestSpan, substr, test, test_body},
 };
+use num::ToPrimitive;
 
 #[test]
 fn basic_call() {
@@ -177,7 +178,7 @@ fn parse_precedence() {
         fn check<T>(res: TestResult<T>) {
             let f = res.one_stmt::<ast::Decl>();
             assert_eq!(fn_body(f.var_ty_expr).downcast::<ast::Ident>().sym.text(), "i32");
-            assert_eq!(fn_body(f.init).downcast::<ast::IntVal>().val, 1);
+            assert_eq!(fn_body(f.init).downcast::<ast::IntVal>().val.to_i32().unwrap(), 1);
         }
         // don't parse       `i32 : ...` as decl
         check(test("f :          -> i32 : -> 1;").parse());
@@ -194,8 +195,8 @@ fn parse_precedence() {
             let ne = fn_body(Some(addr_of.operand)).downcast::<ast::BinOp>();
             assert_eq!(ne.op, ast::BinOpKind::Ne);
 
-            assert_eq!(ne.lhs.downcast::<ast::IntVal>().val, 0);
-            assert_eq!(ne.rhs.downcast::<ast::IntVal>().val, 1);
+            assert_eq!(ne.lhs.downcast::<ast::IntVal>().val.to_i32().unwrap(), 0);
+            assert_eq!(ne.rhs.downcast::<ast::IntVal>().val.to_i32().unwrap(), 1);
         }
         check(test("_ :: &          -> 0 != 1;").parse());
         check(test("_ :: & (x: any) -> 0 != 1;").parse());

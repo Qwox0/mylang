@@ -1,13 +1,13 @@
-use core::num::ParseIntError;
+use num::BigInt;
 use std::num::ParseFloatError;
 
-pub fn parse_int_lit(text: &str) -> Result<i64, ParseIntError> {
+pub fn parse_int_lit(text: &str) -> Option<BigInt> {
     let text = text.replace("_", "");
     match text.get(..2) {
-        Some("0b") => i64::from_str_radix(&text[2..], 2),
-        Some("0o") => i64::from_str_radix(&text[2..], 8),
-        Some("0x") => i64::from_str_radix(&text[2..], 16),
-        _ => i64::from_str_radix(&text, 10),
+        Some("0b") => BigInt::parse_bytes(text[2..].as_bytes(), 2),
+        Some("0o") => BigInt::parse_bytes(text[2..].as_bytes(), 8),
+        Some("0x") => BigInt::parse_bytes(text[2..].as_bytes(), 16),
+        _ => BigInt::parse_bytes(text.as_bytes(), 10),
     }
 }
 

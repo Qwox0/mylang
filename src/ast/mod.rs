@@ -8,9 +8,10 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::Scope,
     type_::ty_match,
-    util::{UnwrapDebug, panic_debug, then, unreachable_debug},
+    util::{UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
 };
 use core::fmt;
+use num::BigInt;
 use std::iter;
 
 pub mod debug;
@@ -535,8 +536,8 @@ ast_variants! {
 
     ===== Constant Values =====
 
-    IntVal { val: i64 },
-    FloatVal { val: f64 },
+    IntVal { val: BigInt },
+    FloatVal { val: f64 }, // currently the biggest supported float type is `f64` => BigFloat is not needed
     BoolVal { val: bool },
     CharVal { val: char },
     // BCharLit { val: u8 },
@@ -877,15 +878,10 @@ impl Ptr<Ast> {
         self.try_downcast_type()?.try_downcast_struct_def()
     }
 
-    pub fn try_int<Int: TryFrom<i64>>(self) -> Option<Int>
-    where Int::Error: fmt::Debug {
-        then!(self.rep().kind == AstKind::IntVal => self.int())
-    }
-
     #[track_caller]
-    pub fn int<Int: TryFrom<i64>>(self) -> Int
+    pub fn int<Int: TryFrom<&'static BigInt>>(self) -> Int
     where Int::Error: fmt::Debug {
-        let int = self.downcast::<IntVal>().val;
+        let int = &self.downcast::<IntVal>().as_ref().val;
         Int::try_from(int).u()
     }
 
@@ -953,7 +949,7 @@ impl Ptr<ConstVal> {
     /// Expects `self` to be an [`IntVal`] or a [`FloatVal`].
     pub fn float_val(self) -> f64 {
         if let Some(int) = self.try_downcast::<IntVal>() {
-            int.val as f64
+            to_f64(&int.val)
         } else {
             self.downcast::<FloatVal>().val
         }
@@ -1456,13 +1452,20 @@ impl Block {
     }
 }
 
+impl IntVal {
+    pub fn new<I>(i: I) -> Result<Ptr<IntVal>, HandledErr>
+    where BigInt: From<I> {
+        Ok(ast_new!(IntVal { val: BigInt::from(i) }, Span::ZERO))
+    }
+}
+
 impl EnumDef {
     /// TODO: handle duplicate tags
     #[cfg(debug_assertions)]
-    pub fn find_variant_ty_for_tag(&self, tag_val: isize) -> Ptr<Type> {
+    pub fn find_variant_ty_for_tag(&self, tag_val: &BigInt) -> Ptr<Type> {
         let variant = self.variants.into_iter().find(|v| {
             debug_assert!(!v.is_const);
-            v.init.u().int::<isize>() == tag_val
+            v.init.u().downcast::<IntVal>().val == *tag_val
         });
         variant.u().var_ty.u()
     }
