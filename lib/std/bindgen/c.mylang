@@ -3,6 +3,16 @@ libc :: #import "libc";
 
 clang :: #import "./libclang.mylang"; // TODO: commit libclang bindings (here or in another project?)
 
+main :: -> {
+    generate_c_bindings(
+        "dev",
+        "/home/qwox/tmp/dev/dev.c",
+        .[][..],
+        "/home/qwox/tmp/dev/dev.c.mylang",
+        .{ convert_macros=false }
+    );
+}
+
 cstr :: *u8;
 Path :: []u8;
 
@@ -41,6 +51,8 @@ pub generate_c_bindings :: (
 ) -> {
     if opts.function_prefix.len == 0 then opts.function_prefix = lib_name;
     if opts.macro_prefix.len == 0 then opts.macro_prefix = opts.function_prefix;
+
+    std.fs.create_all_parent_dirs(out_file.ptr);
 
     idx := clang.createIndex(0, 0);
     defer clang.disposeIndex(idx);
@@ -153,12 +165,12 @@ emit_license :: (d: *mut ClientData, unit: clang.CXTranslationUnit) -> bool {
     mut first_stmt_start := null_loc;
     unit_cursor |> clang.visitChildren(&(cursor, _, first_stmt_start) -> {
         stmt_start := cursor |> clang.getCursorExtent() |> clang.getRangeStart();
-        if clang.location_isFromMainFile(stmt_start) == 0 return .Continue;
+        if not clang.location_isFromMainFile(stmt_start).as_bool2() return .Continue;
         first_stmt_start.as(*mut clang.CXSourceLocation).* = stmt_start;
         return .Break;
     }, &mut first_stmt_start);
 
-    found_first_stmt := clang.equalLocations(first_stmt_start, null_loc) == 0;
+    found_first_stmt := not clang.equalLocations(first_stmt_start, null_loc).as_bool();
     if not found_first_stmt then first_stmt_start = unit_start;
 
     tokens := d.tokenize_source_range(clang.getRange(unit_start, first_stmt_start));
@@ -180,7 +192,7 @@ emit_license :: (d: *mut ClientData, unit: clang.CXTranslationUnit) -> bool {
 }
 
 visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: ?*mut any) -> clang.enums.CXChildVisitResult {
-    d := d.as(*mut ClientData);
+    d := d.as(?*mut ClientData) orelse std.panic("needs ClientData");
 
     d.*.tmp_alloc.&mut.reset();
 
@@ -191,7 +203,6 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: ?*mut any)
     kind := clang.getCursorKind(cursor);
     if kind == .FunctionDecl {
         d.emit_docs(cursor);
-        //is_fn_no_ret();
         fn_ty := clang.getCursorType(cursor);
         mut function_name := d.*.item_name;
         if d.*.used_names.&mut.insert(strclone(function_name.ptr)) != null {
@@ -220,7 +231,7 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: ?*mut any)
 
             ty := clang.getCursorType(cursor);
             real_decl := clang.getTypeDeclaration(ty);
-            is_real_decl := clang.equalCursors(cursor, real_decl).b();
+            is_real_decl := clang.equalCursors(cursor, real_decl).as_bool();
             if not is_real_decl return .Continue;
             d.emit("%ss.%s :: ", xx keyword, xx item_name);
         } else if anon_kind == .FullyAnonymous
@@ -271,6 +282,7 @@ emit_fn_proto :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     d.*.force_single_line = true;
     defer d.*.force_single_line = prev_force_single_line;
 
+    if clang.cursor_isVariadic(cursor).as_bool() then d.emit("#varargs ");
     d.emit("(");
 
     param_count := clang.cursor_getNumArguments(cursor).as(u32);
@@ -292,7 +304,9 @@ emit_fn_proto :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     }
 
     d.emit(") -> ");
-    d.emit_type(clang.getResultType(fn_ty));
+
+    if d.is_function_noreturn(cursor) { d.emit("never"); }
+    else d.emit_type(clang.getResultType(fn_ty));
 }
 
 emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
@@ -301,13 +315,14 @@ emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
     if ty.kind == .Pointer {
         pointee := clang.getPointeeType(ty);
         if pointee.kind != .FunctionProto {
-            is_const := clang.isConstQualifiedType(pointee) != 0;
-            d.emit(if is_const "*" else "*mut ");
+            is_const := clang.isConstQualifiedType(pointee).as_bool();
+            // TODO: check `clang.type_getNullability`
+            d.emit(if is_const "?*" else "?*mut ");
         }
         d.emit_type(clang.getUnqualifiedType(pointee), is_pointee=true);
-    } else if ty.kind == .IncompleteArray {
+    } else if ty.kind == .IncompleteArray or ty.kind == .VariableArray {
         elem_ty := clang.getArrayElementType(ty);
-        is_const := clang.isConstQualifiedType(elem_ty) != 0;
+        is_const := clang.isConstQualifiedType(elem_ty).as_bool();
         d.emit(if is_const "*" else "*mut ");
         d.emit_type(clang.getUnqualifiedType(elem_ty), is_pointee=true);
     } else if ty.kind == .ConstantArray {
@@ -355,8 +370,11 @@ emit_type :: (d: *mut ClientData, ty: clang.CXType, is_pointee := false) -> {
         d.emit_type(clang.getResultType(fn_ty));
     } else if ty.kind == .Void and is_pointee {
         d.emit("any");
+    } else if ty.kind == .Complex {
+        inner_ty := convert_primitive(clang.getElementType(ty).kind);
+        d.emit("struct { real: %s, imag: %s }", xx inner_ty, xx inner_ty);
     } else {
-        primitive := d.convert_primitive(ty);
+        primitive := convert_primitive(ty.kind);
         if primitive != null {
             d.emit("%s", xx primitive);
         } else {
@@ -561,22 +579,15 @@ tokenize_cursor :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 /// ```mylang
 /// defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
 /// ```
-tokenize_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
+tokenize_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> []mut clang.CXToken {
     mut tokens: ?*mut clang.CXToken = null;
     mut num_tokens: u32 = 0;
     clang.tokenize(d.*.unit, range, &mut tokens, &mut num_tokens);
     ptr := tokens orelse std.panic("tokenize failed!");
-    []mut clang.CXToken.{ ptr, len = xx num_tokens }
+    .{ ptr, len = xx num_tokens }
 }
 
-convert_primitive :: (d: *mut ClientData, ty: clang.CXType) -> {
-    if ty.kind != .Complex return convert_simple_primitive(ty.kind);
-
-    inner_ty := d.convert_primitive(clang.getElementType(ty));
-    return d.tmp_format("struct { real: %s, imag: %s }", xx inner_ty, xx inner_ty).ptr;
-}
-
-convert_simple_primitive :: (kind: clang.enums.CXTypeKind) -> {
+convert_primitive :: (kind: clang.enums.CXTypeKind) -> {
     if kind == .Void              "void".ptr
     else if kind == .Bool         "bool".ptr
     else if kind == .Char_U       "u8".ptr
@@ -627,7 +638,7 @@ convert_simple_primitive :: (kind: clang.enums.CXTypeKind) -> {
 
 convert_int_suffix :: (suffix: []u8) -> {
     eq :: std.str.eq;
-    convert_simple_primitive(
+    convert_primitive(
         if eq(suffix, "u") or eq(suffix, "U") then .UInt
         else if eq(suffix, "l") or eq(suffix, "L") then .Long
         else if eq(suffix, "ul") or eq(suffix, "UL") then .ULong
@@ -647,36 +658,26 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 
     s := clang.cursor_getRawCommentText(cursor);
     if clang.getCString(s) == null return false;
-    mut docs := d.tmp_alloc_cxstring(s);
+    mut docs: []u8 = d.tmp_alloc_cxstring(s);
 
-    trim_start :: (mut str: []mut u8) -> {
-        while str.len > 0 and std.str.is_ascii_whitespace(str[0]) do str = str[1..]mut;
-        str
-    }
-
-    trim_start_eq :: (mut str: []mut u8, start: []u8) -> {
+    trim_start_eq :: (mut str: []u8, start: []u8) -> {
         if str.len < start.len return str;
         mut idx: u64 = 0;
         while idx < start.len {
             if str[idx] != start[idx] break;
             idx += 1;
         }
-        return str[idx..]mut;
+        return str[idx..];
     }
 
-    trim_end :: (mut str: []mut u8) -> {
-        while str.len > 0 and std.str.is_ascii_whitespace(str[str.len - 1]) do str.len -= 1;
-        str
-    }
-
-    trim_end_eq :: (mut str: []mut u8, end: []u8) -> {
+    trim_end_eq :: (mut str: []u8, end: []u8) -> {
         if str.len < end.len return str;
         mut idx: u64 = 0;
         while idx < end.len {
             if str[str.len - idx] != end[end.len - idx] break;
             idx += 1;
         }
-        return str[..str.len - idx]mut;
+        return str[..str.len - idx];
     }
 
     find_newline :: (str: []u8) -> {
@@ -685,16 +686,15 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     }
 
     if d.*.opts.format_docs {
-        docs = docs.trim_start_eq("/**").trim_start(/* trims first line entirely if it is empty */)
-            .trim_end_eq("*/").trim_end();
+        docs = docs.trim_start_eq("/**").trim_end_eq("*/") |> std.str.trim();
 
         while docs.len > 0 {
             nl := docs.find_newline();
-            mut line := docs[0..nl]mut;
-            line = line.trim_start().trim_start_eq("*").trim_start_eq(" ");
+            mut line := docs[0..nl];
+            line = line |> std.str.trim_start().trim_start_eq("*").trim_start_eq(" ");
             d.emit_line("/// %.*s", xx line.len, xx line.ptr);
             if nl == docs.len break;
-            docs = docs[(nl + 1)..]mut;
+            docs = docs[(nl + 1)..];
         }
     } else {
         d.emit("%s\n", xx docs.ptr);
@@ -706,6 +706,11 @@ emit_docs :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
 emit_indent :: (d: *ClientData) -> {
     for _ in 0..d.*.opts.indent_width * d.*.ident_level
         d.emit(" ")
+}
+
+token_eq :: (d: *mut ClientData, token: clang.CXToken, kind: clang.CXTokenKind, token_text: []u8) -> {
+    if clang.getTokenKind(token) != kind return false;
+    return clang.getTokenSpelling(d.*.unit, token) |> d.tmp_alloc_cxstring() |> std.str.eq(token_text);
 }
 
 debug_ty :: (d: *mut ClientData, ty: clang.CXType) -> {
@@ -722,6 +727,15 @@ debug_cursor :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     d.debug_source_location(clang.getCursorLocation(cursor));
 }
 
+debug_tokens :: (d: *mut ClientData, tokens: []clang.CXToken) -> {
+    libc.printf("# %d Tokens:\n".ptr, tokens.len);
+    for t in tokens {
+        t_kind := clang.getTokenKind(t).get_token_kind_spelling();
+        t_text := d.tmp_alloc_cxstring(clang.getTokenSpelling(d.*.unit, t)).ptr;
+        libc.printf("  '%s' (%s)\n".ptr, t_text, t_kind.ptr);
+    }
+}
+
 debug_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
     start := clang.getRangeStart(range) |> resolve_source_location();
     end := clang.getRangeEnd(range) |> resolve_source_location();
@@ -733,12 +747,13 @@ debug_source_range :: (d: *mut ClientData, range: clang.CXSourceRange) -> {
 debug_source_location :: (d: *mut ClientData, loc: clang.CXSourceLocation) -> {
     resolved := loc.resolve_source_location();
     libc.printf(
-        "%s:%d:%d(%d; in main file? %s)\n".ptr,
+        "%s:%d:%d(%d; in main file? %s; in system header? %s)\n".ptr,
         resolved.&.filename(d).ptr,
         resolved.line,
         resolved.column,
         resolved.offset,
-        std.fmt.format_bool(clang.location_isFromMainFile(loc) != 0).ptr,
+        std.fmt.format_bool(clang.location_isFromMainFile(loc).as_bool2()).ptr,
+        std.fmt.format_bool(clang.location_isInSystemHeader(loc).as_bool2()).ptr,
     );
 }
 
@@ -757,7 +772,7 @@ resolve_source_location :: (loc: clang.CXSourceLocation) -> {
     return out;
 }
 
-file_equal :: (file1: clang.CXFile, file2: clang.CXFile) -> clang.file_isEqual(file1, file2) != 0;
+file_equal :: (file1: clang.CXFile, file2: clang.CXFile) -> clang.file_isEqual(file1, file2).as_bool2();
 
 tmp_alloc_str :: (d: *mut ClientData, str: []u8) -> {
     std.str.strdup(str, d.*.tmp_alloc.&mut.allocator()) orelse std.panic("tmp allocation for string failed")
@@ -777,7 +792,8 @@ tmp_format :: (d: *mut ClientData, fmt: []u8, a := 0, b := 0, c := 0) -> {
     d.tmp_alloc_str(alloc1)
 }
 
-b :: (clang_bool: u32) -> clang_bool != 0;
+as_bool :: (clang_bool: u32) -> clang_bool != 0;
+as_bool2 :: (clang_bool: i32) -> clang_bool != 0;
 
 strclone :: libc.strdup;
 
@@ -848,7 +864,7 @@ get_type_naming :: (d: *mut ClientData, cursor: clang.CXCursor) -> TypeDeclNamin
 
 /// Returns whether the type decl behind `cursor` cannot be referenced by any name.
 /// Note: `typedef struct {} A;` is not fully anonymous, but it `is_anonymous_type_lit`.
-_is_fully_anonymous_type :: (cursor: clang.CXCursor) -> clang.cursor_isAnonymous(cursor) != 0;
+_is_fully_anonymous_type :: (cursor: clang.CXCursor) -> clang.cursor_isAnonymous(cursor).as_bool();
 
 /// `struct /* no name */ {`
 ///
@@ -891,4 +907,39 @@ _is_anonymous_type_lit :: (d: *mut ClientData, cursor: clang.CXCursor) -> {
     }
 
     true
+}
+
+/// libclang doesn't provide this basic functionality.
+///
+/// Currently this only checks for `__attribute__((__noreturn__))`
+is_function_noreturn :: (d: *mut ClientData, fn_cursor: clang.CXCursor) -> {
+    std.assert(fn_cursor.kind == .FunctionDecl);
+
+    tokens := d.tokenize_cursor(fn_cursor);
+    defer clang.disposeTokens(d.*.unit, tokens.ptr, tokens.len.as(u32));
+
+    // __attribute__((__noreturn__))
+    mut idx: u64 = 0;
+    while idx < tokens.len {
+        defer idx += 1;
+
+        if not d.token_eq(tokens[idx], .Keyword, "__attribute__") continue;
+
+        if idx + 5 >= tokens.len break;
+        std.assert(d.token_eq(tokens[idx + 1], .Punctuation, "("));
+        std.assert(d.token_eq(tokens[idx + 2], .Punctuation, "("));
+        if not d.token_eq(tokens[idx + 3], .Identifier, "__noreturn__") continue;
+        std.assert(d.token_eq(tokens[idx + 4], .Punctuation, ")"));
+        std.assert(d.token_eq(tokens[idx + 5], .Punctuation, ")"));
+
+        return true;
+    }
+
+    // `clang/lib/AST/Decl.cpp` > `bool FunctionDecl::isNoReturn()` > `FnTy->getNoReturnAttr()`
+    fn_ty := clang.getCursorType(fn_cursor).data[0];
+    ext_info := (fn_ty.as(u64) + 2).as(*u16).* >> 3; // ExtInfo: Offset: 2 bytes and 3 bits; Size: 13 bits
+    NO_RETURN_MASK :: 0x20;
+    if ext_info & NO_RETURN_MASK != 0 return true;
+
+    false
 }

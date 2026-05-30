@@ -87,7 +87,7 @@ println :: (str: []u8) -> void {
 
 fail_errno :: (thing: []u8) -> never {
     errno := libc.get_errno();
-    libc.printf("%.*s failed. %s: %s\n".ptr, thing.len, thing.ptr, libc.strerrorname_np(errno), libc.strerror(errno));
+    libc.printf("%.*s failed. %s: %s\n".ptr, thing.len, thing.ptr, errno.strerrorname_np(), errno.strerror());
     libc.abort()
 }
 

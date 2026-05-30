@@ -1,0 +1,32 @@
+std :: #import "std";
+libc :: #import "libc";
+
+parent_dir :: (path: []u8) -> {
+    std.assert(path.len > 0);
+    mut end := path.len - 1;
+    if path[end] == b'/' then end -= 1;
+    while end > 0 and path[end] != b'/' do end -= 1;
+    path[..end]
+}
+
+create_dir :: (path: *u8) -> libc.mkdir(path, libc.S_IRWXU) == 0 or libc.get_errno() == .EEXIST;
+
+/// ```mylang
+/// create_all_parent_dirs("a/b/c/file"); // creates directories `a/`, `a/b/`, `a/b/c/`
+/// ```
+create_all_parent_dirs :: (path: *u8) -> {
+    DIR_BUF_SIZE :: 256;
+    mut dir_buf := u8.[0; DIR_BUF_SIZE];
+    mut end: *u8 = path;
+    while true {
+        end = libc.strchr(end, b'/') orelse break;
+        end = end |> std.ptr.add_bytes(1);
+        len := std.ptr.difference(end, path);
+
+        std.assert(len <= DIR_BUF_SIZE);
+        libc.memcpy(dir_buf.&mut, path, len);
+
+        ok := create_dir(dir_buf[..].ptr);
+        std.assert(ok, "Failed to create dir");
+    }
+}
