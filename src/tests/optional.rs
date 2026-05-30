@@ -588,3 +588,62 @@ opt_int
 ";
     test_body(code).ok(Optional::<i32>::NULL);
 }
+
+#[test]
+fn optional_eq() {
+    // tagged optional
+    let code = r#"
+T :: i32;
+t := 0;
+null_t: ?T = null;
+if not(#sizeof(T) != #sizeof(?T)) return 1;
+if not(null_t == null_t) return 2;
+if not(Some(t) != null) return 3;
+if not(null != Some(t)) return 4;
+if not(Some(t) == Some(t)) return 5;
+t2 := 1;
+if not(Some(t) != Some(t2)) return 6;
+t3 := 0;
+if not(Some(t) == Some(t3)) return 7;
+0
+        "#;
+    test_body(code).ok(0);
+
+    // inlined optional
+    let code = r#"
+T :: struct { val: i32 = 0 };
+t := T.{};
+nil: ?*T = null;
+if not(#sizeof(*T) == #sizeof(?*T)) return 1;
+if not(nil == nil) return 2;
+if not(Some(&t) != null) return 3;
+if not(null != Some(&t)) return 4;
+if not(Some(&t) == Some(&t)) return 5;
+t2 := T.{};
+if not(Some(&t) != Some(&t2)) return 6;
+0
+        "#;
+    test_body(code).ok(0);
+
+    // ?never
+    test_body("null_never: ?never = null; null_never == null_never").ok(true);
+
+    // ?void
+    let code = r#"
+T :: void;
+t := {};
+null_t: ?T = null;
+if not(#sizeof(T) != #sizeof(?T)) return 1;
+if not(null_t == null_t) return 2;
+if not(Some({}) != null) return 3;
+if not(null != Some({})) return 4;
+if not(Some({}) == Some({})) return 5;
+0
+        "#;
+    test_body(code).ok(0);
+}
+
+#[test]
+fn coerce_null_codegen() {
+    test("test :: -> ?*u8 { nil := null; nil }").ok(std::ptr::null::<()>());
+}

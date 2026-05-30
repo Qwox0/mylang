@@ -616,7 +616,15 @@ impl Sema {
                             ty = Some(var_ty);
                         }
                     }
-                    ty.ok_or_else(|| error_unknown_field(*rhs, lhs_ty))?
+                    //ty.ok_or_else(|| error_unknown_field(*rhs, lhs_ty))?
+                    match ty {
+                        Some(ty) => ty,
+                        None => {
+                            // prevents incorrect errors when a method is defined later
+                            cinfo!(rhs.span, "This associated const might be undefined");
+                            return NotFinished { remaining: 1 };
+                        },
+                    }
                 };
                 expr.ty = Some(t);
             },
@@ -2675,5 +2683,5 @@ enum VarDeclSpecialCase {
 const _: () = assert!(size_of::<Option<VarDeclSpecialCase>>() == 1);
 
 fn get_enum_variant_tag(variant: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::IntVal>> {
-    variant.init.u().try_downcast::<ast::IntVal>().or_not_finished()
+    variant.init.or_not_finished()?.try_downcast::<ast::IntVal>().or_not_finished()
 }

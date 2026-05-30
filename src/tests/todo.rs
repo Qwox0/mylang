@@ -315,3 +315,14 @@ test :: -> MyStruct {
 };";
     test(code).ok(5i32);
 }
+
+#[test]
+#[ignore = "not fixed"]
+fn sizeof_unfinished_type() {
+    let code = "
+MyStruct :: struct { p: Pause, x: i32 };
+test :: -> #sizeof(MyStruct);
+Pause :: u8;
+";
+    test(code).ok(8_usize);
+}

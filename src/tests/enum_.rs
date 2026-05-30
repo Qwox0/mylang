@@ -218,7 +218,7 @@ fn one_variant() {
     // in local
     let res = test_body("a := enum { OneVariant }.OneVariant; a").ok(());
     assert!(res.llvm_ir().contains("define void @test()"));
-    assert!(res.llvm_ir().contains("alloca {}, align 1")); // TODO: allow this?
+    assert!(!res.llvm_ir().contains("alloca"), "no stack allocation needed");
     assert!(res.llvm_ir().contains("ret void"));
     drop(res);
 

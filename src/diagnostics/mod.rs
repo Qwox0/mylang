@@ -257,9 +257,11 @@ macro_rules! cunimplemented {
 }
 pub(crate) use cunimplemented;
 
+#[allow(unused)]
 macro_rules! ctodo {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         $crate::diagnostics::cerror_fatal!($span, "TODO: {}", format_args!($fmt, $($args),*))
     };
 }
+#[allow(unused)]
 pub(crate) use ctodo;

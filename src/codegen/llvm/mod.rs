@@ -4,9 +4,9 @@ use crate::{
         DeclMarkers, OPtrTypeExt, RangeKind, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst,
         is_pos_arg,
     },
-    codegen::llvm::bindings::*,
+    codegen::llvm::{bindings::*, error::get_inner_err},
     context::{ctx, primitives, tmp_alloc},
-    diagnostics::{cerror_fatal, ctodo, cwarn},
+    diagnostics::{cerror_fatal, cerror2, cwarn},
     display_code::debug_expr,
     intern_pool::Symbol as InternSym,
     literals::replace_escape_chars,
@@ -99,6 +99,8 @@ pub struct Codegen<'ctx> {
     /// Can be used for ZST fields instead of `void`.
     empty_struct_ty: StructType<'ctx>,
     isize_type: IntType<'ctx>,
+
+    static_void: Option<GlobalValue<'ctx>>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -121,6 +123,8 @@ impl<'ctx> Codegen<'ctx> {
             noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 0),
             empty_struct_ty: context.struct_type(&[], false),
             isize_type: context.i64_type(), // TODO: 32-bit
+
+            static_void: None,
         };
 
         // needed for string slice literals
@@ -381,7 +385,7 @@ impl<'ctx> Codegen<'ctx> {
                 let (ptr, len) = match lhs_ty.matchable().as_mut() {
                     TypeEnum::SliceTy { .. } => self.build_slice_field_access(lhs_sym)?,
                     TypeEnum::ArrayTy { len, .. } => {
-                        let arr_ptr = self.build_ptr_to_sym(lhs_sym, lhs_ty)?;
+                        let arr_ptr = self.build_ptr_to_sym(lhs_sym, lhs_ty)?.u();
                         let len = self.isize_type.const_int(len.int(), false);
                         (arr_ptr, len)
                     },
@@ -534,7 +538,10 @@ impl<'ctx> Codegen<'ctx> {
                 let sym = self.compile_expr(*operand)?;
                 match op {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
-                        reg(self.build_ptr_to_sym(sym, operand.ty.u())?)
+                        reg(match self.build_ptr_to_sym(sym, operand.ty.u())? {
+                            Some(ptr) => ptr,
+                            None => self.build_alloca_with_align(self.raw_type(0), "", 1)?,
+                        })
                     },
                     UnaryOpKind::Deref => {
                         stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
@@ -590,36 +597,14 @@ impl<'ctx> Codegen<'ctx> {
                     return reg(self.build_int_binop(lhs, rhs, false, op)?);
                 }
 
-                let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?;
-                let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?;
-                if arg_ty == p.bool {
-                    let lhs_val = lhs_val.bool_val(self)?;
-                    let rhs_val = rhs_val.bool_val(self)?;
-                    return reg(self.build_bool_binop(lhs_val, rhs_val, op)?);
-                }
-                match arg_ty.matchable().as_ref() {
-                    TypeEnum::IntTy { is_signed, .. } => self
-                        .build_int_binop(lhs_val.int_val(), rhs_val.int_val(), *is_signed, op)
-                        .map(reg_sym),
-                    TypeEnum::PtrTy { .. } => self
-                        .build_int_binop(lhs_val.ptr_val(), rhs_val.ptr_val(), false, op)
-                        .map(reg_sym),
-                    TypeEnum::OptionTy { inner_ty, .. }
-                        if inner_ty.downcast_type().kind == AstKind::PtrTy =>
-                    {
-                        let int_ty = self.isize_type;
-                        let lhs_int =
-                            self.builder.build_ptr_to_int(lhs_val.ptr_val(), int_ty, "")?;
-                        let rhs_int =
-                            self.builder.build_ptr_to_int(rhs_val.ptr_val(), int_ty, "")?;
-                        self.build_int_binop(lhs_int, rhs_int, false, op).map(reg_sym)
-                    },
-                    TypeEnum::FloatTy { .. } => self
-                        .build_float_binop(lhs_val.float_val(), rhs_val.float_val(), op)
-                        .map(reg_sym),
-                    _ => ctodo!(expr.full_span(), "binop {op:?} for {}", arg_ty),
-                }
-                .coerce()
+                let out_val = self.build_binop(op, lhs_sym, rhs_sym, arg_ty).map_err(|e| {
+                    if matches!(get_inner_err(&e), CodegenError::UnsupportedBinOp) {
+                        cerror2!(expr.full_span(), "binop {op:?} for {}", arg_ty)
+                    } else {
+                        e
+                    }
+                })?;
+                reg(out_val)
             },
             AstEnum::Range { start, end, .. } => {
                 let r = out_ty.downcast::<ast::RangeTy>();
@@ -672,7 +657,7 @@ impl<'ctx> Codegen<'ctx> {
                 finalize_ty(rhs.ty.as_mut().u(), lhs.ty.u(), true);
                 let lhs_sym = self.compile_expr(*lhs)?;
                 let stack_ptr = self.build_ptr_to_sym(lhs_sym, lhs.ty.u())?;
-                self.compile_expr_with_write_target(*rhs, Some(stack_ptr))?;
+                self.compile_expr_with_write_target(*rhs, stack_ptr)?;
                 Ok(Symbol::Void)
             },
             AstEnum::BinOpAssign { lhs, op, rhs, .. } => {
@@ -754,7 +739,7 @@ impl<'ctx> Codegen<'ctx> {
                             let for_info =
                                 self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
 
-                            let arr_ptr = self.build_ptr_to_sym(source_sym, source_ty)?;
+                            let arr_ptr = self.build_ptr_to_sym(source_sym, source_ty)?.u();
                             let iter_var_sym = Symbol::Stack(self.build_gep(
                                 source_llvm_ty.arr_ty(),
                                 arr_ptr,
@@ -1072,7 +1057,7 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 } else {
                     debug_assert!(sym.markers.get(DeclMarkers::IS_STATIC_MASK));
-                    self.get_symbol(sym).global()
+                    self.get_symbol(sym).global(self)
                 };
                 ret(global.as_pointer_value())
             },
@@ -1269,7 +1254,9 @@ impl<'ctx> Codegen<'ctx> {
                     arg_values
                         .set(arg_offset, self.build_ptr_to_sym_with_align(sym, arg_align)?.into());
                 },
-                CFfiType::Fn => arg_values.set(arg_offset, sym.global().as_pointer_value().into()),
+                CFfiType::Fn => {
+                    arg_values.set(arg_offset, sym.global(self).as_pointer_value().into())
+                },
                 CFfiType::SmallSimpleEnum { small_int, ffi_int } => {
                     let val = self.sym_as_val_with_llvm_ty(
                         sym,
@@ -1325,7 +1312,7 @@ impl<'ctx> Codegen<'ctx> {
         let p = primitives();
         if ret_ty == p.never {
             return self.build_unreachable();
-        } else if ret_ty == p.void_ty {
+        } else if ret_ty.size() == 0 {
             Ok(Symbol::Void)
         } else if let Some(ret_val_ptr) = ret_val_ptr {
             if !use_sret {
@@ -2073,7 +2060,7 @@ impl<'ctx> Codegen<'ctx> {
             OptionalRepr::AlwaysNull => Ok(self.bool_val(false)),
             OptionalRepr::NullOptimized { offset, field_ty } => {
                 if offset != 0 {
-                    let ptr = self.build_ptr_to_sym(option_sym, inner_ty)?; // build alloca also for simple structs?
+                    let ptr = self.build_ptr_to_sym(option_sym, inner_ty)?.u(); // build alloca also for simple structs?
                     option_sym = Symbol::Stack(self.build_raw_gep(ptr, offset as u64)?);
                 }
                 // TODO: use padding in structs to make them non null
@@ -2156,14 +2143,14 @@ impl<'ctx> Codegen<'ctx> {
         &self,
         sym: Symbol<'ctx>,
         ty: Ptr<ast::Type>,
-    ) -> CodegenResult<PointerValue<'ctx>> {
-        Ok(match sym {
+    ) -> CodegenResult<Option<PointerValue<'ctx>>> {
+        Ok(Some(match sym {
             Symbol::Stack(ptr_value) => ptr_value,
             Symbol::Register(val) => self.build_alloca_value(val.basic_val(), ty.alignment())?,
             Symbol::Global(global) => global.as_pointer_value(),
-            Symbol::Function(_) => unreachable_debug(),
-            Symbol::Void => panic_debug!("{ty} is not represented as a symbol"),
-        })
+            Symbol::Function(f) => f.as_global_value().as_pointer_value(),
+            Symbol::Void => return Ok(None),
+        }))
     }
 
     fn build_ptr_to_sym_with_align(
@@ -2202,8 +2189,13 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn build_return(&mut self, ret_sym: Symbol<'ctx>, ret_ty: Ptr<ast::Type>) -> CodegenResult<()> {
-        let ret = match (ret_sym.basic(), self.c_ffi_type(ret_ty).flatten_simple2(self)) {
+        let ffi_ty = self.c_ffi_type(ret_ty).flatten_simple2(self);
+        let ret = match (ret_sym.basic(), ffi_ty) {
             (_, CFfiType::Zst) => None,
+            (BasicSymbol::Zst, CFfiType::Simple(ty)) => {
+                debug_assert_eq!(ret_ty.kind, AstKind::OptionTy);
+                Some(ty.basic_ty().const_zero())
+            },
             (BasicSymbol::Zst, _) => unreachable_debug(),
             (BasicSymbol::Val(val), CFfiType::ByValPtr | CFfiType::Array) => {
                 let sret_ptr = self.sret_ptr.u();
@@ -2314,6 +2306,82 @@ impl<'ctx> Codegen<'ctx> {
         let len = self.build_struct_access(slice_ty, slice_sym, 1, "")?;
         let len = self.sym_as_val(len, p.u64)?.int_val();
         Ok((ptr, len))
+    }
+
+    fn build_binop(
+        &mut self,
+        op: BinOpKind,
+        lhs_sym: Symbol<'ctx>,
+        rhs_sym: Symbol<'ctx>,
+        arg_ty: Ptr<ast::Type>,
+    ) -> CodegenResult<CodegenValue<'ctx>> {
+        let p = primitives();
+        let val = match arg_ty.matchable2() {
+            TypeMatch::SimpleTy(_) if arg_ty == p.void_ty => {
+                if !matches!(op, BinOpKind::Eq | BinOpKind::Ne) {
+                    return Err(CodegenError::UnsupportedBinOp.into());
+                }
+                CodegenValue::new(self.bool_val(matches!(op, BinOpKind::Eq)))
+            },
+            TypeMatch::SimpleTy(_) if arg_ty == p.bool => {
+                let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?.bool_val(self)?;
+                let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.bool_val(self)?;
+                self.build_bool_binop(lhs_val, rhs_val, op)?
+            },
+            TypeMatch::IntTy(i) => {
+                let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?.int_val();
+                let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.int_val();
+                self.build_int_binop(lhs_val, rhs_val, i.is_signed, op)?
+            },
+            TypeMatch::PtrTy(_) => {
+                let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?.ptr_val();
+                let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.ptr_val();
+                self.build_int_binop(lhs_val, rhs_val, false, op)?
+            },
+            TypeMatch::OptionTy(opt_ty) => {
+                if !matches!(op, BinOpKind::Eq | BinOpKind::Ne) {
+                    return Err(CodegenError::UnsupportedBinOp.into());
+                }
+                let eq = op == BinOpKind::Eq;
+                let inner_ty = opt_ty.inner_ty.downcast_type();
+                match optional_repr(inner_ty) {
+                    OptionalRepr::AlwaysNull => CodegenValue::new(self.bool_val(eq)),
+                    OptionalRepr::NullOptimized { .. } => {
+                        return self.build_binop(op, lhs_sym, rhs_sym, inner_ty);
+                    },
+                    OptionalRepr::Tagged => {
+                        let opt_llvm_ty = self.llvm_type(arg_ty).struct_ty();
+
+                        let lhs_is_some = self.build_optional_is_some(lhs_sym, opt_ty)?;
+                        let rhs_is_some = self.build_optional_is_some(rhs_sym, opt_ty)?;
+
+                        let cmp_data = |self_: &mut Self| {
+                            let lhs_data =
+                                self_.build_struct_access(opt_llvm_ty, lhs_sym, 1, "lhs_data")?;
+                            let rhs_data =
+                                self_.build_struct_access(opt_llvm_ty, rhs_sym, 1, "rhs_data")?;
+                            self_.build_binop(op, lhs_data, rhs_data, inner_ty)?.bool_val(self_)
+                        };
+
+                        if eq {
+                            let tag_eq = self.build_int_eq(lhs_is_some.int, rhs_is_some.int)?;
+                            self.build_short_circuit_and(tag_eq, cmp_data)
+                        } else {
+                            let tag_ne = self.build_int_ne(lhs_is_some.int, rhs_is_some.int)?;
+                            self.build_short_circuit_or(tag_ne, cmp_data)
+                        }
+                        .map(CodegenValue::new)?
+                    },
+                }
+            },
+            TypeMatch::FloatTy { .. } => {
+                let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?.float_val();
+                let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.float_val();
+                self.build_float_binop(lhs_val, rhs_val, op)?
+            },
+            _ => return Err(CodegenError::UnsupportedBinOp.into()),
+        };
+        Ok(val)
     }
 
     pub fn build_int_binop<I: IntMathValue<'ctx> + Copy>(
@@ -2471,49 +2539,64 @@ impl<'ctx> Codegen<'ctx> {
             Ok(CodegenValue::new(val))
         }
 
+        let compile_rhs = |self_: &mut Self| {
+            debug_assert_eq!(rhs.ty, primitives().bool);
+            try_compile_expr_as_val!(self_, rhs).bool_val(self_).coerce()
+        };
+
         match op {
-            BinOpKind::And => ret({
-                let func = self.cur_fn.u();
-                let entry_bb = self.builder.get_insert_block().u();
-                let mut rhs_bb = self.context.append_basic_block(func, "and.rhs");
-                let merge_bb = self.context.append_basic_block(func, "and.merge");
-
-                self.builder.build_conditional_branch(lhs.int, rhs_bb, merge_bb)?;
-
-                self.builder.position_at_end(rhs_bb);
-                debug_assert_eq!(rhs.ty, primitives().bool);
-                let rhs = try_compile_expr_as_val!(self, rhs).bool_val(self)?;
-                self.builder.build_unconditional_branch(merge_bb)?;
-                rhs_bb = self.builder.get_insert_block().expect("has block");
-
-                self.builder.position_at_end(merge_bb);
-                let phi = self.builder.build_phi(lhs.get_type(), "and")?;
-                let false_ = self.bool_val(false);
-                phi.add_incoming(&[(&false_, entry_bb), (&rhs, rhs_bb)]);
-                phi
-            }),
-            BinOpKind::Or => ret({
-                let func = self.cur_fn.u();
-                let entry_bb = self.builder.get_insert_block().u();
-                let mut rhs_bb = self.context.append_basic_block(func, "or.rhs");
-                let merge_bb = self.context.append_basic_block(func, "or.merge");
-
-                self.builder.build_conditional_branch(lhs.int, merge_bb, rhs_bb)?;
-
-                self.builder.position_at_end(rhs_bb);
-                debug_assert_eq!(rhs.ty, primitives().bool);
-                let rhs = try_compile_expr_as_val!(self, rhs).bool_val(self)?;
-                self.builder.build_unconditional_branch(merge_bb)?;
-                rhs_bb = self.builder.get_insert_block().expect("has block");
-
-                self.builder.position_at_end(merge_bb);
-                let phi = self.builder.build_phi(lhs.get_type(), "and")?;
-                let true_ = self.bool_val(true);
-                phi.add_incoming(&[(&true_, entry_bb), (&rhs, rhs_bb)]);
-                phi
-            }),
+            BinOpKind::And => ret(self.build_short_circuit_and(lhs, compile_rhs)?),
+            BinOpKind::Or => ret(self.build_short_circuit_or(lhs, compile_rhs)?),
             _ => unreachable!(),
         }
+    }
+
+    fn build_short_circuit_and<U>(
+        &mut self,
+        lhs: BoolValue<'ctx>,
+        compile_rhs: impl FnOnce(&mut Self) -> CodegenResult<BoolValue<'ctx>, U>,
+    ) -> CodegenResult<PhiValue<'ctx>, U> {
+        let func = self.cur_fn.u();
+        let entry_bb = self.builder.get_insert_block().u();
+        let mut rhs_bb = self.context.append_basic_block(func, "and.rhs");
+        let merge_bb = self.context.append_basic_block(func, "and.merge");
+
+        self.builder.build_conditional_branch(lhs.int, rhs_bb, merge_bb)?;
+
+        self.builder.position_at_end(rhs_bb);
+        let rhs = compile_rhs(self)?;
+        self.builder.build_unconditional_branch(merge_bb)?;
+        rhs_bb = self.builder.get_insert_block().expect("has block");
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self.builder.build_phi(lhs.get_type(), "and")?;
+        let false_ = self.bool_val(false);
+        phi.add_incoming(&[(&false_, entry_bb), (&rhs, rhs_bb)]);
+        Ok(phi)
+    }
+
+    fn build_short_circuit_or<U>(
+        &mut self,
+        lhs: BoolValue<'ctx>,
+        compile_rhs: impl FnOnce(&mut Self) -> CodegenResult<BoolValue<'ctx>, U>,
+    ) -> CodegenResult<PhiValue<'ctx>, U> {
+        let func = self.cur_fn.u();
+        let entry_bb = self.builder.get_insert_block().u();
+        let mut rhs_bb = self.context.append_basic_block(func, "or.rhs");
+        let merge_bb = self.context.append_basic_block(func, "or.merge");
+
+        self.builder.build_conditional_branch(lhs.int, merge_bb, rhs_bb)?;
+
+        self.builder.position_at_end(rhs_bb);
+        let rhs = compile_rhs(self)?;
+        self.builder.build_unconditional_branch(merge_bb)?;
+        rhs_bb = self.builder.get_insert_block().expect("has block");
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self.builder.build_phi(lhs.get_type(), "and")?;
+        let true_ = self.bool_val(true);
+        phi.add_incoming(&[(&true_, entry_bb), (&rhs, rhs_bb)]);
+        Ok(phi)
     }
 
     fn bool_val(&self, val: bool) -> BoolValue<'ctx> {
@@ -3288,7 +3371,12 @@ impl<'ctx> Codegen<'ctx> {
             const ENABLE_NON_MUT_TO_REG: bool = false;
 
             let is_static = markers.get(DeclMarkers::IS_STATIC_MASK);
-            let sym = if is_static {
+            let sym = if var_ty.size() == 0 {
+                if let Some(init) = decl.init {
+                    self.compile_expr(init)?;
+                }
+                Symbol::Void
+            } else if is_static {
                 if during_precompile {
                     let ty = self.llvm_type(var_ty).basic_ty();
 
@@ -3301,7 +3389,7 @@ impl<'ctx> Codegen<'ctx> {
                         var_ty.alignment() as u32,
                     ))
                 } else {
-                    let global = self.get_symbol(decl).global();
+                    let global = self.get_symbol(decl).global(self);
 
                     if !init.is_some_and(|i| i.kind == AstKind::ExternDirective) {
                         let val = match init {
@@ -3443,11 +3531,28 @@ impl<'ctx> Symbol<'ctx> {
         }
     }
 
-    fn global(self) -> GlobalValue<'ctx> {
+    fn global(self, codegen: &mut Codegen<'ctx>) -> GlobalValue<'ctx> {
         match self {
             Symbol::Global(val) => val,
             Symbol::Function(val) => val.as_global_value(),
-            _ => unreachable_debug(),
+            Symbol::Void => {
+                if let None = codegen.static_void {
+                    let ty = codegen.raw_type(0);
+                    let init = ty.as_basic_type_enum().const_zero();
+                    codegen.static_void = Some(codegen.add_global(
+                        "static_void",
+                        ty,
+                        true,
+                        Some(Linkage::Internal),
+                        true,
+                        1,
+                        init,
+                    ));
+                }
+
+                codegen.static_void.u()
+            },
+            _ => panic_debug!("{self:?}"),
         }
     }
 }
@@ -3465,13 +3570,17 @@ impl<'ctx> std::fmt::Debug for CodegenValue<'ctx> {
 }
 
 impl<'ctx> CodegenValue<'ctx> {
-    pub fn new<V: AsValueRef>(val: V) -> CodegenValue<'ctx> {
+    pub fn new(val: impl AsValueRef) -> Self {
+        Self::from_raw(val.as_value_ref())
+    }
+
+    pub fn from_raw(val: LLVMValueRef) -> Self {
         #[cfg(debug_assertions)]
         unsafe {
-            AnyVal::new(val.as_value_ref())
+            AnyVal::new(val)
         };
 
-        CodegenValue { val: val.as_value_ref(), _marker: PhantomData }
+        CodegenValue { val, _marker: PhantomData }
     }
 
     pub fn int_val(&self) -> IntValue<'ctx> {
@@ -3479,7 +3588,7 @@ impl<'ctx> CodegenValue<'ctx> {
         unsafe { IntValue::new(self.val) }
     }
 
-    pub fn bool_val(&self, codegen: &mut Codegen<'ctx>) -> CodegenResult<BoolValue<'ctx>> {
+    pub fn bool_val(&self, codegen: &Codegen<'ctx>) -> CodegenResult<BoolValue<'ctx>> {
         debug_assert_matches!(self.any_val(), AnyVal::IntValue(_));
         let int_val = unsafe { IntValue::new(self.val) };
         Ok(BoolValue::new(if int_val.get_type().get_bit_width() > 1 {
@@ -3539,8 +3648,18 @@ pub struct CodegenType<'ctx> {
 }
 
 impl<'ctx> CodegenType<'ctx> {
-    pub fn new<Ty: AsTypeRef>(ty: Ty) -> Self {
-        CodegenType { inner: ty.as_type_ref(), _marker: PhantomData }
+    pub fn new(ty: impl AsTypeRef) -> Self {
+        Self::from_raw(ty.as_type_ref())
+    }
+
+    pub fn from_raw(ty: LLVMTypeRef) -> Self {
+        debug_assert!(!ty.is_null());
+        #[cfg(debug_assertions)]
+        unsafe {
+            AnyTypeEnum::new(ty)
+        };
+
+        CodegenType { inner: ty, _marker: PhantomData }
     }
 
     pub fn int_ty(&self) -> IntType<'ctx> {

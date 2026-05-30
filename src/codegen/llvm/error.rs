@@ -14,12 +14,25 @@ pub enum CodegenError {
     CannotOptimizeModule(LLVMString),
     CannotCompileObjFile(LLVMString),
     CannotCreateJit(LLVMString),
+    UnsupportedBinOp,
 
     HandledErr(HandledErr),
 }
 
 unsafe impl Send for CodegenError {}
 unsafe impl Sync for CodegenError {}
+
+#[cfg(not(debug_assertions))]
+type CodegenResultError = CodegenError;
+#[cfg(debug_assertions)]
+type CodegenResultError = anyhow::Error;
+
+pub(super) fn get_inner_err(e: &CodegenResultError) -> &CodegenError {
+    #[cfg(not(debug_assertions))]
+    return e;
+    #[cfg(debug_assertions)]
+    return e.downcast_ref().unwrap();
+}
 
 #[derive(Debug)]
 #[must_use]
@@ -28,10 +41,7 @@ pub enum CodegenResult<T, U = !> {
     /// Represents the [`unreachable`](https://llvm.org/docs/LangRef.html#i-unreachable) Terminator
     /// Instruction.
     Unreachable(U),
-    #[cfg(not(debug_assertions))]
-    Err(CodegenError),
-    #[cfg(debug_assertions)]
-    Err(anyhow::Error),
+    Err(CodegenResultError),
 }
 
 pub type CodegenResultAndControlFlow<T> = CodegenResult<T, ()>;
@@ -42,6 +52,14 @@ impl<T, U> CodegenResult<T, U> {
             Ok(t) => Ok(mapper(t)),
             Unreachable(u) => Unreachable(u),
             Err(error) => Err(error),
+        }
+    }
+
+    pub fn map_err(self, mapper: impl FnOnce(CodegenResultError) -> CodegenResultError) -> Self {
+        match self {
+            Ok(t) => Ok(t),
+            Unreachable(u) => Unreachable(u),
+            Err(error) => Err(mapper(error)),
         }
     }
 }

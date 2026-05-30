@@ -482,13 +482,12 @@ impl Parser {
                 expr!(BoolVal { val: kind == TokenKind::BoolLitTrue }, span)
             },
             TokenKind::CharLit => {
-                let code = replace_escape_chars(&self.advanced().lex.get_code()[span]);
+                let code = &self.advanced().lex.get_code()[span];
+                debug_assert_eq!(code.as_bytes().first(), Some(&b'\''));
+                debug_assert_eq!(code.as_bytes().last(), Some(&b'\''));
+                debug_assert!(code.len() > 2);
+                let code = replace_escape_chars(&code[1..code.len() - 1]);
                 let mut chars = code.chars();
-
-                let start = chars.next();
-                debug_assert_eq!(start, Some('\''));
-                let end = chars.next_back();
-                debug_assert_eq!(end, Some('\''));
 
                 let Some(val) = chars.next() else {
                     return cerror2!(span, "character literals must not be empty");
