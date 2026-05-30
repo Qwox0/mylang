@@ -623,7 +623,8 @@ impl<'ctx> Codegen<'ctx> {
                 reg(range)
             },
             AstEnum::OrElse { lhs, rhs, .. } => {
-                let lhs_ty = lhs.as_mut().ty.as_mut().u().downcast_ref::<ast::OptionTy>();
+                let mut lhs_ty = lhs.ty.u().clone_for_finalize(&ctx().alloc).unwrap();
+                let lhs_ty = lhs_ty.downcast_ref::<ast::OptionTy>();
                 finalize_ty(lhs_ty.inner_ty.downcast_type_ref(), out_ty, false); // TODO: is coercion possible here?
                 finalize_ty(rhs.ty.as_mut().u(), out_ty, true);
                 let lhs_sym = self.compile_expr(*lhs)?;

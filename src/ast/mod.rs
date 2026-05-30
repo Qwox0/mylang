@@ -1,4 +1,5 @@
 use crate::{
+    arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
     codegen::llvm::finalize_ty,
     context::{FilesIndex, ctx, ctx_mut, primitives},
@@ -1238,6 +1239,41 @@ impl Type {
     pub fn count_optional_nesting(self: Ptr<Type>) -> usize {
         iter::successors(self.try_downcast::<OptionTy>(), |t| t.inner_ty.try_downcast::<OptionTy>())
             .count()
+    }
+
+    pub fn clone_for_finalize(self: Ptr<Self>, alloc: &Arena) -> Result<Ptr<Self>, AllocErr> {
+        Ok(match self.matchable2() {
+            TypeMatch::SimpleTy(_)
+            | TypeMatch::IntTy(_)
+            | TypeMatch::FloatTy(_)
+            | TypeMatch::StructDef(_)
+            | TypeMatch::UnionDef(_)
+            | TypeMatch::EnumDef(_)
+            | TypeMatch::Fn(_) => self,
+            TypeMatch::PtrTy(p) => {
+                let pointee = p.pointee.downcast_type().clone_for_finalize(alloc)?.upcast();
+                alloc.alloc(PtrTy { pointee, ..*p })?.upcast_to_type()
+            },
+            TypeMatch::SliceTy(s) => {
+                let elem_ty = s.elem_ty.downcast_type().clone_for_finalize(alloc)?.upcast();
+                alloc.alloc(SliceTy { elem_ty, ..*s })?.upcast_to_type()
+            },
+            TypeMatch::ArrayTy(a) => {
+                let len = a.len.downcast::<IntVal>();
+                let len = alloc.alloc(IntVal { val: len.val.clone(), ..*len })?.upcast();
+                let elem_ty = a.elem_ty.downcast_type().clone_for_finalize(alloc)?.upcast();
+                alloc.alloc(ArrayTy { len, elem_ty, ..*a })?.upcast_to_type()
+            },
+            TypeMatch::RangeTy(r) => {
+                let elem_ty = r.elem_ty.clone_for_finalize(alloc)?;
+                alloc.alloc(RangeTy { elem_ty, ..*r })?.upcast_to_type()
+            },
+            TypeMatch::OptionTy(o) => {
+                let inner_ty = o.inner_ty.downcast_type().clone_for_finalize(alloc)?.upcast();
+                alloc.alloc(OptionTy { inner_ty, ..*o })?.upcast_to_type()
+            },
+            TypeMatch::ArrayLikeContainer(_) => unreachable_debug(),
+        })
     }
 }
 

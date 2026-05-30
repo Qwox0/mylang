@@ -45,3 +45,14 @@ fn error_no_allocation_in_common_type() {
         )
         .error("mismatched types: expected `[]mut []u8`; got `[][]mut u8`", substr!("s1";skip=1)); // always emit another error message?
 }
+
+#[test]
+fn dont_break_return_type_on_finalize() {
+    let code = "
+dont_break_my_return_type :: -> ?*mut i64 { mut a := 1; &mut a };
+_ :: -> []mut u8.(dont_break_my_return_type() orelse return null, 0); // this previously changed \
+                the return type of `dont_break_my_return_type` to `*any`
+test :: -> { dont_break_my_return_type() orelse return; };
+";
+    test(code).compile_no_err();
+}

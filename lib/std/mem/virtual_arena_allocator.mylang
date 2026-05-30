@@ -22,7 +22,7 @@ VirtualArenaAllocator :: struct {
         mapping := reserve(reserve_size) orelse std.panic("reserving virtual memory failed");
         if not commit(.(mapping.addr, block_size)) then std.panic("commiting memory failed");
 
-        addr := mapping.addr.as(*mut u8);
+        addr := mapping.ptr().as(*mut u8);
         addr.as(*mut VirtualArenaAllocator).{
             reserve_end = std.ptr.add_bytes(addr, reserve_size),
             block_size,
@@ -41,8 +41,7 @@ VirtualArenaAllocator :: struct {
     allocator :: (self: *mut VirtualArenaAllocator) -> Allocator.{ impl = &impl, data = self };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
-        std.assert(self != null);
-        self := self.as(*mut VirtualArenaAllocator);
+        self := self.as(?*mut VirtualArenaAllocator) orelse std.panic("unreachable");
         if mode == .Alloc {
             return self.alloc(size, alignment);
         } else if mode == .Free {

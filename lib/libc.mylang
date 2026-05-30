@@ -480,7 +480,7 @@ write : (fd: i32, buf: ?*mut any, buf_size: c_size_t) -> c_ssize_t : #extern;
 // ===== <sys/mman.h> =====
 
 /// return value `null` represents a valid address.
-mmap     : (addr: ?*any, len: c_size_t, prot: c_int, flags: c_int, fd: c_int, offset: c_off_t) -> ?*any : #extern;
+mmap     : (addr: ?*any, len: c_size_t, prot: c_int, flags: c_int, fd: c_int, offset: c_off_t) -> ?*mut any : #extern;
 munmap   : (addr: ?*any, len: c_size_t) -> c_int : #extern;
 mprotect : (addr: ?*any, len: c_size_t, prot: c_int) -> c_int : #extern;
 msync    : (addr: ?*any, len: c_size_t, flags: c_int) -> c_int : #extern;

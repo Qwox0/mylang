@@ -1863,7 +1863,9 @@ impl Sema {
         is_const: bool,
     ) -> SemaResult<()> {
         let op_ty = *self.analyze(operand, &Some(target_ty), is_const)?;
-        // TODO: check if cast is possible
+        if !self.validate_cast(op_ty, target_ty) {
+            return cerror2!(expr.full_span(), "cannot cast `{op_ty}` to `{target_ty}`");
+        }
         expr.as_mut().ty = Some(target_ty);
 
         if is_const {
@@ -1887,6 +1889,27 @@ impl Sema {
         }
 
         Ok(())
+    }
+
+    #[must_use]
+    fn validate_cast(&self, ty: Ptr<ast::Type>, target_ty: Ptr<ast::Type>) -> bool {
+        let p = p();
+        match (ty.matchable2(), target_ty.matchable2()) {
+            (..) if ty == p.any => false,
+            (TypeMatch::OptionTy(o1), TypeMatch::OptionTy(o2)) => {
+                // TODO: inlined optionals
+                self.validate_cast(o1.inner_ty.downcast_type(), o2.inner_ty.downcast_type())
+            },
+            (TypeMatch::OptionTy(p), TypeMatch::IntTy(i))
+                if p.inner_ty.downcast_type().kind == AstKind::PtrTy =>
+            {
+                i.bits.u() == 64
+            },
+            (TypeMatch::PtrTy(_), TypeMatch::IntTy(i)) => i.bits.u() == 64,
+            (TypeMatch::OptionTy(_), _) => false,
+            // TODO: more checks
+            _ => true,
+        }
     }
 
     pub fn validate_named_initializer(

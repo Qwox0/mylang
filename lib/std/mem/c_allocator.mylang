@@ -12,8 +12,8 @@ c_allocator :: Allocator.{ impl = &c_allocator_impl, data = null };
 c_allocator_impl : Allocator.ImplFunction : (data, mode, size, alignment, old_ptr) -> {
     if mode == .Alloc {
         std.assert(alignment <= MAX_ALIGN, "malloc cannot guarantee needed alignment");
-        ptr := libc.malloc(size);
-        return []mut u8.{ ptr=xx ptr, len=size }
+        ptr := libc.malloc(size) orelse return null;
+        return []mut u8.{ ptr=ptr.as(*mut u8), len=size }
     } else if mode == .Free {
         libc.free(old_ptr);
         return null;

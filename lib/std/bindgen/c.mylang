@@ -162,8 +162,9 @@ emit_license :: (d: *mut ClientData, unit: clang.CXTranslationUnit) -> bool {
     unit_start := unit_cursor |> clang.getCursorExtent() |> clang.getRangeStart();
 
     null_loc := clang.getNullLocation();
-    mut first_stmt_start := null_loc;
-    unit_cursor |> clang.visitChildren(&(cursor, _, first_stmt_start) -> {
+    mut first_stmt_start: clang.CXSourceLocation = null_loc;
+    unit_cursor |> clang.visitChildren(&(cursor, _, capture) -> {
+        first_stmt_start := capture orelse std.panic("null capture");
         stmt_start := cursor |> clang.getCursorExtent() |> clang.getRangeStart();
         if not clang.location_isFromMainFile(stmt_start).as_bool2() return .Continue;
         first_stmt_start.as(*mut clang.CXSourceLocation).* = stmt_start;
@@ -412,7 +413,7 @@ emit_struct_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType)
     defer d.*.field_count = prev_field_count;
 
     clang.type_visitFields(ty, &(cursor, d) -> {
-        d := d.as(*mut ClientData);
+        d := d.as(?*mut ClientData) orelse std.panic("needs ClientData");
         defer d.*.field_count += 1;
 
         mut field: *u8 = d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor)).ptr;
@@ -457,7 +458,7 @@ emit_enum_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -
     if d.*.type_decl_naming != .FullyAnonymous  d.emit("enum {");
     d.*.ident_level += 1;
     clang.visitChildren(cursor, &(cursor, p, d) -> {
-        d := d.as(*mut ClientData);
+        d := d.as(?*mut ClientData) orelse std.panic("needs ClientData");
         mut variant := d.tmp_alloc_cxstring(clang.getCursorSpelling(cursor));
         if d.*.opts.trim_enum_prefix {
             trim_partial_prefix(&mut variant, d.*.item_name);

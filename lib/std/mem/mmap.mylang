@@ -130,8 +130,9 @@ MMap :: struct {
     }
 
     /// Fails iff the address returned by mmap is `0`.
-    as_slice :: (self: MMap) -> []mut u8 {
-        std.assert(self.addr != null, "0 is a valid address, but is not compatible with the sematics of `?[]T`");
-        []mut u8.{ ptr=self.addr.as(*mut u8), len=self.len }
-    }
+    as_slice :: (self: MMap) -> []mut u8.{ ptr=self.ptr().as(*mut u8), len=self.len };
+
+    /// Fails iff the address returned by mmap is `0`.
+    ptr :: (self: MMap) ->
+        self.addr orelse std.panic("mmap returned `0`, which is a valid address, but is incompatible with the semantics of `?*any`");
 }

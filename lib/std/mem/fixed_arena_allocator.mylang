@@ -19,8 +19,7 @@ FixedArenaAllocator :: struct {
     allocator :: (data: *mut FixedArenaAllocator) -> Allocator.{ impl = &impl, data };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
-        std.assert(self != null);
-        self := self.as(*mut FixedArenaAllocator);
+        self := self.as(?*mut FixedArenaAllocator) orelse std.panic("unreachable");
         if mode == .Alloc {
             return fixed_arena_alloc(self.*.pos.&mut, self.*.end, size, alignment);
         } else if mode == .Free {

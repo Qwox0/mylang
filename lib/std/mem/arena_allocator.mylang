@@ -14,8 +14,7 @@ ArenaAllocator :: struct {
     allocator :: (data: *mut ArenaAllocator) -> Allocator.{ impl = &impl, data };
 
     impl : Allocator.ImplFunction : (self, mode, size, alignment, old_ptr) -> {
-        std.assert(self != null);
-        self := self.as(*mut ArenaAllocator);
+        self := self.as(?*mut ArenaAllocator) orelse std.panic("unreachable");
         if mode == .Alloc {
             return self.alloc(size, alignment);
         } else if mode == .Free {
@@ -33,7 +32,7 @@ ArenaAllocator :: struct {
     /// ```text
     /// BlockHeader, data...
     /// ^                   ^
-    /// block.*             end.*
+    /// block.*             block.end.*
     /// ```
     BlockHeader :: struct {
         pos: *mut u8;
@@ -61,8 +60,10 @@ ArenaAllocator :: struct {
     alloc :: (self: *mut ArenaAllocator, size: usize, alignment: usize) -> {
         self.try_alloc_in_cur_block(size, alignment) orelse {
             // TODO: try resize old block
-            cur_block_size := if self.*.cur_block == null then 0 else
-                self.*.cur_block.as(*BlockHeader).*.end.as(usize) - self.*.cur_block.as(usize); // TODO: remove this cur_block cast
+            cur_block_size := if self.*.cur_block == null then 0 else {
+                cur_block := self.*.cur_block orelse std.panic("unreachable");
+                std.ptr.difference(cur_block.*.end, cur_block)
+            };
             min_block_size := #sizeof(BlockHeader) + alignment + size;
             new_block_size := block_grow_strategy(min_block_size, cur_block_size);
             new_block_buf := self.*.backing_allocator.alloc_at_least(new_block_size, #alignof(BlockHeader)) orelse
