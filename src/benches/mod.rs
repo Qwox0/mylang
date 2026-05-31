@@ -57,17 +57,17 @@ pub defer_test :: -> {
     t2 := out == 11;
     return t1 && t2;
 };";
-        let ctx =
-            CompilationContext::for_tests(BuildArgs::comp_bench_args(), Ptr::from_ref(code), false);
+        let ctx = CompilationContext::for_tests(
+            BuildArgs::comp_bench_args(None),
+            Ptr::from_ref(code),
+            false,
+        );
         compile_ctx(ctx.0, CompileMode::Check);
     })
 }
 
-bench_compilation! {
-    compile_libc_example:
-        no_prelude "../../examples/libc/basic/main.mylang",
-        crate::compiler::CompileMode::Build
-}
+bench_compilation! { parse_std: "./lib/std/mod.mylang", CompileMode::Parse }
+bench_compilation! { check_std: "./lib/std/mod.mylang", CompileMode::Check }
 
 /// ```rust
 /// bench_compilation!(bench1: no_prelude "file.mylang", CompileMode::Build)
@@ -79,21 +79,12 @@ macro_rules! bench_compilation {
     ($test_name:ident : $($rem:tt)*) => {
         #[bench]
         fn $test_name(b: &mut Bencher) {
-            bench_compilation! { @code@ b; $($rem)* }
+            bench_compilation! { @body@ b; $($rem)* }
         }
     };
-    (@code@ $b:expr; no_prelude $code_file_path:expr, $($rem:tt)*) => {
-        let code = include_str!($code_file_path);
-        bench_compilation! { @body@ $b;code; $($rem)* }
-    };
-    (@code@ $b:expr; $code_file_path:expr, $($rem:tt)*) => {
-        let code = concat!(include_str!("../../lib/prelude.mylang"), "\n", include_str!($code_file_path));
-        bench_compilation! { @body@ $b; code; $($rem)* }
-    };
-    (@body@ $b:expr; $code:expr; codegen_only) => {
+    (@body@ $b:expr; $code_file_path:expr, codegen_only) => {
         use crate::diagnostics::DiagnosticReporter;
-        let code = $crate::ptr::Ptr::from_ref($code);
-        let ctx = CompilationContext::for_tests($crate::cli::BuildArgs::comp_bench_args(), code, true);
+        let ctx = CompilationContext::basic($crate::cli::BuildArgs::comp_bench_args(Some($code_file_path))).unwrap();
         let mut stmts = $crate::parser::parse_files(ctx.0);
         assert!(!ctx.do_abort_compilation());
 
@@ -106,11 +97,11 @@ macro_rules! bench_compilation {
             codegen.compile_all(&stmts).unwrap();
         });
     };
-    (@body@ $b:expr; $code:expr; $mode:expr) => {
+    (@body@ $b:expr; $code_file_path:expr, $mode:expr) => {
         use crate::diagnostics::DiagnosticReporter;
-        let code = $crate::ptr::Ptr::from_ref($code);
+        let args = $crate::cli::BuildArgs::comp_bench_args(Some($code_file_path));
         $b.iter(|| {
-            let ctx = CompilationContext::for_tests($crate::cli::BuildArgs::comp_bench_args(), code, true);
+            let ctx = CompilationContext::basic(args.clone()).unwrap();
             black_box($crate::compiler::compile_ctx(ctx.0, $mode));
             debug_assert!(!ctx.do_abort_compilation());
         });

@@ -7,7 +7,8 @@ use test::*;
 
 #[inline]
 fn bench_parse(code: &str) {
-    let ctx = CompilationContext::for_tests(BuildArgs::comp_bench_args(), Ptr::from_ref(code), false);
+    let ctx =
+        CompilationContext::for_tests(BuildArgs::comp_bench_args(None), Ptr::from_ref(code), false);
     parser::parse_files(ctx.0);
     assert!(!ctx.do_abort_compilation());
     assert!(ctx.diagnostic_reporter.diagnostics.is_empty());

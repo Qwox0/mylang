@@ -103,8 +103,9 @@ pub enum OutKind {
 impl BuildArgs {
     /// for benchmarks
     #[track_caller]
-    pub fn comp_bench_args() -> Self {
+    pub fn comp_bench_args(file: Option<&str>) -> Self {
         Self::test_args(TestArgsOptions {
+            path: file.map(Into::into),
             print_source: false,
             debug_ast: false,
             debug_types: false,
@@ -112,6 +113,7 @@ impl BuildArgs {
             llvm_optimization_level: 0,
             print_llvm_module: false,
             is_lib: false,
+            diagnostic_level: DiagnosticSeverity::Error,
         })
     }
 
@@ -119,7 +121,10 @@ impl BuildArgs {
     #[track_caller]
     pub fn test_args(opt: TestArgsOptions) -> Self {
         BuildArgs {
-            path: PathBuf::from(format!("{{test @ {}}}", Location::caller())),
+            path: match opt.path {
+                Some(p) => p,
+                None => PathBuf::from(format!("{{test @ {}}}", Location::caller())),
+            },
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,
             out: OutKind::None,
@@ -133,13 +138,15 @@ impl BuildArgs {
             debug_llvm_ir_unoptimized: false,
             debug_llvm_ir_optimized: opt.print_llvm_module,
             debug_linker_args: false,
+            diagnostic_level: opt.diagnostic_level,
             ..BuildArgs::default()
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TestArgsOptions {
+    pub path: Option<PathBuf>,
     pub print_source: bool,
     pub debug_ast: bool,
     pub debug_types: bool,
@@ -147,18 +154,5 @@ pub struct TestArgsOptions {
     pub llvm_optimization_level: u8,
     pub print_llvm_module: bool,
     pub is_lib: bool,
-}
-
-impl Default for TestArgsOptions {
-    fn default() -> Self {
-        Self {
-            print_source: Default::default(),
-            debug_ast: Default::default(),
-            debug_types: Default::default(),
-            debug_typed_ast: Default::default(),
-            llvm_optimization_level: Default::default(),
-            print_llvm_module: Default::default(),
-            is_lib: true,
-        }
-    }
+    pub diagnostic_level: DiagnosticSeverity,
 }

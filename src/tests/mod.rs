@@ -57,6 +57,7 @@ mod while_loop;
 mod zst;
 
 const DEFAULT_TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
+    path: None,
     print_source: true,
     debug_ast: false,
     debug_types: false,
@@ -64,6 +65,7 @@ const DEFAULT_TEST_OPTIONS: TestArgsOptions = TestArgsOptions {
     llvm_optimization_level: 0,
     print_llvm_module: true,
     is_lib: true,
+    diagnostic_level: DiagnosticSeverity::Info,
 };
 
 fn test(code: impl ToString) -> NewTest {
@@ -144,8 +146,9 @@ impl NewTest {
     #[track_caller]
     fn prepare(self) -> TestResult<()> {
         let code = Ptr::from_ref(self.code.as_str());
+        let print_source = self.options.print_source;
         let args = BuildArgs::test_args(self.options);
-        if self.options.print_source {
+        if print_source {
             println!("##### TEST SOURCE {} #####", args.path.display());
             println!("{code}");
             println!("##### END TEST SOURCE #####");

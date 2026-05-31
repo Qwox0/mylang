@@ -556,7 +556,7 @@ ast_variants! {
 
     ImportDirective {
         path: Ptr<StrVal>,
-        files_idx: FilesIndex,
+        files_idx: Option<FilesIndex>,
     },
     ExternDirective {
         /* TODO: library */
@@ -762,11 +762,14 @@ impl Ptr<Ast> {
 
     /// TODO: check if this is cheaper than [`Ptr::has_type_kind`]
     pub fn is_type(self) -> bool {
-        if self.ty.u() == primitives().type_ty {
+        let p = primitives();
+        if self.ty.u() == p.type_ty {
             debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
             true
         } else if self.ty.u().p_eq(self) {
             debug_assert_eq!(self.kind, AstKind::Fn);
+            true
+        } else if self == p.err_ty.upcast() {
             true
         } else {
             false

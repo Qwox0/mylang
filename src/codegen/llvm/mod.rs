@@ -194,8 +194,9 @@ impl<'ctx> Codegen<'ctx> {
         mut expr: Ptr<Ast>,
         write_target: &mut Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
+        let p = primitives();
         debug_assert!(
-            expr.ty.u().is_finalized() || expr.ty == primitives().rec_ret_ty,
+            expr.ty.u().is_finalized() || expr.ty == p.rec_ret_ty,
             "{} is finalized",
             expr.ty.u()
         );
@@ -204,10 +205,8 @@ impl<'ctx> Codegen<'ctx> {
         // be `*u8` not `*never`
         let out_ty = expr.ty.u();
         expr = expr.rep();
-        debug_assert!(out_ty.is_finalized() || out_ty == primitives().rec_ret_ty);
+        debug_assert!(out_ty.is_finalized() || out_ty == p.rec_ret_ty);
         // `rec_ret_ty` is fine because the call codegen below always uses the finished return type
-
-        let p = primitives();
 
         macro_rules! write_target_or {
             ($alt:expr) => {
@@ -624,6 +623,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::OrElse { lhs, rhs, .. } => {
                 let mut lhs_ty = lhs.ty.u().clone_for_finalize(&ctx().alloc).unwrap();
+                lhs.ty = Some(lhs_ty);
                 let lhs_ty = lhs_ty.downcast_ref::<ast::OptionTy>();
                 finalize_ty(lhs_ty.inner_ty.downcast_type_ref(), out_ty, false); // TODO: is coercion possible here?
                 finalize_ty(rhs.ty.as_mut().u(), out_ty, true);

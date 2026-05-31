@@ -485,7 +485,7 @@ impl Sema {
                 let lhs_ty = *analyze!(*lhs, None);
                 let t = if lhs_ty == p.module {
                     let m = lhs.downcast::<ast::ImportDirective>();
-                    let Some(s) = self.cctx.files()[m.files_idx]
+                    let Some(s) = self.cctx.files()[m.files_idx.u()]
                         .scope
                         .as_ref()
                         .u()

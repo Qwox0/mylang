@@ -37,7 +37,6 @@ mod ptr;
 mod scope;
 mod scoped_stack;
 mod scratch_allocator;
-mod scratch_pool;
 mod sema;
 mod source_file;
 mod type_;

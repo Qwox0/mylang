@@ -32,10 +32,11 @@ bench() {
     sudo $(which poop) "$old_exe $*" "./target/release/mylang $*"
 }
 
+bench check ./lib/std/mod.mylang --lib --diagnostic-level=error
 #bench check ./lib/std/bindgen/c.mylang
-bench check ./lib/std/bindgen/libclang.mylang --lib
+#bench check ./lib/std/bindgen/libclang.mylang --lib
 #bench check ./lib/std/bindgen/libglfw3.mylang --lib
-bench check ../../opengl_sphaerophoria/main.mylang
+#bench check ../../opengl_sphaerophoria/main.mylang
 
 #for i in $(seq 1 9); do
 #    bench check "../../aoc2024/day0${i}.mylang"

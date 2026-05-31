@@ -535,10 +535,6 @@ impl Index<Span> for Code {
     }
 }
 
-pub fn is_ascii_space_or_tab(ascii: u8) -> bool {
-    matches!(ascii, b'\x09' | b'\x20')
-}
-
 pub fn is_whitespace(c: char) -> bool {
     matches!(
         c,

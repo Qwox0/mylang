@@ -12,11 +12,10 @@ use crate::{
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
-    scratch_pool::ScratchPool,
     source_file::SourceFile,
     util::{OptionExt, UnwrapDebug, concat_arr, then, unreachable_debug},
 };
-use core::str;
+use core::{fmt, str};
 pub use error::*;
 use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use num::BigInt;
@@ -209,7 +208,7 @@ impl Parser {
                     expr!(Dot { lhs: Some(lhs), has_lhs: true, rhs }, span)
                 }
             },
-            FollowingOperator::Call => self.call(lhs, ScratchPool::new(), None)?.upcast(),
+            FollowingOperator::Call => self.call(lhs, vec![], None)?.upcast(),
             FollowingOperator::Index => {
                 let idx = self.expr()?;
                 let close = self.tok(TokenKind::CloseBracket)?;
@@ -217,8 +216,10 @@ impl Parser {
                 expr!(Index { mut_access: mut_t.is_some(), lhs, idx }, mut_t.unwrap_or(close).span)
             },
             FollowingOperator::PositionalInitializer => {
-                let (args, close_p_span) = self.parse_call(ScratchPool::new())?;
+                let mut args = vec![];
+                let close_p_span = self.parse_call(&mut args)?;
                 let span = span.join(close_p_span);
+                let args = self.alloc_slice(&args)?;
                 expr!(PositionalInitializer { lhs: Some(lhs), args, parsed_with_lhs: true }, span)
             },
             FollowingOperator::NamedInitializer => {
@@ -290,7 +291,7 @@ impl Parser {
                     },
                     _ => {
                         let func = self.expr_(PIPE_TARGET_PRECEDENCE)?;
-                        let mut args = ScratchPool::new();
+                        let mut args = vec![];
                         if let Some(dot) = func.try_downcast::<ast::Dot>()
                             && dot.lhs.is_none()
                         {
@@ -304,7 +305,7 @@ impl Parser {
                             dot.as_mut().has_lhs = true;
                         } else {
                             // Note: This works for both `x |> Type.func()` and `x |> y.func()`!
-                            args.push(lhs)?;
+                            args.push(lhs);
                         }
                         self.tok(TokenKind::OpenParenthesis)?;
                         self.call(func, args, Some(0))?.upcast()
@@ -562,8 +563,14 @@ impl Parser {
                         let Some(first_decl) = expr.try_to_decl()? else {
                             return Err(unexpected_expr(expr, "a parameter"));
                         };
-                        let params = ScratchPool::new_with_first_val(first_decl)?;
-                        let params = self.params(params, true)?;
+                        let mut params = vec![first_decl];
+                        self.parse_with_sep(
+                            &[TokenKind::Comma],
+                            &mut params,
+                            |self_| self_.var_decl(true),
+                            MIN_PRECEDENCE,
+                            "parameter",
+                        )?;
                         let expected_tok = if params.last().is_some_and(|d| d.is_lhs_only()) {
                             &EXPECTED_AFTER_IDENT_PARAM[..]
                         } else {
@@ -571,7 +578,7 @@ impl Parser {
                         };
                         self.tok_with_expected(TokenKind::CloseParenthesis, expected_tok)?;
                         self.tok(TokenKind::Arrow)?;
-                        params
+                        self.alloc_slice(&params)?
                     },
                     _ if first_expr.is_some_and(|e| e.kind == AstKind::Ident) => {
                         return Err(unexpected_token(t, &EXPECTED_AFTER_IDENT_PARAM));
@@ -641,8 +648,10 @@ impl Parser {
                 expr!(Range { start: None, end, is_inclusive: true }, span)
             },
             TokenKind::DotOpenParenthesis => {
-                let (args, close_p_span) = self.advanced().parse_call(ScratchPool::new())?;
+                let mut args = vec![];
+                let close_p_span = self.advanced().parse_call(&mut args)?;
                 let span = span.join(close_p_span);
+                let args = self.alloc_slice(&args)?;
                 expr!(PositionalInitializer { lhs: None, args, parsed_with_lhs: false }, span)
             },
             TokenKind::DotOpenBrace => {
@@ -681,8 +690,13 @@ impl Parser {
                         &path.text,
                         Some(&self.lex.cursor.file.path),
                         path.span,
-                    )?;
-                    expr!(ImportDirective { path, files_idx: idx }, span)
+                    );
+                    let mut i = expr!(ImportDirective { path, files_idx: idx.ok() }, span);
+                    if idx.is_err() {
+                        i.ty = Some(p.err_ty);
+                        i.set_replacement(p.err_ty.upcast());
+                    }
+                    i
                 } else if directive_name == "extern" {
                     expr!(ExternDirective { decl: None }, span.join(directive_ident.span))
                 } else if directive_name == "intrinsic" {
@@ -783,14 +797,14 @@ impl Parser {
     fn parse_initializer_fields(
         &mut self,
     ) -> ParseResult<(Ptr<[(Ptr<ast::Ident>, OPtr<Ast>)]>, Span)> {
-        let mut fields = ScratchPool::new();
+        let mut fields = vec![];
         let close_b_span = loop {
             if let Some(t) = self.lex.next_if_kind(TokenKind::CloseBrace) {
                 break t.span;
             }
             let ident = self.ident()?;
             let init = then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
-            fields.push((ident, init))?;
+            fields.push((ident, init));
 
             match self.lex.next_or_eof()? {
                 Token { kind: TokenKind::Comma, .. } => {},
@@ -807,7 +821,7 @@ impl Parser {
                 },
             }
         };
-        Ok((self.clone_slice_from_scratch_pool(fields)?, close_b_span))
+        Ok((self.alloc_slice(&fields)?, close_b_span))
     }
 
     /// `.[1, 2, ..., 10]`
@@ -832,8 +846,7 @@ impl Parser {
         Ok(match t.kind {
             // `.[expr]`
             TokenKind::CloseBracket => {
-                let elements = self.scratch_pool_with_first_val(first_expr)?;
-                let elements = self.clone_slice_from_scratch_pool(elements)?;
+                let elements = self.alloc_slice(&[first_expr])?;
                 new_arr_init!(ArrayInitializer { elements })
             },
             // `.[expr; count]`
@@ -843,8 +856,16 @@ impl Parser {
             },
             // `.[expr,]` or `.[expr, expr, ...]`
             TokenKind::Comma => {
-                let elems = self.advanced().scratch_pool_with_first_val(first_expr)?;
-                let elements = self.expr_list(TokenKind::Comma, elems)?.0;
+                self.lex.advance();
+                let mut elems = vec![first_expr];
+                self.parse_with_sep(
+                    &[TokenKind::Comma],
+                    &mut elems,
+                    |self_| self_.expr(),
+                    MIN_PRECEDENCE,
+                    "element",
+                )?;
+                let elements = self.alloc_slice(&elems)?;
                 new_arr_init!(ArrayInitializer { elements })
             },
             _ => {
@@ -919,13 +940,18 @@ impl Parser {
     /// `... ( ... )`
     /// `     ^` starts here
     /// TODO: `... ( <expr>, ..., param=<expr>, ... )`
-    fn parse_call(&mut self, args: ScratchPool<Ptr<Ast>>) -> ParseResult<(Ptr<[Ptr<Ast>]>, Span)> {
+    fn parse_call(&mut self, args: &mut Vec<Ptr<Ast>>) -> ParseResult<Span> {
         let res: ParseResult<_> = try {
-            //let args = self.parse_call_args(args)?;
-            let args = self.expr_list(TokenKind::Comma, args)?.0;
+            self.parse_with_sep(
+                &[TokenKind::Comma],
+                args,
+                |self_| self_.expr(),
+                MIN_PRECEDENCE,
+                "argument expression",
+            )?;
             let closing_paren_span =
                 self.tok_with_expected(TokenKind::CloseParenthesis, &EXPECTED_AFTER_PARAM)?.span;
-            (args, closing_paren_span)
+            closing_paren_span
         };
         if res.is_err() {
             skip_tokens_until!(
@@ -942,10 +968,12 @@ impl Parser {
     fn call(
         &mut self,
         func: Ptr<Ast>,
-        args: ScratchPool<Ptr<Ast>>,
+        start_args: Vec<Ptr<Ast>>,
         pipe_idx: Option<usize>,
     ) -> ParseResult<Ptr<ast::Call>> {
-        let (args, closing_paren_span) = self.parse_call(args)?;
+        let mut args = start_args;
+        let closing_paren_span = self.parse_call(&mut args)?;
+        let args = self.alloc_slice(&args)?;
         Ok(ast_new!(Call { func, args, pipe_idx }, closing_paren_span))
     }
 
@@ -983,52 +1011,30 @@ impl Parser {
         }))
     }
 
-    /// Also returns a `has_trailing_sep` [`bool`].
-    fn expr_list(
+    /// Returns a `has_trailing_sep` [`bool`].
+    fn parse_with_sep<T>(
         &mut self,
-        sep: TokenKind,
-        mut list_pool: ScratchPool<Ptr<Ast>>,
-    ) -> ParseResult<(Ptr<[Ptr<Ast>]>, bool)> {
+        sep: &[TokenKind],
+        items: &mut Vec<T>,
+        mut parse_item: impl FnMut(&mut Self) -> ParseResult<T>,
+        opt_prec: u8,
+        item_name: impl fmt::Display,
+    ) -> ParseResult<bool> {
         let mut has_trailing_sep = false;
         loop {
-            let Some(expr) = opt!(self, expr(), MIN_PRECEDENCE)? else { break };
-            list_pool.push(expr)?;
-            has_trailing_sep = self.lex.advance_if_kind(sep);
+            let Some(t) = opt(self, &mut parse_item, opt_prec)? else { break };
+            items.push(t);
+            has_trailing_sep = self.lex.advance_if(|t| sep.contains(&t.kind));
             if !has_trailing_sep {
                 break;
             }
         }
         if let Some(t) = self.lex.peek()
-            && t.kind == sep
+            && sep.contains(&t.kind)
         {
-            return Err(unexpected_token_expect1(t, "expression"));
+            return Err(unexpected_token_expect1(t, item_name));
         }
-        Ok((self.clone_slice_from_scratch_pool(list_pool)?, has_trailing_sep))
-    }
-
-    /// Parses [`Parser::var_decl`] multiple times, seperated by `sep`. Also allows a trailing
-    /// `sep`.
-    fn params(
-        &mut self,
-        mut list: ScratchPool<Ptr<ast::Decl>>,
-        allow_ident_only: bool,
-    ) -> ParseResult<DeclList> {
-        let sep = TokenKind::Comma;
-        loop {
-            let Some(decl) = opt!(self, var_decl(allow_ident_only), MIN_PRECEDENCE)? else {
-                break;
-            };
-            list.push(decl)?;
-            if !self.lex.advance_if_kind(sep) {
-                break;
-            }
-        }
-        if let Some(t) = self.lex.peek()
-            && t.kind == sep
-        {
-            return Err(unexpected_token_expect1(t, "parameter"));
-        }
-        self.clone_slice_from_scratch_pool(list)
+        Ok(has_trailing_sep)
     }
 
     /// also returns the field_count
@@ -1200,22 +1206,6 @@ impl Parser {
     #[inline]
     fn alloc_slice<T: Copy>(&self, slice: &[T]) -> ParseResult<Ptr<[T]>> {
         Ok(self.cctx.alloc.alloc_slice(slice)?)
-    }
-
-    fn scratch_pool_with_first_val<'bump, T>(
-        &self,
-        first: T,
-    ) -> ParseResult<ScratchPool<'bump, T>> {
-        Ok(ScratchPool::new_with_first_val(first)?)
-    }
-
-    /// Clones all values from a [`ScratchPool`] to `self.alloc`.
-    #[inline]
-    fn clone_slice_from_scratch_pool<T: Clone>(
-        &self,
-        scratch_pool: ScratchPool<T>,
-    ) -> ParseResult<Ptr<[T]>> {
-        Ok(scratch_pool.clone_to_slice_into_arena(&self.cctx.alloc)?)
     }
 
     #[inline]
