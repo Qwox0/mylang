@@ -9,3 +9,12 @@ as_ptr_range_u8 :: (slice: []u8) ->
 
 as_ptr_range_mut_u8 :: (slice: []mut u8) ->
     PtrMutU8Range.(slice.ptr, std.ptr.add_bytes_mut(slice.ptr, slice.len));
+
+get_u8 :: (slice: []u8, idx: usize) -> ?u8 {
+    if idx < slice.len then Some(slice[idx]) else null
+}
+
+contains_u8 :: (slice: []u8, item: u8) -> bool {
+    for x in slice if x == item return true;
+    false
+}

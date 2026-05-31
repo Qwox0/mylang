@@ -260,7 +260,7 @@ impl<'ctx> Codegen<'ctx> {
                     if !*has_trailing_semicolon {
                         out
                     } else {
-                        debug_assert!(out_ty.matches_void());
+                        debug_assert!(out_ty.matches_void() || out_ty == p.any);
                         Symbol::Void
                     }
                 };
@@ -696,7 +696,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             AstEnum::Decl { .. } => {
                 self.compile_decl(expr.downcast::<ast::Decl>(), false)?;
-                debug_assert!(out_ty.matches_void());
+                debug_assert!(out_ty.matches_void() || out_ty == p.any);
                 Ok(Symbol::Void)
             },
             AstEnum::If { condition, then_body, else_body, .. } => {
@@ -798,7 +798,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
 
-                debug_assert!(out_ty.matches_void());
+                debug_assert!(out_ty.matches_void() || out_ty == p.any);
                 Ok(Symbol::Void)
             },
             AstEnum::While { condition, body, .. } => {
@@ -835,7 +835,7 @@ impl<'ctx> Codegen<'ctx> {
                 };
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
-                debug_assert!(out_ty.matches_void());
+                debug_assert!(out_ty.matches_void() || out_ty == p.any);
                 Ok(Symbol::Void)
             },
             AstEnum::Loop { body, .. } => {
@@ -867,14 +867,14 @@ impl<'ctx> Codegen<'ctx> {
                 if out_ty == p.never {
                     self.build_unreachable()
                 } else {
-                    debug_assert!(out_ty.matches_void());
+                    debug_assert!(out_ty.matches_void() || out_ty == p.any);
                     Ok(Symbol::Void)
                 }
             },
             // AstEnum::Catch { .. } => todo!(),
             AstEnum::Defer { stmt, .. } => {
                 self.defer_stack.push(*stmt);
-                debug_assert!(out_ty.matches_void());
+                debug_assert!(out_ty.matches_void() || out_ty == p.any);
                 Ok(Symbol::Void)
             },
             AstEnum::Return { val, parent_fn, .. } => {
@@ -1869,7 +1869,7 @@ impl<'ctx> Codegen<'ctx> {
                     .try_downcast::<ast::OptionTy>()
                     .is_some_and(|opt| opt.inner_ty.rep().kind == AstKind::PtrTy)
             {
-                reg(self.builder.build_int_to_ptr(int, self.ptr_type(), "")?)
+                reg(self.build_int_to_ptr(int)?)
             } else {
                 panic_debug!("cannot cast IntTy to {target_ty}");
             };
@@ -2166,6 +2166,14 @@ impl<'ctx> Codegen<'ctx> {
         })
     }
 
+    fn build_ptr_to_int(&self, ptr: PointerValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        Ok(self.builder.build_ptr_to_int(ptr, self.isize_type, "")?)
+    }
+
+    fn build_int_to_ptr(&self, int: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        Ok(self.builder.build_int_to_ptr(int, self.ptr_type(), "")?)
+    }
+
     fn build_store(
         &self,
         ptr: PointerValue<'ctx>,
@@ -2337,7 +2345,16 @@ impl<'ctx> Codegen<'ctx> {
             TypeMatch::PtrTy(_) => {
                 let lhs_val = self.sym_as_val(lhs_sym, arg_ty)?.ptr_val();
                 let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.ptr_val();
-                self.build_int_binop(lhs_val, rhs_val, false, op)?
+                match op {
+                    BinOpKind::Sub => {
+                        let lhs_int_val = self.build_ptr_to_int(lhs_val)?;
+                        let rhs_int_val = self.build_ptr_to_int(rhs_val)?;
+                        let int_res =
+                            self.build_int_binop(lhs_int_val, rhs_int_val, false, op)?.int_val();
+                        CodegenValue::new(self.build_int_to_ptr(int_res)?)
+                    },
+                    _ => self.build_int_binop(lhs_val, rhs_val, false, op)?,
+                }
             },
             TypeMatch::OptionTy(opt_ty) => {
                 if !matches!(op, BinOpKind::Eq | BinOpKind::Ne) {
@@ -3872,8 +3889,9 @@ pub fn finalize_ty(
     mut out_ty: Ptr<ast::Type>,
     can_have_type_coercion: bool,
 ) -> Ptr<ast::Type> {
+    let p = primitives();
     debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
-    if *ty != primitives().never {
+    if *ty != p.never && out_ty != p.any {
         if can_have_type_coercion {
             remove_type_coercion_for_finalize(*ty, &mut out_ty);
         } else {

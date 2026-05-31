@@ -3,6 +3,7 @@ libc :: #import "libc";
 Allocator :: std.mem.Allocator;
 Layout :: std.mem.Layout;
 max :: std.num.max_u32;
+EqClosure :: std.closures.EqClosure;
 
 Hash :: u32;
 Size :: u32;
@@ -122,14 +123,6 @@ RawHashTable :: struct {
 
         self.*.destroy(alloc, entry_layout.size);
         self.* = new_table;
-    }
-
-    // TODO: implement real capturing closures
-    EqClosure :: struct {
-        fn: *(entry_ptr: *T, capture: *any) -> bool,
-        capture: *any,
-
-        call :: (self: EqClosure, entry_ptr: *T) -> self.fn.*(entry_ptr, self.capture);
     }
 
     pub find :: (

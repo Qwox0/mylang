@@ -34,6 +34,11 @@ FixedArenaAllocator :: struct {
 
     reset :: (self: *mut FixedArenaAllocator) -> self.*.pos = self.*.start.as(*mut u8);
 
+    buf_size :: (self: *FixedArenaAllocator) -> std.ptr.difference(self.*.end, self.*.start);
+    /// remaining capacity
+    capacity :: (self: *FixedArenaAllocator) -> std.ptr.difference(self.*.end, self.*.pos);
+    allocated :: (self: *FixedArenaAllocator) -> std.ptr.difference(self.*.pos, self.*.start);
+
     Checkpoint :: struct { pos: *mut u8 };
     checkpoint :: (self: *mut FixedArenaAllocator) -> Checkpoint.(self.*.pos);
     reset_to :: (self: *mut FixedArenaAllocator, checkpoint: Checkpoint) -> {

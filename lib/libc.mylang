@@ -151,9 +151,10 @@ qsort : (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *a
 
 // ===== <string.h> =====
 
-memcpy : (dest: *mut any, src: *any, len: c_size_t) -> *mut any : #extern;
-memset : (ptr: *mut any,  byte: u8,  len: c_size_t) -> *mut any : #extern;
-memchr : (ptr: *any,      byte: u8,  len: c_size_t) -> ?*any : #extern;
+memcpy  : (dest: *mut any, src: *any, len: c_size_t) -> *mut any : #extern;
+memmove : (dest: *mut any, src: *any, len: c_size_t) -> *mut any : #extern;
+memset  : (ptr: *mut any,  byte: u8,  len: c_size_t) -> *mut any : #extern;
+memchr  : (ptr: *any,      byte: u8,  len: c_size_t) -> ?*any : #extern;
 
 strlen : (str: *c_char) -> c_size_t : #extern;
 

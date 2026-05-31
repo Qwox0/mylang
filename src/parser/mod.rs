@@ -18,7 +18,7 @@ use crate::{
 };
 use core::str;
 pub use error::*;
-use lexer::{Keyword, Lexer, Span, Token, TokenKind, is_ascii_space_or_tab};
+use lexer::{Keyword, Lexer, Span, Token, TokenKind};
 use num::BigInt;
 use parser_helper::ParserInterface;
 use std::ops::DerefMut;
@@ -527,11 +527,7 @@ impl Parser {
                 while let Some(t) = self.lex.next_if_kind(TokenKind::MultilineStrLitLine) {
                     let line_text = self.get_text_from_span(t.span);
                     debug_assert_eq!(&line_text[0..2], "\\\\");
-                    // `\\ a` == "a" == `\\a`
-                    let start_idx =
-                        2 + line_text.as_bytes().get(2).copied().is_some_and(is_ascii_space_or_tab)
-                            as usize;
-                    scratch.extend_from_slice(line_text[start_idx..].as_bytes());
+                    scratch.extend_from_slice(line_text[2..].as_bytes());
                 }
                 let bytes = self.alloc_slice(&scratch)?;
                 let text = unsafe { std::str::from_utf8_unchecked(&bytes) };

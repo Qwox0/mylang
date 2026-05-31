@@ -22,7 +22,7 @@ CStrHashSet :: struct {
 
     T :: *u8;
     T_LAYOUT :: std.mem.Layout.{ size = #sizeof(T), align = #alignof(T) };
-    t_eq :: (capture: T) -> RawHashTable.EqClosure.{
+    t_eq :: (capture: T) -> std.closures.EqClosure.{
         fn = &(v, capture) -> libc.strcmp(v.as(*T).*, capture.as(T)) == 0,
         capture
     };

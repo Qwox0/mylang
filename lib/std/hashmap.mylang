@@ -14,7 +14,7 @@ Str2PtrHashMap :: struct {
     V :: *any;
     Entry :: struct { key: K, val: V }
     ENTRY_LAYOUT :: std.mem.Layout.{ size = #sizeof(Entry), align = #alignof(Entry) };
-    key_eq :: (capture: *K) -> RawHashTable.EqClosure.{
+    key_eq :: (capture: *K) -> std.closures.EqClosure.{
         fn = &(v, capture) -> std.str.eq(v.as(*Entry).*.key, capture.as(*K).*),
         capture
     };

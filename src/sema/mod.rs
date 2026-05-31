@@ -1390,9 +1390,15 @@ impl Sema {
                 expr.set_replacement(main.const_val());
             },
             AstEnum::SizeOfDirective { type_, .. } => {
-                let size = self.analyze_type(*type_)?.size();
+                let ty = self.analyze_type(*type_)?;
+                match ty.matchable2() {
+                    TypeMatch::EnumDef(e) => {
+                        e.tag_ty.or_not_finished()?.bits.or_not_finished()?;
+                    },
+                    _ => {},
+                }
                 expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast::IntVal::new(size)?.upcast());
+                expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let size = analyze!(*val, None).size();

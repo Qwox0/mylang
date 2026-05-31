@@ -1,0 +1,308 @@
+std :: #import "std";
+libc :: #import "libc";
+
+ParseOptions :: struct {
+    /// `[1,]`, `{a: 2,}`
+    ///    ^          ^
+    allow_trailing_comma := true,
+}
+
+/// Dynamic Json value
+Json :: enum {
+    Object(std.hashmap.Str2PtrHashMap),
+    Array(std.RawArrayList), // ArrayList<Json>
+    String([]u8),
+    Number([]u8),
+    True,
+    False,
+    Null,
+};
+Json.LAYOUT :: std.mem.Layout.{ size=#sizeof(Json), align=#alignof(Json) };
+
+Json.destroy :: (self: *Json) -> std.panic("TODO: destroy");
+Json.debug :: (self: *Json) -> std.panic("TODO: debug");
+
+// TODO: better error reporting
+parse_dyn :: (json: []u8, options := ParseOptions.{}, alloc := std.ctx.alloc) -> ?*Json {
+    mut parser := Parser.{ text=json, options, alloc };
+    json := parser.&mut.value() orelse return null;
+    parser.&.alloc_json(json)
+}
+
+Parser :: struct {
+    text: []u8;
+    idx: usize = 0;
+
+    options: ParseOptions;
+    alloc: std.mem.Allocator;
+}
+
+Parser.value :: (parser: *mut Parser) -> ?Json {
+    parser.whitespace();
+    value_start := parser.peek() orelse return null;
+    val: Json = if value_start == '{' then .Object(parser.object() orelse return null)
+    else if value_start == '[' then .Array(parser.array() orelse return null)
+    else if value_start == '"' then .String(parser.string() orelse return null)
+    else if is_number_start(value_start) then .Number(parser.number() orelse return null)
+    else if value_start == 't' {
+        parser.eat_str("true") orelse return null;
+        .True
+    } else if value_start == 'f' {
+        parser.eat_str("false") orelse return null;
+        .False
+    } else if value_start == 'n' {
+        parser.eat_str("null") orelse return null;
+        .Null
+    } else {
+        libc.printf(
+            "Error: unexpected token '%c', expected `{`, `[`, `\"`, number, `true`, `false` or `null`\n".ptr,
+            value_start
+        );
+        return null;
+    };
+    parser.whitespace();
+    Some(val)
+}
+
+Parser.object :: (parser: *mut Parser) -> {
+    parser.eat('{') orelse return null;
+    mut map := std.hashmap.Str2PtrHashMap.new(alloc=parser.*.alloc);
+    loop {
+        parser.whitespace();
+        if parser.try_eat('}') {
+            if not parser.*.options.allow_trailing_comma and map.&.size() != 0 {
+                libc.printf("Error: unexpected '}', because trailing commas are not allowed\n".ptr);
+                return null;
+            }
+            break;
+        }
+
+        key := parser.string() orelse {
+            libc.printf("Error: expected key string or '}'\n".ptr);
+            return null;
+        };
+
+        parser.whitespace();
+        parser.eat(':') orelse return null;
+
+        val := parser.alloc_json(parser.value() orelse return null);
+        map.&mut.insert(key, val);
+
+        if parser.try_eat('}') break;
+        if parser.try_eat(',') continue;
+
+        libc.printf("Error: unexpected token '%c', expected `,` or `}`\n".ptr, parser.peek_or_eof());
+        return null;
+    }
+    Some(map)
+}
+
+Parser.array :: (parser: *mut Parser) -> {
+    parser.eat('[') orelse return null;
+
+    mut items := std.RawArrayList.EMPTY;
+    loop {
+        parser.whitespace();
+        if parser.try_eat(']') {
+            if not parser.*.options.allow_trailing_comma and items.len != 0 {
+                libc.printf("Error: unexpected ']', because trailing commas are not allowed\n".ptr);
+                return null;
+            }
+            break;
+        }
+
+        val := parser.value() orelse return null;
+        items.&mut.push(&val, parser.*.alloc, Json.LAYOUT);
+
+        if parser.try_eat(']') break;
+        if parser.try_eat(',') continue;
+
+        libc.printf("Error: unexpected token '%c', expected `,` or `]`\n".ptr, parser.peek_or_eof());
+        return null;
+    }
+    return items;
+}
+
+Parser.string :: (parser: *mut Parser) -> {
+    parser.eat('"') orelse return null;
+    start := parser.*.idx;
+    loop {
+        c := parser.peek() orelse {
+            libc.printf("Error: unterminated string\n".ptr);
+            return null
+        };
+        if c == '"' break;
+        parser.*.idx += 1;
+        if c != '\\' continue;
+
+        escape := parser.one_of(.['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'][..]) orelse return null;
+        if escape == 'u' then for _ in 0..4 {
+            c := parser.peek() orelse {
+                libc.printf("Error: expected hex digit, got EOF\n".ptr, c);
+                return null
+            };
+            if not(('0' <= c and c <= '9') or ('A' <= c and c <= 'F') or ('a' <= c and c <= 'f')) {
+                libc.printf("Error: expected hex digit, got '%c'\n".ptr, c);
+                return null
+            }
+            parser.*.idx += 1;
+        }
+    }
+    text := parser.*.text[start..parser.*.idx];
+    parser.eat('"') orelse return null;
+    text
+}
+
+is_number_start :: (c: u8) -> c == '-' or ('0' <= c && c <= '9');
+
+Parser.digit :: (parser: *mut Parser) -> {
+    c := parser.peek() orelse return null;
+    if not ('0' <= c && c <= '9') return null;
+    parser.*.idx += 1;
+    Some(c - '0')
+}
+
+Parser.digits :: (parser: *mut Parser) -> {
+    loop {
+        c := parser.peek() orelse break;
+        if not ('0' <= c && c <= '9') break;
+        parser.*.idx += 1;
+    }
+}
+
+Parser.number :: (parser: *mut Parser) -> {
+    number_start := parser.*.idx;
+
+    neg := parser.try_eat('-');
+
+    {
+        d := parser.digit() orelse {
+            libc.printf("Error: expected digit\n".ptr);
+            return null;
+        };
+        if d != 0 parser.digits();
+    }
+
+    if parser.peek_or_eof() == '.' {
+        parser.*.idx += 1;
+        d := parser.digit() orelse {
+            libc.printf("Error: expected digit\n".ptr);
+            return null;
+        };
+        parser.digits();
+    }
+
+    if std.slice.contains_u8(.['e', 'E'][..], parser.peek_or_eof()) {
+        parser.*.idx += 1;
+        if not std.slice.contains_u8(.['+', '-'][..], parser.peek_or_eof()) {
+            libc.printf("Error: expected `+` or `-`\n".ptr);
+            return null;
+        }
+        parser.*.idx += 1;
+        d := parser.digit() orelse {
+            libc.printf("Error: expected digit\n".ptr);
+            return null;
+        };
+        parser.digits();
+    }
+
+    n := parser.*.text[number_start..parser.*.idx];
+    n
+}
+
+
+Parser.whitespace :: (parser: *mut Parser) -> {
+    while {
+        byte := parser.*.text |> std.slice.get_u8(parser.*.idx) orelse return;
+        byte == 0x20 or byte == 0x09 or byte == 0x0A or byte == 0x0D
+    } do parser.*.idx += 1;
+}
+
+// Helpers:
+
+Parser.try_eat :: (parser: *mut Parser, tok: u8) -> {
+    if parser.peek() != Some(tok) return false;
+    parser.*.idx += 1;
+    true
+}
+
+Parser.eat :: (parser: *mut Parser, tok: u8) -> {
+    if parser.try_eat(tok) return Some({});
+
+    got := parser.peek() orelse {
+        libc.printf("Error: unexpected token 'EOF', expected '%c'\n".ptr, tok);
+        return null;
+    };
+    libc.printf("Error: unexpected token '%c', expected '%c'\n".ptr, got.as(u8), tok);
+    return null;
+}
+
+Parser.eat_str :: (parser: *mut Parser, tokens: []u8) -> {
+    for c in tokens {
+        parser.eat(c) orelse return null;
+    }
+    Some({})
+}
+
+Parser.peek :: (parser: *Parser) -> ?u8 {
+    byte := parser.*.text |> std.slice.get_u8(parser.*.idx) orelse return null;
+    Some(byte)
+}
+
+Parser.peek_or_eof :: (parser: *Parser) -> parser.peek() orelse 0;
+
+Parser.alloc_json :: (parser: *Parser, json: Json) -> {
+    buf := parser.*.alloc.alloc(#sizeof(Json), #alignof(Json)).as(?*mut Json) orelse std.panic("oom");
+    buf.* = json;
+    buf
+}
+
+Parser.one_of :: (parser: *mut Parser, options: []u8) -> {
+    std.assert(options.len > 0);
+    loop {
+        got := parser.peek() orelse break;
+        for o in options if got == o {
+            parser.*.idx += 1;
+            return Some(o);
+        }
+        break;
+    }
+
+    libc.printf("Error: expected ".ptr);
+    for idx in (0.as(usize)..) {
+        o := options |> std.slice.get_u8(idx) orelse break;
+        libc.printf("`%c`".ptr, o);
+        if options.len >= 3 and idx != options.len - 1  libc.printf(", ".ptr);
+        if options.len >= 2 and idx == options.len - 2  libc.printf("or ".ptr);
+    }
+    got := parser.peek() orelse {
+        libc.printf(", got 'EOF'\n".ptr);
+        return null;
+    };
+    libc.printf(", got `%c`\n".ptr, got);
+    return null;
+}
+
+test_json :: -> {
+    mut buf: [10 * 1024]u8;
+    mut buf_alloc := std.mem.FixedArenaAllocator.new(buf[..]mut);
+    alloc := buf_alloc.&mut.allocator();
+
+    json :=
+        \\{
+        \\  "a"  : -123.456,
+        \\  "b": false,
+        \\  "c": [1, null, "1", {"c":null}],
+        \\  "empty_obj": { },
+        \\  "empty_arr": [ ],
+        \\  "escapes": "\\u1234 \\\\" ",
+        \\  "loooong_array": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
+        \\}
+    ;
+    libc.printf("json: '%s'\n".ptr, json);
+    res := parse_dyn(json, .{}, alloc) orelse std.panic("parsing failed");
+    libc.printf("res = %p\n".ptr, res);
+    //res.debug();
+
+    libc.printf("buf_alloc used = %d\n".ptr, std.ptr.difference(buf_alloc.pos, buf_alloc.start));
+}

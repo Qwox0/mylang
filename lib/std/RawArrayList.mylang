@@ -1,0 +1,189 @@
+std :: #import "std";
+libc :: #import "libc";
+
+Layout :: std.mem.Layout;
+Allocator :: std.mem.Allocator;
+EqClosure :: std.closures.EqClosure;
+
+mut static empty_array_list_buf: u8;
+
+RawArrayList :: struct {
+    ptr: *mut u8, // *mut T
+    len: usize,
+    cap: usize,
+
+    T :: any;
+
+    EMPTY :: RawArrayList.{ ptr=&mut empty_array_list_buf, len=0, cap=0 };
+
+    new :: (capacity: usize, alloc: Allocator, item_layout: Layout) -> {
+        mut list := RawArrayList.EMPTY;
+        list.&mut.reserve(capacity, alloc, item_layout);
+        list
+    }
+
+    from_slice :: (slice: []T, alloc: Allocator, item_layout: Layout) -> {
+        mut list := RawArrayList.new(slice.len, alloc, item_layout);
+        list.&mut.append_assume_capacity(slice, item_layout.size);
+        list
+    }
+
+    reserve :: (self: *mut RawArrayList, additional: usize, alloc: Allocator, item_layout: Layout) -> {
+        if self.*.cap - self.*.len >= additional return; // no underflow check needed! // TODO: likely
+
+        mut new_cap := self.*.len + additional; // TODO: overflow check
+        new_cap = std.num.max(new_cap, self.*.cap * 2);
+        new_cap = std.num.max(new_cap, 8); // TODO: dynamic min capacity based on item_size.
+
+        // TODO: try resize
+        new_ptr := alloc.alloc(new_cap * item_layout.size, item_layout.align) orelse std.panic("oom");
+        libc.memcpy(new_ptr, self.*.ptr, self.*.len * item_layout.size);
+        if self.*.ptr != &mut empty_array_list_buf then alloc.free(self.*.ptr);
+
+        self.*.ptr = new_ptr;
+        self.*.cap = new_cap;
+    }
+
+    push :: (self: *mut RawArrayList, val: *T, alloc: Allocator, item_layout: Layout) -> *mut T {
+        self.reserve(1, alloc, item_layout);
+
+        slot := std.ptr.add_bytes_mut(self.*.ptr, self.*.len * item_layout.size);
+        libc.memcpy(slot, val, item_layout.size);
+
+        self.*.len += 1;
+        slot
+    }
+
+    append :: (self: *mut RawArrayList, data: []T, alloc: Allocator, item_layout: Layout) -> []mut T {
+        self.reserve(data.len, alloc, item_layout);
+        self.append_assume_capacity(data, item_layout.size)
+    }
+
+    append_assume_capacity :: (self: *mut RawArrayList, data: []T, item_size: usize) -> []mut T {
+        std.assert(self.*.cap - self.*.len >= data.len);
+
+        slots := std.ptr.add_bytes_mut(self.*.ptr, self.*.len * item_size);
+        libc.memcpy(slots, data.ptr, data.len * item_size);
+        self.*.len += data.len;
+        .{ ptr=slots, len=data.len }
+    }
+
+    insert :: (self: *mut RawArrayList, index: usize, val: *T, alloc: Allocator, item_layout: Layout) -> *mut T {
+        std.assert(index <= self.*.len);
+
+        self.reserve(1, alloc, item_layout);
+
+        slot := std.ptr.add_bytes_mut(self.*.ptr, index * item_layout.size);
+        libc.memmove(
+            std.ptr.add_bytes_mut(self.*.ptr, (index + 1) * item_layout.size),
+            slot,
+            item_layout.size,
+        );
+        libc.memcpy(slot, val, item_layout.size)
+    }
+
+    clear :: (self: *mut RawArrayList) -> self.*.len = 0;
+
+    /// The returned pointer should be dereferenced immediately
+    pop :: (self: *mut RawArrayList, item_size: usize) -> ?*T {
+        item := self.last_mut(item_size) orelse return null;
+        self.*.len -= 1;
+        item
+    }
+
+    remove :: (self: *mut RawArrayList, index: usize, item_size: usize) -> {
+        std.assert(index < self.*.len);
+
+        item := std.ptr.add_bytes_mut(self.*.ptr, index * item_size);
+        libc.memmove(
+            item,
+            std.ptr.add_bytes_mut(self.*.ptr, (index + 1) * item_size),
+            item_size,
+        );
+        self.*.len -= 1;
+    }
+
+    //swap_remove :: (self: *mut RawArrayList, index: usize) -> std.panic("swap_remove");
+
+    // -----------------------------------
+    // slice stuff:
+
+    data_slice :: (self: *RawArrayList) -> []u8.{ ptr=self.*.ptr, len=self.*.len };
+    data_slice_mut :: (self: *mut RawArrayList) -> []mut u8.{ ptr=self.*.ptr, len=self.*.len };
+
+    // TODO: generic over mutability
+    get :: (self: *RawArrayList, index: usize, item_size: usize) -> ?*T
+        if index < self.*.len then Some(&self.data_slice()[index * item_size]) else null;
+    get_mut :: (self: *mut RawArrayList, index: usize, item_size: usize) -> ?*mut T
+        if index < self.*.len then Some(&mut self.data_slice_mut()[index * item_size]) else null;
+    first :: (self: *RawArrayList) -> ?*T
+        if 0 < self.*.len then Some(self.*.ptr) else null;
+    first_mut :: (self: *mut RawArrayList) -> ?*mut T
+        if 0 < self.*.len then Some(self.*.ptr) else null;
+    last :: (self: *RawArrayList, item_size: usize) -> ?*T
+        if 0 < self.*.len then self.get(self.*.len - 1, item_size) else null;
+    last_mut :: (self: *mut RawArrayList, item_size: usize) -> ?*mut T
+        if 0 < self.*.len then self.get_mut(self.*.len - 1, item_size) else null;
+
+
+    //contains :: (self: *RawArrayList, val: *T, eq: EqClosure) -> std.todo("contains");
+    //binary_search  :: (self: *RawArrayList, val: *T, eq: OrdClosure) -> std.todo("binary_search");
+
+    debug :: (
+        self: *RawArrayList,
+        item_size: usize,
+        format_item: *(item: *any) -> []u8,
+        free_text: ?*(text: []u8) -> void = null,
+    ) -> {
+        std.print("[");
+        for idx in 0..self.*.len {
+            item := self.get(idx, item_size) orelse std.panic("unreachable");
+            text := format_item.*(item);
+            std.print(text);
+            if idx != self.*.len - 1 then std.print(", ");
+
+            free_text := free_text orelse continue;
+            free_text.*(text);
+        }
+        std.print("]");
+    }
+}
+
+test_array_list :: -> {
+    I64_LAYOUT :: Layout.{ size=#sizeof(i64), align=#alignof(i64) };
+
+    print_list :: (list: *RawArrayList) -> {
+        list.debug(I64_LAYOUT.size, & i -> std.fmt.format("%d", i.as(*i64).*), & t -> libc.free(t.ptr));
+        std.println("");
+    }
+
+    mut buf: [1024]u8;
+    mut buf_alloc := std.mem.FixedArenaAllocator.new(buf[..]mut);
+    alloc := buf_alloc.&mut.allocator();
+
+    mut list := RawArrayList.from_slice(i64.[1, 2, 3][..], alloc, I64_LAYOUT);
+    std.assert(list.len == 3);
+    std.assert(list.cap >= 3);
+    std.assert(buf_alloc.&.allocated() >= #sizeof(i64) * 3);
+
+    print_list(&list);
+
+    old_cap := list.cap;
+    old_allocated := buf_alloc.&.allocated();
+
+    pop_res := list.&mut.pop(I64_LAYOUT.size) orelse std.panic("unreachable");
+    std.assert(pop_res.as(*i64).* == 3);
+    std.assert(list.len == 2);
+    std.assert(list.cap == old_cap);
+    std.assert(buf_alloc.&.allocated() == old_allocated);
+
+    print_list(&list);
+
+    for _ in 0..old_cap do list.&mut.push(&99, alloc, I64_LAYOUT);
+
+    std.assert(list.len == 2 + old_cap);
+    std.assert(list.cap > old_cap);
+    std.assert(buf_alloc.&.allocated() > old_allocated);
+
+    print_list(&list);
+}
