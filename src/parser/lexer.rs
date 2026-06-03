@@ -156,6 +156,8 @@ pub enum TokenKind {
     ColonColon,
     /// `:=`
     ColonEq,
+    /// `:>`
+    ColonGt,
     /// `;`
     Semicolon,
     /// `?`
@@ -294,6 +296,7 @@ impl TokenKind {
             TokenKind::Colon => "`:`",
             TokenKind::ColonColon => "`::`",
             TokenKind::ColonEq => "`:=`",
+            TokenKind::ColonGt => "`:>`",
             TokenKind::Semicolon => "`;`",
             TokenKind::Question => "`?`",
             //TokenKind::QuestionQuestion => "`??`",
@@ -387,7 +390,7 @@ keywords! {
     If = "if",
     Then = "then",
     Else = "else",
-    Match = "match",
+    Switch = "switch",
     For = "for",
     While = "while",
     Loop = "loop",
@@ -784,6 +787,7 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
             default: TokenKind::Colon,
             ':' => TokenKind::ColonColon,
             '=' => TokenKind::ColonEq,
+            '>' => TokenKind::ColonGt,
         },
         ';' => TokenKind::Semicolon,
         '?' => maybe_followed_by! {

@@ -5,7 +5,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, SwitchCase, UnaryOpKind, UpcastToAst,
+        ast_new,
     },
     context::{CompilationContextInner, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -35,6 +36,18 @@ macro_rules! opt {
             _self.$method($($arg),*).map(Some)
         }
     }};
+}
+
+fn opt<T>(
+    parser: &mut Parser,
+    parse_item: impl FnOnce(&mut Parser) -> ParseResult<T>,
+    prec: u8,
+) -> ParseResult<Option<T>> {
+    if parser.lex.peek_or_eof().kind.is_invalid_start(prec) {
+        Ok(None)
+    } else {
+        parse_item(parser).map(Some)
+    }
 }
 
 macro_rules! expr {
@@ -271,8 +284,8 @@ impl Parser {
                     TokenKind::Keyword(Keyword::If | Keyword::Then) => {
                         self.advanced().if_after_cond(lhs, span, true)?.upcast()
                     },
-                    TokenKind::Keyword(Keyword::Match) => {
-                        todo!("|> match")
+                    TokenKind::Keyword(Keyword::Switch) => {
+                        self.advanced().switch_body(lhs, span, true)?.upcast()
                     },
                     TokenKind::Keyword(Keyword::For) => {
                         let iter_var = self.advanced().ident()?;
@@ -418,14 +431,9 @@ impl Parser {
                 let condition = self.advanced().expr()?;
                 self.if_after_cond(condition, span, false)?.upcast()
             },
-            TokenKind::Keyword(Keyword::Match) => {
-                todo!("match body");
-                /*
+            TokenKind::Keyword(Keyword::Switch) => {
                 let val = self.advanced().expr()?;
-                let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
-                    => self.expr()?);
-                expr!(Match { val, else_body, was_piped: false }, span)
-                */
+                self.switch_body(val, span, false)?.upcast()
             },
             TokenKind::Keyword(Keyword::For) => {
                 let iter_var = self.advanced().ident()?;
@@ -933,8 +941,40 @@ impl Parser {
             .advance_if(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Then | Keyword::Do)));
         let then_body = self.expr_(IF_PRECEDENCE)?;
         let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
-            => self.expr_(IF_PRECEDENCE)?);
+            => self.expr_(ELSE_PRECEDENCE)?);
         Ok(ast_new!(If { condition, then_body, else_body, was_piped }, start_span))
+    }
+
+    /// switch val { ... } else ...
+    ///            ^
+    #[allow(unused)]
+    fn switch_body(
+        &mut self,
+        val: Ptr<Ast>,
+        start_span: Span,
+        was_piped: bool,
+    ) -> ParseResult<Ptr<ast::Switch>> {
+        self.tok(TokenKind::OpenBrace)?;
+        let mut cases = Vec::new();
+        self.parse_with_sep(
+            &[TokenKind::Comma, TokenKind::Semicolon],
+            &mut cases,
+            |self_| {
+                let case = self_.expr()?;
+                self_.tok(TokenKind::ColonGt)?;
+                let body = self_.expr()?;
+                let scope = self_.alloc(Scope::new(Ptr::empty_slice(), ScopeKind::SwitchCase))?;
+                Ok(SwitchCase { case, body, scope })
+            },
+            MIN_PRECEDENCE,
+            "case",
+        );
+        let close_b = self.tok(TokenKind::CloseBrace)?;
+        let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
+            => self.expr_(ELSE_PRECEDENCE)?);
+
+        let cases = self.alloc_slice(&cases)?;
+        Ok(ast_new!(Switch { val, cases, else_body, was_piped }, start_span.join(close_b.span)))
     }
 
     /// `... ( ... )`
@@ -947,7 +987,7 @@ impl Parser {
                 args,
                 |self_| self_.expr(),
                 MIN_PRECEDENCE,
-                "argument expression",
+                "expression",
             )?;
             let closing_paren_span =
                 self.tok_with_expected(TokenKind::CloseParenthesis, &EXPECTED_AFTER_PARAM)?.span;
@@ -1404,6 +1444,7 @@ const DECL_TYPE_PRECEDENCE: u8 = 3;
 /// `  ^`
 const ASSIGN_PRECEDENCE: u8 = 2;
 const IF_PRECEDENCE: u8 = 1;
+const ELSE_PRECEDENCE: u8 = 1;
 const MIN_PRECEDENCE: u8 = 0;
 
 impl BinOpKind {

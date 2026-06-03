@@ -483,11 +483,11 @@ ast_variants! {
         then_body: Ptr<Ast>,
         else_body: OPtr<Ast>,
     },
-    /// `match <val> <body>` (`else <else>`)
-    Match {
+    /// `switch <val> <body>` (`else <else>`)
+    Switch {
         was_piped: bool,
         val: Ptr<Ast>,
-        // TODO
+        cases: Ptr<[SwitchCase]>,
         else_body: OPtr<Ast>,
     },
 
@@ -547,6 +547,28 @@ ast_variants! {
     RawPtrVal { val: u64 },
     StaticPtrVal { sym: Ptr<Decl> },
 
+    /// used for unfinished `{enum_variant}`s and finished enum values
+    EnumVal {
+        /// ```mylang
+        /// E :: enum { A(i32), B }
+        /// E.A;    // is_valid == false
+        /// E.A(1); // is_valid == true
+        /// E.B;    // is_valid == true
+        /// ```
+        is_valid: bool,
+        enum_ty: Ptr<EnumDef>,
+        variant_idx: usize,
+        data: OPtr<ConstVal>,
+    },
+    OptionalVal {
+        /// ```mylang
+        /// Some;    // is_some == true; val == None
+        /// Some(1); // is_some == true; val == Some(...)
+        /// null;    // is_some == false; val == None
+        /// ```
+        is_some: bool,
+        val: OPtr<ConstVal>
+    },
     /// used for constant `struct` values, `union` values, `enum` values and `array` values
     AggregateVal {
         /// Always contains all fields in the same order as defined.
@@ -576,8 +598,6 @@ ast_variants! {
     SizeOfValDirective { val: Ptr<Ast> },
     AlignOfDirective { type_: Ptr<Ast> },
     OffsetOfDirective { type_: Ptr<Ast>, field: Ptr<Ident> },
-
-    OptionalVal { val: OPtr<ConstVal> },
 
     ===== Types =====
 
@@ -927,6 +947,7 @@ impl Ptr<Ast> {
 }
 
 impl Ptr<ConstVal> {
+    #[track_caller]
     pub fn downcast<V: ConstValVariant>(self) -> Ptr<V> {
         debug_assert!(self.replacement.is_none());
         debug_assert_eq!(self.kind, V::KIND);
@@ -1081,7 +1102,9 @@ impl Ast {
             &AstEnum::If { then_body, else_body, .. } => {
                 else_body.unwrap_or(then_body).block_expects_trailing_sep()
             },
-            AstEnum::Match { .. } => todo!(),
+            AstEnum::Switch { else_body, .. } => {
+                else_body.as_deref().map(Ast::block_expects_trailing_sep).unwrap_or(false)
+            },
             AstEnum::For { body, .. }
             | AstEnum::While { body, .. }
             | AstEnum::Loop { body, .. } => body.block_expects_trailing_sep(),
@@ -1130,7 +1153,10 @@ impl Ast {
                 let r_span = else_body.unwrap_or(*then_body).full_span();
                 if *was_piped { condition.full_span() } else { span }.join(r_span)
             },
-            AstEnum::Match { .. } => todo!(),
+            &AstEnum::Switch { val, else_body, was_piped, .. } => {
+                if was_piped { val.full_span() } else { span }
+                    .maybe_join(else_body.as_deref().map(Ast::full_span))
+            },
             AstEnum::For { source: l, body, was_piped, .. }
             | AstEnum::While { condition: l, body, was_piped, .. } => {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
@@ -1498,6 +1524,16 @@ impl IntVal {
     }
 }
 
+impl EnumVal {
+    pub fn variant(&self) -> Ptr<Decl> {
+        self.enum_ty.variants.get(self.variant_idx).u()
+    }
+
+    pub fn tag_val(&self) -> &BigInt {
+        &self.variant().init.u().downcast::<IntVal>().as_ref().val
+    }
+}
+
 impl EnumDef {
     /// TODO: handle duplicate tags
     #[cfg(debug_assertions)]
@@ -1819,4 +1855,11 @@ impl DeclListExt for [Ptr<Decl>] {
 
 pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {
     a.kind != AstKind::Assign || a.parenthesis_count > 0
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SwitchCase {
+    pub case: Ptr<Ast>,
+    pub body: Ptr<Ast>,
+    pub scope: Ptr<Scope>,
 }

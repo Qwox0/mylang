@@ -65,6 +65,7 @@ pub struct Primitives {
 
     // Other:
     pub null_lit: Ptr<ast::Decl>,
+    pub some_variant_val: Ptr<ast::OptionalVal>,
     pub some_variant: Ptr<ast::Decl>,
     pub slice_ptr_field_ident: Ptr<ast::Ident>,
     pub slice_len_field: Ptr<ast::Decl>,
@@ -184,6 +185,9 @@ impl Primitives {
 
         let enum_variant = new_primitive_ty!("{enum variant}", simple_ty, finalized: false);
 
+        let null_val = ast_new!(OptionalVal { is_some: false, val: None });
+        let some_variant_val = ast_new!(OptionalVal { is_some: true, val: None });
+
         let mut untyped_slice_ptr_field = new_primitive_decl("ptr")?;
         untyped_slice_ptr_field.is_const = false;
         init_decl(untyped_slice_ptr_field, any_ptr_ty, None);
@@ -246,14 +250,14 @@ impl Primitives {
                 let null_lit_ty = ast_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
                 init_ty(null_lit_ty);
                 let decl = new_primitive_decl("null")?;
-                init_decl(decl, null_lit_ty, Some(ast_new!(OptionalVal { val: None }).upcast()));
+                init_decl(decl, null_lit_ty, Some(null_val.upcast()));
                 insert_symbol_no_duplicate(decls, decl);
                 decl
             },
+            some_variant_val,
             some_variant: {
-                let mut decl = new_primitive_decl("Some")?;
-                decl.is_const = false;
-                init_decl(decl, enum_variant, None);
+                let decl = new_primitive_decl("Some")?;
+                init_decl(decl, enum_variant, Some(some_variant_val.upcast()));
                 insert_symbol_no_duplicate(decls, decl);
                 decl
             },

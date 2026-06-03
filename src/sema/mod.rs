@@ -20,12 +20,15 @@ use crate::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
         ty_match,
     },
-    util::{self, BigIntExt, UnwrapDebug, VecExt, debug_only_assert, then, ui, unreachable_debug},
+    util::{
+        self, BigIntExt, IteratorExt, UnwrapDebug, VecExt, debug_only_assert, then, ui,
+        unreachable_debug, wrap_display,
+    },
 };
 pub(crate) use err::SemaResult;
 use err::SemaResult::*;
 use num::BigInt;
-use std::{fmt::Write, iter};
+use std::{fmt::Write, iter, ops::Not};
 
 mod err;
 pub mod primitives;
@@ -438,7 +441,8 @@ impl Sema {
                     for elem in elem_iter {
                         let ty = *self.analyze(elem, &Some(elem_ty), is_const)?;
                         let Some(common_ty) = common_type(elem_ty, ty) else {
-                            return error_mismatched_types(elem.full_span(), elem_ty, ty).into();
+                            return error_mismatched_types(elem.return_val_span(), elem_ty, ty)
+                                .into();
                         };
                         elem_ty = common_ty;
                     }
@@ -506,9 +510,9 @@ impl Sema {
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
-                    && let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((variant_idx, _)) = enum_ty.variants.find_field(rhs.sym)
                 {
-                    self.analyze_enum_tag(expr, enum_ty, variant, is_const)?
+                    self.analyze_enum_tag(expr, enum_ty, variant_idx, is_const)?
                 } else if lhs_ty == p.type_ty
                     && let TypeEnum::StructDef { consts, .. }
                     | TypeEnum::UnionDef { consts, .. }
@@ -637,9 +641,9 @@ impl Sema {
                 }
                 let enum_hint = ty_hint.try_downcast::<ast::EnumDef>();
                 let ty = if let Some(enum_ty) = enum_hint
-                    && let Some((_, variant)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((variant_idx, _)) = enum_ty.variants.find_field(rhs.sym)
                 {
-                    let ty = self.analyze_enum_tag(expr, enum_ty, variant, is_const)?;
+                    let ty = self.analyze_enum_tag(expr, enum_ty, variant_idx, is_const)?;
                     *lhs = Some(enum_ty.upcast());
                     ty
                 } else if let Some(t) = ty_hint
@@ -821,7 +825,10 @@ impl Sema {
                         let Some(cv) = val.try_downcast_const_val() else {
                             return error_non_const(val, "expected constant value").into();
                         };
-                        let optional_cv = ast_new!(OptionalVal { val: Some(cv) }, expr.full_span());
+                        let optional_cv = ast_new!(
+                            OptionalVal { is_some: true, val: Some(cv) },
+                            expr.full_span()
+                        );
                         expr.set_replacement(optional_cv.upcast());
                     }
                 } else if fn_ty == p.enum_variant {
@@ -832,11 +839,11 @@ impl Sema {
                     expr.ty = Some(enum_ty.upcast_to_type());
 
                     if is_const {
-                        let tag = dot.upcast().downcast::<ast::IntVal>().upcast();
+                        let cv = dot.upcast().downcast::<ast::EnumVal>();
                         debug_assert_eq!(args.len(), 1);
-                        let data = args.get(0).u();
-                        let cv = self.create_aggregate_const_val([tag, data])?;
+                        let data = args.get(0).u().downcast_const_val();
                         data.rep().as_mut().ty = Some(variant.var_ty.u());
+                        cv.as_mut().data = Some(data);
                         expr.set_replacement(cv.upcast());
                     }
                 } else {
@@ -1193,7 +1200,118 @@ impl Sema {
                     );
                 }
             },
-            AstEnum::Match { .. } => todo!(),
+            AstEnum::Switch { val, cases, else_body, .. } => {
+                let val_ty = analyze!(*val, None).finalize();
+
+                let narrowed_symbol = val.try_downcast::<ast::Ident>();
+
+                let mut out_ty = None;
+                for case in cases.iter_mut() {
+                    let case_ty = *self.analyze(case.case, &Some(val_ty), true)?;
+                    if !(ty_match(case_ty, val_ty) || ty_match(case_ty, p.enum_variant)) {
+                        return error_mismatched_types_custom(
+                            case.case.full_span(),
+                            "enum variant",
+                            case_ty,
+                        )
+                        .into();
+                    }
+                    let t = match val_ty.matchable2() {
+                        TypeMatch::EnumDef(_) => {
+                            let case_val = case.case.downcast::<ast::EnumVal>();
+                            if case_val.data.is_some() {
+                                cerror!(
+                                    case.case.full_span(),
+                                    "Enum cases with associated data are currently not implemented"
+                                );
+                                continue;
+                            }
+                            case_val.variant().var_ty.u()
+                        },
+                        TypeMatch::OptionTy(o) => {
+                            let v = case.case.downcast::<ast::OptionalVal>();
+                            if v.val.is_some() {
+                                cerror!(
+                                    case.case.full_span(),
+                                    "Cases with associated data are currently not implemented"
+                                );
+                                continue;
+                            }
+                            if v.is_some { o.inner_ty.downcast_type() } else { p.void_ty }
+                        },
+                        _ => {
+                            return cerror2!(val.full_span(), "Cannot switch on type `{}`", val_ty);
+                        },
+                    };
+                    if let Some(narrowed_symbol) = narrowed_symbol {
+                        if case.scope.decls.is_empty() {
+                            let decl_in_case =
+                                self.alloc(ast::Decl::from_ident(narrowed_symbol))?;
+                            decl_in_case.as_mut().var_ty = Some(t);
+                            case.scope.decls = self.cctx.alloc.alloc_one_val_slice(decl_in_case)?;
+                        } else {
+                            debug_assert_eq!(case.scope.decls.len(), 1);
+                            debug_assert_eq!(case.scope.decls[0].ident, narrowed_symbol);
+                        }
+                    }
+
+                    case.scope.verify_no_duplicates();
+                    let osh = self.open_scope(&mut case.scope);
+                    let res =
+                        self.analyze_and_accumulate_type(case.body, &mut out_ty, ty_hint, is_const);
+                    self.close_scope(osh);
+                    res?;
+                }
+                if let Some(else_body) = *else_body {
+                    self.analyze_and_accumulate_type(else_body, &mut out_ty, ty_hint, is_const)?;
+                } else if let TypeMatch::EnumDef(e) = val_ty.matchable2() {
+                    let mut variant_used = tmp_alloc().alloc_slice_with(e.variants.len(), false)?;
+                    for case in cases.iter() {
+                        let v = case.case.downcast::<ast::EnumVal>();
+                        variant_used[v.variant_idx] = true;
+                    }
+                    if variant_used.iter().any(Not::not) {
+                        let missing = e
+                            .variants
+                            .into_iter()
+                            .zip(variant_used.as_ref())
+                            .filter(|(_, used)| !*used)
+                            .map(|(v, _)| wrap_display!("`.{}`", v.ident.sym.text()))
+                            .join_fancy_list("and");
+
+                        let err = cerror!(
+                            expr.span.start().join(val.full_span()),
+                            "missing cases {missing} in exhaustive switch on enum `{val_ty}`",
+                        );
+                        chint!(expr.span.end(), "Consider adding an `else` case");
+                        return err.into();
+                    }
+                } else if let TypeMatch::OptionTy(_) = val_ty.matchable2() {
+                    let mut variant_used = [false; 2];
+                    for case in cases.iter() {
+                        let v = case.case.downcast::<ast::OptionalVal>();
+                        variant_used[v.is_some as usize] = true;
+                    }
+                    if variant_used.iter().any(Not::not) {
+                        let missing = ["`null`", "`Some`"]
+                            .into_iter()
+                            .zip(variant_used)
+                            .filter(|(_, used)| !*used)
+                            .map(|(v, _)| v)
+                            .join_fancy_list("and");
+
+                        let err = cerror!(
+                            expr.span.start().join(val.full_span()),
+                            "missing cases {missing} in exhaustive switch on enum `{val_ty}`",
+                        );
+                        chint!(expr.span.end(), "Consider adding an `else` case");
+                        return err.into();
+                    }
+                } else {
+                    unreachable_debug()
+                }
+                expr.ty = Some(out_ty.unwrap_or(p.never));
+            },
             AstEnum::For { source, iter_var, body, scope, .. } => {
                 scope.verify_no_duplicates();
 
@@ -1391,9 +1509,17 @@ impl Sema {
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let ty = self.analyze_type(*type_)?;
-                match ty.matchable2() {
-                    TypeMatch::EnumDef(e) => {
-                        e.tag_ty.or_not_finished()?.bits.or_not_finished()?;
+                match ty.matchable().as_ref() {
+                    TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
+                        for f in fields.iter() {
+                            f.var_ty.or_not_finished()?;
+                        }
+                    },
+                    TypeEnum::EnumDef { variants, tag_ty, .. } => {
+                        tag_ty.or_not_finished()?.bits.or_not_finished()?;
+                        for f in variants.iter() {
+                            f.var_ty.or_not_finished()?;
+                        }
                     },
                     _ => {},
                 }
@@ -1449,6 +1575,8 @@ impl Sema {
             */
             AstEnum::StrVal { .. } => expr.ty = Some(p.str_slice_ty),
             AstEnum::RawPtrVal { .. } | AstEnum::StaticPtrVal { .. } => todo!(),
+            AstEnum::EnumVal { .. } => todo!(),
+            AstEnum::OptionalVal { .. } => unreachable_debug(),
             AstEnum::AggregateVal { .. } => todo!(),
             AstEnum::Fn { params_scope, ret_ty_expr, ret_ty, body, has_known_ret_ty, .. } => {
                 params_scope.verify_no_duplicates();
@@ -1540,7 +1668,6 @@ impl Sema {
                     fn_ptr.upcast_to_type()
                 });
             },
-            AstEnum::OptionalVal { .. } => unreachable_debug(),
 
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => {
                 expr.ty = Some(p.type_ty)
@@ -1721,6 +1848,24 @@ impl Sema {
         Ok(ty)
     }
 
+    fn analyze_and_accumulate_type(
+        &mut self,
+        expr: Ptr<Ast>,
+        ty_acc: &mut OPtr<ast::Type>,
+        ty_hint: &Option<Ptr<ast::Type>>,
+        is_const: bool,
+    ) -> SemaResult<Ptr<ast::Type>> {
+        let ty = *self.analyze(expr, &ty_acc.or(*ty_hint), is_const)?;
+        match ty_acc {
+            Some(ty_acc) if let Some(common_ty) = common_type(*ty_acc, ty) => *ty_acc = common_ty,
+            Some(ty_acc) => {
+                return Err(error_mismatched_types(expr.return_val_span(), *ty_acc, ty));
+            },
+            None => *ty_acc = Some(ty),
+        }
+        Ok(ty)
+    }
+
     fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
         let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
@@ -1737,28 +1882,25 @@ impl Sema {
         &mut self,
         expr: Ptr<Ast>,
         enum_ty: Ptr<ast::EnumDef>,
-        variant: Ptr<ast::Decl>,
+        variant_idx: usize,
         is_const: bool,
     ) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
+        let variant = enum_ty.variants.get(variant_idx).u();
         debug_assert!(enum_ty.variants.contains(&variant));
         debug_assert!(!variant.is_const);
+        let is_simple_variant = variant.var_ty.or_not_finished()? == p.void_ty;
         if is_const {
-            let val = &get_enum_variant_tag(variant)?.val;
-            // TODO: is this IntVal duplication really needed?
-            let tag = ast_new!(IntVal { val: val.clone() }, Span::ZERO).upcast();
-            tag.as_mut().ty =
-                Some(if val.is_negative() { p.sint_lit } else { p.int_lit }.upcast_to_type());
-            // TODO: use correct tag_ty:
-            //tag.as_mut().ty = Some(enum_ty.tag_ty.or_not_finished()?.upcast_to_type());
+            let tag = ast_new!(
+                EnumVal { is_valid: is_simple_variant, enum_ty, variant_idx, data: None },
+                Span::ZERO
+            )
+            .upcast();
+            tag.as_mut().ty = Some(p.enum_variant);
             expr.set_replacement(tag);
         }
         // enum variant
-        Ok(if variant.var_ty.or_not_finished()? == p.void_ty {
-            enum_ty.upcast_to_type()
-        } else {
-            p.enum_variant
-        })
+        Ok(if is_simple_variant { enum_ty.upcast_to_type() } else { p.enum_variant })
     }
 
     pub fn try_custom_bitwith_int_type(&self, name: &str) -> Option<ast::IntTy> {
@@ -1875,23 +2017,25 @@ impl Sema {
         expr.as_mut().ty = Some(target_ty);
 
         if is_const {
-            match (op_ty.matchable2(), target_ty.matchable2()) {
+            let cv = match (op_ty.matchable2(), target_ty.matchable2()) {
                 // TODO: remove this int -> ptr cast?
                 (TypeMatch::IntTy(_), TypeMatch::PtrTy(_)) => {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span);
-                    expr.set_replacement(ptr_val.upcast());
+                    ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span).upcast()
                 },
                 (TypeMatch::IntTy(_), TypeMatch::OptionTy(o))
                     if o.inner_ty.downcast_type().kind == AstKind::PtrTy =>
                 {
                     let i_val = operand.downcast::<ast::IntVal>();
-                    let ptr_val = ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span);
-                    expr.set_replacement(ptr_val.upcast());
+                    ast_new!(RawPtrVal { val: ui(&i_val.val) }, i_val.span).upcast()
+                },
+                (TypeMatch::EnumDef(_), TypeMatch::IntTy(_)) => {
+                    get_enum_variant_tag(operand.downcast::<ast::EnumVal>().variant())?.upcast()
                 },
                 // TODO: correctly handle other cases
-                _ => expr.set_replacement(operand.rep()),
-            }
+                _ => operand.rep(),
+            };
+            expr.set_replacement(cv);
         }
 
         Ok(())

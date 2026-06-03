@@ -35,30 +35,30 @@ test :: -> { get_num(); get_num(); get_num() }";
 fn good_invalid_token_error() {
     // here we have to guess that `num` might be a decl (is this a good idea?)
     test_body("{ num i32 = 1; }")
-        .error("expected `:`, `:=`, `::`, or `;`", substr!("num";.after()));
+        .error("expected `:`, `:=`, `::` or `;`", substr!("num";.after()));
 
     // with the `mut` we now know that this is meant to be a decl
     test_body("{ mut num i32 = 1; }")
-        .error("expected `:`, `:=`, or `::`, got an identifier", substr!("i32"));
+        .error("expected `:`, `:=` or `::`, got an identifier", substr!("i32"));
 
-    let err_msg = "expected `:`, `:=`, `,`, or `)`, got `#`";
+    let err_msg = "expected `:`, `:=`, `,` or `)`, got `#`";
 
     // an ident alone is a valid function parameter -> different error
     test("f :: (a # i32 = 1) -> {}").error(err_msg, substr!("#"));
 
     // `mut` marker shouln't change error message
     test("f :: (mut a # i32 = 1) -> {}")
-        .error("expected `:`, `:=`, or `::`, got `#`", substr!("#")); // curently a worse error
+        .error("expected `:`, `:=` or `::`, got `#`", substr!("#")); // curently a worse error
 
     test("f :: (a: i32 = 1, b # i32 = 2) -> {}").error(err_msg, substr!("#"));
 
     // `mut` marker shouln't change error message
     test("f :: (a: i32 = 1, mut b # i32 = 2) -> {}").error(err_msg, substr!("#"));
 
-    test_body("mut a = 1").error("expected `:`, `:=`, or `::`, got `=`", substr!("="));
+    test_body("mut a = 1").error("expected `:`, `:=` or `::`, got `=`", substr!("="));
 
     test_body("mut 1").error(
-        "expected an identifier, `mut`, `rec`, `pub`, or `static`, got an integer literal",
+        "expected an identifier, `mut`, `rec`, `pub` or `static`, got an integer literal",
         substr!("1"),
     );
 }

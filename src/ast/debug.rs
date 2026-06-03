@@ -250,7 +250,7 @@ impl DebugAst for Ast {
                     lines.write_tree(else_body);
                 }
             },
-            AstEnum::Match { .. } => todo!(),
+            AstEnum::Switch { .. } => todo!(),
             AstEnum::For { source, iter_var, body, was_piped, .. } => {
                 if *was_piped {
                     lines.write_tree(source);
@@ -344,6 +344,15 @@ impl DebugAst for Ast {
             AstEnum::StaticPtrVal { sym, .. } => {
                 lines.write(&format!("{{ptr to {}}}", sym.ident.sym))
             },
+            AstEnum::EnumVal { .. } => todo!(),
+            AstEnum::OptionalVal { is_some, val, .. } => match val {
+                Some(val) => {
+                    lines.write("Some(");
+                    lines.write_tree(val);
+                    lines.write(")");
+                },
+                _ => lines.write(if *is_some { "Some" } else { "null" }),
+            },
             AstEnum::AggregateVal { elements, .. } => match ty.matchable().as_ref() {
                 TypeEnum::ArrayTy { elem_ty, .. } => {
                     lines.write_tree(elem_ty);
@@ -385,14 +394,6 @@ impl DebugAst for Ast {
                     lines.write_tree(body);
                     lines.write("}");
                 }
-            },
-            AstEnum::OptionalVal { val, .. } => match val {
-                Some(val) => {
-                    lines.write("Some(");
-                    lines.write_tree(val);
-                    lines.write(")");
-                },
-                None => lines.write("None"),
             },
 
             AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),

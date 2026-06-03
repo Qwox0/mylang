@@ -43,6 +43,7 @@ pub enum ScopeKind {
     File,
     Block,
     ForLoop,
+    SwitchCase,
     Fn,
     Struct,
     Union,
@@ -209,6 +210,7 @@ impl Scope {
             ScopeKind::Root | ScopeKind::File => return None,
             ScopeKind::Block => get_scope_container!(self, ast::Block, scope).upcast(),
             ScopeKind::ForLoop => get_scope_container!(self, ast::For, scope).upcast(),
+            ScopeKind::SwitchCase => todo!(),
             ScopeKind::Fn => get_scope_container!(self, ast::Fn, params_scope).upcast(),
             ScopeKind::Struct => get_scope_container!(self, ast::StructDef, scope).upcast(),
             ScopeKind::Union => get_scope_container!(self, ast::UnionDef, scope).upcast(),
@@ -349,6 +351,7 @@ fn error_duplicate_in_unordered_scope(
             }
         },
         ScopeKind::ForLoop => todo!(),
+        ScopeKind::SwitchCase => todo!(),
         ScopeKind::Fn => {
             cerror!(decl.ident.span, "duplicate parameter '{}'", decl.ident.sym);
         },

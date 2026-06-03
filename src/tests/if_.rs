@@ -53,3 +53,26 @@ if true print();
 }"#;
     test_body(code).with_prelude().ok(());
 }
+
+#[test]
+fn merge_bb_codegen() {
+    // void
+    test_body("if true {} else {}").compile_no_err();
+
+    // zst struct
+    test_body("S :: struct {}; if true S.() else S.()").compile_no_err();
+
+    // never
+    test_body("if true { return 1; } else { return 2; }").compile_no_err();
+
+    // WriteTarget::Phi
+    let res = test_body("if true then 1 else return 2").compile_no_err();
+    assert!(res.llvm_ir().contains("phi i64 [ 1, %then ]"));
+    drop(res);
+
+    // WriteTarget::Ptr
+    let res = test_body("a := if true then 1 else return 2; a").compile_no_err();
+    assert!(res.llvm_ir().contains("store i64 1, ptr %a, align 8"));
+    assert!(!res.llvm_ir().contains("phi"));
+    drop(res);
+}

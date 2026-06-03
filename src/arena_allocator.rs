@@ -44,6 +44,11 @@ impl Arena {
     }
 
     #[inline]
+    pub fn alloc_slice_with<T: Copy>(&self, len: usize, value: T) -> Result<Ptr<[T]>, AllocErr> {
+        Ok(Ptr::from_ref(self.0.try_alloc_slice_fill_copy(len, value)?))
+    }
+
+    #[inline]
     pub fn alloc_one_val_slice<T>(&self, val: T) -> Result<Ptr<[T]>, AllocErr> {
         let ptr = self.alloc(val)?;
         Ok(unsafe { core::slice::from_raw_parts_mut(ptr.as_mut() as *mut T, 1) }.into())

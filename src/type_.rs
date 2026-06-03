@@ -266,6 +266,7 @@ fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: 
         let expected_inner = expected_opt.inner_ty.downcast_type();
         return if allow_opt_coercion
             && expected.count_optional_nesting() > got.count_optional_nesting()
+            && got != p.enum_variant
             && got.is_non_zero()
         {
             ty_match_(got, expected_inner, false)

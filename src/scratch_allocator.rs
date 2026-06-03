@@ -46,6 +46,10 @@ impl ScratchAllocator {
         Ok(TmpPtr::new(self.arena.alloc(val)?, self))
     }
 
+    pub fn alloc_slice_with<T: Copy>(&self, len: usize, val: T) -> Result<TmpPtr<[T]>, AllocErr> {
+        Ok(TmpPtr::new(self.arena.alloc_slice_with(len, val)?, self))
+    }
+
     pub fn alloc_capped_vec<T>(&self, capacity: usize) -> Result<CappedVec<T>, AllocErr> {
         debug_scratch!("alloc CappedVec<{}> (capacity: {capacity})", type_name::<T>());
         Ok(CappedVec::with_buf(self.arena.alloc_uninit_slice(capacity)?, Some(Ptr::from_ref(self))))

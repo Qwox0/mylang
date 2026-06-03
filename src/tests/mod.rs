@@ -47,6 +47,7 @@ mod slice;
 mod statics;
 mod string;
 mod struct_;
+mod switch;
 mod todo;
 mod type_coercion;
 mod type_joining;

@@ -1,6 +1,7 @@
 use crate::{ast::DeclList, context::primitives, parser::lexer::Code, ptr::Ptr};
 use core::fmt;
 use std::{
+    fmt::Write,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
     iter::FusedIterator,
@@ -250,23 +251,49 @@ macro_rules! then {
 pub(crate) use then;
 
 pub trait IteratorExt: Iterator + Sized {
-    fn join(self, sep: impl AsRef<str>) -> String
-    where Self::Item: std::fmt::Display;
-}
-
-impl<I: FusedIterator> IteratorExt for I {
+    #[allow(unused)]
     fn join(mut self, sep: impl AsRef<str>) -> String
-    where Self::Item: std::fmt::Display {
+    where
+        Self: FusedIterator,
+        Self::Item: std::fmt::Display,
+    {
+        let mut buf = String::new();
+        self.join_into(sep, &mut buf);
+        buf
+    }
+
+    fn join_into(mut self, sep: impl AsRef<str>, buf: &mut String)
+    where
+        Self: FusedIterator,
+        Self::Item: std::fmt::Display,
+    {
+        use std::fmt::Write;
         let sep = sep.as_ref();
-        let acc = self.next().map(|i| i.to_string()).unwrap_or_else(String::new);
-        self.fold(acc, |mut acc, item| {
-            acc.push_str(sep);
-            use std::fmt::Write;
-            write!(acc, "{item}").u();
-            acc
-        })
+        let Some(first) = self.next() else { return };
+        write!(buf, "{first}").u();
+        for item in self {
+            write!(buf, "{sep}{item}").u();
+        }
+    }
+
+    /// Returns "{item1}, {item2}, ..., {itemN-1} {last_sep} {itemN}"
+    ///                                          ^ no comma here (because I don't like it)
+    fn join_fancy_list(mut self, last_sep: &str) -> String
+    where
+        Self: DoubleEndedIterator + FusedIterator,
+        Self::Item: std::fmt::Display,
+    {
+        let mut buf =
+            String::with_capacity((self.size_hint().0.saturating_sub(1)) * 2 + last_sep.len());
+
+        let Some(last) = self.next_back() else { return buf };
+        self.join_into(", ", &mut buf);
+        write!(&mut buf, " {last_sep} {last}").u();
+        buf
     }
 }
+
+impl<I: Iterator> IteratorExt for I {}
 
 pub trait StrExt {
     fn capitalize(&mut self) -> &mut Self;
@@ -424,3 +451,18 @@ where
 pub fn to_f64(val: &BigInt) -> f64 {
     num::ToPrimitive::to_f64(val).expect("can't fail")
 }
+
+macro_rules! wrap_display {
+    ($fmt:expr, $val:expr) => {{
+        struct F<T>(T);
+
+        impl<T: ::std::fmt::Display> ::std::fmt::Display for F<T> {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                write!(f, $fmt, self.0)
+            }
+        }
+
+        F($val)
+    }};
+}
+pub(crate) use wrap_display;

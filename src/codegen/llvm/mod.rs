@@ -18,9 +18,8 @@ use crate::{
         remove_type_coercion_for_finalize, struct_size, ty_match, union_size,
     },
     util::{
-        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, debug_only_assert_eq,
-        forget_lifetime, is_simple_enum, panic_debug, round_up_to_alignment, to_f64,
-        unreachable_debug,
+        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime,
+        is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64, unreachable_debug,
     },
 };
 use error::{
@@ -37,6 +36,7 @@ use inkwell::{
     context::Context,
     llvm_sys::{
         LLVMType, LLVMValue,
+        core::LLVMGetUndef,
         prelude::{LLVMTypeRef, LLVMValueRef},
     },
     module::{Linkage, Module},
@@ -635,14 +635,9 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_if(
                     lhs_is_some,
                     |self_| {
-                        let inner_ty = lhs_ty.inner_ty.downcast_type();
-                        let sym = if inner_ty.is_non_zero() {
-                            lhs_sym
-                        } else {
-                            let opt_llvm_ty = self_.llvm_type(lhs_ty.upcast_to_type()).struct_ty();
-                            self_.build_struct_access(opt_llvm_ty, lhs_sym, 1, "data")?
-                        };
+                        let sym = self_.build_optional_data_access(lhs_sym, *lhs_ty)?;
                         if let Some(write_target) = write_target {
+                            let inner_ty = lhs_ty.inner_ty.downcast_type();
                             let () =
                                 self_.write_symbol_to_write_target(sym, inner_ty, write_target)?;
                         }
@@ -723,7 +718,104 @@ impl<'ctx> Codegen<'ctx> {
                     out_ty,
                 )
             },
-            AstEnum::Match { .. } => todo!(),
+            AstEnum::Switch { val, cases, else_body, .. } => {
+                let val_ty = val.ty.u();
+                let val_llvm_ty = self.llvm_type(val_ty);
+
+                let val_sym = self.compile_expr(*val)?;
+
+                let (tag_val, data_sym) = match val_ty.matchable2() {
+                    TypeMatch::EnumDef(e) => {
+                        let enum_llvm = val_llvm_ty.enum_ty();
+                        let tag_sym = self.build_enum_tag_access(enum_llvm, val_sym)?;
+                        let data_sym = self.build_enum_data_access(enum_llvm, val_sym)?;
+                        let tag_val =
+                            self.sym_as_val(tag_sym, e.tag_ty.u().upcast_to_type())?.int_val();
+                        (tag_val, data_sym)
+                    },
+                    TypeMatch::OptionTy(o) => {
+                        let tag_val = self.build_optional_is_some(val_sym, o)?;
+                        let data_sym = self.build_optional_data_access(val_sym, o)?;
+                        (tag_val.int, data_sym)
+                    },
+                    _ => unreachable_debug(),
+                };
+                let tag_llvm_ty = tag_val.get_type();
+
+                let func = self.cur_fn.u();
+                let start_bb = self.builder.get_insert_block().u();
+                let merge_bb = self.context.append_basic_block(func, "switch.merge");
+
+                let out_llvm_ty = self.llvm_type(out_ty);
+
+                let merge = self.create_bb_merge(*write_target, merge_bb, out_ty, out_llvm_ty)?;
+
+                let mut llvm_cases = tmp_alloc().alloc_capped_vec(cases.len())?;
+                for case in cases.iter() {
+                    let case_bb = self.context.append_basic_block(func, "switch.case");
+
+                    let case_int = match case.case.rep().matchable2() {
+                        AstMatch::EnumVal(enum_val) => {
+                            debug_assert_eq!(val_ty.kind, AstKind::EnumDef);
+                            debug_assert!(enum_val.data.is_none());
+                            const_int(tag_llvm_ty, enum_val.tag_val())
+                        },
+                        AstMatch::OptionalVal(opt_val) => {
+                            debug_assert_eq!(val_ty.kind, AstKind::OptionTy);
+                            debug_assert!(opt_val.val.is_none());
+                            tag_llvm_ty.const_int(opt_val.is_some as u64, false)
+                        },
+                        _ => unreachable_debug(),
+                    };
+
+                    llvm_cases.push((case_int, case_bb));
+                    self.builder.position_at_end(case_bb);
+
+                    self.open_scope();
+                    let res = {
+                        debug_assert!(case.scope.decls.len() <= 1);
+                        if let Some(narrowed_sym) = case.scope.decls.get(0) {
+                            self.symbols.push((narrowed_sym, data_sym));
+                        }
+
+                        finalize_ty(case.body.as_mut().ty.as_mut().u(), out_ty, true);
+                        let res = self
+                            .compile_expr_with_write_target(case.body, merge.write_target.ptr());
+                        self.merge_branch(res, out_ty, merge)
+                    };
+                    self.close_scope(true)?;
+                    res?;
+                }
+
+                let else_bb = if let Some(else_body) = *else_body {
+                    let else_bb = self.context.append_basic_block(func, "switch.else");
+                    self.builder.position_at_end(else_bb);
+                    finalize_ty(else_body.as_mut().ty.as_mut().u(), out_ty, true);
+                    let res =
+                        self.compile_expr_with_write_target(else_body, merge.write_target.ptr());
+                    self.merge_branch(res, out_ty, merge)?;
+                    Some(else_bb)
+                } else {
+                    if let WriteTarget::Phi(phi) = merge.write_target {
+                        phi.add_incoming(&[(
+                            &CodegenValue::undef(out_llvm_ty).basic_val(),
+                            start_bb,
+                        )]);
+                    }
+                    None
+                };
+
+                let default_bb = else_bb.unwrap_or(merge_bb);
+                let llvm_cases = llvm_cases.into_full_buf();
+                self.builder.position_at_end(start_bb);
+                self.builder.build_switch(tag_val, default_bb, &llvm_cases)?;
+
+                self.builder.position_at_end(merge_bb);
+                if let Some(last_bb) = else_bb.or(llvm_cases.last().map(|a| a.1)) {
+                    merge_bb.move_after(last_bb).unwrap();
+                }
+                self.bb_merge_finish(merge)
+            },
             AstEnum::For { source, iter_var, body, .. } => {
                 let outer_continue_break_depth = self.continue_break_depth;
                 self.continue_break_depth = 0;
@@ -917,8 +1009,9 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::StrVal { .. }
             | AstEnum::RawPtrVal { .. }
             | AstEnum::StaticPtrVal { .. }
-            | AstEnum::AggregateVal { .. }
-            | AstEnum::OptionalVal { .. } => {
+            | AstEnum::EnumVal { .. }
+            | AstEnum::OptionalVal { .. }
+            | AstEnum::AggregateVal { .. } => {
                 reg(self.compile_const_val(expr.downcast_const_val(), out_ty)?)
             },
 
@@ -984,12 +1077,6 @@ impl<'ctx> Codegen<'ctx> {
                 TypeEnum::FloatTy { bits, .. } => {
                     // TODO: handle precision loss with compiletime checks
                     ret(self.float_type(bits.u()).const_float(to_f64(val)))
-                },
-                TypeEnum::EnumDef { .. } => {
-                    let int_val = cv.downcast::<ast::IntVal>();
-                    let enum_def = ty.downcast::<ast::EnumDef>();
-                    debug_only_assert_eq!(enum_def.find_variant_ty_for_tag(val), p.void_ty);
-                    ret(self.const_enum_val(enum_def, int_val.upcast_to_const_val(), None)?)
                 },
                 _ => panic_debug!("invalid ty for IntVal: {ty}"),
             },
@@ -1062,6 +1149,23 @@ impl<'ctx> Codegen<'ctx> {
                 };
                 ret(global.as_pointer_value())
             },
+            ConstValEnum::EnumVal { data, .. } => {
+                let cv = cv.downcast::<ast::EnumVal>();
+                let enum_def = ty.downcast::<ast::EnumDef>();
+                //debug_only_assert_eq!(enum_def.find_variant_ty_for_tag(val), p.void_ty);
+                ret(self.const_enum_val(enum_def, cv.tag_val(), *data)?)
+            },
+            ConstValEnum::OptionalVal { val, .. } => {
+                let inner_ty = ty.downcast::<ast::OptionTy>().inner_ty.downcast_type();
+                match *val {
+                    Some(val) if inner_ty.is_non_zero() => self.compile_const_val(val, inner_ty),
+                    Some(val) => ret(new_raw_const_struct(self.llvm_type(ty).struct_ty(), &mut [
+                        self.context.i8_type().const_int(1, true).as_value_ref(),
+                        self.compile_const_val(val, inner_ty)?.as_value_ref(),
+                    ])),
+                    None => ret(self.llvm_type(ty).basic_ty().const_zero()),
+                }
+            },
             ConstValEnum::AggregateVal { elements, .. } => {
                 match ty.matchable().as_ref() {
                     TypeEnum::SimpleTy { .. } => todo!(),
@@ -1089,25 +1193,10 @@ impl<'ctx> Codegen<'ctx> {
                         ret(new_raw_const_struct(struct_ty, &mut values))
                     },
                     TypeEnum::UnionDef { .. } => todo!(),
-                    TypeEnum::EnumDef { .. } => ret(self.const_enum_val(
-                        ty.downcast::<ast::EnumDef>(),
-                        elements.get(0).u(),
-                        Some(elements.get(1).u()),
-                    )?),
+                    TypeEnum::EnumDef { .. } => unreachable_debug(),
                     TypeEnum::RangeTy { .. } => todo!(),
                     TypeEnum::OptionTy { .. } => todo!(),
                     _ => panic_debug!("invalid ty for AggregateVal: {ty}"),
-                }
-            },
-            ConstValEnum::OptionalVal { val, .. } => {
-                let inner_ty = ty.downcast::<ast::OptionTy>().inner_ty.downcast_type();
-                match *val {
-                    Some(val) if inner_ty.is_non_zero() => self.compile_const_val(val, inner_ty),
-                    Some(val) => ret(new_raw_const_struct(self.llvm_type(ty).struct_ty(), &mut [
-                        self.context.i8_type().const_int(1, true).as_value_ref(),
-                        self.compile_const_val(val, inner_ty)?.as_value_ref(),
-                    ])),
-                    None => ret(self.llvm_type(ty).basic_ty().const_zero()),
                 }
             },
             ConstValEnum::Fn { .. } => ret(self.get_or_compile_fn(cv.downcast::<ast::Fn>())?),
@@ -1384,11 +1473,9 @@ impl<'ctx> Codegen<'ctx> {
     fn const_enum_val(
         &mut self,
         enum_def: Ptr<ast::EnumDef>,
-        tag: Ptr<ast::ConstVal>,
+        variant_tag: &BigInt,
         data: OPtr<ast::ConstVal>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let variant_tag = &tag.downcast::<ast::IntVal>().val;
-
         let enum_ty = self.type_table[&enum_def.upcast_to_type()].basic_ty();
         let tag_val = self.enum_tag_val(enum_def, variant_tag);
 
@@ -1993,60 +2080,91 @@ impl<'ctx> Codegen<'ctx> {
         write_target: Option<PointerValue<'ctx>>,
         out_ty: Ptr<ast::Type>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
-        let p = primitives();
-
-        if write_target.is_some() {
-            debug_assert!(else_.is_some());
-        }
+        let out_llvm_ty = self.llvm_type(out_ty);
 
         let func = self.cur_fn.u();
-        let mut then_bb = self.context.append_basic_block(func, "then");
-        let mut else_bb = self.context.append_basic_block(func, "else");
+        let then_bb = self.context.append_basic_block(func, "then");
+        let else_bb = then!(else_.is_some() =>
+            self.context.append_basic_block(func, "else"));
         let merge_bb = self.context.append_basic_block(func, "ifmerge");
 
-        self.builder.build_conditional_branch(condition.int, then_bb, else_bb)?;
+        self.builder.build_conditional_branch(
+            condition.int,
+            then_bb,
+            else_bb.unwrap_or(merge_bb),
+        )?;
+
+        debug_assert!(!write_target.is_some() || else_.is_some());
+        let merge = self.create_bb_merge(write_target, merge_bb, out_ty, out_llvm_ty)?;
 
         self.builder.position_at_end(then_bb);
-        let then_sym = compile_then(self).handle_unreachable()?;
-        let then_val = self.sym_as_val_checked(then_sym, out_ty)?;
-        if then_sym.is_some() {
-            self.builder.build_unconditional_branch(merge_bb)?;
-        }
-        then_bb = self.builder.get_insert_block().expect("has block");
+        let then_res = compile_then(self);
+        self.merge_branch(then_res, out_ty, merge)?;
 
-        self.builder.position_at_end(else_bb);
-        let else_sym = if let Some(else_) = else_ {
-            compile_else(self, else_).handle_unreachable()?
-        } else {
-            Some(Symbol::Void)
-        };
-        let else_val = self.sym_as_val_checked(else_sym, out_ty)?;
-        if else_sym.is_some() {
-            self.builder.build_unconditional_branch(merge_bb)?;
+        if let Some(else_) = else_ {
+            self.builder.position_at_end(else_bb.u());
+            let else_res = compile_else(self, else_);
+            self.merge_branch(else_res, out_ty, merge)?;
         }
-        else_bb = self.builder.get_insert_block().expect("has block");
 
         self.builder.position_at_end(merge_bb);
+        self.bb_merge_finish(merge)
+    }
 
-        if out_ty == p.void_ty {
-            return Ok(Symbol::Void);
-        } else if out_ty == p.never {
-            return self.build_unreachable();
+    fn create_bb_merge(
+        &self,
+        write_target: Option<PointerValue<'ctx>>,
+        merge_bb: BasicBlock<'ctx>,
+        out_ty: Ptr<ast::Type>,
+        out_llvm_ty: CodegenType<'ctx>,
+    ) -> CodegenResult<BasicBlockMerge<'ctx>> {
+        let write_target = match write_target {
+            Some(p) => WriteTarget::Ptr(p),
+            None if out_ty == primitives().never => WriteTarget::Never,
+            None if out_ty.size() == 0 => WriteTarget::Zst,
+            None => {
+                let cur_bb = self.builder.get_insert_block().u();
+                self.builder.position_at_end(merge_bb);
+                let phi = self.builder.build_phi(out_llvm_ty.basic_ty(), "switch_ret")?;
+                self.builder.position_at_end(cur_bb);
+                WriteTarget::Phi(phi)
+            },
+        };
+        Ok(BasicBlockMerge { write_target, merge_bb })
+    }
+
+    fn merge_branch(
+        &mut self,
+        compile_branch_res: CodegenResultAndControlFlow<Symbol<'ctx>>,
+        out_ty: Ptr<ast::Type>,
+        bb_merge: BasicBlockMerge<'ctx>,
+    ) -> CodegenResult<Option<Symbol<'ctx>>> {
+        let Some(sym) = compile_branch_res.handle_unreachable()? else {
+            return Ok(None);
+        };
+        match bb_merge.write_target {
+            WriteTarget::Never => panic_debug!("expected never; got value {sym:?}"),
+            WriteTarget::Zst | WriteTarget::Ptr(_) => {},
+            WriteTarget::Phi(phi) => {
+                let val = self.sym_as_val(sym, out_ty)?;
+                let last_bb = self.builder.get_insert_block().u();
+                phi.add_incoming(&[(&val.basic_val(), last_bb)]);
+            },
         }
+        self.builder.build_unconditional_branch(bb_merge.merge_bb)?;
+        Ok(Some(sym))
+    }
 
-        if let Some(write_target) = write_target {
-            stack_val(write_target)
-        } else {
-            let branch_ty = self.llvm_type(out_ty).basic_ty();
-            let phi = self.builder.build_phi(branch_ty, "ifexpr")?;
-            debug_assert!(then_val.is_some() || else_val.is_some());
-            if let Some(then_val) = then_val {
-                phi.add_incoming(&[(&then_val.basic_val(), then_bb)]);
-            }
-            if let Some(else_val) = else_val {
-                phi.add_incoming(&[(&else_val.basic_val(), else_bb)]);
-            }
-            reg(phi)
+    fn bb_merge_finish(
+        &self,
+        bb_merge: BasicBlockMerge<'ctx>,
+    ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
+        debug_assert_eq!(self.builder.get_insert_block().u(), bb_merge.merge_bb);
+        match bb_merge.write_target {
+            WriteTarget::Never => self.build_unreachable(),
+            WriteTarget::Zst => Ok(Symbol::Void),
+            WriteTarget::Ptr(ptr) => stack_val(ptr),
+            WriteTarget::Phi(phi) => reg(phi),
         }
     }
 
@@ -2078,10 +2196,25 @@ impl<'ctx> Codegen<'ctx> {
                 })
             },
             OptionalRepr::Tagged => {
-                let opt_llvm_ty = self.llvm_type(opt_ty.upcast_to_type()).struct_ty();
-                let tag_sym = self.build_struct_access(opt_llvm_ty, option_sym, 0, "tag")?;
+                let opt_llvm_ty = self.llvm_type(opt_ty.upcast_to_type()).enum_ty();
+                let tag_sym = self.build_enum_tag_access(opt_llvm_ty, option_sym)?;
                 self.sym_as_val_to_llvm_ty(tag_sym, self.context.i8_type().as_basic_type_enum(), 1)?
                     .bool_val(self)
+            },
+        }
+    }
+
+    fn build_optional_data_access(
+        &mut self,
+        option_sym: Symbol<'ctx>,
+        opt_ty: Ptr<ast::OptionTy>,
+    ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
+        match optional_repr(opt_ty.inner_ty.downcast_type()) {
+            OptionalRepr::AlwaysNull => self.build_unreachable()?,
+            OptionalRepr::NullOptimized { .. } => Ok(option_sym),
+            OptionalRepr::Tagged => {
+                let opt_llvm_ty = self.llvm_type(opt_ty.upcast_to_type()).struct_ty();
+                self.build_struct_access(opt_llvm_ty, option_sym, 1, "data").coerce()
             },
         }
     }
@@ -2301,6 +2434,32 @@ impl<'ctx> Codegen<'ctx> {
                 reg(self.builder.build_extract_value(val.struct_val(), idx, name)?)
             },
             BasicSymbol::Zst => Ok(Symbol::Void),
+        }
+    }
+
+    fn build_enum_tag_access(
+        &self,
+        enum_ty: EnumType<'ctx>,
+        enum_sym: Symbol<'ctx>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        match enum_ty {
+            EnumType::Simple(_) => Ok(enum_sym),
+            EnumType::WithData(struct_type) => {
+                self.build_struct_access(struct_type, enum_sym, 0, "tag")
+            },
+        }
+    }
+
+    fn build_enum_data_access(
+        &self,
+        enum_ty: EnumType<'ctx>,
+        enum_sym: Symbol<'ctx>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        match enum_ty {
+            EnumType::Simple(_) => Ok(Symbol::Void),
+            EnumType::WithData(struct_type) => {
+                self.build_struct_access(struct_type, enum_sym, 1, "data")
+            },
         }
     }
 
@@ -3229,22 +3388,6 @@ impl<'ctx> Codegen<'ctx> {
         Ok(CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?))
     }
 
-    fn sym_as_val_checked(
-        &mut self,
-        sym: Option<Symbol<'ctx>>,
-        ty: Ptr<ast::Type>,
-    ) -> CodegenResult<Option<CodegenValue<'ctx>>> {
-        Ok(Some(match sym {
-            Some(Symbol::Stack(ptr)) => {
-                let llvm_ty = self.llvm_type(ty).basic_ty();
-                CodegenValue::new(self.build_load(llvm_ty, ptr, "", ty.alignment())?)
-            },
-            Some(Symbol::Register(val)) => val,
-            Some(Symbol::Global(val)) => CodegenValue::new(val),
-            _ => return Ok(None),
-        }))
-    }
-
     #[inline]
     fn get_symbol(&self, decl: Ptr<ast::Decl>) -> Symbol<'ctx> {
         *self.symbols.get(decl).u()
@@ -3601,6 +3744,10 @@ impl<'ctx> CodegenValue<'ctx> {
         CodegenValue { val, _marker: PhantomData }
     }
 
+    pub fn undef(ty: CodegenType<'ctx>) -> CodegenValue<'ctx> {
+        Self::from_raw(unsafe { LLVMGetUndef(ty.inner) })
+    }
+
     pub fn int_val(&self) -> IntValue<'ctx> {
         debug_assert_matches!(self.any_val(), AnyVal::IntValue(_));
         unsafe { IntValue::new(self.val) }
@@ -3704,6 +3851,18 @@ impl<'ctx> CodegenType<'ctx> {
     pub fn struct_ty(&self) -> StructType<'ctx> {
         debug_only_assert!(self.any_ty().is_struct_type());
         unsafe { StructType::new(self.inner) }
+    }
+
+    pub fn enum_ty(&self) -> EnumType<'ctx> {
+        match self.basic_ty() {
+            BasicTypeEnum::IntType(i) => EnumType::Simple(i),
+            BasicTypeEnum::StructType(s) => {
+                debug_assert_eq!(s.count_fields(), 2);
+                debug_assert!(s.get_field_type_at_index(0).u().is_int_type());
+                EnumType::WithData(s)
+            },
+            t => panic_debug!("not an enum type: {t}"),
+        }
     }
 
     pub fn basic_ty(&self) -> BasicTypeEnum<'ctx> {
@@ -3891,7 +4050,7 @@ pub fn finalize_ty(
 ) -> Ptr<ast::Type> {
     let p = primitives();
     debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
-    if *ty != p.never && out_ty != p.any {
+    if *ty != p.never && !([p.any, p.void_ty].contains(&out_ty) && ty.is_finalized()) {
         if can_have_type_coercion {
             remove_type_coercion_for_finalize(*ty, &mut out_ty);
         } else {
@@ -4091,4 +4250,34 @@ fn const_int<'ctx>(ty: IntType<'ctx>, val: &BigInt) -> IntValue<'ctx> {
     let digits = if digits.len() == 0 { &[0] } else { digits };
     let unsigned = ty.const_int_arbitrary_precision(digits);
     if val.is_negative() { unsigned.const_neg() } else { unsigned }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WriteTarget<'ctx> {
+    Never,
+    Zst,
+    Ptr(PointerValue<'ctx>),
+    Phi(PhiValue<'ctx>),
+}
+
+impl<'ctx> WriteTarget<'ctx> {
+    fn ptr(self) -> Option<PointerValue<'ctx>> {
+        match self {
+            WriteTarget::Ptr(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BasicBlockMerge<'ctx> {
+    write_target: WriteTarget<'ctx>,
+    merge_bb: BasicBlock<'ctx>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EnumType<'ctx> {
+    Simple(IntType<'ctx>),
+    /// { tag, data }
+    WithData(StructType<'ctx>),
 }

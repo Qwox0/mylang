@@ -247,3 +247,20 @@ fn enum_size() {
     let res = test_body("enum { A, B, C }.B").ok(1i32);
     assert!(res.llvm_ir().contains(&format!("define noundef i32 @test()")));
 }
+
+#[test]
+fn union_2() {
+    let code = "
+U :: union {
+    i: i8;
+    s: struct { a: i32, b: i32, c: i32 };
+}
+test :: -> {
+    mut u: U;
+    u.s = .(1,2,3);
+    u
+}
+";
+    // This generates `{ i128 }` return type. clang generates `{ i64, i32 }`
+    test(code).ok(fields([1_i32, 2, 3]));
+}

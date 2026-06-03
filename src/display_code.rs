@@ -185,18 +185,18 @@ macro_rules! debug_expr {
         #[allow(unused_imports)]
         use crate::ast::UpcastToAst;
         let span = expr.full_span();
-        print!("DEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
+        eprint!("DEBUG `{}` @ {}", stringify!($expr), ::std::panic::Location::caller());
         if span.file.is_some() {
-            println!();
+            eprintln!();
             crate::display_code::display(span)
                 //.label(&format!("kind: {:?}", expr.kind))
                 .finish();
         } else {
-            println!(", span: {:?} (no file)", span);
+            eprintln!(", span: {:?} (no file)", span);
         }
         use crate::util::OptionExt;
-        println!("  ty: {}", expr.ty.display());
-        println!("  {:x?}\n", ::std::ops::Deref::deref(expr));
+        eprintln!("  ty: {}", expr.ty.display());
+        eprintln!("  {:x?}\n", ::std::ops::Deref::deref(expr));
     }};
 }
 #[allow(unused)]
