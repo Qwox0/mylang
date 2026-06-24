@@ -65,6 +65,7 @@ pub struct Primitives {
 
     // Other:
     pub null_lit: Ptr<ast::Decl>,
+    pub null_ty: Ptr<ast::Type>,
     pub some_variant_val: Ptr<ast::OptionalVal>,
     pub some_variant: Ptr<ast::Decl>,
     pub slice_ptr_field_ident: Ptr<ast::Ident>,
@@ -195,6 +196,9 @@ impl Primitives {
         let slice_len_field = new_primitive_decl("len")?;
         init_decl(slice_len_field, u64, None);
 
+        let null_ty = ast_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
+        init_ty(null_ty);
+
         Ok(Primitives {
             void_ty,
             never,
@@ -247,13 +251,12 @@ impl Primitives {
             as_sym: sym("as"),
 
             null_lit: {
-                let null_lit_ty = ast_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
-                init_ty(null_lit_ty);
                 let decl = new_primitive_decl("null")?;
-                init_decl(decl, null_lit_ty, Some(null_val.upcast()));
+                init_decl(decl, null_ty, Some(null_val.upcast()));
                 insert_symbol_no_duplicate(decls, decl);
                 decl
             },
+            null_ty,
             some_variant_val,
             some_variant: {
                 let decl = new_primitive_decl("Some")?;

@@ -232,6 +232,7 @@ dependencies = [
  "clap",
  "hashbrown",
  "inkwell",
+ "libc",
  "num",
  "thiserror 2.0.11",
  "unicode-xid",

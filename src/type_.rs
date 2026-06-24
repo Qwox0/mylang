@@ -6,8 +6,8 @@ use crate::{
     ptr::{OPtr, Ptr},
     sema::primitives::Primitives,
     util::{
-        BigIntExt, Layout, UnwrapDebug, aligned_add, is_simple_enum, panic_debug,
-        round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
+        BigIntExt, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
+        panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
         variant_count_to_tag_size_bits,
     },
 };
@@ -373,7 +373,54 @@ fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
     }
 }
 
-pub fn remove_type_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
+/// Some expressions might cause type coercion. These expressions usually allow explicit type
+/// annotations. This function has to remove any coercion to prevent later uses of `ty` from
+/// failing or having to handle all coercion cases.
+///
+/// ```mylang
+/// x: *i32 = /* ... */;
+/// y: ?*i32 = x;
+/// //         ^ coerced from `*i32` to `?*i32`
+///
+///   &x;
+/// //^ Other expressions, like AddrOf, can never cause type coercion.
+///
+/// z: ?**i32 = &x;
+/// //          ^ produces `**i32` (no coercion)
+/// //          ^^ coercion to `?**i32` is caused by Decl
+/// ```
+pub fn finalize_ty(
+    ty: &mut Ptr<ast::Type>,
+    mut out_ty: Ptr<ast::Type>,
+    can_have_type_coercion: bool,
+) -> Ptr<ast::Type> {
+    let p = primitives();
+    debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
+    if *ty == p.never {
+        // never is important for trimming unreachable code
+        return *ty;
+    }
+
+    if can_have_type_coercion {
+        remove_optional_coercion_for_finalize(*ty, &mut out_ty);
+    } else {
+        debug_only_assert!(
+            has_no_optional_coercion(*ty, out_ty),
+            "expected no type coercion (got: {ty} -> {out_ty})"
+        );
+    }
+
+    // this is probably incorrect in general.
+    // TODO: finalize during `ty_match`
+    if !ty.is_finalized()
+        || ty.iter_nested_optionals().any(|o| o.upcast_to_type().equals(p.null_ty))
+    {
+        *ty = out_ty;
+    }
+    *ty
+}
+
+fn remove_optional_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
     if let Some(out_opt) = out_ty.try_downcast::<ast::OptionTy>()
         && expr_ty.is_non_zero()
     {
@@ -389,9 +436,9 @@ pub fn remove_type_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut P
 }
 
 #[cfg(debug_assertions)]
-pub fn has_no_type_coercion(expr_ty: Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> bool {
+fn has_no_optional_coercion(expr_ty: Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> bool {
     let mut new_out_ty = out_ty;
-    remove_type_coercion_for_finalize(expr_ty, &mut new_out_ty);
+    remove_optional_coercion_for_finalize(expr_ty, &mut new_out_ty);
     new_out_ty == out_ty
 }
 
@@ -589,6 +636,36 @@ impl ast::Type {
     pub fn propagates_out(self: Ptr<Self>) -> bool {
         let p = primitives();
         self == p.never || self == p.err_ty
+    }
+
+    pub fn equals(self: Ptr<Self>, other: Ptr<Self>) -> bool {
+        use ast::TypeMatch as M;
+        match (self.matchable2(), other.matchable2()) {
+            (M::SimpleTy(l), M::SimpleTy(r)) => l == r,
+            (M::IntTy(l), M::IntTy(r)) => l.is_signed == r.is_signed && l.bits == r.bits,
+            (M::FloatTy(l), M::FloatTy(r)) => l.bits == r.bits,
+            (M::PtrTy(l), M::PtrTy(r)) => {
+                l.is_mut == r.is_mut && l.pointee.downcast_type().equals(r.pointee.downcast_type())
+            },
+            (M::SliceTy(l), M::SliceTy(r)) => {
+                l.is_mut == r.is_mut && l.elem_ty.downcast_type().equals(r.elem_ty.downcast_type())
+            },
+            (M::ArrayTy(l), M::ArrayTy(r)) => {
+                l.len.int::<usize>() == r.len.int()
+                    && l.elem_ty.downcast_type().equals(r.elem_ty.downcast_type())
+            },
+            (M::StructDef(l), M::StructDef(r)) => l == r,
+            (M::UnionDef(l), M::UnionDef(r)) => l == r,
+            (M::EnumDef(l), M::EnumDef(r)) => l == r,
+            (M::RangeTy(l), M::RangeTy(r)) => l.rkind == r.rkind && l.elem_ty.equals(r.elem_ty),
+            (M::OptionTy(l), M::OptionTy(r)) => {
+                l.inner_ty.downcast_type().equals(r.inner_ty.downcast_type())
+            },
+            (M::Fn(l), M::Fn(r)) => l == r,
+            (M::ArrayLikeContainer(_), _) => unreachable_debug(),
+            (_, M::ArrayLikeContainer(_)) => unreachable_debug(),
+            _ => false,
+        }
     }
 }
 

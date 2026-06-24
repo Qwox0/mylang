@@ -7,7 +7,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq)]
 #[repr(C)]
-struct Optional<Data> {
+pub struct Optional<Data> {
     tag: u8,
     data: Data,
 }
@@ -24,7 +24,7 @@ impl<Data: fmt::Display> fmt::Display for Optional<Data> {
     }
 }
 
-fn some<Data>(data: Data) -> Optional<Data> {
+pub fn some<Data>(data: Data) -> Optional<Data> {
     Optional { tag: 1, data }
 }
 

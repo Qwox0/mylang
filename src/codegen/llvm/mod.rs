@@ -14,8 +14,8 @@ use crate::{
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
     type_::{
-        NonZeroFieldType, OptionalRepr, enum_alignment, optional_repr,
-        remove_type_coercion_for_finalize, struct_size, ty_match, union_size,
+        EnumRepr, NonZeroFieldType, OptionalRepr, enum_alignment, enum_repr, finalize_ty,
+        optional_repr, struct_size, ty_match, union_size,
     },
     util::{
         self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime,
@@ -36,7 +36,7 @@ use inkwell::{
     context::Context,
     llvm_sys::{
         LLVMType, LLVMValue,
-        core::LLVMGetUndef,
+        core::{LLVMGetUndef, LLVMTypeOf},
         prelude::{LLVMTypeRef, LLVMValueRef},
     },
     module::{Linkage, Module},
@@ -2146,9 +2146,11 @@ impl<'ctx> Codegen<'ctx> {
             WriteTarget::Never => panic_debug!("expected never; got value {sym:?}"),
             WriteTarget::Zst | WriteTarget::Ptr(_) => {},
             WriteTarget::Phi(phi) => {
-                let val = self.sym_as_val(sym, out_ty)?;
+                let val = self.sym_as_val(sym, out_ty)?.basic_val();
+                let phi_ty = unsafe { CodegenType::from_raw(LLVMTypeOf(phi.as_value_ref())) }.basic_ty();
+                debug_assert_eq!(val.get_type(), phi_ty);
                 let last_bb = self.builder.get_insert_block().u();
-                phi.add_incoming(&[(&val.basic_val(), last_bb)]);
+                phi.add_incoming(&[(&val, last_bb)]);
             },
         }
         self.builder.build_unconditional_branch(bb_merge.merge_bb)?;
@@ -3180,10 +3182,19 @@ impl<'ctx> Codegen<'ctx> {
             TypeMatch::Fn(_) => CFfiType::Fn,
             TypeMatch::ArrayTy(_) => CFfiType::Array,
             _ if size > 16 => CFfiType::ByValPtr,
-            TypeMatch::UnionDef(_) | TypeMatch::EnumDef(_) => CFfiType::Simple(CodegenType::new(
-                self.context
-                    .struct_type(&[self.int_type(size as u32 * 8).as_basic_type_enum()], false),
-            )),
+            TypeMatch::UnionDef(_) => self.c_ffi_union(size),
+            TypeMatch::EnumDef(e) => match enum_repr(e.variants.iter_types()) {
+                EnumRepr::Never => unreachable_debug(),
+                EnumRepr::Transparent(inner) => self.c_ffi_type(inner),
+                EnumRepr::Tagged => {
+                    let tag = self.int_type(e.tag_ty.u().bits.u());
+
+                    CFfiType::Simple2([
+                        CodegenType::new(tag),
+                        CodegenType::new(self.c_ffi_union_inner(union_size(e.variants))),
+                    ])
+                },
+            },
             TypeMatch::StructDef(_) => unreachable_debug(),
             /*
             TypeMatch::FloatTy(f) if is_vararg && f.bits < 64 => {
@@ -3335,6 +3346,28 @@ impl<'ctx> Codegen<'ctx> {
             [None, _] => CFfiType::Zst,
             [Some(f), None] => CFfiType::Simple(f),
             [Some(a), Some(b)] => CFfiType::Simple2([a, b]),
+        }
+    }
+
+    fn c_ffi_union(&self, size: usize) -> CFfiType<'ctx> {
+        debug_assert!(0 < size);
+        debug_assert!(size <= 16);
+        if size <= 8 {
+            CFfiType::Simple(CodegenType::new(self.int_type(8 * (size as u32))))
+        } else {
+            CFfiType::Simple2([CodegenType::new(self.context.i64_type()); 2])
+        }
+    }
+
+    fn c_ffi_union_inner(&self, size: usize) -> BasicTypeEnum<'ctx> {
+        debug_assert!(0 < size);
+        debug_assert!(size <= 16);
+        if size <= 8 {
+            self.int_type(8 * (size as u32)).as_basic_type_enum()
+        } else {
+            self.context
+                .struct_type(&[self.context.i64_type().as_basic_type_enum(); 2], false)
+                .as_basic_type_enum()
         }
     }
 
@@ -3853,7 +3886,7 @@ impl<'ctx> CodegenType<'ctx> {
         unsafe { StructType::new(self.inner) }
     }
 
-    pub fn enum_ty(&self) -> EnumType<'ctx> {
+    fn enum_ty(&self) -> EnumType<'ctx> {
         match self.basic_ty() {
             BasicTypeEnum::IntType(i) => EnumType::Simple(i),
             BasicTypeEnum::StructType(s) => {
@@ -4025,43 +4058,6 @@ struct ForInfo<'ctx> {
     idx_ty: IntType<'ctx>,
     idx_int: IntValue<'ctx>,
     outer_loop: Option<Loop<'ctx>>,
-}
-
-/// Some expressions might cause type coercion. These expressions usually allow explicit type
-/// annotations. This function has to remove any coercion to prevent later uses of `ty` from
-/// failing or having to handle all coercion cases.
-///
-/// ```mylang
-/// x: *i32 = /* ... */;
-/// y: ?*i32 = x;
-///            ^ coerced from `*i32` to `?*i32`
-///
-/// &x;
-/// ^ Other expressions, like AddrOf, can never cause type coercion.
-///
-/// z: ?**i32 = &x;
-///             ^ produces `**i32` (no coercion)
-///             ^^ coercion to `?**i32` is caused by Decl
-/// ```
-pub fn finalize_ty(
-    ty: &mut Ptr<ast::Type>,
-    mut out_ty: Ptr<ast::Type>,
-    can_have_type_coercion: bool,
-) -> Ptr<ast::Type> {
-    let p = primitives();
-    debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
-    if *ty != p.never && !([p.any, p.void_ty].contains(&out_ty) && ty.is_finalized()) {
-        if can_have_type_coercion {
-            remove_type_coercion_for_finalize(*ty, &mut out_ty);
-        } else {
-            debug_only_assert!(
-                crate::type_::has_no_type_coercion(*ty, out_ty),
-                "expected no type coercion (got: {ty} -> {out_ty})"
-            );
-        }
-        *ty = out_ty;
-    }
-    *ty
 }
 
 /// `f: (value: Ptr<Ast>, param_def: OPtr<ast::Decl>, param_idx: usize) -> CodegenResult<(), U>`
@@ -4277,6 +4273,7 @@ struct BasicBlockMerge<'ctx> {
 
 #[derive(Debug, Clone, Copy)]
 enum EnumType<'ctx> {
+    #[allow(unused)]
     Simple(IntType<'ctx>),
     /// { tag, data }
     WithData(StructType<'ctx>),

@@ -14,5 +14,8 @@ num = "0.4.3"                                            # codegen/llvm/mod.rs d
 
 anyhow = "1.0.99" # only needed in debug mode
 
+[dev-dependencies]
+libc = "0.2"
+
 # [profile.release]
 # debug = true

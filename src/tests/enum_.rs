@@ -1,5 +1,5 @@
 use crate::{
-    tests::{TestSpan, arr, fields, substr, test, test_body},
+    tests::{TestSpan, any, arr, fields, reset_test_fd, substr, test, test_body, test_fd},
     util::transmute_unchecked,
 };
 
@@ -187,7 +187,7 @@ fn custom_enum_tag_value() {
 
 #[test]
 fn no_noundef_with_sum_type() {
-    let res = test_body("enum { A(u8), B, C }.B").ok(1u16);
+    let res = test_body("enum { A(u8), B, C }.B").ok((1_u8, any::<u8>()));
     assert!(!res.llvm_ir().contains("noundef"));
 }
 
@@ -243,7 +243,7 @@ test :: -> {
 }";
     let res = test(code).ok(fields([7i64, 456]));
     assert!(res.llvm_ir().contains("alloca { {}, { { i64, i64 }, [0 x i8] } }, align 8"));
-    assert!(res.llvm_ir().contains("ret { i128 } %ret"));
+    assert!(res.llvm_ir().contains("ret { i64, i64 } %ret"));
     drop(res);
 
     // in constant
@@ -254,7 +254,7 @@ test :: -> CONST;";
     let res = test(code).ok(fields([123i64, 7]));
     let const_val = "{ {} zeroinitializer, { i64, i64 } { i64 123, i64 7 } }";
     assert!(res.llvm_ir().contains(const_val));
-    assert!(res.llvm_ir().contains("ret { i128 } %ret"));
+    assert!(res.llvm_ir().contains("ret { i64, i64 } %ret"));
 }
 
 #[test]
@@ -366,4 +366,60 @@ E :: enum {
     A = CONST,
 }";
     test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);
+}
+
+#[test]
+fn enum_c_ffi_codegen() {
+    let test_input = "Hello World\n";
+    let test_fd = test_fd(test_input);
+
+    #[rustfmt::skip]
+    let code = format!(r#"
+printf : #varargs (fmt: *u8) -> i32 : #extern;
+read : (fd: i32, buf: ?*mut any, buf_size: usize) -> isize : #extern;
+abort : () -> never : #extern;
+__errno_location : -> *i32 : #extern;
+
+Result :: enum {{
+    Ok(usize),
+    Err(i32),
+
+    unwrap :: (self: Result) -> switch self {{
+        .Ok :> self,
+        .Err :> {{
+            printf("errno = %d\n".ptr, self);
+            abort()
+        }}
+    }};
+}}
+result :: (result: isize) -> Result {{
+    if result == -1 return .Err(__errno_location().*);
+    if not (result >= 0) abort();
+    .Ok(result.as(usize))
+}}
+
+test :: -> {{
+    mut buf: [1024]u8;
+    buf := buf[..]mut;
+
+    result(read({test_fd}, buf.ptr, buf.len)).unwrap()
+}}
+"#);
+
+    let res = test(&code)
+        .with_prelude()
+        //.update_options(|o| o.llvm_optimization_level = 1)
+        .ok(test_input.len());
+    assert!(!res.llvm_ir().contains("define { i128 } @result"));
+    assert!(res.llvm_ir().contains("define { i8, i64 } @result"));
+    drop(res);
+
+    reset_test_fd(test_fd);
+    let res = test(code)
+        .with_prelude()
+        .update_options(|o| o.llvm_optimization_level = 1)
+        .ok(test_input.len());
+    assert!(!res.llvm_ir().contains("define { i128 } @result"));
+    assert!(res.llvm_ir().contains("define { i8, i64 } @result"));
+    drop(res);
 }

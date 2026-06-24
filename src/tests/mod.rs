@@ -9,8 +9,10 @@ use crate::{
     ptr::Ptr,
 };
 use std::{
+    any::type_name,
     cell::OnceCell,
     fmt::{self, Display},
+    marker::PhantomData,
     thread,
 };
 
@@ -139,6 +141,11 @@ impl NewTest {
         self
     }
 
+    fn update_options(mut self, f: impl FnOnce(&mut TestArgsOptions)) -> Self {
+        f(&mut self.options);
+        self
+    }
+
     fn print_llvm_module(mut self, print_llvm_module: bool) -> Self {
         self.options.print_llvm_module = print_llvm_module;
         self
@@ -193,7 +200,7 @@ impl NewTest {
             panic!(
                 "Cannot use Rust array type `{}` as return type of test might cause problems \
                  because mylang returns a pointer but Rust expectes an array value",
-                std::any::type_name::<RetTy>()
+                type_name::<RetTy>(),
             );
         }
         let res = self.compile_no_err();
@@ -213,7 +220,7 @@ impl NewTest {
             println!(
                 "The array type `{}` might cause problems because mylang returns a pointer but \
                  Rust expectes an array value",
-                std::any::type_name::<RetTy>()
+                type_name::<RetTy>(),
             );
         }
         assert_eq!(res.data.ret, expected);
@@ -285,7 +292,7 @@ impl<Res> TestResult<Res> {
     #[track_caller]
     pub fn warn<'m>(
         mut self,
-        msg: impl Optional<&'m str>,
+        msg: impl OptionalParam<&'m str>,
         span: impl FnOnce(&str) -> TestSpan,
     ) -> Self {
         self.check_next_diag(DiagnosticSeverity::Warn, msg.as_option(), span);
@@ -295,7 +302,7 @@ impl<Res> TestResult<Res> {
     #[track_caller]
     pub fn info<'m>(
         mut self,
-        msg: impl Optional<&'m str>,
+        msg: impl OptionalParam<&'m str>,
         span: impl FnOnce(&str) -> TestSpan,
     ) -> Self {
         self.check_next_diag(DiagnosticSeverity::Info, msg.as_option(), span);
@@ -347,17 +354,17 @@ impl<Res> TestResult<Res> {
     }
 }
 
-trait Optional<T> {
+trait OptionalParam<T> {
     fn as_option(self) -> Option<T>;
 }
 
-impl<T> Optional<T> for T {
+impl<T> OptionalParam<T> for T {
     fn as_option(self) -> Option<T> {
         Some(self)
     }
 }
 
-impl<T> Optional<T> for Option<T> {
+impl<T> OptionalParam<T> for Option<T> {
     fn as_option(self) -> Option<T> {
         self
     }
@@ -474,7 +481,7 @@ impl<RetTy> AsMut<Compiled> for Ok<RetTy> {
 }
 
 fn is_array<T>() -> bool {
-    matches!(std::any::type_name::<T>().as_bytes(), [b'[', .., b']'])
+    matches!(type_name::<T>().as_bytes(), [b'[', .., b']'])
 }
 
 /// # Arrays
@@ -524,4 +531,38 @@ impl PartialEq for ExpectStackPtr {
     fn eq(&self, other: &Self) -> bool {
         unsafe { self.0.byte_offset_from(other) }.unsigned_abs() < 0x800
     }
+}
+
+#[derive(PartialEq, Eq)]
+struct Any<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for Any<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Any<{}>", type_name::<T>())
+    }
+}
+
+fn any<T>() -> Any<T> {
+    Any { _marker: PhantomData }
+}
+
+fn test_fd(data: &str) -> i32 {
+    let test_fd = unsafe { libc::memfd_create("test_stdin\0".as_ptr().cast(), 0) };
+    //let test_fd = unsafe { libc::memfd_create("test_stdin".as_ptr().cast(), 0) };
+    assert!(test_fd != -1, "errno = {}", unsafe { dbg!(*libc::__errno_location()) });
+
+    let write_res = unsafe { libc::write(test_fd, data.as_ptr().cast(), data.len()) };
+    assert!(write_res != -1, "errno = {}", unsafe { dbg!(*libc::__errno_location()) });
+
+    let seek_res = unsafe { libc::lseek(test_fd, 0, libc::SEEK_SET) };
+    assert!(seek_res != -1, "errno = {}", unsafe { dbg!(*libc::__errno_location()) });
+
+    test_fd
+}
+
+fn reset_test_fd(test_fd: i32) {
+    let seek_res = unsafe { libc::lseek(test_fd, 0, libc::SEEK_SET) };
+    assert!(seek_res != -1, "errno = {}", unsafe { dbg!(*libc::__errno_location()) });
 }

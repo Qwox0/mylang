@@ -1,14 +1,13 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
-    codegen::llvm::finalize_ty,
     context::{FilesIndex, ctx, ctx_mut, primitives},
     diagnostics::{HandledErr, cerror2},
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     scope::Scope,
-    type_::ty_match,
+    type_::{finalize_ty, ty_match},
     util::{UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
 };
 use core::fmt;
@@ -1266,8 +1265,13 @@ impl Type {
     /// Counts the number of nested optional layers.
     /// `???int` => 3; `int` => 0
     pub fn count_optional_nesting(self: Ptr<Type>) -> usize {
+        self.iter_nested_optionals().count()
+    }
+
+    pub fn iter_nested_optionals(
+        self: Ptr<Type>,
+    ) -> iter::Successors<Ptr<OptionTy>, impl FnMut(&Ptr<OptionTy>) -> Option<Ptr<OptionTy>>> {
         iter::successors(self.try_downcast::<OptionTy>(), |t| t.inner_ty.try_downcast::<OptionTy>())
-            .count()
     }
 
     pub fn clone_for_finalize(self: Ptr<Self>, alloc: &Arena) -> Result<Ptr<Self>, AllocErr> {
@@ -1723,7 +1727,7 @@ impl UnaryOpKind {
             UnaryOpKind::Deref => {
                 let pointee = arg_ty.downcast_ref::<PtrTy>().pointee.downcast_type_ref();
                 debug_assert!(ty_match(*pointee, out_ty), "{pointee} matches {out_ty}");
-                *pointee = out_ty;
+                finalize_ty(pointee, out_ty, true);
             },
             UnaryOpKind::Not | UnaryOpKind::Neg => {
                 debug_assert!(ty_match(*arg_ty, out_ty));

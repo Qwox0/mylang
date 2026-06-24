@@ -89,19 +89,17 @@ static stdin : *FILE = #extern;
 static stdout : *FILE = #extern;
 static stderr : *FILE = #extern;
 
-printf : #varargs (                                fmt: *c_char) -> c_int : #extern;
-fprintf : #varargs (stream: *FILE,                 fmt: *c_char) -> c_int : #extern;
-dprintf : #varargs (fd: c_int,                     fmt: *c_char) -> c_int : #extern;
-sprintf : #varargs (str: *c_char,                  fmt: *c_char) -> c_int : #extern;
-snprintf : #varargs (str: *c_char, size: c_size_t, fmt: *c_char) -> c_int : #extern;
-asprintf : #varargs (out_str: *mut ?*c_char,       fmt: *c_char) -> c_int : #extern;
+printf   : #varargs (                                  fmt: *c_char) -> c_int : #extern;
+fprintf  : #varargs (stream: *FILE,                    fmt: *c_char) -> c_int : #extern;
+dprintf  : #varargs (fd: c_int,                        fmt: *c_char) -> c_int : #extern;
+sprintf  : #varargs (str: *mut c_char,                 fmt: *c_char) -> c_int : #extern;
+snprintf : #varargs (str: *mut c_char, size: c_size_t, fmt: *c_char) -> c_int : #extern;
+asprintf : #varargs (out_str: *mut ?*c_char,           fmt: *c_char) -> c_int : #extern;
 
-/// writes a character to stdout
-//putchar : (ch: c_int) -> c_int : #extern;
-putchar : (ch: u8) -> c_int : #extern;
-
-/// writes a character string to stdout
-puts : (str: *u8) -> c_int : #extern;
+fputc   : (char: u8, stream: *FILE) -> c_int : #extern;
+putchar : (char: u8               ) -> c_int : #extern;
+fputs   : (str: *u8, stream: *FILE) -> c_int : #extern;
+puts    : (str: *u8               ) -> c_int : #extern;
 
 fgetc : (stream: ?*mut FILE) -> i32 : #extern;
 getc : (stream: ?*mut FILE) -> i32 : #extern;
@@ -169,6 +167,7 @@ strerrorname_np : (errnum: c_int) -> *c_char : #extern;
 
 // ===== <errno.h> =====
 
+/// errno
 E :: enum {
     /// Operation not permitted
     EPERM = 1,
@@ -435,6 +434,24 @@ E :: enum {
     ERFKILL = 132,
     /// Memory page has hardware error
     EHWPOISON = 133,
+}
+
+Result :: enum {
+    Ok(c_size_t),
+    Err(E),
+
+    unwrap :: (self: Result) -> switch self {
+        .Ok :> self,
+        .Err :> {
+            printf("libc operation failed. %s: %s\n".ptr, self.strerrorname_np(), self.strerror());
+            abort()
+        }
+    };
+}
+result :: (result: c_ssize_t) -> Result {
+    if result == -1 return .Err(get_errno());
+    if result < 0 abort();
+    .Ok(result.as(c_size_t))
 }
 
 E.strerror :: (self: E) -> strerror(self.as(c_int));

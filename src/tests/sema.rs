@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, substr, test};
+use crate::tests::{TestSpan, optional::some, substr, test, test_body};
 
 #[test]
 fn error_cycle_in_struct() {
@@ -69,4 +69,49 @@ test :: -> take_f(/* missing '&' */ (x, y) -> x + y);
         "mismatched types: expected `*(x:int,y:int)->int`; got `(x:i64,y:i64)->i64`",
         substr!("(x, y) -> x + y"),
     );
+}
+
+#[test]
+#[ignore = "todo"]
+fn optional_inner_type_variance() {
+    // covariant
+    let code = "
+    insert_10 :: (opt: *mut ?i32) -> opt.* = Some(10);
+
+    opt_never: ?never = null;
+    mut opt_coerced: ?i32 = opt_never; // copy => coercion (/covariance) ok
+    insert_10(&mut opt_coerced);
+    opt_coerced
+";
+    test_body(code).ok(some(10_i32));
+
+    // invariant
+    let code = "
+    insert_10 :: (opt: *mut ?i32) -> opt.* = Some(10);
+
+    mut opt_never: ?never = null;
+    opt_coerced: *mut ?i32 = &mut opt_never; // ptr cast => coercion (/covariance) NOT ok
+    insert_10(opt_coerced);
+    opt_coerced
+";
+    test_body(code).ok(some(10_i32)); // TODO: error
+}
+
+#[test]
+fn finalize_doesnt_change_finalized_types() {
+    let code = r#"
+get_u8 :: (slice: []u8, idx: u64) -> ?u8 {
+    if idx < slice.len then Some(slice[idx]) else null
+}
+min :: (a: u64, b: u64) -> if a < b then a else b;
+
+trim_partial_prefix :: (name: *mut []mut u8) -> {
+    name_char := get_u8(name.*, 0); // finalize_ty changes `name.*` to `[]u8`
+    max_idx := min(0, name.*.len); // `name.*` expects `[]mut u8`
+}
+    "#;
+    test(code).compile_no_err();
+
+    // Is it possible to have `*mut {integer}` which is then finalized to `*i64`, instead of
+    // `*mut i64`?
 }
