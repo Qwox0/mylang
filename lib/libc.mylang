@@ -26,6 +26,7 @@ pub c_double :: f64;
 
 // ===== <ctype.h> =====
 
+isprint : (c: u8) -> c_int : #extern;
 
 // ===== <fenv.h> =====
 

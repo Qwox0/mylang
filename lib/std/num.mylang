@@ -40,3 +40,13 @@ align_up :: (x: uint, alignment: uint) ->
 /// doesn't change endianness.
 from_bytes_u32 :: (bytes: [4]u8) -> bytes.&.as(*u32).*;
 as_bytes_u32 :: (val: u32) -> val.&.as(*[4]u8).*;
+
+is_ascii_lowercase :: (char: u8) -> 'a' <= char && char <= 'z';
+is_ascii_uppercase :: (char: u8) -> 'A' <= char && char <= 'Z';
+
+ASCII_CASE_MASK :: 0b0100000;
+as_ascii_lowercase :: (char: u8) -> char ^ (ASCII_CASE_MASK * is_ascii_uppercase(char).as(u8));
+as_ascii_uppercase :: (char: u8) -> char ^ (ASCII_CASE_MASK * is_ascii_lowercase(char).as(u8));
+
+eq_ignore_ascii_case_u8 :: (byte1: u8, byte2: u8) ->
+    byte1.as_ascii_lowercase() == byte2.as_ascii_lowercase();

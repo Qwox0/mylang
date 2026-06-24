@@ -9,7 +9,7 @@ ParseOptions :: struct {
 
 /// Dynamic Json value
 Json :: enum {
-    Object(std.hashmap.Str2PtrHashMap),
+    Object(std.hashmap.Str2PtrHashMap), // HashMap<[]u8, *Json>
     Array(std.RawArrayList), // ArrayList<Json>
     String([]u8),
     Number([]u8),
@@ -21,6 +21,7 @@ Json.LAYOUT :: std.mem.Layout.{ size=#sizeof(Json), align=#alignof(Json) };
 
 Json.destroy :: (self: *Json) -> std.panic("TODO: destroy");
 Json.debug :: (self: *Json) -> std.panic("TODO: debug");
+Json.write_to :: (self: *Json) -> std.panic("TODO: write_to");
 
 // TODO: better error reporting
 parse_dyn :: (json: []u8, options := ParseOptions.{}, alloc := std.ctx.alloc) -> ?*Json {
@@ -54,8 +55,8 @@ Parser.value :: (parser: *mut Parser) -> ?Json {
         parser.eat_str("null") orelse return null;
         .Null
     } else {
-        libc.printf(
-            "Error: unexpected token '%c', expected `{`, `[`, `\"`, number, `true`, `false` or `null`\n".ptr,
+        parser.emit_err(
+            "Error: unexpected token '%c', expected `{`, `[`, `\"`, number, `true`, `false` or `null`\n",
             value_start
         );
         return null;
@@ -71,14 +72,14 @@ Parser.object :: (parser: *mut Parser) -> {
         parser.whitespace();
         if parser.try_eat('}') {
             if not parser.*.options.allow_trailing_comma and map.&.size() != 0 {
-                libc.printf("Error: unexpected '}', because trailing commas are not allowed\n".ptr);
+                parser.emit_err("Error: unexpected '}', because trailing commas are not allowed\n");
                 return null;
             }
             break;
         }
 
         key := parser.string() orelse {
-            libc.printf("Error: expected key string or '}'\n".ptr);
+            parser.emit_err("Error: expected key string or '}'\n");
             return null;
         };
 
@@ -86,12 +87,12 @@ Parser.object :: (parser: *mut Parser) -> {
         parser.eat(':') orelse return null;
 
         val := parser.alloc_json(parser.value() orelse return null);
-        map.&mut.insert(key, val);
+        map.&mut.insert(key, val, parser.*.alloc);
 
         if parser.try_eat('}') break;
         if parser.try_eat(',') continue;
 
-        libc.printf("Error: unexpected token '%c', expected `,` or `}`\n".ptr, parser.peek_or_eof());
+        parser.emit_err("Error: unexpected token '%c', expected `,` or `}`\n", parser.peek_or_eof());
         return null;
     }
     Some(map)
@@ -105,7 +106,7 @@ Parser.array :: (parser: *mut Parser) -> {
         parser.whitespace();
         if parser.try_eat(']') {
             if not parser.*.options.allow_trailing_comma and items.len != 0 {
-                libc.printf("Error: unexpected ']', because trailing commas are not allowed\n".ptr);
+                parser.emit_err("Error: unexpected ']', because trailing commas are not allowed\n");
                 return null;
             }
             break;
@@ -117,7 +118,7 @@ Parser.array :: (parser: *mut Parser) -> {
         if parser.try_eat(']') break;
         if parser.try_eat(',') continue;
 
-        libc.printf("Error: unexpected token '%c', expected `,` or `]`\n".ptr, parser.peek_or_eof());
+        parser.emit_err("Error: unexpected token '%c', expected `,` or `]`\n", parser.peek_or_eof());
         return null;
     }
     return items;
@@ -128,7 +129,7 @@ Parser.string :: (parser: *mut Parser) -> {
     start := parser.*.idx;
     loop {
         c := parser.peek() orelse {
-            libc.printf("Error: unterminated string\n".ptr);
+            parser.emit_err("Error: unterminated string\n");
             return null
         };
         if c == '"' break;
@@ -138,11 +139,11 @@ Parser.string :: (parser: *mut Parser) -> {
         escape := parser.one_of(.['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'][..]) orelse return null;
         if escape == 'u' then for _ in 0..4 {
             c := parser.peek() orelse {
-                libc.printf("Error: expected hex digit, got EOF\n".ptr, c);
+                parser.emit_err("Error: expected hex digit, got EOF\n", c);
                 return null
             };
             if not(('0' <= c and c <= '9') or ('A' <= c and c <= 'F') or ('a' <= c and c <= 'f')) {
-                libc.printf("Error: expected hex digit, got '%c'\n".ptr, c);
+                parser.emit_err("Error: expected hex digit, got '%c'\n", c);
                 return null
             }
             parser.*.idx += 1;
@@ -177,7 +178,7 @@ Parser.number :: (parser: *mut Parser) -> {
 
     {
         d := parser.digit() orelse {
-            libc.printf("Error: expected digit\n".ptr);
+            parser.emit_err("Error: expected digit\n");
             return null;
         };
         if d != 0 parser.digits();
@@ -186,7 +187,7 @@ Parser.number :: (parser: *mut Parser) -> {
     if parser.peek_or_eof() == '.' {
         parser.*.idx += 1;
         d := parser.digit() orelse {
-            libc.printf("Error: expected digit\n".ptr);
+            parser.emit_err("Error: expected digit\n");
             return null;
         };
         parser.digits();
@@ -195,12 +196,12 @@ Parser.number :: (parser: *mut Parser) -> {
     if std.slice.contains_u8(.['e', 'E'][..], parser.peek_or_eof()) {
         parser.*.idx += 1;
         if not std.slice.contains_u8(.['+', '-'][..], parser.peek_or_eof()) {
-            libc.printf("Error: expected `+` or `-`\n".ptr);
+            parser.emit_err("Error: expected `+` or `-`\n");
             return null;
         }
         parser.*.idx += 1;
         d := parser.digit() orelse {
-            libc.printf("Error: expected digit\n".ptr);
+            parser.emit_err("Error: expected digit\n");
             return null;
         };
         parser.digits();
@@ -230,10 +231,10 @@ Parser.eat :: (parser: *mut Parser, tok: u8) -> {
     if parser.try_eat(tok) return Some({});
 
     got := parser.peek() orelse {
-        libc.printf("Error: unexpected token 'EOF', expected '%c'\n".ptr, tok);
+        parser.emit_err("Error: unexpected token 'EOF', expected '%c'\n", tok);
         return null;
     };
-    libc.printf("Error: unexpected token '%c', expected '%c'\n".ptr, got.as(u8), tok);
+    parser.emit_err("Error: unexpected token '%c', expected '%c'\n", got.as(u8), tok);
     return null;
 }
 
@@ -268,19 +269,35 @@ Parser.one_of :: (parser: *mut Parser, options: []u8) -> {
         break;
     }
 
-    libc.printf("Error: expected ".ptr);
+    parser.emit_err("Error: expected ");
     for idx in (0.as(usize)..) {
         o := options |> std.slice.get_u8(idx) orelse break;
-        libc.printf("`%c`".ptr, o);
-        if options.len >= 3 and idx != options.len - 1  libc.printf(", ".ptr);
-        if options.len >= 2 and idx == options.len - 2  libc.printf("or ".ptr);
+        parser.emit_err("`%c`", o);
+        if options.len >= 3 and idx != options.len - 1  parser.emit_err(", ");
+        if options.len >= 2 and idx == options.len - 2  parser.emit_err("or ");
     }
     got := parser.peek() orelse {
-        libc.printf(", got 'EOF'\n".ptr);
+        parser.emit_err(", got 'EOF'\n");
         return null;
     };
-    libc.printf(", got `%c`\n".ptr, got);
+    parser.emit_err(", got `%c`\n", got);
     return null;
+}
+
+Parser.emit_err :: (parser: *Parser, fmt: []u8, a: u8 = 0, b: u8 = 0, c: u8 = 0, d: u8 = 0) -> {
+    libc.fprintf(libc.stderr, fmt.ptr, a, b, c, d);
+    libc.fprintf(libc.stderr, "offset: %d\n".ptr, parser.*.idx);
+
+    start := parser.*.idx |> saturating_sub(40);
+    end := parser.*.idx + 40 |> std.num.min(parser.*.text.len);
+
+    std.escaped_println(parser.*.text[start..end], libc.stderr);
+    libc.fprintf(libc.stderr, "%*s^\n".ptr, parser.*.idx - start, "".ptr);
+}
+
+saturating_sub :: (lhs: uint, rhs: uint) -> {
+    if lhs <= rhs return 0;
+    lhs - rhs
 }
 
 test_json :: -> {

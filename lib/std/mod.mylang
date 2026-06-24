@@ -2,6 +2,7 @@ pub RawArrayList :: #import "./RawArrayList.mylang".RawArrayList;
 pub RawHashTable :: #import "./RawHashTable.mylang".RawHashTable;
 pub bindgen :: #import "./bindgen/mod.mylang";
 pub closures :: #import "./closures.mylang";
+pub compiler :: #import "./compiler/mod.mylang";
 pub env :: #import "./env.mylang";
 pub fmt :: #import "./fmt.mylang";
 pub fs :: #import "./fs.mylang";
@@ -26,8 +27,7 @@ static ctx := struct {
 };
 
 panic :: (msg: []u8) -> never {
-    print("PANIC: ");
-    println(msg);
+    libc.fprintf(libc.stderr, "PANIC: %.*s\n".ptr, msg.len, msg.ptr);
     libc.abort();
 }
 
@@ -84,6 +84,25 @@ print :: (str: []u8) -> void {
 println :: (str: []u8) -> void {
     print(str);
     libc.putchar('\n'); // handle output == EOF?
+}
+
+escaped_print :: (str: []u8, stream := libc.stdout) -> {
+    for char in str {
+        if char == 0               libc.fputs("\\0".ptr, stream)
+        else if char == '\t'       libc.fputs("\\t".ptr, stream)
+        else if char == '\n'       libc.fputs("\\n".ptr, stream)
+        else if char == '\r'       libc.fputs("\\r".ptr, stream)
+        else if char == '\\'       libc.fputs("\\\\".ptr, stream)
+        else if char == '\''       libc.fputs("\\'".ptr, stream)
+        else if char == '\"'       libc.fputs("\\\"".ptr, stream)
+        else if libc.isprint(char) != 0 libc.fputc(char, stream)
+        else                       libc.fprintf(stream, "\\x%02x".ptr, char);
+    }
+}
+
+escaped_println :: (str: []u8, stream := libc.stdout) -> {
+    escaped_print(str, stream);
+    libc.fputc('\n', stream);
 }
 
 fail_errno :: (thing: []u8) -> never {

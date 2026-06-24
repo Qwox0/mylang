@@ -1,6 +1,7 @@
 std :: #import "std";
 libc :: #import "libc";
 RawHashTable :: std.RawHashTable;
+Allocator :: std.mem.Allocator;
 
 Hash :: u32;
 
@@ -21,10 +22,10 @@ Str2PtrHashMap :: struct {
 
     pub EMPTY :: Str2PtrHashMap.(.EMPTY);
 
-    pub new :: (capacity: u32 = RawHashTable.MIN_CAPACITY, alloc := std.ctx.alloc) ->
+    pub new :: (capacity: u32 = RawHashTable.MIN_CAPACITY, alloc: Allocator) ->
         Str2PtrHashMap.(.new(capacity, alloc, ENTRY_LAYOUT));
 
-    pub destroy :: (self: Str2PtrHashMap, alloc := std.ctx.alloc) ->
+    pub destroy :: (self: Str2PtrHashMap, alloc: Allocator) ->
         self.table.destroy(alloc, ENTRY_LAYOUT.size);
 
     pub size :: (self: *Str2PtrHashMap) -> self.*.table.size;
@@ -32,7 +33,7 @@ Str2PtrHashMap :: struct {
     /// The number of elements in the set for which no allocations are guaranteed.
     pub capacity :: (self: *Str2PtrHashMap) -> self.*.table.&.capacity();
 
-    pub reserve :: (self: *mut Str2PtrHashMap, additional: u32, alloc := std.ctx.alloc) -> {
+    pub reserve :: (self: *mut Str2PtrHashMap, additional: u32, alloc: Allocator) -> {
         self.*.table.&mut.reserve(
             additional,
             & entry_ptr -> hash(entry_ptr.as(*Entry).*.key),
@@ -41,35 +42,49 @@ Str2PtrHashMap :: struct {
         )
     }
 
-    pub get :: (self: *Str2PtrHashMap, key: *K) -> ?*V {
-        hash := hash(key.*);
-        val_ptr := self.*.table.&.get(hash, key_eq(key), ENTRY_LAYOUT.size) orelse return null;
-        val_ptr.as(*Entry).*.val.&
+    //pub get :: (self: *Str2PtrHashMap, key: *K) -> ?*V {
+    pub get :: (self: *Str2PtrHashMap, key: K) -> ?V {
+        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
+        hash := hash(key);
+        val_ptr := self.*.table.&.get(hash, key_eq(&key), ENTRY_LAYOUT.size) orelse return null;
+        val_ptr.as(*Entry).*.val
     }
 
-    pub insert :: (self: *mut Str2PtrHashMap, key: K, val: V) -> ?Entry {
-        self.reserve(1);
+    pub get_entry :: (self: *Str2PtrHashMap, key: K) -> ?Entry {
+        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
+        hash := hash(key);
+        val_ptr := self.*.table.&.get(hash, key_eq(&key), ENTRY_LAYOUT.size) orelse return null;
+        val_ptr.as(*Entry).*
+    }
+
+    pub insert :: (self: *mut Str2PtrHashMap, key: K, val: V, alloc: Allocator) -> ?V {
+        self.reserve(1, alloc);
         self.insert_assume_capacity(key, val)
     }
 
-    pub insert_assume_capacity :: (self: *mut Str2PtrHashMap, key: K, val: V) -> ?Entry {
+    pub insert_assume_capacity :: (self: *mut Str2PtrHashMap, key: K, val: V) -> ?V {
         hash := hash(key);
         slot := self.*.table.&mut.insert_slot_assume_capacity(hash, key_eq(&key), ENTRY_LAYOUT.size);
         entry := slot.entry.as(*mut Entry);
-        old_val := entry.*;
-        entry.{ key, val };
-        if slot.occupied Some(old_val) else null
+        if slot.occupied {
+            old_val := entry.*.val;
+            entry.*.val = val;
+            Some(old_val)
+        } else {
+            entry.{ key, val };
+            null
+        }
     }
 
     pub contains_key :: (self: *Str2PtrHashMap, key: *K) -> bool {
-        if self.size() == 0 return false; // TODO: unlikely branch
+        if self.*.table.&.is_empty() return false; // TODO: unlikely branch
         hash := hash(key.*);
         self.*.table.&.find(hash, key_eq(key), ENTRY_LAYOUT.size) orelse return false;
         true
     }
 
     pub remove :: (self: *mut Str2PtrHashMap, key: *K) -> ?Entry {
-        if self.size() == 0 return null; // TODO: unlikely branch
+        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
 
         hash := hash(key.*);
         slot := self.*.table.&mut.remove(hash, key_eq(key), ENTRY_LAYOUT.size) orelse return null;
@@ -79,7 +94,7 @@ Str2PtrHashMap :: struct {
 
     pub reset :: (self: *mut Str2PtrHashMap) -> self.*.table.&mut.reset(ENTRY_LAYOUT.size);
 
-    pub reset_with_free :: (self: *mut Str2PtrHashMap, alloc := std.ctx.alloc) -> {
+    pub reset_with_free :: (self: *mut Str2PtrHashMap, alloc: Allocator) -> {
         for idx in 0..self.*.table.&.slots()
             alloc.free(self.*.table.&.entry(idx, ENTRY_LAYOUT.size));
         self.reset();
@@ -100,19 +115,21 @@ Str2PtrHashMap :: struct {
 test_map :: -> {
     fail :: () -> std.panic("test failed");
 
-    mut map := Str2PtrHashMap.new();
-    defer map.destroy();
+    alloc := std.ctx.alloc;
+
+    mut map := Str2PtrHashMap.new(alloc=alloc);
+    defer map.destroy(alloc);
     map := &mut map;
 
     std.assert(map.size() == 0);
 
     std.println("insert");
-    map.insert("key 1", "some value".ptr);
+    map.insert("key 1", "some value".ptr, alloc);
     v2 := "another value".ptr;
-    map.insert("abc", v2);
-    map.insert("3", "third value".ptr);
+    map.insert("abc", v2, alloc);
+    map.insert("3", "third value".ptr, alloc);
     std.assert(map.size() == 3);
-    std.assert((map.get(&"abc") orelse fail()).* == v2);
+    std.assert((map.get("abc") orelse fail()) == v2);
 
     std.println("insert duplicate keys");
     key1 := "my key";
@@ -120,15 +137,15 @@ test_map :: -> {
     defer std.ctx.alloc.free(key2.ptr);
     std.assert(key1.ptr != key2.ptr);
 
-    map.insert(key1, key1.ptr);
+    map.insert(key1, key1.ptr, alloc);
     std.assert(map.size() == 4);
-    std.assert((map.get(&key1) orelse fail()).* == key1.ptr);
-    std.assert((map.get(&key2) orelse fail()).* == key1.ptr);
+    std.assert((map.get(key1) orelse fail()) == key1.ptr);
+    std.assert((map.get(key2) orelse fail()) == key1.ptr);
 
-    map.insert(key2, key2.ptr);
+    map.insert(key2, key2.ptr, alloc);
     std.assert(map.size() == 4);
-    std.assert((map.get(&key1) orelse fail()).* == key2.ptr);
-    std.assert((map.get(&key2) orelse fail()).* == key2.ptr);
+    std.assert((map.get(key1) orelse fail()) == key2.ptr);
+    std.assert((map.get(key2) orelse fail()) == key2.ptr);
 
 
     std.println("not contains");
@@ -139,7 +156,7 @@ test_map :: -> {
     for idx in 0..70 {
         str := std.fmt.format("additional item %d", xx idx); // leaked
         libc.printf("## insert additional item: %s\n".ptr, str.ptr);
-        map.insert(str, str.ptr);
+        map.insert(str, str.ptr, alloc);
         libc.printf("cap: %d / slots: %d\n".ptr, map.capacity(), map.*.table.&.slots());
     }
 

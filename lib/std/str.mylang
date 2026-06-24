@@ -20,9 +20,22 @@ pub concat :: (str1: []u8, str2: []u8) -> {
 pub eq :: (str1: []u8, str2: []u8) -> bool {
     if str1.len != str2.len return false;
     for idx in 0..str1.len
-        if str1[idx] != str2[idx]
-            return false;
+        if str1[idx] != str2[idx] return false;
     true
+}
+
+pub eq_ignore_ascii_case :: (str1: []u8, str2: []u8) -> bool {
+    if str1.len != str2.len return false;
+    for idx in 0..str1.len
+        if not std.num.eq_ignore_ascii_case_u8(str1[idx], str2[idx]) return false;
+    true
+}
+
+ASCII_CASE_MASK :: 0b0100000;
+
+pub as_ascii_lowercase :: (char: u8) -> u8 {
+    is_upper := 'A' <= char && char <= 'Z';
+    char ^ (ASCII_CASE_MASK * is_upper.as(u8))
 }
 
 pub contains :: (str: []u8, substr: []u8, ignore_case := false) -> {

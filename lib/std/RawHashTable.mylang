@@ -88,6 +88,8 @@ RawHashTable :: struct {
     /// `capacity * 100 / slots <= MAX_LOAD_PERCENTAGE`
     pub slots :: (self: *RawHashTable) -> self.*.mask + 1;
 
+    is_empty :: (self: *RawHashTable) -> self.*.mask == !0;
+
     T :: any;
 
     pub reserve :: (
@@ -260,21 +262,22 @@ RawHashTable :: struct {
         entry_size: usize,
         format_entry: *(entry: *any) -> []u8,
         free_text: ?*(text: []u8) -> void = null,
+        c_stream := libc.stderr,
     ) -> {
-        libc.printf("RawHashTable (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask);
+        libc.fprintf(c_stream, "RawHashTable (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask);
         for idx in 0..self.slots() {
             tag := self.tag(idx).*;
             text := if tag.is_used() then format_entry.*(self.entry(idx, entry_size))
             else if tag.eq(Tag.empty) then "EMPTY"
             else "DELETED";
 
-            libc.printf("  %.*s (%08b),\n".ptr, text.len, text.ptr, tag.val);
+            libc.fprintf(c_stream, "  %.*s (%08b),\n".ptr, text.len, text.ptr, tag.val);
 
             if tag.is_used() {
                 free_text := free_text orelse continue;
                 free_text.*(text);
             }
         }
-        std.println("}");
+        libc.fprintf(c_stream, "}\n".ptr);
     }
 }
