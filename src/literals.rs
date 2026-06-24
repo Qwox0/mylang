@@ -1,3 +1,4 @@
+use crate::util::{UnwrapDebug, unreachable_debug};
 use num::BigInt;
 use std::num::ParseFloatError;
 
@@ -16,11 +17,23 @@ pub fn parse_float_lit(text: &str) -> Result<f64, ParseFloatError> {
 }
 
 pub fn replace_escape_chars(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\\\", "\\")
-        .replace("\\0", "\0")
-        .replace("\\'", "\'")
-        .replace("\\\"", "\"")
+    let mut buf = String::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            buf.push(byte as char);
+            continue;
+        }
+        buf.push(match bytes.next().u() {
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'\\' => '\\',
+            b'0' => '\0',
+            b'\'' => '\'',
+            b'\"' => '\"',
+            _ => unreachable_debug(),
+        });
+    }
+    buf
 }

@@ -351,7 +351,7 @@ impl Sema {
                     && s.kind.is_struct_kind()
                 {
                     let fields = s.downcast_struct_def().fields;
-                    self.validate_call(&fields, args, false, span.end(), is_const)?;
+                    self.validate_call(&fields, args, false, span.end(), is_const, false)?;
                     expr.ty = Some(s);
 
                     if is_const {
@@ -371,7 +371,7 @@ impl Sema {
                         return error_const_ptr_initializer(expr).into();
                     } else {
                         let fields = s.downcast_struct_def().fields;
-                        self.validate_call(&fields, args, false, span.end(), false)?;
+                        self.validate_call(&fields, args, false, span.end(), false, false)?;
                     }
                 } else if lhs.ty.u().propagates_out() {
                     expr.ty = Some(lhs.ty.u());
@@ -520,7 +520,7 @@ impl Sema {
                 {
                     // associated consts/methods
                     let Some((_, field)) = consts.find_field(rhs.sym) else {
-                        cinfo!(rhs.span, "This associated const might be undefined");
+                        cinfo!(rhs.span, "This associated const on `{lhs_ty}` might be undefined");
                         // The definition of an associated const might be after it's first use (or
                         // even in another file).
                         //
@@ -625,7 +625,10 @@ impl Sema {
                         Some(ty) => ty,
                         None => {
                             // prevents incorrect errors when a method is defined later
-                            cinfo!(rhs.span, "This associated const might be undefined");
+                            cinfo!(
+                                rhs.span,
+                                "This associated const on `{lhs_ty}` might be undefined"
+                            );
                             return NotFinished { remaining: 1 };
                         },
                     }
@@ -777,6 +780,7 @@ impl Sema {
                         fn_ty.has_varargs,
                         span.end(),
                         false,
+                        false,
                     )?;
                     expr.ty = Some(self.get_fn_ret_ty(fn_ty));
                 } else if fn_ty == p.method_stub {
@@ -793,6 +797,7 @@ impl Sema {
                         &args,
                         fn_ty.has_varargs,
                         span.end(),
+                        false,
                         false,
                     )?;
 
@@ -835,7 +840,7 @@ impl Sema {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(dot.rhs.sym).u().1;
-                    self.validate_call(&[variant], args, false, span.end(), is_const)?;
+                    self.validate_call(&[variant], args, false, span.end(), is_const, true)?;
                     expr.ty = Some(enum_ty.upcast_to_type());
 
                     if is_const {
@@ -1203,12 +1208,22 @@ impl Sema {
             AstEnum::Switch { val, cases, else_body, .. } => {
                 let val_ty = analyze!(*val, None).finalize();
 
+                let val_inner_ty = if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
+                    p.pointee.downcast_type()
+                } else {
+                    val_ty
+                };
+                match val_inner_ty.matchable2() {
+                    TypeMatch::EnumDef(_) | TypeMatch::OptionTy(_) => {},
+                    _ => return cerror2!(val.full_span(), "Cannot switch on type `{}`", val_ty),
+                }
+
                 let narrowed_symbol = val.try_downcast::<ast::Ident>();
 
                 let mut out_ty = None;
                 for case in cases.iter_mut() {
-                    let case_ty = *self.analyze(case.case, &Some(val_ty), true)?;
-                    if !(ty_match(case_ty, val_ty) || ty_match(case_ty, p.enum_variant)) {
+                    let case_ty = *self.analyze(case.case, &Some(val_inner_ty), true)?;
+                    if !(ty_match(case_ty, val_inner_ty) || ty_match(case_ty, p.enum_variant)) {
                         return error_mismatched_types_custom(
                             case.case.full_span(),
                             "enum variant",
@@ -1216,7 +1231,7 @@ impl Sema {
                         )
                         .into();
                     }
-                    let t = match val_ty.matchable2() {
+                    let mut narrowed_ty = match val_inner_ty.matchable2() {
                         TypeMatch::EnumDef(_) => {
                             let case_val = case.case.downcast::<ast::EnumVal>();
                             if case_val.data.is_some() {
@@ -1239,15 +1254,21 @@ impl Sema {
                             }
                             if v.is_some { o.inner_ty.downcast_type() } else { p.void_ty }
                         },
-                        _ => {
-                            return cerror2!(val.full_span(), "Cannot switch on type `{}`", val_ty);
-                        },
+                        _ => unreachable_debug(),
                     };
                     if let Some(narrowed_symbol) = narrowed_symbol {
                         if case.scope.decls.is_empty() {
                             let decl_in_case =
                                 self.alloc(ast::Decl::from_ident(narrowed_symbol))?;
-                            decl_in_case.as_mut().var_ty = Some(t);
+                            if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
+                                narrowed_ty = type_new!(PtrTy {
+                                    is_mut: p.is_mut,
+                                    pointee: narrowed_ty.upcast()
+                                })
+                                .upcast_to_type()
+                            }
+                            decl_in_case.as_mut().var_ty = Some(narrowed_ty);
+
                             case.scope.decls = self.cctx.alloc.alloc_one_val_slice(decl_in_case)?;
                         } else {
                             debug_assert_eq!(case.scope.decls.len(), 1);
@@ -1264,7 +1285,7 @@ impl Sema {
                 }
                 if let Some(else_body) = *else_body {
                     self.analyze_and_accumulate_type(else_body, &mut out_ty, ty_hint, is_const)?;
-                } else if let TypeMatch::EnumDef(e) = val_ty.matchable2() {
+                } else if let TypeMatch::EnumDef(e) = val_inner_ty.matchable2() {
                     let mut variant_used = tmp_alloc().alloc_slice_with(e.variants.len(), false)?;
                     for case in cases.iter() {
                         let v = case.case.downcast::<ast::EnumVal>();
@@ -1286,7 +1307,7 @@ impl Sema {
                         chint!(expr.span.end(), "Consider adding an `else` case");
                         return err.into();
                     }
-                } else if let TypeMatch::OptionTy(_) = val_ty.matchable2() {
+                } else if let TypeMatch::OptionTy(_) = val_inner_ty.matchable2() {
                     let mut variant_used = [false; 2];
                     for case in cases.iter() {
                         let v = case.case.downcast::<ast::OptionalVal>();
@@ -1423,6 +1444,9 @@ impl Sema {
                 expr.ty = Some(p.never)
             },
             AstEnum::Continue { .. } => {
+                let Some(_) = self.loop_stack.last() else {
+                    return cerror2!(expr.span, "`continue` can only be used inside a loop");
+                };
                 // TODO: check if in loop
                 expr.ty = Some(p.never)
             },
@@ -2392,6 +2416,7 @@ impl Sema {
         allows_varargs: bool,
         close_p_span: Span,
         is_const: bool,
+        is_enum_init: bool,
     ) -> SemaResult<()> {
         // positional args
         let mut pos_idx = 0;
@@ -2456,7 +2481,7 @@ impl Sema {
             .iter()
             .copied()
             .zip(was_set)
-            .filter(|(p, was_set)| !was_set && p.init.is_none())
+            .filter(|(p, was_set)| !was_set && !p.has_default(is_enum_init))
             .map(|(p, _)| p);
         if let Some(first) = missing_params.next() {
             let mut missing_params_list = String::new();

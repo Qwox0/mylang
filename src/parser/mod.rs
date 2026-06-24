@@ -305,7 +305,7 @@ impl Parser {
                     _ => {
                         let func = self.expr_(PIPE_TARGET_PRECEDENCE)?;
                         let mut args = vec![];
-                        if let Some(dot) = func.try_downcast::<ast::Dot>()
+                        let pipe_idx = if let Some(dot) = func.try_downcast::<ast::Dot>()
                             && dot.lhs.is_none()
                         {
                             // For simplicity the following two cases are handled differently:
@@ -316,12 +316,14 @@ impl Parser {
                             //     => omitting the type might produce different code
                             dot.as_mut().lhs = Some(lhs);
                             dot.as_mut().has_lhs = true;
+                            None
                         } else {
                             // Note: This works for both `x |> Type.func()` and `x |> y.func()`!
                             args.push(lhs);
-                        }
+                            Some(0)
+                        };
                         self.tok(TokenKind::OpenParenthesis)?;
-                        self.call(func, args, Some(0))?.upcast()
+                        self.call(func, args, pipe_idx)?.upcast()
                     },
                 }
             },
@@ -389,7 +391,8 @@ impl Parser {
                             let ty = then!(
                             self.lex.advance_if_kind(TokenKind::OpenParenthesis) => {
                                 let ty_expr = self.expr()?;
-                                self.tok(TokenKind::CloseParenthesis)?;
+                                let close_p = self.tok(TokenKind::CloseParenthesis)?;
+                                decl.span = decl.span.join(close_p.span);
                                 ty_expr
                             });
                             let variant_index =

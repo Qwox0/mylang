@@ -423,3 +423,10 @@ test :: -> {{
     assert!(res.llvm_ir().contains("define { i8, i64 } @result"));
     drop(res);
 }
+
+#[test]
+fn error_missing_sum_type_data() {
+    // TODO: better error message?
+    test_body("a := enum { A(i32) }.A(); a")
+        .error("Missing argument for parameter `A: i32`", substr!(".A()";.end()));
+}

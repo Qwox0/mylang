@@ -1,4 +1,4 @@
-use crate::tests::{NewTest, arr, substr, test, test_body};
+use crate::tests::{CFfiArray, NewTest, arr, substr, test, test_body};
 
 #[rustfmt::skip]
 fn test_enum_switch(switch_: &str) -> NewTest {
@@ -167,4 +167,96 @@ a := switch enum { A, B }.A {
     assert!(res.llvm_ir().contains("store i64 1, ptr %a, align 8"));
     assert!(!res.llvm_ir().contains("phi"));
     drop(res);
+}
+
+#[test]
+fn switch_on_ptr_to_enum() {
+    let code = "
+MyEnum :: enum {
+    Void,
+    Int(i32),
+    Struct(struct { a: i32, b: i32 }),
+}
+add_one :: (e: *mut MyEnum) -> switch e {
+    .Void :> {};
+    .Int :> e.* += 1;
+    .Struct :> e.*.a += 1;
+};
+test :: -> {
+    mut v := MyEnum.Void;
+    add_one(&mut v);
+    mut i := MyEnum.Int(1);
+    add_one(&mut i);
+    mut s := MyEnum.Struct(.(10, 20));
+    add_one(&mut s);
+    .[v, i, s]
+}";
+    #[derive(Debug, Clone, Copy)]
+    #[repr(C)]
+    struct MyEnum {
+        tag: u8,
+        data: [i32; 2],
+    }
+    let res = test(code).get_out::<[MyEnum; 3]>();
+    debug_assert_eq!(res[0].tag, 0);
+    debug_assert_eq!(res[1].tag, 1);
+    debug_assert_eq!(res[1].data[0], 2);
+    debug_assert_eq!(res[2].tag, 2);
+    debug_assert_eq!(res[2].data[0], 11);
+    debug_assert_eq!(res[2].data[1], 20);
+
+    let code = "
+MyEnum :: enum { A, B, C }
+test :: -> switch &MyEnum.B {
+    .A :> 1;
+    .B :> 2;
+    .C :> 3;
+};";
+    test(code).ok(2);
+}
+
+#[test]
+fn switch_on_ptr_to_opt() {
+    let code = "
+MyEnum :: enum {
+    Void,
+    Int(i32),
+    Struct(struct { a: i32, b: i32 }),
+}
+add_one :: (e: *mut ?i32) -> switch e {
+    Some :> e.* += 1;
+    null :> {};
+};
+test :: -> {
+    mut some: ?i32 = Some(5);
+    add_one(&mut some);
+    mut n: ?i32 = null;
+    add_one(&mut n);
+    .[some, n]
+}";
+    #[derive(Debug, Clone, Copy)]
+    #[repr(C)]
+    struct MyEnum {
+        tag: u8,
+        data: i32,
+    }
+    let res = test(code).get_out::<CFfiArray<[MyEnum; 2]>>();
+    debug_assert_eq!(res.val[0].tag, 1);
+    debug_assert_eq!(res.val[0].data, 6);
+    debug_assert_eq!(res.val[1].tag, 0);
+    debug_assert_eq!(res.val[1].data, 0);
+
+    let code = "
+set_ptr :: (ref: *mut ?*any) -> switch ref {
+    Some :> ref.* = 0xabc.as(*any);
+    null :> {};
+};
+test :: -> {
+    mut some: ?*any = Some(&{});
+    set_ptr(&mut some);
+    mut n: ?*any = null;
+    set_ptr(&mut n);
+    .[some, n]
+}";
+    test(code).ok(arr([0xabc_usize, 0]));
 }

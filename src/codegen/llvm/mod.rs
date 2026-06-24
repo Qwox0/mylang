@@ -542,9 +542,7 @@ impl<'ctx> Codegen<'ctx> {
                             None => self.build_alloca_with_align(self.raw_type(0), "", 1)?,
                         })
                     },
-                    UnaryOpKind::Deref => {
-                        stack_val(self.sym_as_val(sym, p.never_ptr_ty)?.ptr_val())
-                    },
+                    UnaryOpKind::Deref => self.build_ptr_deref(sym).coerce(),
                     UnaryOpKind::Not => {
                         debug_assert!(
                             operand.ty == p.bool || operand.ty.u().kind == AstKind::IntTy
@@ -719,14 +717,18 @@ impl<'ctx> Codegen<'ctx> {
                 )
             },
             AstEnum::Switch { val, cases, else_body, .. } => {
+                let mut val_sym = self.compile_expr(*val)?;
                 let val_ty = val.ty.u();
-                let val_llvm_ty = self.llvm_type(val_ty);
+                let val_inner_ty = if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
+                    val_sym = self.build_ptr_deref(val_sym)?;
+                    p.pointee.downcast_type()
+                } else {
+                    val_ty
+                };
 
-                let val_sym = self.compile_expr(*val)?;
-
-                let (tag_val, data_sym) = match val_ty.matchable2() {
+                let (tag_val, mut data_sym) = match val_inner_ty.matchable2() {
                     TypeMatch::EnumDef(e) => {
-                        let enum_llvm = val_llvm_ty.enum_ty();
+                        let enum_llvm = self.llvm_type(val_inner_ty).enum_ty();
                         let tag_sym = self.build_enum_tag_access(enum_llvm, val_sym)?;
                         let data_sym = self.build_enum_data_access(enum_llvm, val_sym)?;
                         let tag_val =
@@ -740,6 +742,13 @@ impl<'ctx> Codegen<'ctx> {
                     },
                     _ => unreachable_debug(),
                 };
+                if let TypeMatch::PtrTy(_) = val_ty.matchable2() {
+                    match data_sym {
+                        Symbol::Void => {},
+                        Symbol::Stack(ptr) => data_sym = reg_sym(ptr),
+                        _ => unreachable_debug(),
+                    }
+                }
                 let tag_llvm_ty = tag_val.get_type();
 
                 let func = self.cur_fn.u();
@@ -756,12 +765,12 @@ impl<'ctx> Codegen<'ctx> {
 
                     let case_int = match case.case.rep().matchable2() {
                         AstMatch::EnumVal(enum_val) => {
-                            debug_assert_eq!(val_ty.kind, AstKind::EnumDef);
+                            debug_assert_eq!(val_inner_ty.kind, AstKind::EnumDef);
                             debug_assert!(enum_val.data.is_none());
                             const_int(tag_llvm_ty, enum_val.tag_val())
                         },
                         AstMatch::OptionalVal(opt_val) => {
-                            debug_assert_eq!(val_ty.kind, AstKind::OptionTy);
+                            debug_assert_eq!(val_inner_ty.kind, AstKind::OptionTy);
                             debug_assert!(opt_val.val.is_none());
                             tag_llvm_ty.const_int(opt_val.is_some as u64, false)
                         },
@@ -3419,6 +3428,14 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<CodegenValue<'ctx>> {
         let ptr = self.build_ptr_to_sym_with_align(sym, alignment)?;
         Ok(CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?))
+    }
+
+    fn build_ptr_deref(&mut self, ptr_sym: Symbol<'ctx>) -> CodegenResult<Symbol<'ctx>> {
+        let ptr_align = primitives().never_ptr_ty.alignment();
+        stack_val(
+            self.sym_as_val_with_llvm_ty(ptr_sym, self.ptr_type().as_basic_type_enum(), ptr_align)?
+                .ptr_val(),
+        )
     }
 
     #[inline]

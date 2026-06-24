@@ -1504,6 +1504,10 @@ impl Decl {
     pub fn is_allowed_in_const(&self) -> bool {
         self.is_const || self.markers.get(DeclMarkers::IS_STATIC_MASK)
     }
+
+    pub fn has_default(&self, is_enum_variant: bool) -> bool {
+        if is_enum_variant { false } else { self.init.is_some() }
+    }
 }
 
 impl Block {
@@ -1853,7 +1857,10 @@ impl DeclListExt for [Ptr<Decl>] {
     }
 
     fn iter_types(&self) -> impl ExactSizeIterator<Item = Ptr<Type>> + Clone + '_ {
-        self.iter().map(|decl| decl.var_ty.u())
+        self.iter().map(|decl| {
+            //debug_expr!(*decl);
+            decl.var_ty.u()
+        })
     }
 }
 
