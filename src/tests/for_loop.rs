@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::*;
 
 #[test]
 fn for_loop_sum_array() {

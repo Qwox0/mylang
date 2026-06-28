@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, arr, substr, test, test_body};
+use crate::tests::*;
 
 /// more tests about associated constants: [`crate::tests::associated_consts`]
 #[test]

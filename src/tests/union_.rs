@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::*;
 
 #[test]
 fn transmute_with_union_same_size() {

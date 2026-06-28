@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, substr, test};
+use crate::tests::*;
 
 #[test]
 fn recursive_value_cannot_infer_type() {

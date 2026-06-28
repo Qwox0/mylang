@@ -1,4 +1,4 @@
-use crate::tests::{substr, test, test_body};
+use crate::tests::*;
 
 #[test]
 fn initializer_on_struct_type() {

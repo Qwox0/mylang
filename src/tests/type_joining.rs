@@ -1,7 +1,4 @@
-use crate::{
-    ast,
-    tests::{TestSpan, substr, test},
-};
+use crate::{ast, tests::*};
 
 /// common_type([]T, []mut T) == []T (allowed)
 /// ty_match(got=[]T, expected=[]mut T) => Error

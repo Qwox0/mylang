@@ -1,7 +1,7 @@
 use crate::{
     ast,
     ptr::{OPtr, Ptr},
-    tests::{TestResult, TestSpan, substr, test, test_body},
+    tests::*,
 };
 use num::ToPrimitive;
 

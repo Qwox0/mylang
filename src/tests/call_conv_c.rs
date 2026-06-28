@@ -12,7 +12,7 @@
 //! { i32, f32 } -> i64
 //! { f32, i32 } -> i64
 
-use crate::tests::{fields, test, test_body};
+use crate::tests::*;
 
 macro_rules! test_struct_return {
     ($test_name:ident : { $($field:ident : $ty:ty = $val:expr),* $(,)? }) => {

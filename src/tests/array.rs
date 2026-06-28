@@ -1,4 +1,4 @@
-use crate::tests::{arr, substr, test_body};
+use crate::tests::*;
 
 #[test]
 fn arr_initializer_with_lhs() {

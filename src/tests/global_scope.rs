@@ -1,4 +1,4 @@
-use crate::tests::{has_duplicate_symbol, substr, test};
+use crate::tests::*;
 
 #[test]
 fn error_duplicate() {

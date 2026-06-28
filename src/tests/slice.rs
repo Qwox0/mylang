@@ -1,4 +1,4 @@
-use crate::tests::{stack_ptr, test_body};
+use crate::tests::*;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]

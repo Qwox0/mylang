@@ -1,4 +1,4 @@
-use crate::tests::{CFfiArray, NewTest, arr, substr, test, test_body};
+use crate::tests::*;
 
 #[rustfmt::skip]
 fn test_enum_switch(switch_: &str) -> NewTest {

@@ -1,4 +1,4 @@
-use crate::tests::{arr, substr, test_body};
+use crate::tests::*;
 
 #[test]
 fn mut_checks() {

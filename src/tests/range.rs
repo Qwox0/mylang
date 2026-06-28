@@ -1,4 +1,4 @@
-use crate::tests::{substr, test_body};
+use crate::tests::*;
 
 #[test]
 fn inclusive_range_without_end_bound() {

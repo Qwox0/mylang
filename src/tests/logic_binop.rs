@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::*;
 use core::fmt;
 
 #[test]

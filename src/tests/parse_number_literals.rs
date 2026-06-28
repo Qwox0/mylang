@@ -5,7 +5,7 @@ use crate::{
     },
     ptr::Ptr,
     source_file::SourceFile,
-    tests::{substr, test_body},
+    tests::*,
 };
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-use crate::tests::test;
+use crate::tests::*;
 
 #[test]
 fn compile_std_lib() {

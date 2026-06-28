@@ -1,4 +1,4 @@
-use crate::tests::test_body;
+use crate::tests::*;
 
 #[test]
 fn should_not_respect_outer_precedence() {

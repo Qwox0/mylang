@@ -1,8 +1,4 @@
-use crate::{
-    ast::debug::DebugAst,
-    ptr::OPtr,
-    tests::{stack_ptr, substr, test, test_body},
-};
+use crate::{ast::debug::DebugAst, ptr::OPtr, tests::*};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq)]

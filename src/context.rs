@@ -173,13 +173,20 @@ impl CompilationContextInner {
         cur_path: Option<&Path>,
         err_span: Span,
     ) -> Result<FilesIndex, HandledErr> {
+        #[cfg(test)]
+        {
+            if let Some(idx) = self.import_manager.imports.get(Path::new(import_text)) {
+                return Ok(*idx);
+            }
+        }
+
         let std_path = self.import_manager.try_resolve_standard_import_path(import_text);
         let assume_canonicalized = std_path.is_some();
         let path = std_path.unwrap_or_else(|| {
             let cur_path = cur_path.u();
             debug_assert!(is_canonical(cur_path));
             debug_assert!(cur_path.is_file());
-            // This needs to be canonicalized because import_text might look like "../a.mylang"
+            // This must be canonicalized because import_text might look like "../a.mylang"
             cur_path.parent().u().join(import_text)
         });
         self.import_manager
@@ -198,12 +205,17 @@ impl CompilationContextInner {
 
     #[cfg(test)]
     fn set_test_file(&mut self, code: Ptr<lexer::Code>) -> Result<(), HandledErr> {
-        let test_file_idx = self.import_manager.add_source_file(
-            SourceFile::new(Ptr::from_ref(self.args.path.as_ref()), code),
-            None,
-            &self.alloc,
-        )?;
+        let test_file_idx = self.add_test_file(self.args.path.clone(), code)?;
         Ok(self.import_manager.set_start_file(test_file_idx))
+    }
+
+    #[cfg(test)]
+    pub fn add_test_file(
+        &mut self,
+        path: PathBuf,
+        code: Ptr<lexer::Code>,
+    ) -> Result<FilesIndex, HandledErr> {
+        self.import_manager.add_test_file(path, code, &self.alloc)
     }
 
     pub fn add_library(&mut self, str_lit: Ptr<ast::StrVal>) -> Result<(), HandledErr> {
@@ -239,7 +251,7 @@ impl CompilationContextInner {
 pub struct ImportManager {
     /// absolute import file path -> index into `files`
     //pub imports: HashMap<Box<Path>, FilesIndex>, // If I use this valgrind shows false positives
-    imports: HashMap<PathBuf, FilesIndex>,
+    pub imports: HashMap<PathBuf, FilesIndex>,
     /// This List must contain [`Ptr`]s because it might reallocate while a mutable reference to
     /// [`SourceFile`] is active.
     files: Vec<Ptr<SourceFile>>,
@@ -315,24 +327,32 @@ impl ImportManager {
             let p = path.display();
             cerror!(err_span, "cannot import source file \"{p}\": {e}")
         })?;
-        self.add_source_file(file, Some(path), alloc)
+        self.add_source_file(file, path, alloc)
     }
 
     fn add_source_file(
         &mut self,
         file: SourceFile,
-        path: Option<PathBuf>,
+        path: PathBuf,
         alloc: &Arena,
     ) -> Result<FilesIndex, HandledErr> {
         let file = alloc.alloc(file)?;
         self.files.push(file);
         let idx = self.files.len() - 1;
-        if let Some(path) = path {
-            //self.as_mut().imports.insert(path.into_boxed_path(), idx);
-            let old = self.imports.insert(path, idx);
-            debug_assert!(old.is_none());
-        }
+        //self.as_mut().imports.insert(path.into_boxed_path(), idx);
+        let old = self.imports.insert(path, idx);
+        debug_assert!(old.is_none());
         Ok(idx)
+    }
+
+    #[cfg(test)]
+    pub fn add_test_file(
+        &mut self,
+        path: PathBuf,
+        code: Ptr<lexer::Code>,
+        alloc: &Arena,
+    ) -> Result<FilesIndex, HandledErr> {
+        self.add_source_file(SourceFile::new(Ptr::from_ref(path.as_ref()), code), path, &alloc)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::tests::{substr, test};
+use crate::tests::*;
 
 #[test]
 fn error_unterminated_block_comment() {

@@ -1,4 +1,4 @@
-use crate::tests::{substr, test, test_body};
+use crate::tests::*;
 
 #[test]
 fn if_variants() {

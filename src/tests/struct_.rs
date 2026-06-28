@@ -1,7 +1,4 @@
-use crate::{
-    ast::DeclListExt,
-    tests::{substr, test, test_body},
-};
+use crate::{ast::DeclListExt, tests::*};
 use std::mem::offset_of;
 
 #[test]

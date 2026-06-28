@@ -1,4 +1,4 @@
-use crate::tests::{substr, test_body};
+use crate::tests::*;
 
 #[test]
 fn invalid_index_type() {

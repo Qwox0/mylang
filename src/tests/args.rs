@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, substr, test};
+use crate::tests::*;
 
 fn test_compile_err_for_call_and_pos_initializer(
     params: &str,

@@ -1,4 +1,4 @@
-use crate::tests::{test, test_body};
+use crate::tests::*;
 
 #[test]
 fn defer_reverse_order() {

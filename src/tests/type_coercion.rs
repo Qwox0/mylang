@@ -1,4 +1,4 @@
-use crate::tests::{NewTest, substr, test, test_body};
+use crate::tests::*;
 use std::fmt;
 
 fn test_all_coercion_sites(

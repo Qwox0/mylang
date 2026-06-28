@@ -1,4 +1,4 @@
-use crate::tests::{TestSpan, arr, substr, test_body};
+use crate::tests::*;
 
 #[test]
 fn array_initializer() {

@@ -3,7 +3,7 @@ use crate::{
     cli::{BuildArgs, TestArgsOptions},
     codegen::llvm::CodegenModuleExt,
     compiler::{BackendModule, CompileMode, CompileResult, compile_ctx},
-    context::CompilationContext,
+    context::{CompilationContext, ctx},
     diagnostics::{DiagnosticReporter, DiagnosticSeverity},
     parser::lexer::Span,
     ptr::Ptr,
@@ -13,6 +13,7 @@ use std::{
     cell::OnceCell,
     fmt::{self, Display},
     marker::PhantomData,
+    path::{Path, PathBuf},
     thread,
 };
 
@@ -41,7 +42,6 @@ mod optional;
 mod parse_number_literals;
 mod parser;
 mod pipe;
-mod ptr;
 mod range;
 mod realistic;
 mod sema;
@@ -120,22 +120,41 @@ impl Drop for TestCtx {
 struct TestResult<Kind> {
     ctx: TestCtx,
     code: String,
+    additional_file_code: Vec<String>,
     loaded_prelude: bool,
     data: Kind,
 }
 
-struct Parsed;
-struct Compiled {
-    backend_mod: BackendModule,
-    module_text: OnceCell<String>,
+struct TestPrepared(TestResult<()>);
+
+mod m {
+    use super::*;
+
+    pub struct Parsed;
+    pub struct Compiled {
+        pub backend_mod: BackendModule,
+        pub module_text: OnceCell<String>,
+    }
+    pub struct Ok<RetTy> {
+        pub c: Compiled,
+        pub ret: RetTy,
+    }
+    pub struct Err;
 }
-struct Ok<RetTy> {
-    c: Compiled,
-    ret: RetTy,
-}
-struct Err;
 
 impl NewTest {
+    fn add_file(self, name: &str, code: impl ToString) -> TestPrepared {
+        let mut res = self.prepare();
+        let code = code.to_string();
+        res.0
+            .ctx
+            .ctx
+            .add_test_file(PathBuf::from(name), Ptr::from_ref(code.as_ref()))
+            .expect("failed to add test file");
+        res.0.additional_file_code.push(code);
+        res
+    }
+
     fn with_prelude(mut self) -> Self {
         self.load_prelude = true;
         self
@@ -152,7 +171,7 @@ impl NewTest {
     }
 
     #[track_caller]
-    fn prepare(self) -> TestResult<()> {
+    fn prepare(self) -> TestPrepared {
         let code = Ptr::from_ref(self.code.as_str());
         let print_source = self.options.print_source;
         let args = BuildArgs::test_args(self.options);
@@ -163,37 +182,50 @@ impl NewTest {
         }
 
         let ctx = CompilationContext::for_tests(args, code, self.load_prelude);
-        TestResult {
+        TestPrepared(TestResult {
             ctx: TestCtx { ctx, diag_idx: 0 },
             code: self.code,
+            additional_file_code: vec![],
             loaded_prelude: self.load_prelude,
             data: (),
-        }
+        })
     }
 
-    fn parse(self) -> TestResult<Parsed> {
+    fn parse(self) -> TestResult<m::Parsed> {
         let res = self.prepare();
-        crate::parser::parse_files(res.ctx.ctx.0);
-        TestResult { data: Parsed, ..res }
+        crate::parser::parse_files(res.0.ctx.ctx.0);
+        TestResult { data: m::Parsed, ..res.0 }
     }
+}
 
+impl CompileTest for NewTest {
     #[track_caller]
     fn compile(self) -> TestResult<CompileResult> {
-        let _self = self.prepare();
-        TestResult { data: compile_ctx(_self.ctx.ctx.0, CompileMode::TestRun), .._self }
+        self.prepare().compile()
     }
+}
+
+impl CompileTest for TestPrepared {
+    #[track_caller]
+    fn compile(self) -> TestResult<CompileResult> {
+        TestResult { data: compile_ctx(self.0.ctx.ctx.0, CompileMode::TestRun), ..self.0 }
+    }
+}
+
+trait CompileTest: Sized {
+    fn compile(self) -> TestResult<CompileResult>;
 
     #[track_caller]
-    fn compile_no_err(self) -> TestResult<Compiled> {
+    fn compile_no_err(self) -> TestResult<m::Compiled> {
         let res = self.compile();
         let CompileResult::ModuleForTesting(backend_mod) = res.data else {
             panic!("Test failed! Expected no compiler errors.")
         };
-        TestResult { data: Compiled { backend_mod, module_text: OnceCell::new() }, ..res }
+        TestResult { data: m::Compiled { backend_mod, module_text: OnceCell::new() }, ..res }
     }
 
     #[track_caller]
-    fn _ok<RetTy>(self) -> TestResult<Ok<RetTy>> {
+    fn _ok<RetTy>(self) -> TestResult<m::Ok<RetTy>> {
         if is_array::<RetTy>() && std::mem::size_of::<RetTy>() <= 16 {
             // For some reason arrays with size == 16 are received incorrectly by Rust even though
             // Rust should use sret for types with size >= 16.
@@ -210,11 +242,11 @@ impl NewTest {
             .codegen_module()
             .jit_run_fn::<RetTy>("test", inkwell::OptimizationLevel::None)
             .unwrap();
-        TestResult { data: Ok { ret, c: res.data }, ..res }
+        TestResult { data: m::Ok { ret, c: res.data }, ..res }
     }
 
     #[track_caller]
-    fn ok<RetTy: PartialEq + fmt::Debug>(self, expected: RetTy) -> TestResult<Ok<RetTy>> {
+    fn ok<RetTy: PartialEq + fmt::Debug>(self, expected: RetTy) -> TestResult<m::Ok<RetTy>> {
         let res = self._ok();
         if res.data.ret != expected && is_array::<RetTy>() && std::mem::size_of::<RetTy>() < 16 {
             println!(
@@ -233,7 +265,11 @@ impl NewTest {
     }
 
     #[track_caller]
-    fn error(self, msg: impl AsRef<str>, span: impl FnOnce(&str) -> TestSpan) -> TestResult<Err> {
+    fn error(
+        self,
+        msg: impl AsRef<str>,
+        span: impl FnOnce(&str) -> TestSpan,
+    ) -> TestResult<m::Err> {
         let res = self.compile();
         if !(matches!(res.data, CompileResult::Err)
             && res.ctx.ctx.diagnostic_reporter.do_abort_compilation())
@@ -246,17 +282,17 @@ impl NewTest {
 
 impl<Res> TestResult<Res> {
     fn read_llvm_ir(&self) -> String
-    where Res: AsRef<Compiled> {
+    where Res: AsRef<m::Compiled> {
         self.data.as_ref().backend_mod.codegen_module().print_to_string().to_string()
     }
 
     pub fn llvm_ir(&self) -> &str
-    where Res: AsRef<Compiled> {
+    where Res: AsRef<m::Compiled> {
         self.data.as_ref().module_text.get_or_init(|| self.read_llvm_ir())
     }
 
     pub fn take_llvm_ir(&mut self) -> String
-    where Res: AsRef<Compiled> + AsMut<Compiled> {
+    where Res: AsRef<m::Compiled> + AsMut<m::Compiled> {
         self.data.as_mut().module_text.take().unwrap_or_else(|| self.read_llvm_ir())
     }
 
@@ -284,9 +320,9 @@ impl<Res> TestResult<Res> {
         mut self,
         msg: impl AsRef<str>,
         span: impl FnOnce(&str) -> TestSpan,
-    ) -> TestResult<Err> {
+    ) -> TestResult<m::Err> {
         self.check_next_diag(DiagnosticSeverity::Error, Some(msg.as_ref()), span);
-        TestResult { data: Err, ..self }
+        TestResult { data: m::Err, ..self }
     }
 
     #[track_caller]
@@ -389,7 +425,16 @@ impl TestSpan {
     }
 
     #[track_caller]
-    pub fn of_substr(str: &str, substr: &str, mut n: usize) -> TestSpan {
+    pub fn of_substr(str: &str, substr: &str, mut n: usize, file: Option<&str>) -> TestSpan {
+        let str = file
+            .map(|file| {
+                let Some(idx) = ctx().import_manager.imports.get(Path::new(file)) else {
+                    panic!("Cannot find file '{file}'");
+                };
+                (*ctx().files()[*idx].code).as_ref()
+            })
+            .unwrap_or(str);
+
         let mut pos = 0;
         loop {
             let str = &str[pos..];
@@ -450,32 +495,33 @@ fn has_duplicate_symbol(llvm_ir: &str, mut sym_name: &str) -> bool {
 }
 
 macro_rules! substr {
-    ($substr:expr $(; skip=$skip:expr)? $(; . $method:ident($($arg:expr),*))?) => {
-        &|code: &str| $crate::tests::TestSpan::of_substr(code, $substr, 0 $(+ $skip)?)$(.$method($($arg),*))?
+    ($substr:expr $(; skip=$skip:expr)? $(; . $method:ident($($arg:expr),*))? $(; in=$file:expr)?) => {
+        &|code: &str| $crate::tests::TestSpan::of_substr(code, $substr, 0 $(+ $skip)?, None $(.or(Some($file)))?)
+            $(.$method($($arg),*))?
     };
 }
 pub(self) use substr;
 
-impl AsRef<Compiled> for Compiled {
-    fn as_ref(&self) -> &Compiled {
+impl AsRef<m::Compiled> for m::Compiled {
+    fn as_ref(&self) -> &m::Compiled {
         self
     }
 }
 
-impl AsMut<Compiled> for Compiled {
-    fn as_mut(&mut self) -> &mut Compiled {
+impl AsMut<m::Compiled> for m::Compiled {
+    fn as_mut(&mut self) -> &mut m::Compiled {
         self
     }
 }
 
-impl<RetTy> AsRef<Compiled> for Ok<RetTy> {
-    fn as_ref(&self) -> &Compiled {
+impl<RetTy> AsRef<m::Compiled> for m::Ok<RetTy> {
+    fn as_ref(&self) -> &m::Compiled {
         &self.c
     }
 }
 
-impl<RetTy> AsMut<Compiled> for Ok<RetTy> {
-    fn as_mut(&mut self) -> &mut Compiled {
+impl<RetTy> AsMut<m::Compiled> for m::Ok<RetTy> {
+    fn as_mut(&mut self) -> &mut m::Compiled {
         &mut self.c
     }
 }

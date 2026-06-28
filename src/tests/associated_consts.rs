@@ -1,4 +1,4 @@
-use crate::tests::{has_duplicate_symbol, substr, test, test_body};
+use crate::tests::*;
 
 #[test]
 fn struct_method() {

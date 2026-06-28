@@ -1,6 +1,6 @@
 use crate::{
     ast::{self, AstKind},
-    tests::{substr, test, test_body},
+    tests::*,
 };
 use num::ToPrimitive;
 
@@ -34,8 +34,7 @@ test :: -> { get_num(); get_num(); get_num() }";
 #[test]
 fn good_invalid_token_error() {
     // here we have to guess that `num` might be a decl (is this a good idea?)
-    test_body("{ num i32 = 1; }")
-        .error("expected `:`, `:=`, `::` or `;`", substr!("num";.after()));
+    test_body("{ num i32 = 1; }").error("expected `:`, `:=`, `::` or `;`", substr!("num";.after()));
 
     // with the `mut` we now know that this is meant to be a decl
     test_body("{ mut num i32 = 1; }")
@@ -47,8 +46,7 @@ fn good_invalid_token_error() {
     test("f :: (a # i32 = 1) -> {}").error(err_msg, substr!("#"));
 
     // `mut` marker shouln't change error message
-    test("f :: (mut a # i32 = 1) -> {}")
-        .error("expected `:`, `:=` or `::`, got `#`", substr!("#")); // curently a worse error
+    test("f :: (mut a # i32 = 1) -> {}").error("expected `:`, `:=` or `::`, got `#`", substr!("#")); // curently a worse error
 
     test("f :: (a: i32 = 1, b # i32 = 2) -> {}").error(err_msg, substr!("#"));
 
