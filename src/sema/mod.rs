@@ -514,9 +514,7 @@ impl Sema {
                 {
                     self.analyze_enum_tag(expr, enum_ty, variant_idx, is_const)?
                 } else if lhs_ty == p.type_ty
-                    && let TypeEnum::StructDef { consts, .. }
-                    | TypeEnum::UnionDef { consts, .. }
-                    | TypeEnum::EnumDef { consts, .. } = lhs.downcast_type().matchable().as_ref()
+                    && let Some(consts) = lhs.downcast_type().get_associated_consts()
                 {
                     // associated consts/methods
                     let Some((_, field)) = consts.find_field(rhs.sym) else {
@@ -788,7 +786,7 @@ impl Sema {
                         return error_const_call(call).into();
                     }
                     let dot = func.downcast::<ast::Dot>().as_mut();
-                    let fn_ty = dot.rhs.upcast().downcast::<ast::Fn>();
+                    let fn_ty = dot.rhs.ty.u().upcast().downcast::<ast::Fn>();
                     let args = std::iter::once(dot.lhs.u())
                         .chain(args.iter().copied())
                         .collect::<Vec<_>>(); // TODO: bench no allocation
@@ -1208,12 +1206,8 @@ impl Sema {
             AstEnum::Switch { val, cases, else_body, .. } => {
                 let val_ty = analyze!(*val, None).finalize();
 
-                let val_inner_ty = if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
-                    p.pointee.downcast_type()
-                } else {
-                    val_ty
-                };
-                match val_inner_ty.matchable2() {
+                let source = PatternSource::new(val_ty);
+                match source.ty.matchable2() {
                     TypeMatch::EnumDef(_) | TypeMatch::OptionTy(_) => {},
                     _ => return cerror2!(val.full_span(), "Cannot switch on type `{}`", val_ty),
                 }
@@ -1222,8 +1216,8 @@ impl Sema {
 
                 let mut out_ty = None;
                 for case in cases.iter_mut() {
-                    let case_ty = *self.analyze(case.case, &Some(val_inner_ty), true)?;
-                    if !(ty_match(case_ty, val_inner_ty) || ty_match(case_ty, p.enum_variant)) {
+                    let case_ty = *self.analyze(case.case, &Some(source.ty), true)?;
+                    if !(ty_match(case_ty, source.ty) || ty_match(case_ty, p.enum_variant)) {
                         return error_mismatched_types_custom(
                             case.case.full_span(),
                             "enum variant",
@@ -1231,7 +1225,7 @@ impl Sema {
                         )
                         .into();
                     }
-                    let mut narrowed_ty = match val_inner_ty.matchable2() {
+                    let narrowed_ty = match source.ty.matchable2() {
                         TypeMatch::EnumDef(_) => {
                             let case_val = case.case.downcast::<ast::EnumVal>();
                             if case_val.data.is_some() {
@@ -1260,14 +1254,7 @@ impl Sema {
                         if case.scope.decls.is_empty() {
                             let decl_in_case =
                                 self.alloc(ast::Decl::from_ident(narrowed_symbol))?;
-                            if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
-                                narrowed_ty = type_new!(PtrTy {
-                                    is_mut: p.is_mut,
-                                    pointee: narrowed_ty.upcast()
-                                })
-                                .upcast_to_type()
-                            }
-                            decl_in_case.as_mut().var_ty = Some(narrowed_ty);
+                            decl_in_case.as_mut().var_ty = Some(source.ty_in_body(narrowed_ty));
 
                             case.scope.decls = self.cctx.alloc.alloc_one_val_slice(decl_in_case)?;
                         } else {
@@ -1285,7 +1272,7 @@ impl Sema {
                 }
                 if let Some(else_body) = *else_body {
                     self.analyze_and_accumulate_type(else_body, &mut out_ty, ty_hint, is_const)?;
-                } else if let TypeMatch::EnumDef(e) = val_inner_ty.matchable2() {
+                } else if let TypeMatch::EnumDef(e) = source.ty.matchable2() {
                     let mut variant_used = tmp_alloc().alloc_slice_with(e.variants.len(), false)?;
                     for case in cases.iter() {
                         let v = case.case.downcast::<ast::EnumVal>();
@@ -1307,7 +1294,7 @@ impl Sema {
                         chint!(expr.span.end(), "Consider adding an `else` case");
                         return err.into();
                     }
-                } else if let TypeMatch::OptionTy(_) = val_inner_ty.matchable2() {
+                } else if let TypeMatch::OptionTy(_) = source.ty.matchable2() {
                     let mut variant_used = [false; 2];
                     for case in cases.iter() {
                         let v = case.case.downcast::<ast::OptionalVal>();
@@ -1333,10 +1320,12 @@ impl Sema {
                 }
                 expr.ty = Some(out_ty.unwrap_or(p.never));
             },
-            AstEnum::For { source, iter_var, body, scope, .. } => {
+            AstEnum::For { source_expr, iter_var, body, scope, .. } => {
                 scope.verify_no_duplicates();
 
-                analyze!(*source, None).finalize();
+                let source_ty = analyze!(*source_expr, None).finalize();
+                let source = PatternSource::new(source_ty);
+
                 let elem_ty = match source.ty.matchable().as_ref() {
                     TypeEnum::ArrayTy { elem_ty, .. } | TypeEnum::SliceTy { elem_ty, .. } => {
                         elem_ty.downcast_const_val().downcast_type()
@@ -1348,9 +1337,8 @@ impl Sema {
                     },
                     _ => {
                         return cerror2!(
-                            source.full_span(),
-                            "cannot iterate over value of type `{}`",
-                            source.ty.u()
+                            source_expr.full_span(),
+                            "cannot iterate over value of type `{source_ty}`",
                         );
                     },
                 };
@@ -1358,7 +1346,7 @@ impl Sema {
                 let osh = self.open_scope(scope);
                 self.loop_stack.push(expr);
                 let res = (|| {
-                    iter_var.var_ty = Some(elem_ty);
+                    iter_var.var_ty = Some(source.ty_in_body(elem_ty));
                     self.analyze_decl(*iter_var, false, None)?;
 
                     self.analyze(*body, &Some(p.void_ty), is_const)?;
@@ -2517,6 +2505,8 @@ impl Sema {
             return Ok(());
         }
 
+        let p = p();
+
         // TODO?: allow `ptr: **mut u8; ptr.*.* = 1;`
         const DEEP_MUT_CHECK: bool = true;
 
@@ -2611,8 +2601,10 @@ impl Sema {
                         }
                     },
                     AstMatch::Dot(dot) => {
-                        debug_assert_ne!(dot.lhs.u().ty.u().kind, AstKind::PtrTy); // autodereferencing is not implemented
-                        mutated = dot.lhs.u().rep();
+                        let lhs = dot.lhs.u();
+                        debug_assert_ne!(lhs.ty.u().kind, AstKind::PtrTy); // autodereferencing is not implemented
+                        mutated =
+                            if lhs.ty == p.module { dot.rhs.upcast() } else { dot.lhs.u().rep() };
                     },
                     AstMatch::Index(index) => {
                         handle_index!(index.lhs, index.idx);
@@ -2882,4 +2874,37 @@ const _: () = assert!(size_of::<Option<VarDeclSpecialCase>>() == 1);
 
 fn get_enum_variant_tag(variant: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::IntVal>> {
     variant.init.or_not_finished()?.try_downcast::<ast::IntVal>().or_not_finished()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PatternSource {
+    pub ty: Ptr<ast::Type>,
+    pub kind: PatternSourceKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PatternSourceKind {
+    ByVal,
+    ByRef { is_mut: bool },
+}
+
+impl PatternSource {
+    pub fn new(ty: Ptr<ast::Type>) -> PatternSource {
+        match ty.matchable2() {
+            TypeMatch::PtrTy(p) => PatternSource {
+                kind: PatternSourceKind::ByRef { is_mut: p.is_mut },
+                ty: p.pointee.downcast_type(),
+            },
+            _ => PatternSource { kind: PatternSourceKind::ByVal, ty },
+        }
+    }
+
+    fn ty_in_body(self, narrowed_inner: Ptr<ast::Type>) -> Ptr<ast::Type> {
+        match self.kind {
+            PatternSourceKind::ByRef { is_mut } => {
+                type_new!(PtrTy { is_mut, pointee: narrowed_inner.upcast() }).upcast_to_type()
+            },
+            PatternSourceKind::ByVal => narrowed_inner,
+        }
+    }
 }

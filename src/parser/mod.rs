@@ -295,7 +295,7 @@ impl Parser {
                         let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
                         let scope =
                             Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
-                        expr!(For { source: lhs, iter_var, body, scope, was_piped: true }, t.span)
+                        expr!(For { source_expr: lhs, iter_var, body, scope, was_piped: true }, t.span)
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         self.advanced().opt_do();
@@ -441,13 +441,13 @@ impl Parser {
             TokenKind::Keyword(Keyword::For) => {
                 let iter_var = self.advanced().ident()?;
                 self.local_keyword("in")?;
-                let source = self.expr()?;
+                let source_expr = self.expr()?;
                 self.opt_do();
                 let body = self.expr()?;
 
                 let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
                 let scope = Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
-                expr!(For { source, iter_var, body, scope, was_piped: false }, span)
+                expr!(For { source_expr, iter_var, body, scope, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr()?;

@@ -20,7 +20,7 @@ pub str :: #import "./str.mylang";
 libc :: #import "libc";
 
 // TODO: add real context.
-static ctx := struct {
+mut static ctx := struct {
     alloc: mem.Allocator;
 }.{
     alloc = mem.c_allocator,

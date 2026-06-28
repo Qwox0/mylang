@@ -8,7 +8,7 @@ FixedArenaAllocator :: struct {
     end: *u8,
 
     new :: (buffer: []mut u8) -> {
-        addr_range := std.slice.as_ptr_range_mut_u8(buffer);;
+        addr_range := std.slice.as_ptr_range_mut_u8(buffer);
         FixedArenaAllocator.{
             pos = addr_range.start,
             start = addr_range.start,

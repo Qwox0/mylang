@@ -249,3 +249,22 @@ struct {{a:i64, b:i64}}.{{ a, b }}"
     );
     test_body(code("mut")).ok((2i64, 2i64));
 }
+
+#[test]
+fn mut_check_imported_static() {
+    let code = r#"
+other :: #import "other";
+other.x.inner += 1;
+other.x
+"#;
+    test_body(code)
+        .add_file("other", "static x: struct { inner: i32 = 1 } = .{};")
+        .error(
+            r#"Cannot assign to `#import "other".x.inner`, as `x` is not declared as mutable"#, // TODO: no replacement in error message
+            substr!("other.x.inner += 1"),
+        )
+        .info("consider changing `x` to be mutable", substr!("x";in="other"));
+    test_body(code)
+        .add_file("other", "mut static x: struct { inner: i32 = 1 } = .{};")
+        .ok(2_i32);
+}

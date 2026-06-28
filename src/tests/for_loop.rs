@@ -63,3 +63,13 @@ product"
 fn invalid_source_type() {
     test_body("true |> for _x { break; };").ok(());
 }
+
+#[test]
+fn for_each_by_ref() {
+    let code = "
+mut arr := i32.[1, 2, 3, 4, 5];
+for x in &mut arr do x.* *= 2;
+arr
+";
+    test_body(code).ok(arr([2_i32, 4, 6, 8, 10]));
+}

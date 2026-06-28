@@ -494,7 +494,7 @@ ast_variants! {
     /// `<source> | for <iter_var> <body>`
     For {
         was_piped: bool,
-        source: Ptr<Ast>,
+        source_expr: Ptr<Ast>,
         iter_var: Ptr<Decl>,
         body: Ptr<Ast>,
         scope: Scope,
@@ -1156,7 +1156,7 @@ impl Ast {
                 if was_piped { val.full_span() } else { span }
                     .maybe_join(else_body.as_deref().map(Ast::full_span))
             },
-            AstEnum::For { source: l, body, was_piped, .. }
+            AstEnum::For { source_expr: l, body, was_piped, .. }
             | AstEnum::While { condition: l, body, was_piped, .. } => {
                 if *was_piped { l.full_span() } else { span }.join(body.full_span())
             },

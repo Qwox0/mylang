@@ -52,6 +52,14 @@ isprint : (c: u8) -> c_int : #extern;
 
 log10 : (x: c_double) -> c_double : #extern;
 
+fabs  : (x:  f64) ->  f64 : #extern;
+fabsf : (x:  f32) ->  f32 : #extern;
+fabsl : (x: f128) -> f128 : #extern;
+
+modf  : (x:  f64, iptr: ?*mut  f64) ->  f64 : #extern;
+modff : (x:  f32, iptr: ?*mut  f32) ->  f32 : #extern;
+modfl : (x: f128, iptr: ?*mut f128) -> f128 : #extern;
+
 // ===== <setjmp.h> =====
 
 
@@ -144,6 +152,9 @@ atol : (string: *c_char) -> c_long : #extern;
 
 /// <https://www.gnu.org/software/libc/manual/html_node/Array-Sort-Function.html>
 qsort : (array: *any, count: c_size_t, size: c_size_t, compare: *(l: *any, r: *any) -> c_int) -> void : #extern;
+
+rand  : () -> i32 : #extern;
+srand : (seed: u32) -> void : #extern;
 
 // ===== <stdnoreturn.h> =====
 

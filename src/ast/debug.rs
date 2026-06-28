@@ -251,16 +251,16 @@ impl DebugAst for Ast {
                 }
             },
             AstEnum::Switch { .. } => todo!(),
-            AstEnum::For { source, iter_var, body, was_piped, .. } => {
+            AstEnum::For { source_expr, iter_var, body, was_piped, .. } => {
                 if *was_piped {
-                    lines.write_tree(source);
+                    lines.write_tree(source_expr);
                     lines.write("|>for ");
                     lines.write_tree(iter_var);
                 } else {
                     lines.write("for ");
                     lines.write_tree(iter_var);
                     lines.write(" in ");
-                    lines.write_tree(source);
+                    lines.write_tree(source_expr);
                 }
                 lines.write(" ");
                 lines.write_tree(body);

@@ -13,6 +13,7 @@ use crate::{
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
+    sema,
     type_::{
         EnumRepr, NonZeroFieldType, OptionalRepr, enum_alignment, enum_repr, finalize_ty,
         optional_repr, struct_size, ty_match, union_size,
@@ -473,7 +474,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_call(f, fn_val, args.into_iter(), write_target.take())
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
-                    let f = dot.rhs.rep().downcast::<ast::Fn>();
+                    let f = dot.rhs.ty.u().downcast::<ast::Fn>();
                     let Some(&val) = self.fn_table.get(&f) else {
                         println!("Function was not compiled:",);
                         debug_expr!(f);
@@ -717,38 +718,22 @@ impl<'ctx> Codegen<'ctx> {
                 )
             },
             AstEnum::Switch { val, cases, else_body, .. } => {
-                let mut val_sym = self.compile_expr(*val)?;
-                let val_ty = val.ty.u();
-                let val_inner_ty = if let TypeMatch::PtrTy(p) = val_ty.matchable2() {
-                    val_sym = self.build_ptr_deref(val_sym)?;
-                    p.pointee.downcast_type()
-                } else {
-                    val_ty
-                };
-
-                let (tag_val, mut data_sym) = match val_inner_ty.matchable2() {
+                let source = PatternSourceSymbol::new(self.compile_expr(*val)?, val.ty.u(), self)?;
+                let tag_val;
+                let data_sym = source.sym_in_body(match source.ty.matchable2() {
                     TypeMatch::EnumDef(e) => {
-                        let enum_llvm = self.llvm_type(val_inner_ty).enum_ty();
-                        let tag_sym = self.build_enum_tag_access(enum_llvm, val_sym)?;
-                        let data_sym = self.build_enum_data_access(enum_llvm, val_sym)?;
-                        let tag_val =
+                        let enum_llvm = self.llvm_type(source.ty).enum_ty();
+                        let tag_sym = self.build_enum_tag_access(enum_llvm, source.sym)?;
+                        tag_val =
                             self.sym_as_val(tag_sym, e.tag_ty.u().upcast_to_type())?.int_val();
-                        (tag_val, data_sym)
+                        self.build_enum_data_access(enum_llvm, source.sym)?
                     },
                     TypeMatch::OptionTy(o) => {
-                        let tag_val = self.build_optional_is_some(val_sym, o)?;
-                        let data_sym = self.build_optional_data_access(val_sym, o)?;
-                        (tag_val.int, data_sym)
+                        tag_val = self.build_optional_is_some(source.sym, o)?.int;
+                        self.build_optional_data_access(source.sym, o)?
                     },
                     _ => unreachable_debug(),
-                };
-                if let TypeMatch::PtrTy(_) = val_ty.matchable2() {
-                    match data_sym {
-                        Symbol::Void => {},
-                        Symbol::Stack(ptr) => data_sym = reg_sym(ptr),
-                        _ => unreachable_debug(),
-                    }
-                }
+                });
                 let tag_llvm_ty = tag_val.get_type();
 
                 let func = self.cur_fn.u();
@@ -765,12 +750,12 @@ impl<'ctx> Codegen<'ctx> {
 
                     let case_int = match case.case.rep().matchable2() {
                         AstMatch::EnumVal(enum_val) => {
-                            debug_assert_eq!(val_inner_ty.kind, AstKind::EnumDef);
+                            debug_assert_eq!(source.ty.kind, AstKind::EnumDef);
                             debug_assert!(enum_val.data.is_none());
                             const_int(tag_llvm_ty, enum_val.tag_val())
                         },
                         AstMatch::OptionalVal(opt_val) => {
-                            debug_assert_eq!(val_inner_ty.kind, AstKind::OptionTy);
+                            debug_assert_eq!(source.ty.kind, AstKind::OptionTy);
                             debug_assert!(opt_val.val.is_none());
                             tag_llvm_ty.const_int(opt_val.is_some as u64, false)
                         },
@@ -825,76 +810,72 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 self.bb_merge_finish(merge)
             },
-            AstEnum::For { source, iter_var, body, .. } => {
+            AstEnum::For { source_expr, iter_var, body, .. } => {
                 let outer_continue_break_depth = self.continue_break_depth;
                 self.continue_break_depth = 0;
 
                 let res: CodegenResultAndControlFlow<()> = try {
-                    let source_ty = source.ty.u();
-                    let source_llvm_ty = self.llvm_type(source_ty);
-                    let source_sym = self.compile_expr(*source)?;
+                    let source = PatternSourceSymbol::new(
+                        self.compile_expr(*source_expr)?,
+                        source_expr.ty.u(),
+                        self,
+                    )?;
+                    let source_llvm_ty = self.llvm_type(source.ty);
 
-                    match source_ty.matchable().as_ref() {
+                    let for_info;
+                    let iter_var_sym = source.sym_in_body(match source.ty.matchable().as_ref() {
                         TypeEnum::ArrayTy { len, .. } => {
                             let idx_ty = self.isize_type;
                             let len = idx_ty.const_int(len.int(), false);
-                            let for_info =
+                            for_info =
                                 self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
 
-                            let arr_ptr = self.build_ptr_to_sym(source_sym, source_ty)?.u();
-                            let iter_var_sym = Symbol::Stack(self.build_gep(
-                                source_llvm_ty.arr_ty(),
-                                arr_ptr,
-                                &[idx_ty.const_zero(), for_info.idx_int],
-                            )?);
-                            self.symbols.push((*iter_var, iter_var_sym));
-                            let out = self.compile_expr(*body).handle_unreachable()?;
-                            self.build_for_end(for_info, out)?
+                            let arr_ptr = self.build_ptr_to_sym(source.sym, source.ty)?.u();
+                            Symbol::Stack(self.build_gep(source_llvm_ty.arr_ty(), arr_ptr, &[
+                                idx_ty.const_zero(),
+                                for_info.idx_int,
+                            ])?)
                         },
                         TypeEnum::SliceTy { elem_ty, .. } => {
                             let idx_ty = self.isize_type;
-                            let (ptr, len) = self.build_slice_field_access(source_sym)?;
+                            let (ptr, len) = self.build_slice_field_access(source.sym)?;
 
-                            let for_info =
+                            for_info =
                                 self.build_for(idx_ty, false, idx_ty.const_zero(), len, false)?;
                             let elem_ty = self.llvm_type(elem_ty.downcast_type()).basic_ty();
-                            let iter_var_sym =
-                                Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?);
-                            self.symbols.push((*iter_var, iter_var_sym));
-                            let out = self.compile_expr(*body).handle_unreachable()?;
-                            self.build_for_end(for_info, out)?
+                            Symbol::Stack(self.build_gep(elem_ty, ptr, &[for_info.idx_int])?)
                         },
                         TypeEnum::RangeTy { elem_ty, rkind, .. } if rkind.has_start() => {
                             let i = elem_ty.downcast::<ast::IntTy>();
                             let elem_llvm_ty = self.llvm_type(*elem_ty).int_ty();
                             let range_ty = source_llvm_ty.struct_ty();
                             let start =
-                                self.build_struct_access(range_ty, source_sym, 0, "start")?;
+                                self.build_struct_access(range_ty, source.sym, 0, "start")?;
                             let start = self.sym_as_val(start, *elem_ty)?.int_val();
 
                             let end = if rkind.has_end() {
                                 let idx = rkind.get_field_count() as u32 - 1;
                                 let end =
-                                    self.build_struct_access(range_ty, source_sym, idx, "end")?;
+                                    self.build_struct_access(range_ty, source.sym, idx, "end")?;
                                 self.sym_as_val(end, *elem_ty)?.int_val()
                             } else {
                                 self.max_int(elem_llvm_ty, i.is_signed)?
                             };
 
-                            let for_info = self.build_for(
+                            for_info = self.build_for(
                                 elem_llvm_ty,
                                 i.is_signed,
                                 start,
                                 end,
                                 rkind.is_inclusive(),
                             )?;
-                            let iter_var_sym = reg_sym(for_info.idx);
-                            self.symbols.push((*iter_var, iter_var_sym));
-                            let out = self.compile_expr(*body).handle_unreachable()?;
-                            self.build_for_end(for_info, out)?
+                            reg_sym(for_info.idx)
                         },
                         _ => panic_debug!("for loop over other types"),
-                    };
+                    });
+                    self.symbols.push((*iter_var, iter_var_sym));
+                    let out = self.compile_expr(*body).handle_unreachable()?;
+                    self.build_for_end(for_info, out)?
                 };
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
@@ -2156,7 +2137,8 @@ impl<'ctx> Codegen<'ctx> {
             WriteTarget::Zst | WriteTarget::Ptr(_) => {},
             WriteTarget::Phi(phi) => {
                 let val = self.sym_as_val(sym, out_ty)?.basic_val();
-                let phi_ty = unsafe { CodegenType::from_raw(LLVMTypeOf(phi.as_value_ref())) }.basic_ty();
+                let phi_ty =
+                    unsafe { CodegenType::from_raw(LLVMTypeOf(phi.as_value_ref())) }.basic_ty();
                 debug_assert_eq!(val.get_type(), phi_ty);
                 let last_bb = self.builder.get_insert_block().u();
                 phi.add_incoming(&[(&val, last_bb)]);
@@ -4294,4 +4276,36 @@ enum EnumType<'ctx> {
     Simple(IntType<'ctx>),
     /// { tag, data }
     WithData(StructType<'ctx>),
+}
+
+struct PatternSourceSymbol<'ctx> {
+    sym: Symbol<'ctx>,
+    ty: Ptr<ast::Type>,
+    kind: sema::PatternSourceKind,
+}
+
+impl<'ctx> PatternSourceSymbol<'ctx> {
+    fn new(
+        sym: Symbol<'ctx>,
+        ty: Ptr<ast::Type>,
+        codegen: &mut Codegen<'ctx>,
+    ) -> CodegenResult<PatternSourceSymbol<'ctx>> {
+        let s = sema::PatternSource::new(ty);
+        let sym = match s.kind {
+            sema::PatternSourceKind::ByVal => sym,
+            sema::PatternSourceKind::ByRef { .. } => codegen.build_ptr_deref(sym)?,
+        };
+        Ok(PatternSourceSymbol { sym, kind: s.kind, ty: s.ty })
+    }
+
+    fn sym_in_body(&self, sym: Symbol<'ctx>) -> Symbol<'ctx> {
+        match self.kind {
+            sema::PatternSourceKind::ByVal => sym,
+            sema::PatternSourceKind::ByRef { .. } => match sym {
+                Symbol::Void => sym,
+                Symbol::Stack(ptr) => reg_sym(ptr),
+                _ => unreachable_debug(),
+            },
+        }
+    }
 }
