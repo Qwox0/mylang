@@ -2,7 +2,7 @@ use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt, error::CodegenResult},
-    context::{CompilationContext, CompilationContextInner, ctx, tmp_alloc},
+    context::{CompilationContext, CompilationContextInner, tmp_alloc},
     diagnostics::{DiagnosticReporter, HandledErr, cerror, cwarn},
     parser::{self, lexer::Span},
     ptr::Ptr,
@@ -105,7 +105,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
 
     if mode == CompileMode::Parse {
         if !args.quiet {
-            ctx.compile_time.print();
+            print_compilation_stats(&ctx);
         }
         return CompileResult::Ok;
     }
@@ -128,7 +128,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
 
     if mode == CompileMode::Check {
         if !args.quiet {
-            ctx.compile_time.print();
+            print_compilation_stats(&ctx);
         }
         return CompileResult::Ok;
     }
@@ -214,7 +214,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
         );
 
         if !args.quiet {
-            ctx.compile_time.print();
+            print_compilation_stats(&ctx);
         }
 
         return CompileResult::Ok;
@@ -253,7 +253,7 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     }
 
     if !args.quiet {
-        ctx.compile_time.print();
+        print_compilation_stats(&ctx);
     }
 
     // ##### Executing #####
@@ -274,6 +274,17 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
     }
 
     CompileResult::Ok
+}
+
+fn print_compilation_stats(ctx: &CompilationContextInner) {
+    eprintln!("  compiled code size:    {} KiB", (ctx.code_len as f32) / 1024.0);
+    eprintln!("    {} LOC (excluding empty lines and comments)", ctx.code_lines_compact);
+
+    let allocated = ctx.alloc.0.allocated_bytes() - ctx.alloc.0.chunk_capacity();
+    eprintln!("  main arena allocated:  {} MiB", (allocated as f32) / 1024.0 / 1024.0);
+
+    eprintln!();
+    ctx.compile_time.print();
 }
 
 #[derive(Default)]
@@ -316,9 +327,6 @@ impl CompileDurations {
 
         let total = frontend_total + backend_total + self.linking;
         eprintln!("  Total:                 {:?}", total);
-
-        eprintln!();
-        eprintln!("  main arena allocated: {} KiB", (ctx().alloc.0.allocated_bytes() as f32) / 1024.0)
     }
 }
 

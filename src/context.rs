@@ -31,6 +31,8 @@ pub struct CompilationContextInner {
     pub tmp_alloc: ScratchAllocator,
     pub diagnostic_reporter: CtxDiagnosticReporter,
     pub compile_time: CompileDurations,
+    pub code_len: usize,
+    pub code_lines_compact: u32,
 
     pub symbols: InternPool,
     pub primitives: Primitives,
@@ -84,7 +86,8 @@ impl Drop for CompilationContext {
 
 impl CompilationContext {
     pub fn empty(args: BuildArgs) -> CompilationContext {
-        let alloc = Arena::new();
+        const MEBIBYTE: usize = 1024 * 1024;
+        let alloc = Arena(bumpalo::Bump::with_capacity(10 * MEBIBYTE));
         let diagnostic_reporter = CtxDiagnosticReporter::default();
         let mut symbols = InternPool::new();
 
@@ -100,6 +103,8 @@ impl CompilationContext {
             tmp_alloc: ScratchAllocator::new(32 * 1024 - Arena::BUMP_OVERHEAD),
             diagnostic_reporter,
             compile_time: CompileDurations::default(),
+            code_len: 0,
+            code_lines_compact: 0,
 
             symbols,
             primitives,
@@ -339,6 +344,9 @@ impl ImportManager {
         let file = alloc.alloc(file)?;
         self.files.push(file);
         let idx = self.files.len() - 1;
+
+        ctx_mut().code_len += file.code.len();
+
         //self.as_mut().imports.insert(path.into_boxed_path(), idx);
         let old = self.imports.insert(path, idx);
         debug_assert!(old.is_none());

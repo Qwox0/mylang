@@ -162,6 +162,8 @@ pub fn parse_file_into(
         unexpected_token(t, &[]);
         let _ = p.parse_stmts_into(stmts, false);
     }
+    //println!("{} -> {} LOC", file.path.display(), p.lex.cursor.code_lines_compact);
+    cctx.as_mut().code_lines_compact += p.lex.cursor.code_lines_compact;
     debug_assert!(p.lex.is_empty());
     let stmt_range = start_idx..stmts.len();
     file.set_stmt_range(stmt_range.clone());
@@ -295,7 +297,10 @@ impl Parser {
                         let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
                         let scope =
                             Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
-                        expr!(For { source_expr: lhs, iter_var, body, scope, was_piped: true }, t.span)
+                        expr!(
+                            For { source_expr: lhs, iter_var, body, scope, was_piped: true },
+                            t.span
+                        )
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         self.advanced().opt_do();

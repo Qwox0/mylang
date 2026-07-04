@@ -18,11 +18,6 @@ impl Arena {
     pub const BUMP_OVERHEAD: usize = 64;
 
     #[inline]
-    pub fn new() -> Self {
-        Self(bumpalo::Bump::new())
-    }
-
-    #[inline]
     pub fn alloc<T>(&self, val: T) -> Result<Ptr<T>, AllocErr> {
         Ok(Ptr::from_ref(self.0.try_alloc(val)?))
     }
@@ -85,7 +80,7 @@ mod benches {
         (_ $bench_name:ident, $f:ident($val:expr)) => {
             #[bench]
             fn $bench_name(b: &mut Bencher) {
-                let alloc = Arena::new();
+                let alloc = Arena(Default::default());
                 b.iter(|| {
                     for _ in 0..100 {
                         let _ = black_box(black_box(&alloc).$f(black_box($val)));

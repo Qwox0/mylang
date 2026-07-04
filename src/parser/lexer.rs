@@ -562,6 +562,18 @@ pub fn is_whitespace(c: char) -> bool {
     )
 }
 
+fn skip_whitespace(c: &mut Cursor, mut has_newline: bool) {
+    c.advance_while(|c| {
+        if c == '\n' {
+            has_newline = true;
+        }
+        is_whitespace(c)
+    });
+    if has_newline {
+        c.finish_line();
+    }
+}
+
 pub fn is_ident_start(c: char) -> bool {
     c == '_' || unicode_xid::UnicodeXID::is_xid_start(c)
 }
@@ -652,12 +664,11 @@ fn load_next(lex: &mut Cursor) -> Option<Token> {
     loop {
         start = lex.pos;
         kind = parse_next_token_kind(lex)?;
-        if kind.is_ignored() {
-            continue;
-        } else {
+        if !kind.is_ignored() {
             break;
-        };
+        }
     }
+    lex.line_has_code = true;
     Some(Token { kind, span: Span::new(start..lex.pos, Some(lex.file)) })
 }
 
@@ -683,7 +694,7 @@ fn parse_next_token_kind(lex: &mut Cursor) -> Option<TokenKind> {
     let start = lex.pos;
     Some(match lex.next()? {
         w if is_whitespace(w) => {
-            lex.advance_while(is_whitespace);
+            skip_whitespace(lex, w == '\n');
             TokenKind::Whitespace
         },
         '"' => string_literal(lex),
@@ -833,6 +844,8 @@ fn string_literal(lex: &mut Cursor) -> TokenKind {
 
 fn multiline_string_literal_line(lex: &mut Cursor) -> TokenKind {
     while lex.next().is_some_and(|c| c != '\n') {}
+    lex.line_has_code = true;
+    lex.finish_line();
     TokenKind::MultilineStrLitLine
 }
 
@@ -868,7 +881,7 @@ fn num_literal(lex: &mut Cursor) -> TokenKind {
                 TokenKind::FloatLit
             } else {
                 let dot_pos = peek_lex.pos;
-                peek_lex.advance_while(is_whitespace);
+                peek_lex.advance_while(is_whitespace); // not relevant for LOC
                 if parse_next_token_kind(&mut peek_lex).is_some_and(|t| t == TokenKind::Ident) {
                     TokenKind::IntLit
                 } else {
@@ -904,6 +917,7 @@ fn line_comment(code: &mut Cursor) -> TokenKind {
         _ => TokenKind::LineComment,
     };
     while !matches!(code.next(), None | Some('\n')) {}
+    code.finish_line();
     t
 }
 
@@ -955,11 +969,21 @@ pub struct Cursor {
     code: Ptr<Code>,
     pos: usize,
     has_unclosed_block_comment: bool,
+
+    line_has_code: bool,
+    pub code_lines_compact: u32,
 }
 
 impl Cursor {
     pub fn new(file: Ptr<SourceFile>) -> Cursor {
-        Cursor { file, code: file.code, pos: 0, has_unclosed_block_comment: false }
+        Cursor {
+            file,
+            code: file.code,
+            pos: 0,
+            has_unclosed_block_comment: false,
+            line_has_code: false,
+            code_lines_compact: 0,
+        }
     }
 
     pub fn get_rem(&self) -> &str {
@@ -970,6 +994,13 @@ impl Cursor {
         let mut c = self.get_rem().chars();
         c.next();
         c.next()
+    }
+
+    fn finish_line(&mut self) {
+        if self.line_has_code {
+            self.code_lines_compact += 1;
+            self.line_has_code = false;
+        }
     }
 }
 
