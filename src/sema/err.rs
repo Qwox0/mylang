@@ -1,4 +1,4 @@
-use crate::diagnostics::HandledErr;
+use crate::{diagnostics::HandledErr, sema::UnitDependency};
 use SemaResult::*;
 use std::{
     convert::Infallible,
@@ -11,11 +11,7 @@ pub type SemaError = HandledErr;
 #[must_use]
 pub enum SemaResult<T> {
     Ok(T),
-    NotFinished {
-        /// must decrease iff analysis continued. non-zero because [`Ok`] should be used when an
-        /// expression was fully analyzed
-        remaining: usize,
-    },
+    NotFinished(UnitDependency),
     Err(SemaError),
 }
 
@@ -28,7 +24,7 @@ impl<T> SemaResult<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SemaResult<U> {
         match self {
             Ok(t) => Ok(f(t)),
-            NotFinished { remaining } => NotFinished { remaining },
+            NotFinished(dep) => NotFinished(dep),
             Err(HandledErr) => Err(HandledErr),
         }
     }
@@ -45,7 +41,7 @@ impl<T> Try for SemaResult<T> {
     fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
         match self {
             Ok(ty) => ControlFlow::Continue(ty),
-            NotFinished { remaining } => ControlFlow::Break(SemaResult::NotFinished { remaining }),
+            NotFinished(dep) => ControlFlow::Break(SemaResult::NotFinished(dep)),
             Err(err) => ControlFlow::Break(SemaResult::Err(err)),
         }
     }
@@ -54,7 +50,7 @@ impl<T> Try for SemaResult<T> {
 impl<T> FromResidual<SemaResult<!>> for SemaResult<T> {
     fn from_residual(residual: SemaResult<!>) -> Self {
         match residual {
-            NotFinished { remaining } => SemaResult::NotFinished { remaining },
+            NotFinished(dep) => SemaResult::NotFinished(dep),
             Err(err) => SemaResult::Err(err),
         }
     }

@@ -364,7 +364,7 @@ impl Parser {
                 let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
-                    StructDef { scope, fields, consts, finished_members: 0 },
+                    StructDef { scope, sema_units: None, fields, consts, finished_members: 0 },
                     span.join(close_b.span)
                 )
             },
@@ -373,7 +373,7 @@ impl Parser {
                 let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
-                    UnionDef { scope, fields, consts, finished_members: 0 },
+                    UnionDef { scope, sema_units: None, fields, consts, finished_members: 0 },
                     span.join(close_b.span)
                 )
             },
@@ -425,6 +425,7 @@ impl Parser {
                 expr!(
                     EnumDef {
                         scope,
+                        sema_units: None,
                         variants: fields,
                         finished_members: 0,
                         consts,

@@ -45,6 +45,7 @@ mod pipe;
 mod range;
 mod realistic;
 mod sema;
+mod sema_dependencies;
 mod slice;
 mod statics;
 mod string;

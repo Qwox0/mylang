@@ -270,6 +270,7 @@ impl Primitives {
                 let fields = alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?;
                 let def = ast_new!(StructDef {
                     scope: Scope::new(fields, ScopeKind::Struct),
+                    sema_units: None,
                     fields,
                     consts: Vec::new(),
                     finished_members: 2,

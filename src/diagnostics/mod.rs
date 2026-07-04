@@ -28,6 +28,7 @@ pub trait DiagnosticReporter {
         self.report(DiagnosticSeverity::Warn, span, msg)
     }
 
+    #[allow(unused)]
     #[track_caller]
     fn info(&mut self, span: Span, msg: impl Display) {
         self.report(DiagnosticSeverity::Info, span, msg)
@@ -236,11 +237,13 @@ macro_rules! cwarn {
 }
 pub(crate) use cwarn;
 
+#[allow(unused)]
 macro_rules! cinfo {
     ($span:expr, $fmt:literal $( , $args:expr )* $(,)?) => {
         crate::diagnostics::DiagnosticReporter::info(crate::context::ctx_mut(), $span, &format_args!($fmt, $($args),*))
     };
 }
+#[allow(unused)]
 pub(crate) use cinfo;
 
 macro_rules! chint {

@@ -6,7 +6,9 @@ use crate::{
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
-    scope::Scope,
+    scope::{Scope, ScopePos},
+    scratch_allocator::TmpPtr,
+    sema::SemaUnit,
     type_::{finalize_ty, ty_match},
     util::{UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
 };
@@ -342,6 +344,8 @@ ast_variants! {
         scope: Scope,
         /// all statements (including declarations) in this block
         stmts: Ptr<[Ptr<Ast>]>,
+        finished: usize,
+        cur_scope_pos: ScopePos,
     },
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
@@ -637,11 +641,13 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
-        finished_members: usize,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
+        /// only valid during sema
+        sema_units: Option<TmpPtr<[SemaUnit]>>,
+        finished_members: usize,
     },
     /// `union { a: int, b: String, c: (u8, u32) }`
     UnionDef {
@@ -649,11 +655,13 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
-        finished_members: usize,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
+        /// only valid during sema
+        sema_units: Option<TmpPtr<[SemaUnit]>>,
+        finished_members: usize,
     },
     /// `enum { A, B(i64) }`
     EnumDef {
@@ -663,12 +671,14 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `variant_count`
         variants: Ptr<[Ptr<Decl>]>,
-        finished_members: usize,
         /// contains the constants which are also in [`Scope::decls`] plus constants which are
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
+        /// only valid during sema
+        sema_units: Option<TmpPtr<[SemaUnit]>>,
+        finished_members: usize,
     },
 
     RangeTy {
@@ -1262,6 +1272,14 @@ impl Type {
         }
     }
 
+    // TODO: add SliceTy cases
+    pub fn get_fields(&self) -> Option<&[Ptr<Decl>]> {
+        match self.matchable().as_ref() {
+            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => Some(fields),
+            _ => None,
+        }
+    }
+
     /// Counts the number of nested optional layers.
     /// `???int` => 3; `int` => 0
     pub fn count_optional_nesting(self: Ptr<Type>) -> usize {
@@ -1517,7 +1535,7 @@ impl Block {
         has_trailing_semicolon: bool,
         span: Span,
     ) -> Self {
-        ast_new!(local Block { span, has_trailing_semicolon, stmts, scope })
+        ast_new!(local Block { span, has_trailing_semicolon, stmts, scope, finished: 0, cur_scope_pos: ScopePos(0) })
     }
 
     pub fn new_anon(stmts: Ptr<[Ptr<Ast>]>, scope: Scope) -> Self {

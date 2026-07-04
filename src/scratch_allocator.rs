@@ -122,6 +122,14 @@ impl ScratchAllocator {
     pub fn count_allocated_bytes(&self) -> usize {
         unsafe { self.arena.0.iter_allocated_chunks_raw() }.map(|(_, len)| len).sum()
     }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.arena.0.allocated_bytes()
+    }
+
+    pub fn chunk_capacity(&self) -> usize {
+        self.arena.0.chunk_capacity()
+    }
 }
 
 pub struct TmpPtr<T: ?Sized> {
@@ -129,6 +137,12 @@ pub struct TmpPtr<T: ?Sized> {
 
     #[cfg(debug_assertions)]
     in_scratch: Ptr<ScratchAllocator>,
+}
+
+impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for TmpPtr<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.ptr.fmt(f)
+    }
 }
 
 impl<T: ?Sized> TmpPtr<T> {

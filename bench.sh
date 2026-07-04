@@ -21,22 +21,21 @@ cd "$script_dir"
 
 cargo build --release
 
-old_exe="./mylang-old"
+executables=(
+    "./mylang-old"
+    "./target/release/mylang"
+)
 
-sha256sum "$old_exe"
-sha256sum ./target/release/mylang
-
-cd "$script_dir"
+for exe in "${executables[@]}"; do
+    sha256sum "$exe"
+done
 
 bench() {
-    sudo $(which poop) "$old_exe $*" "./target/release/mylang $*"
+    sudo $(which poop) "${executables[@]/%/ $*}"
 }
 
 bench check ./lib/std/mod.mylang --lib --diagnostic-level=error
-#bench check ./lib/std/bindgen/c.mylang
-#bench check ./lib/std/bindgen/libclang.mylang --lib
-#bench check ./lib/std/bindgen/libglfw3.mylang --lib
-#bench check ../../opengl_sphaerophoria/main.mylang
+#bench check ../../minesweeper/main.mylang
 
 #for i in $(seq 1 9); do
 #    bench check "../../aoc2024/day0${i}.mylang"

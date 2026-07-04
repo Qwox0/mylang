@@ -1,6 +1,20 @@
 use crate::tests::{optional::some, *};
 
 #[test]
+fn cycle_detection() {
+    let code = "
+a :: -> b();
+b :: -> a();
+a2 :: -> b2();
+b2 :: -> a2();
+not_part_of_cycle :: -> struct {}.MISSING;
+";
+    test(code)
+        .error("no associated constant `MISSING` on type `struct{}`", substr!("MISSING"))
+        .error("cycle(s) detected:", |_| TestSpan::ZERO);
+}
+
+#[test]
 fn error_cycle_in_struct() {
     let code = "
 MyStruct :: struct {

@@ -100,7 +100,7 @@ impl CompilationContext {
 
         let ctx = CompilationContextInner {
             alloc,
-            tmp_alloc: ScratchAllocator::new(32 * 1024 - Arena::BUMP_OVERHEAD),
+            tmp_alloc: ScratchAllocator::new(10 * MEBIBYTE - Arena::BUMP_OVERHEAD),
             diagnostic_reporter,
             compile_time: CompileDurations::default(),
             code_len: 0,
