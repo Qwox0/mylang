@@ -487,6 +487,7 @@ impl Sema {
             },
             AstEnum::Dot { has_lhs: true, lhs: Some(lhs), rhs, .. } => {
                 let lhs_ty = *analyze!(*lhs, None);
+                let decl;
                 let t = if lhs_ty == p.module {
                     let m = lhs.downcast::<ast::ImportDirective>();
                     let Some(s) = self.cctx.files()[m.files_idx.u()]
@@ -502,7 +503,7 @@ impl Sema {
                             m.path.text.as_ref(),
                         );
                     };
-                    rhs.decl = Some(s);
+                    decl = Some(s);
                     let ty = self.get_symbol_var_ty(s)?;
                     if let Some(cv) = s.try_const_val() {
                         expr.set_replacement(cv);
@@ -510,8 +511,9 @@ impl Sema {
                     ty
                 } else if lhs_ty == p.type_ty
                     && let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>()
-                    && let Some((variant_idx, _)) = enum_ty.variants.find_field(rhs.sym)
+                    && let Some((variant_idx, v)) = enum_ty.variants.find_field(rhs.sym)
                 {
+                    decl = Some(v);
                     self.analyze_enum_tag(expr, enum_ty, variant_idx, is_const)?
                 } else if lhs_ty == p.type_ty
                     && let Some(consts) = lhs.downcast_type().get_associated_consts()
@@ -526,6 +528,7 @@ impl Sema {
                         // is triggered)
                         return NotFinished { remaining: 2 };
                     };
+                    decl = Some(field);
                     let ty = self.get_symbol_var_ty(field)?;
                     debug_assert!(field.is_const);
                     expr.set_replacement(field.const_val());
@@ -542,6 +545,7 @@ impl Sema {
                             "automatic dereferencing of pointers is currently not allowed"
                         );
                     }
+                    decl = Some(field);
                     let ty = self.get_symbol_var_ty(field)?;
                     if is_const {
                         let Some(cv) = lhs.try_downcast_const_val() else {
@@ -565,6 +569,7 @@ impl Sema {
                     debug_assert!(method.is_const);
                     // method access
                     let method_ty = self.get_symbol_var_ty(method)?;
+                    decl = Some(method);
                     rhs.ty = Some(method_ty);
                     rhs.upcast().set_replacement(method.const_val());
                     if method_ty.try_downcast::<ast::Fn>().is_some() {
@@ -586,14 +591,17 @@ impl Sema {
                 } else if let TypeEnum::SliceTy { elem_ty, is_mut, .. } = *lhs_ty.matchable()
                     && rhs.sym == p.ptr_sym
                 {
+                    decl = None;
                     // TODO: remove this allocation (test if cast SliceTy -> PointerTy is valid)
                     type_new!(PtrTy { pointee: elem_ty, is_mut }).upcast_to_type()
                 } else if lhs_ty.kind == AstKind::SliceTy && rhs.sym == p.len_sym {
+                    decl = None;
                     p.u64
                 } else if let ty = lhs_ty.flatten_transparent()
                     // `lhs_ty.propagates_out()` implies `lhs_ty.flatten_transparent() == lhs_ty`
                     && ty.propagates_out()
                 {
+                    decl = None;
                     ty
                 } else {
                     if rhs.replacement.is_some() {
@@ -617,6 +625,9 @@ impl Sema {
                         } else if var_ty.propagates_out() {
                             ty = Some(var_ty);
                         }
+                        decl = Some(s);
+                    } else {
+                        decl = None;
                     }
                     //ty.ok_or_else(|| error_unknown_field(*rhs, lhs_ty))?
                     match ty {
@@ -631,6 +642,7 @@ impl Sema {
                         },
                     }
                 };
+                rhs.decl = decl;
                 expr.ty = Some(t);
             },
             AstEnum::Dot { has_lhs: true, lhs: None, .. } => unreachable_debug(),
@@ -1235,7 +1247,8 @@ impl Sema {
                                 );
                                 continue;
                             }
-                            case_val.variant().var_ty.u()
+                            let inner_ty = case_val.variant().var_ty.u();
+                            if inner_ty == p.void_ty { source.ty } else { inner_ty }
                         },
                         TypeMatch::OptionTy(o) => {
                             let v = case.case.downcast::<ast::OptionalVal>();
@@ -2150,6 +2163,7 @@ impl Sema {
                 );
                 on_err!();
             };
+            init.ty.or_not_finished()?;
             handle_const_val!(f_idx, init);
         }
         if ok {

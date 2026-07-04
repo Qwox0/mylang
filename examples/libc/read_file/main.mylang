@@ -1,5 +1,5 @@
 main :: -> {
-    text := read_file_as_string_slice("./file.txt");
+    text := read_file_alloc("./file.txt");
     puts(text.ptr);
     0
 }

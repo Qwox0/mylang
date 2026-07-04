@@ -100,6 +100,7 @@ pub struct Codegen<'ctx> {
     /// Can be used for ZST fields instead of `void`.
     empty_struct_ty: StructType<'ctx>,
     isize_type: IntType<'ctx>,
+    c_int: IntType<'ctx>,
 
     static_void: Option<GlobalValue<'ctx>>,
 }
@@ -124,6 +125,7 @@ impl<'ctx> Codegen<'ctx> {
             noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 0),
             empty_struct_ty: context.struct_type(&[], false),
             isize_type: context.i64_type(), // TODO: 32-bit
+            c_int: context.i32_type(),
 
             static_void: None,
         };
@@ -168,9 +170,9 @@ impl<'ctx> Codegen<'ctx> {
         ty: Ptr<ast::Type>,
         write_target: PointerValue<'ctx>,
     ) -> CodegenResult<()> {
-        match sym {
-            Symbol::Void => {},
-            Symbol::Stack(ptr) => {
+        match sym.basic() {
+            BasicSymbol::Zst => {},
+            BasicSymbol::Ref(ptr) => {
                 // #[cfg(debug_assertions)]
                 // println!("WARN: memcpy to write_target");
                 let layout = ty.layout();
@@ -178,12 +180,8 @@ impl<'ctx> Codegen<'ctx> {
                 let size = self.isize_type.const_int(layout.size as u64, false);
                 self.builder.build_memcpy(write_target, alignment, ptr, alignment, size)?;
             },
-            Symbol::Register(val) => {
+            BasicSymbol::Val(val) => {
                 self.build_store(write_target, val.basic_val(), ty.alignment())?;
-            },
-            Symbol::Global(_) => panic_debug!(),
-            Symbol::Function(f) => {
-                self.build_store(write_target, f.as_global_value().as_pointer_value(), 8)?;
             },
         }
         Ok(())
@@ -411,7 +409,7 @@ impl<'ctx> Codegen<'ctx> {
                                     .build_extract_value(range_val, 0, "start")?
                                     .into_int_value();
                                 let ptr = self.build_gep(llvm_elem_ty, ptr, &[start])?;
-                                let start = self.build_uint_extend(start, self.isize_type)?;
+                                let start = self.build_int_extend(start, self.isize_type, false)?;
                                 let len = self.builder.build_int_sub(len, start, "")?;
                                 (ptr, len)
                             },
@@ -420,7 +418,7 @@ impl<'ctx> Codegen<'ctx> {
                                     .builder
                                     .build_extract_value(range_val, 0, "end")?
                                     .into_int_value();
-                                end = self.build_uint_extend(end, self.isize_type)?;
+                                end = self.build_int_extend(end, self.isize_type, false)?;
                                 if rkind.is_inclusive() {
                                     end = self.builder.build_int_add(
                                         end,
@@ -1297,25 +1295,38 @@ impl<'ctx> Codegen<'ctx> {
             match *arg_ty {
                 CFfiType::Zst => {},
                 CFfiType::Simple(simple_ty) => {
-                    let val = if is_vararg
-                        && let Some(f_ty) = param_ty.try_downcast::<ast::FloatTy>()
-                        && f_ty.bits.u() < 64
-                    {
-                        // see <https://stackoverflow.com/a/53712850>
-                        let small_float = self
-                            .sym_as_val_with_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
-                            .float_val();
-                        CodegenValue::new(self.builder.build_float_ext(
-                            small_float,
-                            self.context.f64_type(),
-                            "",
-                        )?)
-                    } else if !param_ty.is_aggregate() {
-                        self.sym_as_val_with_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
-                    } else {
-                        // Cannot directly pass the `Symbol::Register` because the types might mismatch
-                        // (e.g. sym ty: `{ i32 }`, c_ffi_ty: `i32`
-                        self.sym_as_val_to_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
+                    let val = match simple_ty.any_ty() {
+                        AnyTypeEnum::FloatType(float_type) if is_vararg => {
+                            let llvm_f64 = self.context.f64_type();
+                            let float_val = self
+                                .sym_as_val_with_llvm_ty(sym, float_type, arg_align)?
+                                .float_val();
+                            CodegenValue::new(if float_type == llvm_f64 {
+                                float_val
+                            } else {
+                                self.builder.build_float_ext(float_val, llvm_f64, "")?
+                            })
+                        },
+                        AnyTypeEnum::IntType(int_type) if is_vararg => {
+                            let int_val =
+                                self.sym_as_val_with_llvm_ty(sym, int_type, arg_align)?.int_val();
+                            // Default argument promotion (<https://en.cppreference.com/c/language/conversion#Default_argument_promotions>)
+                            CodegenValue::new(
+                                if int_type.get_bit_width() < self.c_int.get_bit_width() {
+                                    self.build_int_extend(int_val, self.c_int, false)?
+                                } else {
+                                    int_val
+                                },
+                            )
+                        },
+                        _ if !param_ty.is_aggregate() => {
+                            self.sym_as_val_with_llvm_ty(sym, simple_ty, arg_align)?
+                        },
+                        _ => {
+                            // Cannot directly pass the `Symbol::Register` because the types might mismatch
+                            // (e.g. sym ty: `{ i32 }`, c_ffi_ty: `i32`
+                            self.sym_as_val_to_llvm_ty(sym, simple_ty.basic_ty(), arg_align)?
+                        },
                     };
                     arg_values.set(arg_offset, val.basic_metadata_val());
                 },
@@ -2786,16 +2797,17 @@ impl<'ctx> Codegen<'ctx> {
         ptr: PointerValue<'ctx>,
         len: IntValue<'ctx>,
     ) -> CodegenResult<StructValue<'ctx>> {
-        let len = self.build_uint_extend(len, self.isize_type)?;
+        let len = self.build_int_extend(len, self.isize_type, false)?;
         let slice = self.slice_ty().get_undef();
         let slice = self.builder.build_insert_value(slice, ptr, 0, "")?;
         Ok(self.builder.build_insert_value(slice, len, 1, "slice")?.into_struct_value())
     }
 
-    fn build_uint_extend(
+    fn build_int_extend(
         &self,
         val: IntValue<'ctx>,
         ty: IntType<'ctx>,
+        is_signed: bool,
     ) -> CodegenResult<IntValue<'ctx>> {
         debug_assert!(
             val.get_type().get_bit_width() <= ty.get_bit_width(),
@@ -2804,7 +2816,11 @@ impl<'ctx> Codegen<'ctx> {
             ty.get_bit_width()
         );
         // ..._or_bit_cast emits noop when source bit-width == target bit-width
-        Ok(self.builder.build_int_z_extend_or_bit_cast(val, self.isize_type, "")?)
+        if is_signed {
+            Ok(self.builder.build_int_s_extend_or_bit_cast(val, ty, "")?)
+        } else {
+            Ok(self.builder.build_int_z_extend_or_bit_cast(val, ty, "")?)
+        }
     }
 
     /// # Usage
@@ -3386,9 +3402,10 @@ impl<'ctx> Codegen<'ctx> {
     fn sym_as_val_with_llvm_ty(
         &mut self,
         sym: Symbol<'ctx>,
-        llvm_ty: BasicTypeEnum<'ctx>,
+        llvm_ty: impl BasicType<'ctx>,
         alignment: usize,
     ) -> CodegenResult<CodegenValue<'ctx>> {
+        let llvm_ty = llvm_ty.as_basic_type_enum();
         Ok(match sym.basic() {
             BasicSymbol::Ref(ptr) => {
                 CodegenValue::new(self.build_load(llvm_ty, ptr, "", alignment)?)

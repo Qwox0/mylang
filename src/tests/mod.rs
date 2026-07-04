@@ -255,7 +255,18 @@ trait CompileTest: Sized {
                 type_name::<RetTy>(),
             );
         }
-        assert_eq!(res.data.ret, expected);
+        let got = &res.data.ret;
+        if *got != expected {
+            let got_text = format!("{got:?}");
+            let expected_text = format!("{expected:?}");
+            panic!(
+                "got incorrect return value
+      got: {got_text:text_width$} 0x{got:0hex_width$x?}
+ expected: {expected_text:text_width$} 0x{expected:0hex_width$x?}",
+                text_width = got_text.len().max(expected_text.len()),
+                hex_width = size_of::<RetTy>() * 2,
+            );
+        }
         res
     }
 

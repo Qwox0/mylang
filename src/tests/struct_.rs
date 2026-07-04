@@ -117,3 +117,20 @@ fn struct_layout() {
     assert_eq!(crate::type_::struct_offset(&s.fields, 1), offset_of!(A, b));
     assert_eq!(crate::type_::struct_offset(&s.fields, 2), offset_of!(A, c));
 }
+
+#[test]
+#[ignore = "todo"]
+fn static_in_struct() {
+    let code = "
+Color :: u32;
+Theme :: struct {
+    static default: Theme;
+    static default := Theme.{};
+
+    ButtonColors :: struct { bg: Color, border: Color }
+    button := ButtonColors.{ bg=0, border=1 };
+    button_hovered := ButtonColors.{ bg=2, border=3 };
+}
+";
+    test(code).compile_no_err();
+}

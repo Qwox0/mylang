@@ -133,7 +133,7 @@ pub SEEK_CUR : c_int : 1;
 pub SEEK_END : c_int : 2;
 
 fread  : (data: *mut any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
-fwrite : (data: *mut any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
+fwrite : (data:     *any, size: c_size_t, count: c_size_t, stream: *FILE) -> c_size_t : #extern;
 
 // ===== <stdlib.h> =====
 
@@ -446,19 +446,19 @@ E :: enum {
     ERFKILL = 132,
     /// Memory page has hardware error
     EHWPOISON = 133,
+
+    errno :: -> get_errno();
+    fail :: (errno: E) -> never {
+        printf("libc operation failed. %s: %s\n".ptr, errno.strerrorname_np(), errno.strerror());
+        abort()
+    }
 }
 
 Result :: enum {
     Ok(c_size_t),
     Err(E),
 
-    unwrap :: (self: Result) -> switch self {
-        .Ok :> self,
-        .Err :> {
-            printf("libc operation failed. %s: %s\n".ptr, self.strerrorname_np(), self.strerror());
-            abort()
-        }
-    };
+    unwrap :: (self: Result) -> switch self { .Ok :> self, .Err :> self.fail() };
 }
 result :: (result: c_ssize_t) -> Result {
     if result == -1 return .Err(get_errno());
@@ -480,6 +480,8 @@ get_errno :: -> __errno_location().*.as(E);
 
 // ===== <time.h> =====
 
+time_t :: i64;
+time : (timer: ?*mut time_t) -> time_t : #extern;
 
 // ===== <uchar.h> =====
 

@@ -1,6 +1,37 @@
 std :: #import "std";
 libc :: #import "libc";
 
+get_file_size :: (file: *libc.FILE) -> u64 {
+    cur_pos := libc.ftell(file);
+
+    libc.fseek(file, 0, libc.SEEK_END);
+    size := libc.ftell(file);
+    if size < 0 do std.panic("Cannot get file size");
+
+    libc.fseek(file, cur_pos, libc.SEEK_SET);
+    size.as(u64)
+}
+
+/// The `ptr` on the returned slice must be `free`d by the caller.
+read_file_alloc :: (pathname: *u8, alloc := std.ctx.alloc) -> []u8 {
+    file := libc.fopen(pathname, "rb".ptr) orelse libc.E.errno().fail();
+    defer libc.fclose(file);
+
+    len := get_file_size(file);
+    ptr := alloc.alloc(len, 1) orelse std.panic("read_file_alloc: allocation failed");
+    libc.fread(ptr, 1, len, file);
+    .{ ptr, len }
+}
+
+read_file :: (file: *libc.FILE, buf: []mut u8) -> {
+    length := get_file_size(file);
+    if buf.len < length then std.panic("buffer too small");
+    read := libc.fread(buf.ptr, 1, length, file);
+    if read < length then std.panic("read failed");
+    std.assert(read == length);
+    buf[..length]
+}
+
 parent_dir :: (path: []u8) -> {
     std.assert(path.len > 0);
     mut end := path.len - 1;

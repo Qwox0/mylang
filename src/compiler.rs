@@ -2,7 +2,7 @@ use crate::{
     ast::{Ast, debug::DebugAst},
     cli::{BuildArgs, OutKind},
     codegen::llvm::{self, CodegenModuleExt, error::CodegenResult},
-    context::{CompilationContext, CompilationContextInner, tmp_alloc},
+    context::{CompilationContext, CompilationContextInner, ctx, tmp_alloc},
     diagnostics::{DiagnosticReporter, HandledErr, cerror, cwarn},
     parser::{self, lexer::Span},
     ptr::Ptr,
@@ -130,7 +130,6 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
         if !args.quiet {
             ctx.compile_time.print();
         }
-        // println!("{} KiB", alloc.0.allocated_bytes() as f64 / 1024.0);
         return CompileResult::Ok;
     }
 
@@ -213,6 +212,11 @@ pub fn compile_ctx(mut ctx: Ptr<CompilationContextInner>, mode: CompileMode) -> 
             "finished building object file. Building a static or dynamic library is currently not \
              implemented"
         );
+
+        if !args.quiet {
+            ctx.compile_time.print();
+        }
+
         return CompileResult::Ok;
     }
 
@@ -312,6 +316,9 @@ impl CompileDurations {
 
         let total = frontend_total + backend_total + self.linking;
         eprintln!("  Total:                 {:?}", total);
+
+        eprintln!();
+        eprintln!("  main arena allocated: {} KiB", (ctx().alloc.0.allocated_bytes() as f32) / 1024.0)
     }
 }
 
