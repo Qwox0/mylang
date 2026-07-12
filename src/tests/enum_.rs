@@ -257,7 +257,7 @@ test :: -> CONST;";
 #[test]
 fn good_error_message3() {
     test_body("A :: enum { B }; x := 1; A.B.(1);")
-        .error("Cannot apply a positional initializer to a value of type `A`", substr!("A.B"));
+        .error("Cannot apply a positional initializer to value of type `A`", substr!("A.B"));
 }
 
 #[test]

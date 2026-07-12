@@ -326,3 +326,14 @@ Pause :: u8;
 ";
     test(code).ok(8_usize);
 }
+
+#[test]
+fn named_arg_codegen() {
+    let code = r#"
+f :: (x: i32, y: []u8) -> {
+
+}
+test :: -> f(y="hello", x=1);
+"#;
+    test(code).compile_no_err();
+}

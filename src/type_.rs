@@ -4,7 +4,7 @@ use crate::{
     diagnostics::cerror,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    sema::primitives::Primitives,
+    sema::{accumulate_type, primitives::Primitives},
     util::{
         BigIntExt, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
         panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
@@ -254,6 +254,14 @@ fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: 
         return false;
     }
 
+    if let Some(got) = got.try_downcast::<ast::GenericDef>() {
+        //debug_assert!(got.var_ty.is_none_or(|t| t == expected));
+        //got.as_mut().var_ty = Some(expected);
+        return true;
+    } else if let Some(expected) = expected.try_downcast::<ast::GenericDef>() {
+        return accumulate_type(&mut expected.as_mut().cur_inst, got, None).is_ok();
+    }
+
     if let Some(expected_lvl) = number_subtyping_level(expected) {
         let Some(got_lvl) = number_subtyping_level(got) else { return false };
         debug_assert_ne!(expected, got, "exact equality was already checked above");
@@ -484,6 +492,7 @@ impl ast::Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
             TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::GenericDef { .. } => true, // TODO: is this correct?
         }
     }
 
@@ -519,6 +528,9 @@ impl ast::Type {
                 debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::GenericDef { .. } => {
+                // TODO: is this correct?
+            },
         }
         debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
         *self
@@ -526,6 +538,7 @@ impl ast::Type {
 
     /// size of stack allocation in bytes
     pub fn size(self: Ptr<Self>) -> usize {
+        debug_assert!(self.is_finalized(), "`{self}` is not finalized");
         const PTR_SIZE: usize = 8;
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
@@ -557,6 +570,7 @@ impl ast::Type {
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::GenericDef { .. } => todo!("Generic"),
         }
     }
 
@@ -587,6 +601,7 @@ impl ast::Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { inner_ty, .. } => inner_ty.downcast_type().alignment(),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::GenericDef { .. } => todo!("Generic"),
         };
         debug_assert!(alignment.is_power_of_two());
         alignment
@@ -623,12 +638,32 @@ impl ast::Type {
             },
             TypeEnum::Fn { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+            TypeEnum::GenericDef { .. } => todo!("Generic"),
         }
     }
 
-    pub fn is_ffi_noundef(self: Ptr<Self>) -> bool {
+    pub fn is_ffi_noundef(mut self: Ptr<Self>) -> bool {
+        self = self.handle_generic_inst();
         // arrays are special because they are always passed as a primitive pointer
         !self.is_aggregate() || self.kind == AstKind::ArrayTy
+    }
+
+    pub fn handle_generic_inst(self: Ptr<Self>) -> Ptr<Self> {
+        if self.kind == AstKind::GenericDef {
+            self.rep().downcast_type()
+        } else {
+            debug_assert!(self.replacement.is_none());
+            self
+        }
+    }
+
+    pub fn handle_generic_inst_ref(self: &mut Ptr<Self>) -> &mut Ptr<Self> {
+        if self.kind == AstKind::GenericDef {
+            self.rep_mut().downcast_type_ref()
+        } else {
+            debug_assert!(self.replacement.is_none());
+            self
+        }
     }
 
     /// `func(arg)`
@@ -837,6 +872,7 @@ pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
         TypeEnum::RangeTy { elem_ty, .. } => optional_repr(*elem_ty),
         TypeEnum::OptionTy { .. } => Tagged,
         TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
+        TypeEnum::GenericDef { .. } => todo!("Generic"),
     }
 }
 

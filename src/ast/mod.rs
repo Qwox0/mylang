@@ -1,7 +1,7 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
-    context::{FilesIndex, ctx, ctx_mut, primitives},
+    context::{FilesIndex, ctx, primitives},
     diagnostics::{HandledErr, cerror2},
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
@@ -10,7 +10,7 @@ use crate::{
     scratch_allocator::TmpPtr,
     sema::SemaUnit,
     type_::{finalize_ty, ty_match},
-    util::{UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
+    util::{OptionExt, UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
 };
 use core::fmt;
 use num::BigInt;
@@ -266,7 +266,7 @@ macro_rules! ast_variants {
                 match ast.kind {
                     $(|AstKind::$name)+
                     $(|AstKind::$c_name)+ => unreachable_debug(),
-                    $(AstKind::$t_name => TypeMatch::$t_name(ast.downcast::<$t_name>()),)+
+                    $(AstKind::$t_name => TypeMatch::$t_name(ast.flat_downcast::<$t_name>()),)+
                 }
             }
         }
@@ -416,6 +416,8 @@ ast_variants! {
         args: Ptr<[Ptr<Ast>]>,
         /// which argument was piped into this [`Ast::Call`]
         pipe_idx: Option<usize>,
+
+        inst_idx: InstIdx,
     },
 
     /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
@@ -445,6 +447,7 @@ ast_variants! {
 
     /// `<lhs> = <lhs>`
     Assign {
+        is_explicit_generic_arg: bool,
         lhs: Ptr<Ast>,
         rhs: Ptr<Ast>,
     },
@@ -645,6 +648,7 @@ ast_variants! {
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
+
         /// only valid during sema
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
@@ -659,6 +663,7 @@ ast_variants! {
         /// defined later.
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
+
         /// only valid during sema
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
@@ -676,6 +681,7 @@ ast_variants! {
         // TODO: don't allocate [`Scope::decls`] twice.
         consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
+
         /// only valid during sema
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
@@ -701,9 +707,19 @@ ast_variants! {
         /// set during sema
         has_known_ret_ty: bool,
         has_varargs: bool,
+
+        /// params_scope.decls:
+        ///     `0..param_count`: parameters, including const parameters
+        ///     `param_count..` : template generics
         params_scope: Scope,
+        //param_count: usize,
+
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,
+
+        generics: Vec<Ptr<GenericDef>>,
+        instantiations: Vec<GenericInstantiation>,
+
         /// if `body == None` this Ast node originated from a function type. Note: normal functions
         /// are also valid [`Type`]s.
         body: OPtr<Ast>,
@@ -712,10 +728,36 @@ ast_variants! {
         decl: OPtr<Decl>,
     },
 
+    GenericDef {
+        name: Ptr<Ident>,
+
+        /// Index into [`Fn::generics`]
+        idx: usize,
+
+        cur_inst: OPtr<Type>,
+
+        // /// `[$N]$T`
+        // ///      ^^ ty=type
+        // ///   ^^ ty=uint
+        // // TODO?: move to contraints
+        // var_ty: OPtr<Type>,
+        // /// expression which must be checked for every generic instantiation.
+        // contraints: Vec<Ptr<Ast>>,
+    },
+
     /// only for type hints
     ArrayLikeContainer {
         elem_ty: Ptr<Type>,
-    }
+    },
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericInstantiation(pub Ptr<[Ptr<Type>]>);
+
+impl GenericInstantiation {
+    pub const EMPTY: GenericInstantiation =
+        GenericInstantiation(Ptr::new(std::ptr::NonNull::from_ref(&[])));
 }
 
 inherit_ast! {
@@ -735,6 +777,10 @@ pub trait UpcastToAst: Sized {
     /// resolve possible replacements of this expression
     fn rep(self: Ptr<Self>) -> Ptr<Ast> {
         self.upcast().rep()
+    }
+
+    fn rep_mut(self: &mut Ptr<Self>) -> &mut Ptr<Ast> {
+        Ptr::from_ref(self).cast::<Ptr<Ast>>().as_mut().rep_mut()
     }
 
     fn full_span(&self) -> Span {
@@ -795,8 +841,8 @@ impl Ptr<Ast> {
         if self.ty.u() == p.type_ty {
             debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
             true
-        } else if self.ty.u().p_eq(self) {
-            debug_assert_eq!(self.kind, AstKind::Fn);
+        } else if self.rep().kind == AstKind::Fn {
+            debug_assert!(self.ty.u().p_eq(self));
             true
         } else if self == p.err_ty.upcast() {
             true
@@ -879,6 +925,12 @@ impl Ptr<Ast> {
     }
 
     pub fn flat_downcast_type(self) -> Ptr<Type> {
+        debug_assert!(
+            self.ty.is_none_or(|t| t == primitives().type_ty
+                || (t.ty == t && matches!(t.kind, AstKind::Fn | AstKind::GenericDef))),
+            "`{}`",
+            self.ty.display()
+        );
         //debug_assert!(self.is_type() || self.kind == AstKind::Fn);
         debug_assert!(self.has_type_kind());
         self.cast()
@@ -993,8 +1045,15 @@ impl Ptr<ConstVal> {
 impl Ptr<Type> {
     /// always behaves like a `flat_downcast`.
     #[track_caller]
-    pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
-        debug_assert!(self.replacement.is_none());
+    pub fn downcast<V: TypeVariant>(mut self) -> Ptr<V> {
+        self = self.handle_generic_inst();
+        debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
+        debug_assert!(self.upcast().has_type_kind());
+        self.cast()
+    }
+
+    pub fn flat_downcast<V: TypeVariant>(self) -> Ptr<V> {
+        //debug_assert!(self.replacement.is_none());
         debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
         debug_assert!(self.upcast().has_type_kind());
         self.cast()
@@ -1007,8 +1066,8 @@ impl Ptr<Type> {
         Ptr::from_ref(self).cast::<Ptr<V>>().as_mut()
     }
 
-    pub fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
-        debug_assert!(self.replacement.is_none());
+    pub fn try_downcast<V: TypeVariant>(mut self) -> OPtr<V> {
+        self = self.handle_generic_inst();
         then!(self.kind == V::KIND => self.downcast())
     }
 
@@ -1017,7 +1076,8 @@ impl Ptr<Type> {
         then!(self.kind == V::KIND => self.downcast_ref())
     }
 
-    pub fn downcast_struct_def(self) -> Ptr<StructDef> {
+    pub fn downcast_struct_def(mut self) -> Ptr<StructDef> {
+        self = self.handle_generic_inst();
         match self.kind {
             AstKind::StructDef => self.downcast::<StructDef>(),
             AstKind::SliceTy => primitives().untyped_slice_struct_def,
@@ -1025,8 +1085,8 @@ impl Ptr<Type> {
         }
     }
 
-    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
-        debug_assert!(self.replacement.is_none());
+    pub fn try_downcast_struct_def(mut self) -> OPtr<StructDef> {
+        self = self.handle_generic_inst();
         then!(self.kind.is_struct_kind() => self.downcast_struct_def())
     }
 
@@ -1053,6 +1113,7 @@ impl Ptr<Type> {
                 TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => {
                     panic_debug!("invalid type")
                 },
+                TypeEnum::GenericDef { .. } => todo!("Generic"),
             }
         }
     }
@@ -1071,6 +1132,7 @@ impl Ptr<Type> {
             TypeMatch::OptionTy(o) => Some(o.inner_ty.downcast_type()),
             TypeMatch::Fn(_) => None,
             TypeMatch::ArrayLikeContainer(a) => Some(a.elem_ty),
+            TypeMatch::GenericDef(g) => g.cur_inst.and_then(Ptr::inner_ty),
         }
     }
 
@@ -1177,10 +1239,11 @@ impl Ast {
                 Some(val) => span.join(val.full_span()),
                 None => span,
             },
+            AstEnum::GenericDef { name, .. } => span.join(name.span),
+
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
             AstEnum::ExternDirective { .. } => span,
             AstEnum::IntrinsicDirective { intrinsic_name, .. } => span.join(intrinsic_name.span),
-
             AstEnum::SizeOfDirective { type_: e, .. }
             | AstEnum::SizeOfValDirective { val: e, .. }
             | AstEnum::AlignOfDirective { type_: e, .. } => span.join(e.full_span()),
@@ -1220,14 +1283,14 @@ impl Ast {
 impl ConstVal {
     #[inline]
     pub fn matchable(&self) -> Ptr<ConstValEnum> {
-        Ptr::from(self).cast()
+        Ptr::from_ref(self).cast()
     }
 }
 
 impl Type {
     #[inline]
     pub fn matchable(&self) -> Ptr<TypeEnum> {
-        Ptr::from(self).cast()
+        Ptr::from_ref(self).cast()
     }
 
     #[inline]
@@ -1324,6 +1387,7 @@ impl Type {
                 alloc.alloc(OptionTy { inner_ty, ..*o })?.upcast_to_type()
             },
             TypeMatch::ArrayLikeContainer(_) => unreachable_debug(),
+            TypeMatch::GenericDef(_) => todo!("Generic"),
         })
     }
 }
@@ -1333,7 +1397,7 @@ impl TypeEnum {
     pub fn as_type(&self) -> OPtr<Type> {
         match self {
             TypeEnum::Unset => None,
-            _ => Some(Ptr::from(self).cast()),
+            _ => Some(Ptr::from_ref(self).cast()),
         }
     }
 }
@@ -1386,7 +1450,7 @@ impl OPtrTypeExt for OPtr<Type> {
 impl AstEnum {
     #[inline]
     pub fn as_ast(&self) -> Ptr<Ast> {
-        Ptr::from(self).cast()
+        Ptr::from_ref(self).cast()
     }
 }
 
@@ -1420,13 +1484,6 @@ impl AstKind {
             AstKind::ArrayInitializer | AstKind::ArrayInitializerShort => "an array initializer",
             k => panic_debug!("{k:?} is not an initializer kind"),
         }
-    }
-}
-
-impl Ident {
-    #[inline]
-    pub fn new(text: Ptr<str>, span: Span) -> Ident {
-        ast_new!(local Ident { span, sym: ctx_mut().symbols.get_or_intern(text), decl: None })
     }
 }
 
@@ -1572,10 +1629,53 @@ impl EnumDef {
     }
 }
 
+/// Index into [`Fn::instantiations`]
+pub type InstIdx = usize;
+
 impl Fn {
     #[inline]
-    pub fn params(&self) -> DeclList {
-        self.params_scope.decls
+    pub fn params(&self) -> &[Ptr<Decl>] {
+        let param_count = self.params_scope.decls.len() - self.generics.len();
+        &self.params_scope.decls[..param_count]
+    }
+
+    pub fn is_generic(&self) -> bool {
+        !self.generics.is_empty()
+    }
+
+    pub fn instantiations(&self) -> &[GenericInstantiation] {
+        if self.is_generic() {
+            &self.instantiations[..]
+        } else {
+            &[GenericInstantiation::EMPTY]
+        }
+    }
+
+    pub fn get_inst(&self, inst_idx: InstIdx) -> GenericInstantiation {
+        if self.is_generic() {
+            *self.instantiations.get(inst_idx).u()
+        } else {
+            debug_assert_eq!(inst_idx, 0);
+            GenericInstantiation::EMPTY
+        }
+    }
+
+    pub fn use_inst(&mut self, inst: GenericInstantiation) {
+        debug_assert!(if self.is_generic() {
+            self.instantiations.contains(&inst)
+        } else {
+            inst == GenericInstantiation::EMPTY
+        });
+        debug_assert_eq!(inst.0.len(), self.generics.len());
+        for (generic, inst) in self.generics.iter_mut().zip(inst.0) {
+            generic.replacement = Some(inst.upcast());
+        }
+    }
+
+    pub fn unuse_inst(&mut self) {
+        for generic in self.generics.iter_mut() {
+            generic.replacement = None;
+        }
     }
 }
 
@@ -1883,7 +1983,11 @@ impl DeclListExt for [Ptr<Decl>] {
 }
 
 pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {
-    a.kind != AstKind::Assign || a.parenthesis_count > 0
+    try_downcast_named_arg(*a).is_none()
+}
+
+pub fn try_downcast_named_arg(arg: Ptr<Ast>) -> OPtr<Assign> {
+    then!(arg.parenthesis_count == 0 => arg.try_downcast::<Assign>()?)
 }
 
 #[derive(Debug, Clone, Copy)]

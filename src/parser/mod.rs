@@ -5,10 +5,9 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclList, DeclMarkers, SwitchCase, UnaryOpKind, UpcastToAst,
-        ast_new,
+        self, Ast, AstKind, BinOpKind, DeclMarkers, SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
     },
-    context::{CompilationContextInner, primitives},
+    context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
     literals::{self, replace_escape_chars},
     ptr::{OPtr, Ptr},
@@ -167,9 +166,7 @@ pub fn parse_file_into(
     debug_assert!(p.lex.is_empty());
     let stmt_range = start_idx..stmts.len();
     file.set_stmt_range(stmt_range.clone());
-    file.scope
-        .set_once(Scope::file(&stmts[stmt_range], cctx.global_scope, &cctx.alloc))
-        .into()
+    file.scope.set_once(Scope::file(&stmts[stmt_range], cctx.global_scope)).into()
 }
 
 pub fn parse_prelude_into(cctx: Ptr<CompilationContextInner>, stmts: &mut Vec<Ptr<Ast>>) -> bool {
@@ -252,8 +249,7 @@ impl Parser {
                     );
                 };
                 let param = self.alloc(ast::Decl::from_ident(lhs))?;
-                let params = self.alloc_one_val_slice(param)?;
-                self.function_tail(params, span, min_precedence)?.upcast()
+                self.function_tail(vec![param], span, min_precedence)?.upcast()
             },
             FollowingOperator::PostOp(mut op) => {
                 let mut span = span;
@@ -295,8 +291,7 @@ impl Parser {
                         let body = self.expr()?;
 
                         let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                        let scope =
-                            Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
+                        let scope = Scope::new(vec![iter_var], ScopeKind::ForLoop);
                         expr!(
                             For { source_expr: lhs, iter_var, body, scope, was_piped: true },
                             t.span
@@ -334,7 +329,7 @@ impl Parser {
             },
             FollowingOperator::Assign => {
                 let rhs = self.expr()?;
-                expr!(Assign { lhs, rhs }, span)
+                expr!(Assign { lhs, rhs, is_explicit_generic_arg: false }, span)
             },
             FollowingOperator::BinOpAssign(op) => {
                 let rhs = self.expr()?;
@@ -351,11 +346,7 @@ impl Parser {
         let Token { kind, span } = self.lex.peek_or_eof();
 
         Ok(match kind {
-            TokenKind::Ident => {
-                let text = self.advanced().get_text_from_span(span);
-                let sym = self.cctx.symbols.get_or_intern(text);
-                expr!(Ident { sym, decl: None }, span)
-            },
+            TokenKind::Ident => self.advanced().ident_from_span(span)?.upcast(),
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub | Keyword::Static) => {
                 self.var_decl(false)?.upcast()
             },
@@ -452,7 +443,7 @@ impl Parser {
                 let body = self.expr()?;
 
                 let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                let scope = Scope::new(self.alloc_one_val_slice(iter_var)?, ScopeKind::ForLoop);
+                let scope = Scope::new(vec![iter_var], ScopeKind::ForLoop);
                 expr!(For { source_expr, iter_var, body, scope, was_piped: false }, span)
             },
             TokenKind::Keyword(Keyword::While) => {
@@ -503,7 +494,6 @@ impl Parser {
                 let code = &self.advanced().lex.get_code()[span];
                 debug_assert_eq!(code.as_bytes().first(), Some(&b'\''));
                 debug_assert_eq!(code.as_bytes().last(), Some(&b'\''));
-                debug_assert!(code.len() > 2);
                 let code = replace_escape_chars(&code[1..code.len() - 1]);
                 let mut chars = code.chars();
 
@@ -537,7 +527,7 @@ impl Parser {
             },
             TokenKind::StrLit => {
                 let lit = self.advanced().get_text_from_span(span);
-                expr!(StrVal { text: Ptr::from(&lit[1..lit.len().saturating_sub(1)]) }, span)
+                expr!(StrVal { text: Ptr::from_ref(&lit[1..lit.len().saturating_sub(1)]) }, span)
             },
             TokenKind::MultilineStrLitLine => {
                 // Note: Arena allocates in the wrong direction
@@ -550,7 +540,7 @@ impl Parser {
                 let bytes = self.alloc_slice(&scratch)?;
                 let text = unsafe { std::str::from_utf8_unchecked(&bytes) };
                 debug_assert!(text.ends_with('\n'));
-                expr!(StrVal { text: Ptr::from(&text[0..text.len().saturating_sub(1)]) }, span)
+                expr!(StrVal { text: Ptr::from_ref(&text[0..text.len().saturating_sub(1)]) }, span)
             },
             TokenKind::OpenParenthesis => {
                 // TODO: currently no tuples allowed!
@@ -566,12 +556,11 @@ impl Parser {
                         return Ok(expr);
                     },
                     // (expr) -> ...
-                    TokenKind::CloseParenthesis if let Some(e) = first_expr => self
-                        .alloc_one_val_slice(
-                            e.try_to_decl()?.ok_or_else(|| unexpected_expr(e, "a parameter"))?,
-                        )?,
+                    TokenKind::CloseParenthesis if let Some(e) = first_expr => {
+                        vec![e.try_to_decl()?.ok_or_else(|| unexpected_expr(e, "a parameter"))?]
+                    },
                     // () -> ...
-                    TokenKind::CloseParenthesis => Ptr::empty_slice(),
+                    TokenKind::CloseParenthesis => Vec::new(),
                     // (params...) -> ...
                     TokenKind::Comma => {
                         let Some(expr) = first_expr else {
@@ -595,7 +584,7 @@ impl Parser {
                         };
                         self.tok_with_expected(TokenKind::CloseParenthesis, expected_tok)?;
                         self.tok(TokenKind::Arrow)?;
-                        self.alloc_slice(&params)?
+                        params
                     },
                     _ if first_expr.is_some_and(|e| e.kind == AstKind::Ident) => {
                         return Err(unexpected_token(t, &EXPECTED_AFTER_IDENT_PARAM));
@@ -634,9 +623,7 @@ impl Parser {
                 let operand = self.advanced().expr_(PREOP_PRECEDENCE)?;
                 expr!(UnaryOp { op: UnaryOpKind::Neg, operand, is_postfix: false }, span)
             },
-            TokenKind::Arrow => {
-                self.advanced().function_tail(Ptr::empty_slice(), span, prec)?.upcast()
-            },
+            TokenKind::Arrow => self.advanced().function_tail(vec![], span, prec)?.upcast(),
             TokenKind::Asterisk => {
                 // TODO: deref prefix
                 let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
@@ -801,11 +788,14 @@ impl Parser {
                     return cerror2!(span.join(directive_ident.span), "Unknown compiler directive");
                 }
             },
-            TokenKind::Dollar => todo!("TokenKind::Dollar"),
-            TokenKind::At => todo!("TokenKind::At"),
-            TokenKind::Tilde => todo!("TokenKind::Tilde"),
-            TokenKind::Backslash => todo!("TokenKind::BackSlash"),
-            TokenKind::Backtick => todo!("TokenKind::BackTick"),
+            TokenKind::Dollar => {
+                let name = self.advanced().ident()?;
+                expr!(GenericDef { name, idx: usize::MAX, cur_inst: None }, span)
+            },
+            //TokenKind::At => todo!("TokenKind::At"),
+            //TokenKind::Tilde => todo!("TokenKind::Tilde"),
+            //TokenKind::Backslash => todo!("TokenKind::BackSlash"),
+            //TokenKind::Backtick => todo!("TokenKind::BackTick"),
             kind => return Err(unexpected_token(Token { kind, span }, &[])),
         })
     }
@@ -898,7 +888,7 @@ impl Parser {
     /// parsing starts after the '->'
     fn function_tail(
         &mut self,
-        params: DeclList,
+        params: Vec<Ptr<ast::Decl>>,
         start_span: Span,
         mut outer_prec: u8,
     ) -> ParseResult<Ptr<ast::Fn>> {
@@ -930,6 +920,8 @@ impl Parser {
                 params_scope,
                 ret_ty_expr,
                 ret_ty: None,
+                generics: vec![],
+                instantiations: vec![],
                 body,
                 has_known_ret_ty: false,
                 has_varargs: false,
@@ -972,7 +964,7 @@ impl Parser {
                 let case = self_.expr()?;
                 self_.tok(TokenKind::ColonGt)?;
                 let body = self_.expr()?;
-                let scope = self_.alloc(Scope::new(Ptr::empty_slice(), ScopeKind::SwitchCase))?;
+                let scope = self_.alloc(Scope::new(vec![], ScopeKind::SwitchCase))?;
                 Ok(SwitchCase { case, body, scope })
             },
             MIN_PRECEDENCE,
@@ -1023,7 +1015,7 @@ impl Parser {
         let mut args = start_args;
         let closing_paren_span = self.parse_call(&mut args)?;
         let args = self.alloc_slice(&args)?;
-        Ok(ast_new!(Call { func, args, pipe_idx }, closing_paren_span))
+        Ok(ast_new!(Call { func, args, pipe_idx, inst_idx: usize::MAX }, closing_paren_span))
     }
 
     /// expects next token to be '{' and parses until and including the '}'
@@ -1038,7 +1030,7 @@ impl Parser {
 
         let span = open_b.span.join(close_b.span);
         let stmts = self.alloc_slice(&stmts)?;
-        let scope = Scope::from_stmts(&stmts, ScopeKind::Block, &self.cctx.alloc)?;
+        let scope = Scope::from_stmts(&stmts, ScopeKind::Block)?;
         Ok(self.alloc(ast::Block::new(stmts, scope, has_trailing_semicolon, span))?)
     }
 
@@ -1207,7 +1199,8 @@ impl Parser {
 
     /// this doesn't check if the text at span is valid
     fn ident_from_span(&self, span: Span) -> ParseResult<Ptr<ast::Ident>> {
-        self.alloc(ast::Ident::new(self.get_text_from_span(span), span))
+        let sym = ctx_mut().symbols.get_or_intern(self.get_text_from_span(span));
+        Ok(ast_new!(Ident { span, sym, decl: None }))
     }
 
     fn local_keyword(&mut self, local_keyword: &str) -> ParseResult<()> {
@@ -1257,13 +1250,8 @@ impl Parser {
         Ok(self.cctx.alloc.alloc_slice(slice)?)
     }
 
-    #[inline]
-    fn alloc_one_val_slice<T>(&self, val: T) -> ParseResult<Ptr<[T]>> {
-        Ok(self.cctx.alloc.alloc_one_val_slice(val)?)
-    }
-
     fn get_text_from_span(&self, span: Span) -> Ptr<str> {
-        self.lex.get_code()[span].into()
+        Ptr::from_ref(&self.lex.get_code()[span])
     }
 }
 

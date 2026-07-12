@@ -93,7 +93,6 @@ impl CompilationContext {
 
         let mut decls = Vec::new();
         let primitives = Primitives::setup(&mut decls, &mut symbols, &alloc);
-        let decls = alloc.alloc_slice(&decls).unwrap();
         let primitives_scope = alloc.alloc(Scope::new(decls, ScopeKind::Root)).unwrap();
 
         let entry_point_sym = symbols.get_or_intern(Ptr::from_ref(args.entry_point.as_ref()));

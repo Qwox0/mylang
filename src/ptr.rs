@@ -34,13 +34,6 @@ impl<T: ?Sized> DerefMut for Ptr<T> {
     }
 }
 
-impl<T: ?Sized> From<&T> for Ptr<T> {
-    #[inline]
-    fn from(value: &T) -> Self {
-        Ptr(value.into())
-    }
-}
-
 impl<T: ?Sized> From<&mut T> for Ptr<T> {
     #[inline]
     fn from(value: &mut T) -> Self {
@@ -112,7 +105,7 @@ impl<T: ?Sized> Ptr<T> {
 
 impl<T> Ptr<[T]> {
     pub fn empty_slice() -> Ptr<[T]> {
-        Ptr::from(&[] as &[T])
+        Ptr(NonNull::from_ref(&[] as &[T]))
     }
 
     /// [`Ptr::from_ref`] but with a fixes assertion

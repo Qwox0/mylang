@@ -30,6 +30,7 @@ mod defer;
 mod enum_;
 mod for_loop;
 mod function;
+mod generics;
 mod global_scope;
 mod if_;
 mod index;
@@ -624,3 +625,11 @@ fn reset_test_fd(test_fd: i32) {
     let seek_res = unsafe { libc::lseek(test_fd, 0, libc::SEEK_SET) };
     assert!(seek_res != -1, "errno = {}", unsafe { dbg!(*libc::__errno_location()) });
 }
+
+macro_rules! assert_contains {
+    ($val:expr, $($pat:tt)+) => {{
+        let pat = format!($($pat)+);
+        assert!($val.contains(&pat), "assertion failed: `{}` contains \"{pat}\"", stringify!($val));
+    }};
+}
+pub(crate) use assert_contains;

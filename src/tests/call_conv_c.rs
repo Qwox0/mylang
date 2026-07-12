@@ -225,10 +225,7 @@ take_array :: (arr: [3]i32) -> arr[1];
 test :: -> take_array(.[1,-2, 0]);";
     let res = test(code).ok(-2i32);
     let param_name = if cfg!(debug_assertions) { "arr" } else { "0" };
-    assert!(
-        res.llvm_ir()
-            .contains(&format!("define noundef i32 @take_array(ptr noundef %{param_name})"))
-    );
+    assert_contains!(res.llvm_ir(), "define noundef i32 @take_array(ptr noundef %{param_name})");
     drop(res);
 
     let code = "

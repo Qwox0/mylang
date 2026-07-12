@@ -267,9 +267,10 @@ impl Primitives {
             slice_ptr_field_ident: untyped_slice_ptr_field.ident,
             slice_len_field,
             untyped_slice_struct_def: {
-                let fields = alloc.alloc_slice(&[untyped_slice_ptr_field, slice_len_field])?;
+                let fields_vec = vec![untyped_slice_ptr_field, slice_len_field];
+                let fields = Ptr::from_ref(fields_vec.as_slice());
                 let def = ast_new!(StructDef {
-                    scope: Scope::new(fields, ScopeKind::Struct),
+                    scope: Scope::new(fields_vec, ScopeKind::Struct),
                     sema_units: None,
                     fields,
                     consts: Vec::new(),

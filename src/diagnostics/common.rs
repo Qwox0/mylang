@@ -19,7 +19,17 @@ pub fn error_mismatched_types(
     expected: Ptr<ast::Type>,
     got: Ptr<ast::Type>,
 ) -> HandledErr {
-    error_mismatched_types_custom(span, format_args!("`{expected}`"), got)
+    if let Some(g) = expected.try_downcast::<ast::GenericDef>()
+        && let Some(cur_inst) = g.cur_inst
+    {
+        error_mismatched_types_custom(
+            span,
+            format_args!("`{expected}` (inferred as `{cur_inst}`)"),
+            got,
+        )
+    } else {
+        error_mismatched_types_custom(span, format_args!("`{expected}`"), got)
+    }
 }
 
 #[track_caller]
@@ -78,12 +88,12 @@ pub fn error_cannot_apply_initializer(
             chint!(initializer_expr.span, "Consider using an array initializer (`.[...]`) instead")
         }
     } else {
-        debug_assert!(analyzed_lhs == lhs_expr.u());
         cerror!(
             span,
-            "Cannot apply {initializer_kind} to a value of type `{}`",
+            "Cannot apply {initializer_kind} to value of type `{}`",
             analyzed_lhs.ty.u()
         );
+        debug_assert!(analyzed_lhs == lhs_expr.u());
     }
     HandledErr
 }

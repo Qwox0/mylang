@@ -5,7 +5,7 @@ use crate::{
     diagnostics::{DiagnosticReporter, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::{debug_only_assert, hash_val, panic_debug, unreachable_debug},
+    util::{UnwrapDebug, debug_only_assert, hash_val, panic_debug, unreachable_debug},
 };
 use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 
@@ -77,7 +77,8 @@ impl ScopeKind {
 pub struct Scope {
     pub parent: OPtr<Scope>,
     pub pos_in_parent: ScopePos,
-    pub decls: DeclList,
+    /// TODO: use `struct { ptr: *mut T, len: u32, cap: u32 }` instead
+    pub decls: Vec<Ptr<Decl>>,
     /// used for symbol lookups when this scope has more than [`SMALL_SCOPE_MAX_SIZE`] Decls.
     /// Set at the start of sema, if needed
     ///
@@ -92,7 +93,7 @@ pub struct Scope {
 const SMALL_SCOPE_MAX_SIZE: usize = 32;
 
 impl Scope {
-    pub fn new(decls: DeclList, kind: ScopeKind) -> Scope {
+    pub fn new(decls: Vec<Ptr<Decl>>, kind: ScopeKind) -> Scope {
         debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
         Scope {
             parent: None,
@@ -106,22 +107,18 @@ impl Scope {
         }
     }
 
-    pub fn from_stmts(
-        stmts: &[Ptr<ast::Ast>],
-        kind: ScopeKind,
-        alloc: &Arena,
-    ) -> Result<Scope, AllocErr> {
+    pub fn from_stmts(stmts: &[Ptr<ast::Ast>], kind: ScopeKind) -> Result<Scope, AllocErr> {
         // TODO: bench copy vs preallocate `stmts.len`
         let decls = stmts
             .iter()
             .filter_map(|s| s.try_downcast::<Decl>())
             .filter(|d| d.on_type.is_none())
             .collect::<Vec<_>>();
-        Ok(Scope::new(alloc.alloc_slice(&decls)?, kind))
+        Ok(Scope::new(decls, kind))
     }
 
-    pub fn file(stmts: &[Ptr<ast::Ast>], parent_scope: Ptr<Scope>, alloc: &Arena) -> Scope {
-        let mut scope = Scope::from_stmts(stmts, ScopeKind::File, alloc).unwrap();
+    pub fn file(stmts: &[Ptr<ast::Ast>], parent_scope: Ptr<Scope>) -> Scope {
+        let mut scope = Scope::from_stmts(stmts, ScopeKind::File).unwrap();
         scope.parent = Some(parent_scope);
         debug_assert!(!parent_scope.kind.allows_shadowing());
         scope.pos_in_parent = ScopePos(parent_scope.decls.len() as u32);
@@ -137,17 +134,34 @@ impl Scope {
     ) -> Result<ScopeAndAggregateInfo, AllocErr> {
         debug_assert!(kind.is_aggregate());
         let fields = alloc.alloc_slice(&fields)?; // fields are allocated twice because `scope_decls` is rearranged during sema.
-        let scope_decls = alloc.alloc_uninit_slice(fields.len() + consts.len())?;
-        scope_decls.as_mut()[..fields.len()].write_copy_of_slice(&fields);
-        scope_decls.as_mut()[fields.len()..].write_copy_of_slice(&consts);
-        let scope = Scope::new(scope_decls.assume_init(), kind);
-        Ok(ScopeAndAggregateInfo { scope, fields, consts })
+        let mut scope_decls = Vec::with_capacity(fields.len() + consts.len());
+        scope_decls.extend_from_slice(&fields);
+        scope_decls.extend_from_slice(&consts);
+        Ok(ScopeAndAggregateInfo { scope: Scope::new(scope_decls, kind), fields, consts })
     }
 
     /// also sets up [`Scope::decls_map`] if needed.
     pub fn verify_no_duplicates(&mut self) {
         if !self.kind.allows_shadowing() {
-            if let Some(map) = verify_no_duplicates(self.kind, self.decls) {
+            debug_assert!(!self.kind.allows_shadowing());
+            if self.decls.len() <= SMALL_SCOPE_MAX_SIZE {
+                for (idx, decl) in self.decls.iter().copied().enumerate() {
+                    debug_assert!(decl.on_type.is_none());
+                    if let Some(dup) =
+                        linear_search_symbol(&self.decls[..idx], decl.ident.sym, false, false)
+                    {
+                        error_duplicate_in_unordered_scope(self.kind, decl, dup);
+                    }
+                }
+                self.decls_map = None;
+            } else {
+                let mut map = UnorderedDeclMap::with_capacity(self.decls.len());
+                for &decl in self.decls.iter() {
+                    debug_assert!(decl.on_type.is_none());
+                    if let Err(dup) = map.try_insert(decl) {
+                        error_duplicate_in_unordered_scope(self.kind, decl, dup);
+                    }
+                }
                 self.decls_map = Some(map);
             }
         }
@@ -157,15 +171,24 @@ impl Scope {
         }
     }
 
-    pub fn find_decl_norec(
-        &self,
-        sym: Symbol,
-        cur_pos: ScopePos,
-        ignore_fields: bool,
-    ) -> OPtr<Decl> {
+    pub fn check_if_duplicate(&self, decl_new: Ptr<Decl>) {
+        debug_only_assert!(self.was_checked_for_duplicates);
+        debug_assert!(decl_new.on_type.is_none());
+        if self.decls.len() <= SMALL_SCOPE_MAX_SIZE {
+            if let Some(dup) = linear_search_symbol(&self.decls, decl_new.ident.sym, false, false) {
+                error_duplicate_in_unordered_scope(self.kind, decl_new, dup);
+            }
+        } else {
+            if let Some(dup) = self.decls_map.as_ref().u().get(decl_new.ident.sym, false) {
+                error_duplicate_in_unordered_scope(self.kind, decl_new, dup);
+            }
+        }
+    }
+
+    fn find_decl_norec(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
         debug_only_assert!(self.was_checked_for_duplicates);
         debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
-        let ignore_non_const = ignore_fields && self.kind.is_aggregate();
+        let ignore_non_const = self.kind.is_aggregate();
         if let Some(decls_map) = self.decls_map.as_ref() {
             debug_assert!(ctx().do_abort_compilation() || decls_map.len() == self.decls.len());
             decls_map.get(sym, ignore_non_const)
@@ -179,11 +202,11 @@ impl Scope {
         }
     }
 
-    pub fn find_decl(&self, sym: Symbol, cur_pos: ScopePos, ignore_fields: bool) -> OPtr<Decl> {
+    pub fn find_decl(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
         let mut cur_scope = Some(Ptr::from_ref(self));
         let mut cur_pos = cur_pos;
         while let Some(scope) = cur_scope {
-            if let Some(sym) = scope.find_decl_norec(sym, cur_pos, ignore_fields) {
+            if let Some(sym) = scope.find_decl_norec(sym, cur_pos) {
                 return Some(sym);
             }
             cur_scope = scope.parent;
@@ -193,19 +216,25 @@ impl Scope {
     }
 
     /// assumes `self` is an unordered scope. see [`ScopeKind::allows_shadowing`].
-    pub fn find_decl_unordered(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
+    pub fn find_decl_norec_unordered(&self, sym: Symbol) -> OPtr<Decl> {
         debug_assert!(!self.kind.allows_shadowing());
-        self.find_decl(sym, ScopePos::UNSET, ignore_fields)
-    }
-
-    /// assumes `self` is an unordered scope. see [`ScopeKind::allows_shadowing`].
-    pub fn find_decl_norec_unordered(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
-        debug_assert!(!self.kind.allows_shadowing());
-        self.find_decl_norec(sym, ScopePos::UNSET, ignore_fields)
+        self.find_decl_norec(sym, ScopePos::UNSET)
     }
 
     // Currently only for debugging
     pub fn get_expr(self: Ptr<Self>) -> OPtr<Ast> {
+        macro_rules! get_scope_container {
+            ($scope:expr, $container_ty:path, $scope_field:ident) => {{
+                use crate::ast::AstVariant;
+                let scope: Ptr<Scope> = $scope;
+                debug_assert_eq!(scope.kind, ScopeKind::for_container(<$container_ty>::KIND));
+                crate::util::assert_has_field!($container_ty, $scope_field: Scope);
+                scope
+                    .byte_sub(std::mem::offset_of!($container_ty, $scope_field))
+                    .cast::<$container_ty>()
+            }};
+        }
+
         Some(match self.kind {
             ScopeKind::Root | ScopeKind::File => return None,
             ScopeKind::Block => get_scope_container!(self, ast::Block, scope).upcast(),
@@ -218,19 +247,6 @@ impl Scope {
         })
     }
 }
-
-macro_rules! get_scope_container {
-    ($scope:expr, $container_ty:path, $scope_field:ident) => {{
-        use crate::ast::AstVariant;
-        let scope: Ptr<Scope> = $scope;
-        debug_assert_eq!(scope.kind, ScopeKind::for_container(<$container_ty>::KIND));
-        crate::util::assert_has_field!($container_ty, $scope_field: Scope);
-        scope
-            .byte_sub(std::mem::offset_of!($container_ty, $scope_field))
-            .cast::<$container_ty>()
-    }};
-}
-pub(crate) use get_scope_container;
 
 /// `reverse` is needed because of shadowing
 fn linear_search_symbol(
@@ -290,31 +306,6 @@ impl UnorderedDeclMap {
             .raw_entry()
             .from_hash(hash, |d| d.ident.sym == sym && (!ignore_non_const || d.is_const))
             .map(|(d, ())| *d)
-    }
-}
-
-fn verify_no_duplicates(
-    scope_kind: ScopeKind,
-    decls: Ptr<[Ptr<Decl>]>,
-) -> Option<UnorderedDeclMap> {
-    debug_assert!(!scope_kind.allows_shadowing());
-    if decls.len() <= SMALL_SCOPE_MAX_SIZE {
-        for (idx, decl) in decls.into_iter().enumerate() {
-            debug_assert!(decl.on_type.is_none());
-            if let Some(dup) = linear_search_symbol(&decls[..idx], decl.ident.sym, false, false) {
-                error_duplicate_in_unordered_scope(scope_kind, decl, dup);
-            }
-        }
-        None
-    } else {
-        let mut map = UnorderedDeclMap::with_capacity(decls.len());
-        for decl in decls {
-            debug_assert!(decl.on_type.is_none());
-            if let Err(dup) = map.try_insert(decl) {
-                error_duplicate_in_unordered_scope(scope_kind, decl, dup);
-            }
-        }
-        Some(map)
     }
 }
 

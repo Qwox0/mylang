@@ -229,7 +229,7 @@ impl DebugAst for Ast {
                 if let Some(init) = init {
                     lines.write(&format!(
                         "{}{}",
-                        if var_ty_expr.is_none() { ":" } else { "" },
+                        if var_ty_expr.is_none() && var_ty.is_none() { ":" } else { "" },
                         if *is_const { ":" } else { "=" },
                     ));
                     lines.write_tree(init);
@@ -382,6 +382,8 @@ impl DebugAst for Ast {
                     lines.write_tree(ret_type);
                 } else if let Some(ret_ty) = ret_ty {
                     lines.write_tree(ret_ty);
+                } else {
+                    lines.write("{unknown}");
                 }
                 if lines.write_fn_as_type() {
                     return;
@@ -394,6 +396,10 @@ impl DebugAst for Ast {
                     lines.write_tree(body);
                     lines.write("}");
                 }
+            },
+            AstEnum::GenericDef { name, .. } => {
+                lines.write("$");
+                lines.write(name.sym.text());
             },
 
             AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),

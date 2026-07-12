@@ -1,4 +1,6 @@
-use crate::{ast::DeclList, context::primitives, parser::lexer::Code, ptr::Ptr};
+use crate::{
+    ast::DeclList, context::primitives, parser::lexer::Code, ptr::Ptr, scratch_allocator::TmpPtr,
+};
 use core::fmt;
 use std::{
     fmt::Write,
@@ -124,6 +126,16 @@ impl<T> UnwrapDebug for Ptr<[Option<T>]> {
     }
 }
 
+impl<T> UnwrapDebug for TmpPtr<[Option<T>]> {
+    type Unwrapped = TmpPtr<[T]>;
+
+    fn u(self) -> Self::Unwrapped {
+        debug_assert!(self.iter().all(Option::is_some));
+        const { assert!(size_of::<Option<T>>() == size_of::<T>()) };
+        unsafe { std::mem::transmute::<Self, Self::Unwrapped>(self) }
+    }
+}
+
 /// like [`unreachable`] but UB in release mode.
 #[track_caller]
 #[inline]
@@ -154,10 +166,11 @@ pub trait OptionExt<T> {
     where T: std::fmt::Display;
 }
 
-impl<T> OptionExt<T> for Option<T> {
+impl<T: fmt::Debug> OptionExt<T> for Option<T> {
     #[inline]
+    #[track_caller]
     fn set_once(&mut self, val: T) -> &mut T {
-        debug_assert!(self.is_none());
+        debug_assert!(self.is_none(), "called set_once on {:?}", self);
         *self = Some(val);
         self.as_mut().u()
     }
@@ -466,3 +479,13 @@ macro_rules! wrap_display {
     }};
 }
 pub(crate) use wrap_display;
+
+macro_rules! orelse {
+    ($lhs:expr, $(@$capture:ident)? $rhs:expr) => {
+        match ::std::ops::Try::branch($lhs) {
+            ::std::ops::ControlFlow::Continue(val) => val,
+            ::std::ops::ControlFlow::Break($($capture,)? ..) => $rhs,
+        }
+    };
+}
+pub(crate) use orelse;
