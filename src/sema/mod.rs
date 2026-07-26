@@ -2109,8 +2109,6 @@ impl Sema {
         let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
         if ty_match(ty, p.type_ty) {
             Ok(ty_expr.downcast_type())
-        } else if ty.propagates_out() {
-            Ok(ty)
         } else {
             error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
         }

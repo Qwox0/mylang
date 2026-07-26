@@ -61,7 +61,7 @@ pub fn common_type_restrict_optional_coerction(
     rhs: Ptr<ast::Type>,
     allow_opt_coercion: AllowOptionalCoercion,
 ) -> OPtr<ast::Type> {
-    match common_type_impl_(lhs, rhs, allow_opt_coercion) {
+    match type_check(TypeCheckMode::Join, lhs, rhs, allow_opt_coercion) {
         CommonTypeSelection::Equal => Some(lhs),
         CommonTypeSelection::Lhs => Some(lhs),
         CommonTypeSelection::Rhs => Some(rhs),
@@ -70,206 +70,71 @@ pub fn common_type_restrict_optional_coerction(
     }
 }
 
-// Problem: `common_type(*int_lit, *mut i32)` should return `*i32`
-//    Can this (or something similar) even happen?
-fn common_type_impl(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> CommonTypeSelection {
-    common_type_impl_(lhs, rhs, AllowOptionalCoercion::TRUE)
-}
-
-fn common_type_impl_(
-    lhs: Ptr<ast::Type>,
-    rhs: Ptr<ast::Type>,
-    allow_opt_coercion: AllowOptionalCoercion,
-) -> CommonTypeSelection {
-    use CommonTypeSelection::*;
-    let p = primitives();
-
-    if lhs == rhs {
-        return Equal;
-    }
-
-    if lhs == p.err_ty {
-        return Lhs;
-    } else if rhs == p.err_ty {
-        return Rhs;
-    }
-
-    if is_bottom_type(lhs, p) || rhs == p.any {
-        return Rhs;
-    } else if is_bottom_type(rhs, p) || lhs == p.any {
-        return Lhs;
-    }
-
-    fn optional_common(
-        lhs: Ptr<ast::OptionTy>,
-        rhs: Ptr<ast::Type>,
-        allow_opt_coercion: bool,
-    ) -> CommonTypeSelection {
-        let lhs_inner = lhs.inner_ty.downcast_type();
-        return if allow_opt_coercion
-            && lhs_inner.count_optional_nesting() >= rhs.count_optional_nesting()
-            && rhs.is_non_zero()
-        {
-            match common_type_impl_(lhs_inner, rhs, AllowOptionalCoercion::FALSE) {
-                Equal | Lhs => Lhs,
-                Rhs => NewAlloc(type_new!(OptionTy { inner_ty: rhs.upcast() }).upcast_to_type()),
-                NewAlloc(inner_common) => NewAlloc(
-                    type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type(),
-                ),
-                Mismatch => Mismatch,
-            }
-        } else if let Some(rhs_opt) = rhs.try_downcast::<ast::OptionTy>() {
-            common_type_impl_(
-                lhs_inner,
-                rhs_opt.inner_ty.downcast_type(),
-                AllowOptionalCoercion::FALSE,
-            )
-        } else {
-            Mismatch
-        };
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::OptionTy>() {
-        return optional_common(lhs, rhs, allow_opt_coercion.rhs);
-    } else if let Some(rhs) = rhs.try_downcast::<ast::OptionTy>() {
-        debug_assert_ne!(lhs.kind, AstKind::OptionTy);
-        return optional_common(rhs, lhs, allow_opt_coercion.lhs).flip();
-    }
-
-    if let Some(lhs_num_lvl) = number_subtyping_level(lhs) {
-        let rhs_num_lvl = number_subtyping_level(rhs)?;
-        debug_assert_ne!(lhs, rhs, "exact equality was already checked above");
-        return SubtypingLevel::select(lhs_num_lvl, rhs_num_lvl);
-    }
-
-    /// common_type([]T, []mut T) == []T
-    /// common_type([]mut T, []T) == []T
-    /// common_type([][]mut T, []mut []T) == [][]T
-    ///      would require an allocation. => currently an error (TODO)
-    macro_rules! common_mut {
-        ($lhs:ident, $rhs:ident, $child_sel:expr, $ty:ident $child_field:ident $(,)?) => {{
-            let child_sel = $child_sel;
-            let out_mut = $lhs.is_mut && $rhs.is_mut;
-            match child_sel {
-                Mismatch => Mismatch,
-                Lhs if $lhs.is_mut == out_mut => Lhs,
-                Rhs if $rhs.is_mut == out_mut => Rhs,
-                Lhs | Rhs => {
-                    let sel = if child_sel == Lhs { $lhs } else { $rhs };
-                    let mut copy = unsafe { std::ptr::read(sel.raw()) };
-                    copy.is_mut = out_mut;
-                    let copy = Ptr::from_ref(&copy).upcast_to_type();
-                    cerror!(
-                        Span::ZERO,
-                        "The compiler currently cannot use `{copy}` as the combined type of `{}` \
-                         and `{}`. Consider specifying `{copy}` explicitly.",
-                        $lhs.upcast_to_type(),
-                        $rhs.upcast_to_type(),
-                    );
-                    Mismatch
-                },
-                Equal if $lhs.is_mut == $rhs.is_mut => Equal,
-                Equal if $lhs.is_mut == out_mut => Lhs,
-                Equal => {
-                    debug_assert!($rhs.is_mut == out_mut);
-                    Rhs
-                },
-                // TODO: Maybe allocate in the other problematic case aswell
-                NewAlloc(child) => NewAlloc(
-                    type_new!($ty { is_mut: out_mut, $child_field: child.upcast() })
-                        .upcast_to_type(),
-                ),
-            }
-        }};
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::PtrTy>() {
-        let rhs = rhs.try_downcast::<ast::PtrTy>()?;
-        return common_mut!(
-            lhs,
-            rhs,
-            common_type_impl(lhs.pointee.downcast_type(), rhs.pointee.downcast_type()),
-            PtrTy pointee,
-        );
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::SliceTy>() {
-        let rhs = rhs.try_downcast::<ast::SliceTy>()?;
-        return common_mut!(
-            lhs,
-            rhs,
-            common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type()),
-            SliceTy elem_ty,
-        );
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::ArrayTy>() {
-        return match rhs.try_downcast::<ast::ArrayTy>() {
-            Some(rhs) if lhs.len.int::<u64>() == rhs.len.int::<u64>() => {
-                common_type_impl(lhs.elem_ty.downcast_type(), rhs.elem_ty.downcast_type())
-            },
-            _ => Mismatch,
-        };
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::RangeTy>() {
-        return match rhs.try_downcast::<ast::RangeTy>() {
-            Some(rhs) if lhs.rkind == rhs.rkind => common_type_impl(lhs.elem_ty, rhs.elem_ty),
-            _ => Mismatch,
-        };
-    }
-
-    if let Some(lhs) = lhs.try_downcast::<ast::Fn>() {
-        if let Some(rhs) = rhs.try_downcast::<ast::Fn>()
-            // Currently function types must match exactly (see <https://en.wikipedia.org/wiki/Subtyping#Function_types>)
-            && ty_match(lhs.upcast_to_type(), rhs.upcast_to_type())
-        {
-            return Equal;
-        }
-        return Mismatch;
-    }
-
-    Mismatch
-}
-
 /// might not be symmetrical
 pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
-    ty_match_(got, expected, true)
+    match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE) {
+        CommonTypeSelection::Equal | CommonTypeSelection::Rhs => true,
+        CommonTypeSelection::Mismatch | CommonTypeSelection::Lhs => false,
+        CommonTypeSelection::NewAlloc(_) => unreachable_debug(),
+    }
 }
 
-fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: bool) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeCheckMode {
+    Strict,
+    Join,
+}
+
+fn type_check(
+    mode: TypeCheckMode,
+    got: Ptr<ast::Type>,
+    expected: Ptr<ast::Type>,
+    allow_opt_coercion: AllowOptionalCoercion,
+    //quiet: bool,
+) -> CommonTypeSelection {
+    use CommonTypeSelection::*;
+
     let p = primitives();
 
     if got == expected {
-        return true;
+        return Equal;
     }
 
-    if got == p.err_ty || expected == p.err_ty {
-        return true;
+    if expected == p.err_ty {
+        return Rhs;
+    } else if got == p.err_ty {
+        return if mode == TypeCheckMode::Strict { Equal } else { Lhs };
     }
 
     if is_bottom_type(got, p) || expected == p.any {
-        return true;
+        return Rhs;
     } else if is_bottom_type(expected, p) || got == p.any {
-        return false;
+        return Lhs;
     }
 
-    if let Some(got) = got.try_downcast::<ast::GenericDef>() {
+    if let Some(expected) = expected.try_downcast::<ast::GenericDef>() {
+        // resolve polymorph instantiation
+        debug_assert!(mode == TypeCheckMode::Strict);
+        return if accumulate_type(&mut expected.as_mut().cur_inst, got, None).is_ok() {
+            Equal
+        } else {
+            Mismatch
+        };
+    } else if let Some(_got) = got.try_downcast::<ast::GenericDef>() {
+        //todo!();
         //debug_assert!(got.var_ty.is_none_or(|t| t == expected));
         //got.as_mut().var_ty = Some(expected);
-        return true;
-    } else if let Some(expected) = expected.try_downcast::<ast::GenericDef>() {
-        return accumulate_type(&mut expected.as_mut().cur_inst, got, None).is_ok();
+        return Rhs;
     }
 
     if let Some(expected_lvl) = number_subtyping_level(expected) {
-        let Some(got_lvl) = number_subtyping_level(got) else { return false };
+        let got_lvl = number_subtyping_level(got)?;
         debug_assert_ne!(expected, got, "exact equality was already checked above");
-        let selection = SubtypingLevel::select(expected_lvl, got_lvl);
-        return !matches!(selection, CommonTypeSelection::Mismatch | CommonTypeSelection::Rhs);
+        return SubtypingLevel::select(got_lvl, expected_lvl);
     }
 
     // must be above every non-zero `got` value.
+    /*
     if let Some(expected_opt) = expected.try_downcast::<ast::OptionTy>() {
         let expected_inner = expected_opt.inner_ty.downcast_type();
         return if allow_opt_coercion
@@ -284,38 +149,136 @@ fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: 
             false
         };
     }
+    */
 
-    if let Some(expected_ptr) = expected.try_downcast::<ast::PtrTy>() {
-        let Some(got_ptr) = got.try_downcast::<ast::PtrTy>() else { return false };
-        if ctx().do_mut_checks && expected_ptr.is_mut && !got_ptr.is_mut {
-            return false;
-        }
-        return ty_match(got_ptr.pointee.downcast_type(), expected_ptr.pointee.downcast_type());
+    fn opt_coercion(
+        mode: TypeCheckMode,
+        lhs: Ptr<ast::Type>,
+        rhs: Ptr<ast::OptionTy>,
+        allow_opt_coercion: bool,
+    ) -> CommonTypeSelection {
+        debug_assert!(lhs.kind != AstKind::OptionTy);
+        let rhs_inner = rhs.inner_ty.downcast_type();
+        return if allow_opt_coercion
+            //&& lhs_inner.count_optional_nesting() >= rhs.count_optional_nesting()
+            && lhs != primitives().enum_variant // why is this needed?
+            && lhs.is_non_zero()
+        {
+            match type_check(mode, lhs, rhs_inner, AllowOptionalCoercion::FALSE) {
+                Equal | Rhs => Rhs,
+                Lhs => NewAlloc(type_new!(OptionTy { inner_ty: lhs.upcast() }).upcast_to_type()),
+                NewAlloc(inner_common) => NewAlloc(
+                    type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type(),
+                ),
+                Mismatch => Mismatch,
+            }
+        } else {
+            Mismatch
+        };
     }
 
-    if let Some(expected_slice) = expected.try_downcast::<ast::SliceTy>() {
-        let Some(got_slice) = got.try_downcast::<ast::SliceTy>() else { return false };
-        if ctx().do_mut_checks && expected_slice.is_mut && !got_slice.is_mut {
-            return false;
-        }
-        return ty_match(got_slice.elem_ty.downcast_type(), expected_slice.elem_ty.downcast_type());
+    if let Some(expected) = expected.try_downcast::<ast::OptionTy>() {
+        return if let Some(got) = got.try_downcast::<ast::OptionTy>() {
+            // assumes that OptionTy is never non_zero.
+            type_check(
+                mode,
+                got.inner_ty.downcast_type(),
+                expected.inner_ty.downcast_type(),
+                AllowOptionalCoercion::FALSE,
+            )
+        } else {
+            opt_coercion(mode, got, expected, allow_opt_coercion.lhs)
+        };
+    } else if let Some(got) = got.try_downcast::<ast::OptionTy>()
+        && mode == TypeCheckMode::Join
+    {
+        return opt_coercion(mode, expected, got, allow_opt_coercion.rhs).flip();
     }
 
-    if let Some(expected_arr) = expected.try_downcast::<ast::ArrayTy>() {
-        let Some(got_arr) = got.try_downcast::<ast::ArrayTy>() else { return false };
-        return got_arr.len.int::<u64>() == expected_arr.len.int::<u64>()
-            && ty_match(got_arr.elem_ty.downcast_type(), expected_arr.elem_ty.downcast_type());
+    /// common_type([]T, []mut T) == []T
+    /// common_type([]mut T, []T) == []T
+    /// common_type([][]mut T, []mut []T) == [][]T
+    ///      would require an allocation. => currently an error (TODO)
+    macro_rules! mut_check {
+        ($got:expr, $expected:expr, $ty:ident $child_field:ident $(,)?) => {{
+            let got = $got;
+            let expected = $expected;
+            if ctx().do_mut_checks
+                && mode == TypeCheckMode::Strict
+                && expected.is_mut
+                && !got.is_mut
+            {
+                return Mismatch;
+            }
+            let out_mut = expected.is_mut && got.is_mut;
+            let child_sel = type_check(
+                mode,
+                got.$child_field.downcast_type(),
+                expected.$child_field.downcast_type(),
+                AllowOptionalCoercion::TRUE, // *NonNull -> *?NonNull coercion is valid
+            );
+            match child_sel {
+                Mismatch => Mismatch,
+                Lhs | Rhs => {
+                    let sel = if child_sel == Lhs { got } else { expected };
+                    if sel.is_mut == out_mut {
+                        child_sel
+                    } else {
+                        NewAlloc(
+                            type_new!($ty { is_mut: out_mut, $child_field: sel.$child_field })
+                                .upcast_to_type(),
+                        )
+                    }
+                },
+                Equal if got.is_mut == expected.is_mut => Equal,
+                Equal if got.is_mut == out_mut => Lhs,
+                Equal => {
+                    debug_assert!(expected.is_mut == out_mut);
+                    Rhs
+                },
+                NewAlloc(child) => NewAlloc(
+                    type_new!($ty { is_mut: out_mut, $child_field: child.upcast() })
+                        .upcast_to_type(),
+                ),
+            }
+        }};
+    }
+
+    if let Some(expected) = expected.try_downcast::<ast::PtrTy>() {
+        let got = got.try_downcast::<ast::PtrTy>()?;
+        return mut_check!(got, expected, PtrTy pointee);
+    }
+
+    if let Some(expected) = expected.try_downcast::<ast::SliceTy>() {
+        let got = got.try_downcast::<ast::SliceTy>()?;
+        return mut_check!(got, expected, SliceTy elem_ty);
+    }
+
+    if let Some(expected) = expected.try_downcast::<ast::ArrayTy>() {
+        let got = got.try_downcast::<ast::ArrayTy>()?;
+        if got.len.downcast::<ast::IntVal>().val != expected.len.downcast::<ast::IntVal>().val {
+            return Mismatch;
+        }
+        return type_check(
+            mode,
+            got.elem_ty.downcast_type(),
+            expected.elem_ty.downcast_type(),
+            allow_opt_coercion,
+        );
     }
 
     if let Some(expected_range) = expected.try_downcast::<ast::RangeTy>() {
-        let Some(got_range) = got.try_downcast::<ast::RangeTy>() else { return false };
-        return got_range.rkind == expected_range.rkind
-            && ty_match(got_range.elem_ty, expected_range.elem_ty);
+        let got_range = got.try_downcast::<ast::RangeTy>()?;
+        if got_range.rkind != expected_range.rkind {
+            return Mismatch;
+        }
+        return type_check(mode, got_range.elem_ty, expected_range.elem_ty, allow_opt_coercion);
     }
 
     if let Some(got_fn) = got.try_downcast::<ast::Fn>() {
-        let Some(expected_fn) = expected.try_downcast::<ast::Fn>() else { return false };
-        return got_fn.params().len() == expected_fn.params().len()
+        let expected_fn = expected.try_downcast::<ast::Fn>()?;
+        // Currently function types must match exactly (see <https://en.wikipedia.org/wiki/Subtyping#Function_types>)
+        let eq = got_fn.params().len() == expected_fn.params().len()
             && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
             && got_fn
                 .params()
@@ -326,9 +289,10 @@ fn ty_match_(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, allow_opt_coercion: 
                     // g and e are swapped because functions are contravariant wrt. parameter types
                     // TODO: better errors messages
                     ty_match(e, g));
+        return if eq { Equal } else { Mismatch };
     }
 
-    false
+    Mismatch
 }
 
 /// The bottom type has no values and can transform into any other type.

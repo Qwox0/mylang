@@ -23,26 +23,6 @@ fn can_infer_more_general_return_type() {
     t("test :: (str: [][]u8, mut_str: []mut []mut u8) -> { return str; mut_str }", "[][]u8");
 }
 
-/// `common_type([][]mut T, []mut []T)` should return `[][]T`, but I don't want to allocate those
-/// return types.
-#[test]
-fn error_no_allocation_in_common_type() {
-    test("test :: (s1: [][]mut u8, s2: []mut []u8) -> { return s1; s2 }")
-        .error(
-            "The compiler currently cannot use `[][]u8` as the combined type of `[][]mut u8` and \
-             `[]mut []u8`. Consider specifying `[][]u8` explicitly.",
-            |_| TestSpan::ZERO,
-        )
-        .error("mismatched types: expected `[][]mut u8`; got `[]mut []u8`", substr!("s2";skip=1)); // always emit another error message?
-    test("test :: (s1: [][]mut u8, s2: []mut []u8) -> { return s2; s1 }")
-        .error(
-            "The compiler currently cannot use `[][]u8` as the combined type of `[]mut []u8` and \
-             `[][]mut u8`. Consider specifying `[][]u8` explicitly.",
-            |_| TestSpan::ZERO,
-        )
-        .error("mismatched types: expected `[]mut []u8`; got `[][]mut u8`", substr!("s1";skip=1)); // always emit another error message?
-}
-
 #[test]
 fn dont_break_return_type_on_finalize() {
     let code = "

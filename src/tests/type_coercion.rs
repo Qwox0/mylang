@@ -61,6 +61,7 @@ fn coerce_orelse_rhs() {
     a := NonNullEnum.A;
     opt: ??NonNullEnum = null;
     opt orelse a
+    //         ^ coerced to `Some(a)`
 ";
     test_body(code).ok(123_u8);
 }
