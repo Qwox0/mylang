@@ -826,7 +826,7 @@ impl<'ctx> Codegen<'ctx> {
                 let outer_continue_break_depth = self.continue_break_depth;
                 self.continue_break_depth = 0;
 
-                let res: CodegenResultAndControlFlow<()> = try {
+                let res = (|| {
                     let source = PatternSourceSymbol::new(
                         self.compile_expr(*source_expr)?,
                         source_expr.ty.u(),
@@ -887,8 +887,9 @@ impl<'ctx> Codegen<'ctx> {
                     });
                     self.symbols.push((*iter_var, iter_var_sym));
                     let out = self.compile_expr(*body).handle_unreachable()?;
-                    self.build_for_end(for_info, out)?
-                };
+                    self.build_for_end(for_info, out)?;
+                    Ok(())
+                })();
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
 
@@ -904,7 +905,7 @@ impl<'ctx> Codegen<'ctx> {
                 let outer_continue_break_depth = self.continue_break_depth;
                 self.continue_break_depth = 0;
 
-                let res: CodegenResultAndControlFlow<()> = try {
+                let res = (|| {
                     // entry
                     self.builder.build_unconditional_branch(cond_bb)?;
 
@@ -926,7 +927,8 @@ impl<'ctx> Codegen<'ctx> {
 
                     // end
                     self.builder.position_at_end(end_bb);
-                };
+                    Ok(())
+                })();
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
                 debug_assert!(out_ty.matches_void() || out_ty == p.any);
@@ -942,7 +944,7 @@ impl<'ctx> Codegen<'ctx> {
 
                 let outer_loop = self.cur_loop.replace(Loop { continue_bb: loop_bb, end_bb });
 
-                let res: CodegenResultAndControlFlow<()> = try {
+                let res: CodegenResultAndControlFlow<()> = (|| {
                     self.builder.build_unconditional_branch(loop_bb)?;
 
                     self.builder.position_at_end(loop_bb);
@@ -954,7 +956,8 @@ impl<'ctx> Codegen<'ctx> {
 
                     // end
                     self.builder.position_at_end(end_bb);
-                };
+                    Ok(())
+                })();
                 self.cur_loop = outer_loop;
                 self.continue_break_depth = outer_continue_break_depth;
                 res?;
@@ -1755,7 +1758,7 @@ impl<'ctx> Codegen<'ctx> {
 
         debug_assert!(f.params().iter().all(|d| !d.might_need_precompilation()));
         self.open_scope();
-        let res = try {
+        let res: CodegenResult<()> = (|| {
             self.symbols.reserve(f.params().len());
 
             let mut param_val_iter = func.get_param_iter().skip(use_sret as usize);
@@ -1832,7 +1835,8 @@ impl<'ctx> Codegen<'ctx> {
                 unsafe { func.delete() };
                 cerror_fatal!(f.span, "generated invalid llvm function");
             }
-        };
+            Ok(())
+        })();
         self.close_scope(true)?; // TODO: is `true` correct?
         self.return_depth = outer_return_depth;
         self.cur_fn = outer_fn;

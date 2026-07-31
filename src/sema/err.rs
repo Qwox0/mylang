@@ -2,7 +2,7 @@ use crate::{diagnostics::HandledErr, sema::UnitDependency};
 use SemaResult::*;
 use std::{
     convert::Infallible,
-    ops::{ControlFlow, FromResidual, Try},
+    ops::{ControlFlow, FromResidual, Residual, Try},
 };
 
 pub type SemaError = HandledErr;
@@ -54,6 +54,10 @@ impl<T> FromResidual<SemaResult<!>> for SemaResult<T> {
             Err(err) => SemaResult::Err(err),
         }
     }
+}
+
+impl<T> Residual<T> for SemaResult<!> {
+    type TryType = SemaResult<T>;
 }
 
 impl<T, E: Into<SemaError>> FromResidual<Result<Infallible, E>> for SemaResult<T> {

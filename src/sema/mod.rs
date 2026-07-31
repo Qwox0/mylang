@@ -2538,10 +2538,10 @@ impl Sema {
         if self.cctx.args.debug_types && decl.ident.span != Span::ZERO {
             let label = match &res {
                 Ok(()) => format!("type: {}", decl.var_ty.u()),
-                NotFinished(dep) => format!(
-                    "not finished ({dep:?}; type: {})",
-                    if let Some(ty) = decl.var_ty { &format!("Some({ty})") } else { "None" }
-                ),
+                NotFinished(dep) => {
+                    use crate::util::OptionExt;
+                    format!("not finished ({dep:?}; type: {})", decl.var_ty.display())
+                },
                 Err(e) => format!("err: {:?}", e),
             };
             display(decl.ident.span).label(&label).finish();
@@ -3063,20 +3063,21 @@ impl Sema {
             },
             (InvalidMutation::Var(var), k) => {
                 debug_assert_ne!(k, MutationKind::Initialize);
+                // Cannot be inlined (see <https://github.com/rust-lang/rust/pull/145838>)
+                let v = if mutated == var.upcast() { "it" } else { &format!("`{}`", var.sym) };
                 cerror!(
                     expr.full_span(),
-                    "Cannot {op} `{}`, as {} is not declared as mutable",
+                    "Cannot {op} `{}`, as {v} is not declared as mutable",
                     mutated.to_text(false),
-                    if mutated == var.upcast() { "it" } else { &format!("`{}`", var.sym) }
                 );
                 chint!(var.decl.u().ident.span, "consider changing `{}` to be mutable", var.sym);
             },
             (InvalidMutation::Ptr(ptr), MutationKind::Initialize) => {
+                let p = if mutated == ptr { "it" } else { &format!("`{}`", ptr.to_text(false)) };
                 cerror!(
                     expr.full_span(),
-                    "Cannot {op} the value behind `{}`, because {} is an immutable pointer",
+                    "Cannot {op} the value behind `{}`, because {p} is an immutable pointer",
                     mutated.to_text(false),
-                    if mutated == ptr { "it" } else { &format!("`{}`", ptr.to_text(false)) },
                 );
                 chint!(ptr.full_span(), "The pointer type `{}` is not `mut`", ptr.ty.u());
             },
@@ -3101,11 +3102,12 @@ impl Sema {
             },
             (InvalidMutation::Reslice(slice), k) => {
                 debug_assert_eq!(k, MutationKind::Slice);
+                let s =
+                    if mutated == slice { "it" } else { &format!("`{}`", slice.to_text(false)) };
                 cerror!(
                     expr.full_span(),
-                    "Cannot {op} the elements of `{}`, because {} is an immutable slice",
+                    "Cannot {op} the elements of `{}`, because {s} is an immutable slice",
                     mutated.to_text(false),
-                    if mutated == slice { "it" } else { &format!("`{}`", slice.to_text(false)) },
                 );
                 chint!(slice.full_span(), "The slice type `{}` is not `mut`", slice.ty.u());
             },

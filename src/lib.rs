@@ -1,8 +1,6 @@
-// Cannot use Rust nightly >= 1.92.0, because of <https://github.com/rust-lang/rust/pull/145838>
-
 #![cfg_attr(not(test), allow(dead_code))]
 #![feature(test)]
-#![feature(try_trait_v2)]
+#![feature(try_trait_v2, try_trait_v2_residual)]
 #![feature(never_type)]
 #![feature(iter_intersperse)]
 #![feature(new_range_api)]

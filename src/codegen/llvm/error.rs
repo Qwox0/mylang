@@ -3,7 +3,7 @@ use CodegenResult::*;
 use inkwell::{builder::BuilderError, execution_engine::FunctionLookupError, support::LLVMString};
 use std::{
     convert::Infallible,
-    ops::{ControlFlow, FromResidual, Try},
+    ops::{ControlFlow, FromResidual, Residual, Try},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +132,10 @@ impl<T> FromResidual<CodegenResult<!>> for CodegenResultAndControlFlow<T> {
             Err(err) => CodegenResult::Err(err.into()),
         }
     }
+}
+
+impl<T, U> Residual<T> for CodegenResult<!, U> {
+    type TryType = CodegenResult<T, U>;
 }
 
 impl<T, U, E> FromResidual<Result<Infallible, E>> for CodegenResult<T, U>
