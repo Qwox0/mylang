@@ -6,7 +6,7 @@ use crate::{
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopePos},
+    scope::{Scope, ScopeKind},
     scratch_allocator::TmpPtr,
     sema::SemaUnit,
     type_::{finalize_ty, ty_match},
@@ -341,11 +341,11 @@ ast_variants! {
     /// `{ <stmt>* }`
     Block {
         has_trailing_semicolon: bool,
-        scope: Scope,
         /// all statements (including declarations) in this block
         stmts: Ptr<[Ptr<Ast>]>,
+        /// only contains the currently visible declarations. Shadowed decls are replaced.
+        decl_scope: Scope,
         finished: usize,
-        cur_scope_pos: ScopePos,
     },
 
     /// `alloc(MyStruct).( a, b, c = <expr>, )`
@@ -1586,17 +1586,10 @@ impl Decl {
 }
 
 impl Block {
-    pub fn new(
-        stmts: Ptr<[Ptr<Ast>]>,
-        scope: Scope,
-        has_trailing_semicolon: bool,
-        span: Span,
-    ) -> Self {
-        ast_new!(local Block { span, has_trailing_semicolon, stmts, scope, finished: 0, cur_scope_pos: ScopePos(0) })
-    }
-
-    pub fn new_anon(stmts: Ptr<[Ptr<Ast>]>, scope: Scope) -> Self {
-        Block::new(stmts, scope, false, Span::ZERO)
+    pub fn new(stmts: Ptr<[Ptr<Ast>]>, has_trailing_semicolon: bool, span: Span) -> Self {
+        let mut decl_scope = Scope::new(vec![], ScopeKind::Block);
+        decl_scope.verify_no_duplicates();
+        ast_new!(local Block { span, has_trailing_semicolon, stmts, decl_scope, finished: 0 })
     }
 }
 

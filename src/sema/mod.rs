@@ -11,10 +11,9 @@ use crate::{
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
     display_code::display,
-    intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopeKind, ScopePos},
+    scope::{Scope, ScopeKind},
     scoped_stack::ScopedStack,
     type_::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
@@ -273,7 +272,6 @@ pub struct Sema {
 
     cctx: Ptr<CompilationContextInner>,
     cur_scope: Ptr<Scope>,
-    cur_scope_pos: ScopePos,
 
     #[cfg(debug_assertions)]
     debug_scope_level: usize,
@@ -342,7 +340,6 @@ impl Sema {
             loop_stack: vec![],
             cctx,
             cur_scope: cctx.primitives_scope,
-            cur_scope_pos: ScopePos(0),
             #[cfg(debug_assertions)]
             debug_scope_level: 0,
         }
@@ -421,7 +418,7 @@ impl Sema {
         }
 
         match expr.matchable().as_mut() {
-            AstEnum::Ident { sym, decl, span, .. } => match self.get_symbol(*sym) {
+            AstEnum::Ident { sym, decl, span, .. } => match self.cur_scope.find_decl(*sym) {
                 None if let Some(mut i) = self.try_custom_bitwith_int_type(sym.text()) => {
                     i.span = expr.span;
                     i.ty = Some(p.type_ty);
@@ -448,17 +445,9 @@ impl Sema {
                     };
                 },
             },
-            AstEnum::Block {
-                stmts,
-                finished,
-                cur_scope_pos,
-                has_trailing_semicolon,
-                scope,
-                ..
-            } => {
-                scope.verify_no_duplicates();
-                let osh = self.open_scope(scope);
-                self.cur_scope_pos = *cur_scope_pos;
+            AstEnum::Block { stmts, finished, has_trailing_semicolon, decl_scope, .. } => {
+                debug_only_assert!(decl_scope.was_checked_for_duplicates);
+                let osh = self.open_scope(decl_scope);
                 let res: SemaResult<()> = try {
                     let max_idx = stmts.len().wrapping_sub(1);
                     while let Some(s) = stmts.get(*finished) {
@@ -468,12 +457,16 @@ impl Sema {
                                 // s.ty = s.ty.finalize();
                                 debug_assert!(s.ty.is_some());
                             },
-                            NotFinished(dep) => {
-                                *cur_scope_pos = self.cur_scope_pos;
-                                NotFinished(dep)?
-                            },
+                            NotFinished(dep) => NotFinished(dep)?,
                             Err(HandledErr) => s.as_mut().ty = Some(p.err_ty),
                         }
+
+                        if let Some(decl) = s.try_downcast::<ast::Decl>()
+                            && decl.on_type.is_none()
+                        {
+                            decl_scope.add_decl_to_block(decl);
+                        }
+
                         *finished += 1;
                     }
                 };
@@ -630,7 +623,7 @@ impl Sema {
                         .scope
                         .as_ref()
                         .u()
-                        .find_decl_norec_unordered(rhs.sym)
+                        .find_decl_norec(rhs.sym)
                     else {
                         return cerror2!(
                             rhs.span,
@@ -739,7 +732,7 @@ impl Sema {
                     // method-like call:
                     // TODO?: maybe change syntax to `arg~my_fn(...)`. using `.` both for method
                     //        calls and method-like calls might be confusing
-                    if let Some(s) = self.get_symbol(rhs.sym) {
+                    if let Some(s) = self.cur_scope.find_decl(rhs.sym) {
                         let var_ty = self.get_symbol_var_ty(s)?;
                         if let Some(f) = var_ty.try_downcast::<ast::Fn>()
                             && let Some(first_param) = f.params().get(0)
@@ -1303,11 +1296,8 @@ impl Sema {
                 not_never!(rhs_ty);
                 expr.ty = Some(p.void_ty);
             },
-            AstEnum::Decl { on_type, .. } => {
+            AstEnum::Decl { .. } => {
                 self.analyze_decl(expr.downcast::<ast::Decl>(), None)?;
-                if on_type.is_none() {
-                    self.cur_scope_pos.inc();
-                }
             },
             AstEnum::If { condition, then_body, else_body, .. } => {
                 assert!(!is_const, "todo: if in const");
@@ -1618,8 +1608,7 @@ impl Sema {
                 debug_assert!(!self.cctx.args.is_lib);
                 let entry_point_sym = self.cctx.entry_point;
                 let start_file = self.cctx.start_file();
-                let Some(main) =
-                    start_file.scope.as_ref().u().find_decl_norec_unordered(entry_point_sym)
+                let Some(main) = start_file.scope.as_ref().u().find_decl_norec(entry_point_sym)
                 else {
                     return cerror2!(
                         start_file.full_span().start(),
@@ -3163,12 +3152,6 @@ impl Sema {
         Ok([ptr, p.slice_len_field])
     }
 
-    /// Note: the returned [`ast::Decl`] might not be fully analyzed.
-    #[inline]
-    fn get_symbol(&self, sym: Symbol) -> OPtr<ast::Decl> {
-        self.cur_scope.find_decl(sym, self.cur_scope_pos)
-    }
-
     fn get_symbol_var_ty(&self, sym: Ptr<ast::Decl>) -> SemaResult<Ptr<ast::Type>> {
         Ok(if let Some(var_ty) = sym.var_ty {
             var_ty
@@ -3199,25 +3182,41 @@ impl Sema {
         }
         if new_scope.parent.is_none() {
             new_scope.parent = Some(self.cur_scope);
-            new_scope.pos_in_parent = self.cur_scope_pos;
         }
 
+        let osh = OpenScopeHandle(
+            self.cur_scope,
+            #[cfg(debug_assertions)]
+            {
+                self.debug_scope_level += 1;
+                self.debug_scope_level
+            },
+        );
+
         self.cur_scope = Ptr::from_ref(new_scope);
-        self.cur_scope_pos = ScopePos(0);
         self.defer_stack.open_scope();
 
-        OpenScopeHandle::new(self)
+        osh
     }
 
-    fn close_scope(&mut self, open_scope_handle: OpenScopeHandle) {
-        open_scope_handle.close(self);
+    fn close_scope(&mut self, osh: OpenScopeHandle) {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(osh.1, self.debug_scope_level, "forgot to close scope");
+            self.debug_scope_level -= 1;
+        }
 
         // The parent scope of the prelude file is the root scope. During analysis of other files
         // the correct starting value for cur_scope is the prelude scope, not the root scope.
         // Nevertheless, assigning the root scope to cur_scope (after analysis of the prelude) is
         // fine because open_scope is called immediately for the next file which overwrites cur_scope.
-        self.cur_scope_pos = self.cur_scope.pos_in_parent;
-        self.cur_scope = self.cur_scope.parent.u();
+        debug_assert!(
+            osh.0 == self.cur_scope.parent.u()
+                || (osh.0.kind == ScopeKind::Root
+                    && self.cur_scope.parent.u().kind == ScopeKind::File)
+        );
+
+        self.cur_scope = osh.0;
         self.defer_stack.close_scope();
     }
 
@@ -3228,29 +3227,7 @@ impl Sema {
 }
 
 #[must_use]
-struct OpenScopeHandle(#[cfg(debug_assertions)] usize);
-
-impl OpenScopeHandle {
-    #[inline]
-    fn new(#[allow(unused)] sema: &mut Sema) -> OpenScopeHandle {
-        Self(
-            #[cfg(debug_assertions)]
-            {
-                sema.debug_scope_level += 1;
-                sema.debug_scope_level
-            },
-        )
-    }
-
-    #[inline]
-    fn close(self, #[allow(unused)] sema: &mut Sema) {
-        #[cfg(debug_assertions)]
-        {
-            debug_assert_eq!(self.0, sema.debug_scope_level, "forgot to close scope");
-            sema.debug_scope_level -= 1;
-        }
-    }
-}
+struct OpenScopeHandle(Ptr<Scope>, #[cfg(debug_assertions)] usize);
 
 /// `expr == None` means silent
 pub fn accumulate_type(

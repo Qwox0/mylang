@@ -1030,8 +1030,7 @@ impl Parser {
 
         let span = open_b.span.join(close_b.span);
         let stmts = self.alloc_slice(&stmts)?;
-        let scope = Scope::from_stmts(&stmts, ScopeKind::Block)?;
-        Ok(self.alloc(ast::Block::new(stmts, scope, has_trailing_semicolon, span))?)
+        Ok(self.alloc(ast::Block::new(stmts, has_trailing_semicolon, span))?)
     }
 
     /// Parses the insides of a [`Parser::block`]: Expressions and statements seperated by ';'.

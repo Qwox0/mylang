@@ -5,37 +5,10 @@ use crate::{
     diagnostics::{DiagnosticReporter, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::{UnwrapDebug, debug_only_assert, hash_val, panic_debug, unreachable_debug},
+    util::{debug_only_assert, hash_val, panic_debug, unreachable_debug},
 };
 use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
-
-/// The number of [`Decl`]s before this statement in the current [`Scope`].
-///
-/// ```text
-/// stmt pos=0
-/// decl pos=0
-/// stmt pos=1
-/// stmt pos=1
-/// decl pos=1
-/// stmt pos=2
-/// ```
-///
-/// A [`Decl`] has the same pos as the statement before it because ...
-///
-/// ```mylang
-/// a := a + 1; // the `a` in the init expr shouldn't resolve to this decl.
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ScopePos(pub u32);
-
-impl ScopePos {
-    pub const UNSET: Self = ScopePos(u32::MAX);
-
-    #[inline]
-    pub fn inc(&mut self) {
-        self.0 += 1;
-    }
-}
+use std::assert_matches::debug_assert_matches;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeKind {
@@ -75,8 +48,8 @@ impl ScopeKind {
 
 #[derive(Debug)]
 pub struct Scope {
+    pub kind: ScopeKind,
     pub parent: OPtr<Scope>,
-    pub pos_in_parent: ScopePos,
     /// TODO: use `struct { ptr: *mut T, len: u32, cap: u32 }` instead
     pub decls: Vec<Ptr<Decl>>,
     /// used for symbol lookups when this scope has more than [`SMALL_SCOPE_MAX_SIZE`] Decls.
@@ -84,7 +57,6 @@ pub struct Scope {
     ///
     /// Currently only used for unordered scopes because those scopes don't allow shadowing.
     decls_map: Option<UnorderedDeclMap>,
-    pub kind: ScopeKind,
 
     #[cfg(debug_assertions)]
     pub was_checked_for_duplicates: bool,
@@ -97,7 +69,6 @@ impl Scope {
         debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
         Scope {
             parent: None,
-            pos_in_parent: ScopePos::UNSET,
             decls,
             decls_map: None,
             kind,
@@ -107,21 +78,20 @@ impl Scope {
         }
     }
 
-    pub fn from_stmts(stmts: &[Ptr<ast::Ast>], kind: ScopeKind) -> Result<Scope, AllocErr> {
+    pub fn from_stmts(stmts: &[Ptr<ast::Ast>], kind: ScopeKind) -> Scope {
         // TODO: bench copy vs preallocate `stmts.len`
         let decls = stmts
             .iter()
             .filter_map(|s| s.try_downcast::<Decl>())
             .filter(|d| d.on_type.is_none())
             .collect::<Vec<_>>();
-        Ok(Scope::new(decls, kind))
+        Scope::new(decls, kind)
     }
 
     pub fn file(stmts: &[Ptr<ast::Ast>], parent_scope: Ptr<Scope>) -> Scope {
-        let mut scope = Scope::from_stmts(stmts, ScopeKind::File).unwrap();
+        let mut scope = Scope::from_stmts(stmts, ScopeKind::File);
         scope.parent = Some(parent_scope);
         debug_assert!(!parent_scope.kind.allows_shadowing());
-        scope.pos_in_parent = ScopePos(parent_scope.decls.len() as u32);
         scope
     }
 
@@ -143,7 +113,6 @@ impl Scope {
     /// also sets up [`Scope::decls_map`] if needed.
     pub fn verify_no_duplicates(&mut self) {
         if !self.kind.allows_shadowing() {
-            debug_assert!(!self.kind.allows_shadowing());
             if self.decls.len() <= SMALL_SCOPE_MAX_SIZE {
                 for (idx, decl) in self.decls.iter().copied().enumerate() {
                     debug_assert!(decl.on_type.is_none());
@@ -153,12 +122,12 @@ impl Scope {
                         error_duplicate_in_unordered_scope(self.kind, decl, dup);
                     }
                 }
-                self.decls_map = None;
+                debug_assert_matches!(self.decls_map, None)
             } else {
                 let mut map = UnorderedDeclMap::with_capacity(self.decls.len());
                 for &decl in self.decls.iter() {
                     debug_assert!(decl.on_type.is_none());
-                    if let Err(dup) = map.try_insert(decl) {
+                    if let Err(dup) = map.try_insert_no_dup(decl) {
                         error_duplicate_in_unordered_scope(self.kind, decl, dup);
                     }
                 }
@@ -171,21 +140,17 @@ impl Scope {
         }
     }
 
-    pub fn check_if_duplicate(&self, decl_new: Ptr<Decl>) {
+    pub fn add_decl_to_block(&mut self, decl_new: Ptr<Decl>) {
+        debug_assert!(self.kind.allows_shadowing());
         debug_only_assert!(self.was_checked_for_duplicates);
         debug_assert!(decl_new.on_type.is_none());
-        if self.decls.len() <= SMALL_SCOPE_MAX_SIZE {
-            if let Some(dup) = linear_search_symbol(&self.decls, decl_new.ident.sym, false, false) {
-                error_duplicate_in_unordered_scope(self.kind, decl_new, dup);
-            }
-        } else {
-            if let Some(dup) = self.decls_map.as_ref().u().get(decl_new.ident.sym, false) {
-                error_duplicate_in_unordered_scope(self.kind, decl_new, dup);
-            }
+        if let Some(map) = self.decls_map.as_mut() {
+            map.insert_or_replace(decl_new);
         }
+        self.decls.push(decl_new);
     }
 
-    fn find_decl_norec(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
+    pub fn find_decl_norec(&self, sym: Symbol) -> OPtr<Decl> {
         debug_only_assert!(self.was_checked_for_duplicates);
         debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
         let ignore_non_const = self.kind.is_aggregate();
@@ -193,32 +158,19 @@ impl Scope {
             debug_assert!(ctx().do_abort_compilation() || decls_map.len() == self.decls.len());
             decls_map.get(sym, ignore_non_const)
         } else {
-            let decls = if self.kind.allows_shadowing() {
-                &self.decls[..cur_pos.0 as usize]
-            } else {
-                &self.decls
-            };
-            linear_search_symbol(decls, sym, self.kind.allows_shadowing(), ignore_non_const)
+            linear_search_symbol(&self.decls, sym, self.kind.allows_shadowing(), ignore_non_const)
         }
     }
 
-    pub fn find_decl(&self, sym: Symbol, cur_pos: ScopePos) -> OPtr<Decl> {
+    pub fn find_decl(&self, sym: Symbol) -> OPtr<Decl> {
         let mut cur_scope = Some(Ptr::from_ref(self));
-        let mut cur_pos = cur_pos;
         while let Some(scope) = cur_scope {
-            if let Some(sym) = scope.find_decl_norec(sym, cur_pos) {
+            if let Some(sym) = scope.find_decl_norec(sym) {
                 return Some(sym);
             }
             cur_scope = scope.parent;
-            cur_pos = scope.pos_in_parent;
         }
         return None;
-    }
-
-    /// assumes `self` is an unordered scope. see [`ScopeKind::allows_shadowing`].
-    pub fn find_decl_norec_unordered(&self, sym: Symbol) -> OPtr<Decl> {
-        debug_assert!(!self.kind.allows_shadowing());
-        self.find_decl_norec(sym, ScopePos::UNSET)
     }
 
     // Currently only for debugging
@@ -237,7 +189,7 @@ impl Scope {
 
         Some(match self.kind {
             ScopeKind::Root | ScopeKind::File => return None,
-            ScopeKind::Block => get_scope_container!(self, ast::Block, scope).upcast(),
+            ScopeKind::Block => get_scope_container!(self, ast::Block, decl_scope).upcast(),
             ScopeKind::ForLoop => get_scope_container!(self, ast::For, scope).upcast(),
             ScopeKind::SwitchCase => todo!(),
             ScopeKind::Fn => get_scope_container!(self, ast::Fn, params_scope).upcast(),
@@ -288,14 +240,30 @@ impl UnorderedDeclMap {
         self.map.len()
     }
 
-    fn try_insert(&mut self, decl: Ptr<ast::Decl>) -> Result<(), Ptr<Decl>> {
+    fn eq(decl: Ptr<Decl>) -> impl Fn(&Ptr<Decl>) -> bool {
+        move |d: &Ptr<Decl>| d.ident.sym == decl.ident.sym
+    }
+
+    fn try_insert_no_dup(&mut self, decl: Ptr<ast::Decl>) -> Result<(), Ptr<Decl>> {
         let hasher = |d: &Ptr<Decl>| hash_val(&self.hash_builder, d.ident.sym);
         let hash = hasher(&decl);
-        match self.map.raw_entry_mut().from_hash(hash, |d| d.ident.sym == decl.ident.sym) {
+        match self.map.raw_entry_mut().from_hash(hash, Self::eq(decl)) {
             RawEntryMut::Occupied(val) => Err(*val.get_key_value().0),
             RawEntryMut::Vacant(slot) => {
                 slot.insert_with_hasher(hash, decl, (), hasher);
                 Ok(())
+            },
+        }
+    }
+
+    fn insert_or_replace(&mut self, decl: Ptr<Decl>) -> OPtr<Decl> {
+        let hasher = |d: &Ptr<Decl>| hash_val(&self.hash_builder, d.ident.sym);
+        let hash = hasher(&decl);
+        match self.map.raw_entry_mut().from_hash(hash, Self::eq(decl)) {
+            RawEntryMut::Occupied(mut val) => Some(val.insert_key(decl)),
+            RawEntryMut::Vacant(slot) => {
+                slot.insert_with_hasher(hash, decl, (), hasher);
+                None
             },
         }
     }
