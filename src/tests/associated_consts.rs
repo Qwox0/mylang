@@ -200,7 +200,9 @@ fn mangle_function_in_anon_struct() {
         struct {
             f :: -> i64 3;
         }.f()";
-    test_body(code).ok(3i64);
+    let res = test_body(code).ok(3i64);
+    // TODO: correctly mangle `f`. Currently the function is mangled as `lambda`
+    drop(res);
 }
 
 #[test]

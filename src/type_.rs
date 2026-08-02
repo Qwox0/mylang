@@ -456,7 +456,7 @@ impl ast::Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
             TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => true, // TODO: is this correct?
+            TypeEnum::GenericDef { .. } => false,
         }
     }
 
@@ -492,9 +492,7 @@ impl ast::Type {
                 debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => {
-                // TODO: is this correct?
-            },
+            TypeEnum::GenericDef { .. } => panic_debug!("cannot finalize GenericDef"),
         }
         debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
         *self
@@ -606,28 +604,9 @@ impl ast::Type {
         }
     }
 
-    pub fn is_ffi_noundef(mut self: Ptr<Self>) -> bool {
-        self = self.handle_generic_inst();
+    pub fn is_ffi_noundef(self: Ptr<Self>) -> bool {
         // arrays are special because they are always passed as a primitive pointer
         !self.is_aggregate() || self.kind == AstKind::ArrayTy
-    }
-
-    pub fn handle_generic_inst(self: Ptr<Self>) -> Ptr<Self> {
-        if self.kind == AstKind::GenericDef {
-            self.rep().downcast_type()
-        } else {
-            debug_assert!(self.replacement.is_none());
-            self
-        }
-    }
-
-    pub fn handle_generic_inst_ref(self: &mut Ptr<Self>) -> &mut Ptr<Self> {
-        if self.kind == AstKind::GenericDef {
-            self.rep_mut().downcast_type_ref()
-        } else {
-            debug_assert!(self.replacement.is_none());
-            self
-        }
     }
 
     /// `func(arg)`

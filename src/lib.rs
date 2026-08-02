@@ -18,6 +18,7 @@
 #![feature(maybe_uninit_write_slice)]
 #![feature(type_changing_struct_update)]
 #![feature(vec_push_within_capacity)]
+#![feature(debug_closure_helpers)]
 
 mod arena_allocator;
 mod ast;

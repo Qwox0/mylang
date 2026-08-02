@@ -1,8 +1,8 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
-    ast::{self, Ast, AstKind, Decl, DeclList, UpcastToAst},
-    context::ctx,
-    diagnostics::{DiagnosticReporter, cerror, chint},
+    ast::{self, Ast, AstKind, Decl, DeclFlags, DeclList, UpcastToAst},
+    context::{ctx, primitives},
+    diagnostics::{DiagnosticReporter, HandledErr, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
     util::{debug_only_assert, hash_val, panic_debug, unreachable_debug},
@@ -17,7 +17,7 @@ pub enum ScopeKind {
     Block,
     ForLoop,
     SwitchCase,
-    Fn,
+    FnParams,
     Struct,
     Union,
     Enum,
@@ -40,7 +40,7 @@ impl ScopeKind {
             AstKind::StructDef => ScopeKind::Struct,
             AstKind::UnionDef => ScopeKind::Union,
             AstKind::EnumDef => ScopeKind::Enum,
-            AstKind::Fn => ScopeKind::Fn,
+            AstKind::Fn => ScopeKind::FnParams,
             k => panic_debug!("{k:?} doesn't contain a scope"),
         }
     }
@@ -97,17 +97,22 @@ impl Scope {
 
     /// also returns the fields as a [`DeclList`].
     pub fn for_aggregate(
-        fields: Vec<Ptr<Decl>>,
-        consts: Vec<Ptr<Decl>>,
+        decls: Vec<Ptr<Decl>>,
         alloc: &Arena,
         kind: ScopeKind,
     ) -> Result<ScopeAndAggregateInfo, AllocErr> {
         debug_assert!(kind.is_aggregate());
-        let fields = alloc.alloc_slice(&fields)?; // fields are allocated twice because `scope_decls` is rearranged during sema.
-        let mut scope_decls = Vec::with_capacity(fields.len() + consts.len());
-        scope_decls.extend_from_slice(&fields);
-        scope_decls.extend_from_slice(&consts);
-        Ok(ScopeAndAggregateInfo { scope: Scope::new(scope_decls, kind), fields, consts })
+        let mut fields_buf = Vec::with_capacity(decls.len());
+        for d in decls.iter().copied() {
+            if d.is_const {
+                d.as_mut().flags.set(DeclFlags::IS_CONST_MEMBER);
+            } else {
+                d.as_mut().flags.set(DeclFlags::IS_DATA_MEMBER);
+                fields_buf.push(d);
+            }
+        }
+        let fields = alloc.alloc_slice(&fields_buf)?; // fields are allocated twice because `scope.decls` is rearranged during sema.
+        Ok(ScopeAndAggregateInfo { scope: Scope::new(decls, kind), fields })
     }
 
     /// also sets up [`Scope::decls_map`] if needed.
@@ -120,6 +125,11 @@ impl Scope {
                         linear_search_symbol(&self.decls[..idx], decl.ident.sym, false, false)
                     {
                         error_duplicate_in_unordered_scope(self.kind, decl, dup);
+                        for d in &self.decls {
+                            if d.ident.sym == decl.ident.sym {
+                                d.as_mut().var_ty = Some(primitives().err_ty);
+                            }
+                        }
                     }
                 }
                 debug_assert_matches!(self.decls_map, None)
@@ -140,20 +150,38 @@ impl Scope {
         }
     }
 
-    pub fn add_decl_to_block(&mut self, decl_new: Ptr<Decl>) {
+    pub fn add_decl_to_block(&mut self, decl: Ptr<Decl>) {
         debug_assert!(self.kind.allows_shadowing());
         debug_only_assert!(self.was_checked_for_duplicates);
-        debug_assert!(decl_new.on_type.is_none());
+        debug_assert!(decl.on_type.is_none());
         if let Some(map) = self.decls_map.as_mut() {
-            map.insert_or_replace(decl_new);
+            map.insert_or_replace(decl);
         }
-        self.decls.push(decl_new);
+        self.decls.push(decl);
     }
 
-    pub fn find_decl_norec(&self, sym: Symbol) -> OPtr<Decl> {
+    pub fn add_decl(&mut self, decl: Ptr<Decl>) -> Result<(), Ptr<Decl>> {
+        if self.kind.allows_shadowing() {
+            self.add_decl_to_block(decl);
+        } else {
+            if let Some(map) = self.decls_map.as_mut() {
+                let () = map.try_insert_no_dup(decl)?;
+            } else if let Some(dup) =
+                linear_search_symbol(&self.decls, decl.ident.sym, false, false)
+            {
+                return Err(dup);
+            }
+            self.decls.push(decl);
+        }
+        Ok(())
+    }
+
+    pub fn find_decl_norec(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
         debug_only_assert!(self.was_checked_for_duplicates);
         debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
-        let ignore_non_const = self.kind.is_aggregate();
+        // TODO: remove this
+        let ignore_non_const =
+            ignore_fields && self.kind.is_aggregate() && self.kind != ScopeKind::Enum;
         if let Some(decls_map) = self.decls_map.as_ref() {
             debug_assert!(ctx().do_abort_compilation() || decls_map.len() == self.decls.len());
             decls_map.get(sym, ignore_non_const)
@@ -165,7 +193,7 @@ impl Scope {
     pub fn find_decl(&self, sym: Symbol) -> OPtr<Decl> {
         let mut cur_scope = Some(Ptr::from_ref(self));
         while let Some(scope) = cur_scope {
-            if let Some(sym) = scope.find_decl_norec(sym) {
+            if let Some(sym) = scope.find_decl_norec(sym, true) {
                 return Some(sym);
             }
             cur_scope = scope.parent;
@@ -192,7 +220,7 @@ impl Scope {
             ScopeKind::Block => get_scope_container!(self, ast::Block, decl_scope).upcast(),
             ScopeKind::ForLoop => get_scope_container!(self, ast::For, scope).upcast(),
             ScopeKind::SwitchCase => todo!(),
-            ScopeKind::Fn => get_scope_container!(self, ast::Fn, params_scope).upcast(),
+            ScopeKind::FnParams => get_scope_container!(self, ast::Fn, params_scope).upcast(),
             ScopeKind::Struct => get_scope_container!(self, ast::StructDef, scope).upcast(),
             ScopeKind::Union => get_scope_container!(self, ast::UnionDef, scope).upcast(),
             ScopeKind::Enum => get_scope_container!(self, ast::EnumDef, scope).upcast(),
@@ -219,7 +247,6 @@ fn linear_search_symbol(
 pub struct ScopeAndAggregateInfo {
     pub scope: Scope,
     pub fields: DeclList,
-    pub consts: Vec<Ptr<Decl>>,
 }
 
 #[derive(Debug)]
@@ -278,11 +305,11 @@ impl UnorderedDeclMap {
 }
 
 #[track_caller]
-fn error_duplicate_in_unordered_scope(
+pub fn error_duplicate_in_unordered_scope(
     scope_kind: ScopeKind,
     decl: Ptr<ast::Decl>,
     first: Ptr<ast::Decl>,
-) {
+) -> HandledErr {
     match scope_kind {
         ScopeKind::Root | ScopeKind::File => {
             cerror!(decl.ident.span, "duplicate definition in file scope");
@@ -311,10 +338,11 @@ fn error_duplicate_in_unordered_scope(
         },
         ScopeKind::ForLoop => todo!(),
         ScopeKind::SwitchCase => todo!(),
-        ScopeKind::Fn => {
+        ScopeKind::FnParams => {
             cerror!(decl.ident.span, "duplicate parameter '{}'", decl.ident.sym);
         },
         ScopeKind::Block => unreachable_debug(),
     }
     chint!(first.ident.span, "first definition of '{}'", decl.ident.sym);
+    HandledErr
 }

@@ -273,7 +273,7 @@ impl Primitives {
                     scope: Scope::new(fields_vec, ScopeKind::Struct),
                     sema_units: None,
                     fields,
-                    consts: Vec::new(),
+                    external_consts: Vec::new(),
                     finished_members: 2,
                 });
                 init_ty(def.upcast_to_type());

@@ -489,3 +489,54 @@ macro_rules! orelse {
     };
 }
 pub(crate) use orelse;
+
+pub const BITFLAGS_DEBUG_ALL: bool = false;
+
+macro_rules! bitflags {
+    ($ty_name:ident : $repr:ty { $( $(#[$attr:meta])* $flag_name:ident),* $(,)? }) => {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub struct $ty_name {
+            pub data: $repr,
+        }
+
+        impl ::std::fmt::Debug for $ty_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                if $crate::util::BITFLAGS_DEBUG_ALL {
+                    f.debug_struct(stringify!($ty_name))
+                        $(.field(stringify!($flag_name), &self.get($ty_name::$flag_name)))*
+                        .finish()
+                } else {
+                    let mut t = f.debug_tuple(stringify!(DeclFlags));
+                    t.field_with(|f| write!(f, "{:01$b}", self.data, Self::_FLAG_COUNT));
+                    $(if self.get($ty_name::$flag_name) { t.field(&stringify!($flag_name)); })*
+                    t.finish_non_exhaustive()
+                }
+            }
+        }
+
+        impl $ty_name {
+            $crate::util::bitflags! { _flags: $repr, 0, $($(#[$attr])* $flag_name,)* }
+
+            pub const fn default() -> Self {
+                Self { data: 0 }
+            }
+
+            pub fn get(&self, mask: $repr) -> bool {
+                self.data & mask != 0
+            }
+
+            pub fn set(&mut self, mask: $repr) {
+                self.data |= mask;
+            }
+        }
+    };
+    (_flags: $repr:ty, $idx:expr,) => {
+        pub const _FLAG_COUNT: usize = $idx;
+    };
+    (_flags: $repr:ty, $idx:expr, $(#[$attr:meta])* $flag_name:ident, $($rem:tt)*) => {
+        $(#[$attr])*
+        pub const $flag_name: $repr = 1 << $idx;
+        $crate::util::bitflags! { _flags: $repr, $idx + 1, $($rem)* }
+    };
+}
+pub(crate) use bitflags;

@@ -17,46 +17,35 @@ error() {
     if [ $2 -ne 0 ]; then exit $2; fi
 }
 
-esc=$(printf '\033')
-reset="${esc}[0m"
-cyan="${esc}[0;36m"
-bold_red="${esc}[1;91m"
-bold_green="${esc}[1;92m"
+cd "$script_dir"
 
 #ASAN_VAR="RUSTFLAGS=-Zsanitizer=address"
 ASAN_TARGET="${ASAN_VAR+"x86_64-unknown-linux-gnu"}"
 
 tests="$@"
 
-watchdir -c "$ASAN_VAR cargo test $ASAN_TARGET --color=always -- $tests --nocapture --test-threads 1" 2>&1 | \
-    while IFS= read -r empty_line1; do # `sed '//d'` and `grep -v` collect all lines before printing
-        if ! [[ -z "$empty_line1" ]]; then
-            echo "$empty_line1"
-            continue
-        fi
+SHORT_BACKTRACE_LEN=9
+short_backtrace="s/\
+(\nstack backtrace:\n)([ ]*)0: __rustc::rust_begin_unwind\s*at [^\n]*\n\
+(([ ]*\d+: [^\n]*\n[ ]*at \S*\n){,$SHORT_BACKTRACE_LEN})\
+([ ]*\d+: [^\n]*\n[ ]*at \S*\n)*\
+/\1\3\2?: ... (short backtrace)\n/g"
 
-        read -r test_count_line
-        if ! [[ "$test_count_line" =~ (^running ([0-9]+) test[s]?$) ]]; then
-            echo "$empty_line1"
-            echo "$test_count_line"
-            continue
-        elif [[ "${BASH_REMATCH[2]}" != "0" ]]; then
-            echo "$test_count_line"
-            continue
-        fi
+remove_newline_test_stats="s/\n(\nrunning \d tests?\n)/\1/g"
+remove_0_tests_stats="s/running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured;[^\n]*\n\n//g"
 
-        read -r empty_line2
-        read -r empty_test_results
-        if ! [[ "$empty_test_results" =~ (^test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured;) ]]; then
-            echo "$empty_line1"
-            echo "$test_count_line"
-            echo "$empty_line2"
-            echo "$empty_test_results"
-            continue
-        fi
+highlight_individual_tests="s/test (\S*) \.\.\. (ignored[^\n]*)?\n?/$(tput setaf 6)TEST: \1$(tput sgr0) ... \2\n/g"
+highlight_failed="s/(FAILED\n)\s*/$(tput setaf 9 bold)\1$(tput sgr0)\n/g"
+highlight_ok="s/\s*(\sok\n)\s*/$(tput setaf 10 bold)\1$(tput sgr0)\n/g"
 
-        read -r empty_line3
-    done | \
-    sed "s/^test \([^ ]*\) \.\.\. /${cyan}TEST: \1${reset} ...\n/;\
-        s/\(\<FAILED\>\)/${bold_red}\1${reset}/;\
-        s/\(\<ok\>\)$/${bold_green}\1${reset}\n/"
+perl_filter="2>&1 | perl -0pe '
+    ;$short_backtrace
+    ;$remove_newline_test_stats
+    ;$remove_0_tests_stats
+    ;$highlight_individual_tests
+    ;$highlight_failed
+    ;$highlight_ok
+'"
+
+RUST_BACKTRACE=1 \
+watchdir -c "$ASAN_VAR cargo test $ASAN_TARGET --color=always -- $tests --nocapture --test-threads 1 $perl_filter"

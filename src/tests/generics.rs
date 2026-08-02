@@ -7,7 +7,7 @@ fn generic_function_call() {
     struct Sums(i8, i16, i32, i64, i128);
 
     let code = "
-add :: (l: $Num, r: Num) -> l + r;
+add :: (l: $Num, r: Num) -> Num l + r;
 test :: -> {
     sum8 := add(10, r=20, Num=i8);         // Explicit type annotation
     sum16 := add(1000.as(i16), 2000);      // Inferred, based on input 1
@@ -35,7 +35,7 @@ add :: (l: $Num, r: Num) -> l + r;
 test :: -> add(10, 20);
 ";
     let res = test(code).ok(30_i64);
-    assert!(res.llvm_ir().contains("@add.i64"));
+    assert_contains!(res.llvm_ir(), "@add.i64");
     drop(res);
 
     // error: not a normal parameter (see const_parameter)
@@ -46,16 +46,20 @@ test :: -> add(10, 20);
 #[test]
 fn generic_inner_types() {
     let code = r#"
+MyStruct :: struct { a: i8, b: []u8 };
 func :: (ptr: *$A, arr: [3]$B, opt: ?$C) -> {}
 test :: -> {
     int: i32 = 10;
-    s: struct { a: i8, b: []u8 } = .(-1, "Hello World");
+    s: MyStruct = .(-1, "Hello World");
 
     func(&int, .[1, 2, 3], Some(s));
-    func(&s, .[1, 2, 3], Some(s));
+    func(&s, u16.[1, 2, 3], Some(s));
 }
 "#;
-    test(code).compile_no_err();
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@func.i32.i64.MyStruct");
+    assert_contains!(res.llvm_ir(), "@func.MyStruct.u16.MyStruct");
+    drop(res);
 
     // cannot infer type inside optional
     let code = r#"
@@ -66,17 +70,60 @@ test :: -> take_opt(null);
 }
 
 #[test]
+#[ignore = "TODO"]
+fn infer_generic_based_on_inferred_return_type() {
+    let code = "
+id :: (x: $T) -> /* inferred: T */ x;
+test :: -> a: u16 = id(1);
+";
+    // Currently `1` is inferred as `i64`, which causes a mismatch with `u16`
+    test(code).compile_no_err();
+}
+
+#[test]
+fn generic_type_error() {
+    let code = r#"
+add_pi :: (val: $Num) -> val + 3.1415;
+test :: -> {
+    add_pi(1.0);
+    add_pi(1);
+    add_pi("Hello World");
+    add_pi(struct { val := 1 }.{});
+}
+"#;
+    // TODO: also print call which generated instantiation
+    test(code)
+        .error("mismatched types (left: `i64`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `[]u8`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `struct{val:i64}`, right: `{float}`)", substr!("+"));
+}
+
+#[test]
 fn generic_mismatches() {
-    /*
+    let code = r#"
+f :: (a: $T, b: T) -> {};
+test :: -> {
+    f(1, "Hello");
+}"#;
+    test(code).error(
+        "mismatched types: expected `$T` (inferred as `{integer}`); got `[]u8`",
+        substr!("\"Hello\""),
+    );
+
+    /*// TODO
     let code = "
 f :: (a: $T) -> {};
 test :: -> {
     empty: ?*i32 = null;
     f(empty, T=*i32);
 }";
-    test(code).error("todo", substr!("todo"));
+    test(code).error(
+        "mismatched types: expected `$T` (inferred as `*i32`); got `?*i32`",
+        substr!("empty"; skip=1),
+    );
     */
 
+    // allow coercion if the generic is not specified explicitly
     let code = "
 f :: (a: $T, b: T) -> {};
 test :: -> {
@@ -86,6 +133,14 @@ test :: -> {
 }
 ";
     test(code).compile_no_err();
+}
+
+#[test]
+fn duplicate_generic_def() {
+    // TODO: better error?
+    test("f :: (a: $T, b: $T) -> {}")
+        .error("duplicate parameter 'T'", substr!("T"; skip=1))
+        .info("first definition of 'T'", substr!("T"));
 }
 
 #[test]
@@ -116,7 +171,7 @@ test :: -> sizeof(i32);
 
 #[test]
 #[ignore = "TODO"]
-fn generic_number_val() {
+fn non_type_const_parameter() {
     let code = "
 init_arr :: (default: $T) -> [$N]T {
     mut arr: [N]T;

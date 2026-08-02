@@ -10,7 +10,10 @@ use crate::{
     scratch_allocator::TmpPtr,
     sema::SemaUnit,
     type_::{finalize_ty, ty_match},
-    util::{OptionExt, UnwrapDebug, panic_debug, then, to_f64, unreachable_debug},
+    util::{
+        OptionExt, UnwrapDebug, bitflags, debug_only_assert, panic_debug, then, to_f64,
+        unreachable_debug,
+    },
 };
 use core::fmt;
 use num::BigInt;
@@ -66,9 +69,11 @@ macro_rules! ast_new {
             $( $(#[$attr])* $field $(: $val)? ),*
         }
     };
+    ($alloc:expr, $kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }) => { {
+        $alloc.alloc(ast_new!(local $kind { $( $(#[$attr])* $field $(:$val)?),* }))?
+    } };
     ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }) => { {
-        let expr = ast_new!(local $kind { $( $(#[$attr])* $field $(:$val)?),* });
-        crate::context::ctx().alloc.alloc(expr)?
+        ast_new!(crate::context::ctx().alloc, $kind { $( $(#[$attr])* $field $(:$val)?),* })
     } };
     ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
         ast_new!($kind { span: $span, $( $(#[$attr])* $field $(:$val)?),* })
@@ -413,11 +418,10 @@ ast_variants! {
     /// `                                        ^ expr.span`
     Call {
         func: Ptr<Ast>,
+        resolved_fn_inst: OPtr<Fn>,
         args: Ptr<[Ptr<Ast>]>,
         /// which argument was piped into this [`Ast::Call`]
         pipe_idx: Option<usize>,
-
-        inst_idx: InstIdx,
     },
 
     /// examples: `&<expr>`, `<expr>.*`, `- <expr>`
@@ -467,9 +471,10 @@ ast_variants! {
     /// `expr.span` must describe the entire expression if `default.is_none()`,
     /// otherwise only the start is important
     Decl {
+        // TODO: move this into flags
         is_const: bool,
+        flags: DeclFlags,
         has_init_expr: bool,
-        markers: DeclMarkers,
         ident: Ptr<Ident>,
         /// `MyStruct.abc :: /* ... */;`
         /// `^^^^^^^^`
@@ -644,10 +649,8 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
-        /// contains the constants which are also in [`Scope::decls`] plus constants which are
-        /// defined later.
-        // TODO: don't allocate [`Scope::decls`] twice.
-        consts: Vec<Ptr<Decl>>,
+
+        external_consts: Vec<Ptr<Decl>>,
 
         /// only valid during sema
         sema_units: Option<TmpPtr<[SemaUnit]>>,
@@ -659,10 +662,8 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `field_count`
         fields: Ptr<[Ptr<Decl>]>,
-        /// contains the constants which are also in [`Scope::decls`] plus constants which are
-        /// defined later.
-        // TODO: don't allocate [`Scope::decls`] twice.
-        consts: Vec<Ptr<Decl>>,
+
+        external_consts: Vec<Ptr<Decl>>,
 
         /// only valid during sema
         sema_units: Option<TmpPtr<[SemaUnit]>>,
@@ -676,10 +677,8 @@ ast_variants! {
         scope: Scope,
         // TODO(size): allocate relative to `scope.decls.ptr`; replace with `variant_count`
         variants: Ptr<[Ptr<Decl>]>,
-        /// contains the constants which are also in [`Scope::decls`] plus constants which are
-        /// defined later.
-        // TODO: don't allocate [`Scope::decls`] twice.
-        consts: Vec<Ptr<Decl>>,
+
+        external_consts: Vec<Ptr<Decl>>,
         tag_ty: OPtr<IntTy>,
 
         /// only valid during sema
@@ -704,21 +703,19 @@ ast_variants! {
     /// `^ expr.span`
     // Note: for normal functions the following might not be true: `fn.ty.ty == primitives.type_ty`
     Fn {
-        /// set during sema
-        has_known_ret_ty: bool,
-        has_varargs: bool,
+        flags: FnFlags,
 
         /// params_scope.decls:
         ///     `0..param_count`: parameters, including const parameters
         ///     `param_count..` : template generics
         params_scope: Scope,
-        //param_count: usize,
+        param_count: usize,
 
         ret_ty_expr: OPtr<Ast>,
         ret_ty: OPtr<Type>,
 
-        generics: Vec<Ptr<GenericDef>>,
-        instantiations: Vec<GenericInstantiation>,
+        /// clones of the function
+        instantiations: Vec<Ptr<Fn>>,
 
         /// if `body == None` this Ast node originated from a function type. Note: normal functions
         /// are also valid [`Type`]s.
@@ -752,14 +749,6 @@ ast_variants! {
 
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GenericInstantiation(pub Ptr<[Ptr<Type>]>);
-
-impl GenericInstantiation {
-    pub const EMPTY: GenericInstantiation =
-        GenericInstantiation(Ptr::new(std::ptr::NonNull::from_ref(&[])));
-}
-
 inherit_ast! {
     struct ConstVal {}
 }
@@ -777,10 +766,6 @@ pub trait UpcastToAst: Sized {
     /// resolve possible replacements of this expression
     fn rep(self: Ptr<Self>) -> Ptr<Ast> {
         self.upcast().rep()
-    }
-
-    fn rep_mut(self: &mut Ptr<Self>) -> &mut Ptr<Ast> {
-        Ptr::from_ref(self).cast::<Ptr<Ast>>().as_mut().rep_mut()
     }
 
     fn full_span(&self) -> Span {
@@ -883,11 +868,16 @@ impl Ptr<Ast> {
 
     #[inline]
     pub fn set_replacement(self, rep: Ptr<Ast>) {
+        self.set_replacement_no_type(rep);
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
-        //debug_assert!(self.replacement.is_none()); // TODO(without `NotFinished`); use this
         if rep.ty.is_none() {
             rep.as_mut().ty = Some(self.ty.u());
         }
+    }
+
+    #[inline]
+    pub fn set_replacement_no_type(self, rep: Ptr<Ast>) {
+        debug_assert!(self.replacement.is_none_or(|r| r == rep));
         self.as_mut().replacement = Some(rep)
     }
 
@@ -932,7 +922,7 @@ impl Ptr<Ast> {
             self.ty.display()
         );
         //debug_assert!(self.is_type() || self.kind == AstKind::Fn);
-        debug_assert!(self.has_type_kind());
+        debug_assert!(self.has_type_kind(), "expected type kind, got {:?}", self.kind);
         self.cast()
     }
 
@@ -1045,8 +1035,7 @@ impl Ptr<ConstVal> {
 impl Ptr<Type> {
     /// always behaves like a `flat_downcast`.
     #[track_caller]
-    pub fn downcast<V: TypeVariant>(mut self) -> Ptr<V> {
-        self = self.handle_generic_inst();
+    pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
         debug_assert_eq!(self.kind, V::KIND, "invalid downcast to {:?}", V::KIND);
         debug_assert!(self.upcast().has_type_kind());
         self.cast()
@@ -1066,8 +1055,7 @@ impl Ptr<Type> {
         Ptr::from_ref(self).cast::<Ptr<V>>().as_mut()
     }
 
-    pub fn try_downcast<V: TypeVariant>(mut self) -> OPtr<V> {
-        self = self.handle_generic_inst();
+    pub fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
         then!(self.kind == V::KIND => self.downcast())
     }
 
@@ -1076,8 +1064,7 @@ impl Ptr<Type> {
         then!(self.kind == V::KIND => self.downcast_ref())
     }
 
-    pub fn downcast_struct_def(mut self) -> Ptr<StructDef> {
-        self = self.handle_generic_inst();
+    pub fn downcast_struct_def(self) -> Ptr<StructDef> {
         match self.kind {
             AstKind::StructDef => self.downcast::<StructDef>(),
             AstKind::SliceTy => primitives().untyped_slice_struct_def,
@@ -1085,8 +1072,7 @@ impl Ptr<Type> {
         }
     }
 
-    pub fn try_downcast_struct_def(mut self) -> OPtr<StructDef> {
-        self = self.handle_generic_inst();
+    pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
         then!(self.kind.is_struct_kind() => self.downcast_struct_def())
     }
 
@@ -1326,19 +1312,19 @@ impl Type {
         }
     }
 
-    pub fn get_associated_consts(&self) -> Option<&[Ptr<Decl>]> {
+    pub fn get_associated_external_consts(&self) -> Option<&[Ptr<Decl>]> {
         match self.matchable().as_ref() {
-            TypeEnum::StructDef { consts, .. }
-            | TypeEnum::UnionDef { consts, .. }
-            | TypeEnum::EnumDef { consts, .. } => Some(consts),
+            TypeEnum::StructDef { external_consts, .. }
+            | TypeEnum::UnionDef { external_consts, .. }
+            | TypeEnum::EnumDef { external_consts, .. } => Some(external_consts),
             _ => None,
         }
     }
 
     // TODO: add SliceTy cases
-    pub fn get_fields(&self) -> Option<&[Ptr<Decl>]> {
+    pub fn get_fields(&self) -> Option<Ptr<[Ptr<Decl>]>> {
         match self.matchable().as_ref() {
-            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => Some(fields),
+            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => Some(*fields),
             _ => None,
         }
     }
@@ -1497,9 +1483,9 @@ impl Decl {
     pub const fn new(ident: Ptr<Ident>, associated_type_expr: OPtr<Ast>, span: Span) -> Decl {
         ast_new!(local Decl {
             span,
+            flags: DeclFlags::default(),
             is_const: false,
             has_init_expr: false,
-            markers: DeclMarkers::default(),
             ident,
             on_type: associated_type_expr,
             var_ty_expr: None,
@@ -1532,20 +1518,20 @@ impl Decl {
         self.var_ty_expr.is_none() && self.init.is_none()
     }
 
-    pub fn const_val(self: Ptr<Decl>) -> Ptr<Ast> {
-        debug_assert!(self.is_const);
+    pub fn const_val(self: Ptr<Decl>) -> Ptr<ConstVal> {
+        debug_assert!(self.is_allowed_in_const());
         debug_assert!(self.var_ty.is_some() || self.init.u().kind == AstKind::Fn);
         if let Some(t) = self.var_ty
             && t.propagates_out()
         {
-            return t.upcast();
+            return t.upcast().downcast_const_val();
         }
         debug_assert!(self.is_const);
-        self.init.u().downcast_const_val().upcast()
+        self.init.u().downcast_const_val()
     }
 
     pub fn try_const_val(self: Ptr<Decl>) -> OPtr<Ast> {
-        then!(self.is_const => self.const_val())
+        then!(self.is_const => self.const_val().upcast())
     }
 
     pub fn lhs_span(&self) -> Span {
@@ -1577,7 +1563,7 @@ impl Decl {
     }
 
     pub fn is_allowed_in_const(&self) -> bool {
-        self.is_const || self.markers.get(DeclMarkers::IS_STATIC_MASK)
+        self.is_const || self.flags.get(DeclFlags::IS_STATIC)
     }
 
     pub fn has_default(&self, is_enum_variant: bool) -> bool {
@@ -1590,6 +1576,21 @@ impl Block {
         let mut decl_scope = Scope::new(vec![], ScopeKind::Block);
         decl_scope.verify_no_duplicates();
         ast_new!(local Block { span, has_trailing_semicolon, stmts, decl_scope, finished: 0 })
+    }
+}
+
+impl For {
+    pub fn new(
+        source_expr: Ptr<Ast>,
+        iter_var: Ptr<Ident>,
+        body: Ptr<Ast>,
+        was_piped: bool,
+        span: Span,
+        alloc: &Arena,
+    ) -> Result<Ptr<For>, HandledErr> {
+        let iter_var = alloc.alloc(Decl::from_ident(iter_var))?;
+        let scope = Scope::new(vec![iter_var], ScopeKind::ForLoop);
+        Ok(ast_new!(alloc, For { source_expr, iter_var, body, scope, was_piped, span }))
     }
 }
 
@@ -1622,53 +1623,60 @@ impl EnumDef {
     }
 }
 
-/// Index into [`Fn::instantiations`]
-pub type InstIdx = usize;
-
 impl Fn {
+    pub fn new(
+        params: Vec<Ptr<Decl>>,
+        param_count: usize,
+        ret_ty_expr: OPtr<Ast>,
+        body: OPtr<Ast>,
+        start_span: Span,
+    ) -> Fn {
+        debug_assert!(params[..param_count].iter().all(|p| p.flags.get(DeclFlags::IS_PARAMETER)));
+        debug_assert!(params[param_count..].iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
+        let params_scope = Scope::new(params, ScopeKind::FnParams);
+        ast_new!(local Fn {
+            params_scope,
+            param_count,
+            //inst_scope: None,
+            ret_ty_expr,
+            ret_ty: None,
+            //generics: vec![],
+            instantiations: vec![],
+            body,
+            flags: FnFlags::default(),
+            #[cfg(debug_assertions)]
+            decl: None,
+            span: start_span
+        })
+    }
+
     #[inline]
     pub fn params(&self) -> &[Ptr<Decl>] {
-        let param_count = self.params_scope.decls.len() - self.generics.len();
-        &self.params_scope.decls[..param_count]
+        &self.params_scope.decls[..self.param_count]
     }
 
-    pub fn is_generic(&self) -> bool {
-        !self.generics.is_empty()
+    /// (a: $Const1, $Const2) -> {}
+    #[inline]
+    pub fn constants(&self) -> &[Ptr<Decl>] {
+        &self.params_scope.decls[self.param_count..]
     }
 
-    pub fn instantiations(&self) -> &[GenericInstantiation] {
-        if self.is_generic() {
+    pub fn constants_count(&self) -> usize {
+        self.params_scope.decls.len() - self.param_count
+    }
+
+    pub fn instantiations(self: &Ptr<Fn>) -> &[Ptr<Fn>] {
+        if self.flags.get(FnFlags::IS_GENERIC) {
             &self.instantiations[..]
         } else {
-            &[GenericInstantiation::EMPTY]
+            Ptr::from_ref(self).as_slice1().as_ref()
         }
     }
+}
 
-    pub fn get_inst(&self, inst_idx: InstIdx) -> GenericInstantiation {
-        if self.is_generic() {
-            *self.instantiations.get(inst_idx).u()
-        } else {
-            debug_assert_eq!(inst_idx, 0);
-            GenericInstantiation::EMPTY
-        }
-    }
-
-    pub fn use_inst(&mut self, inst: GenericInstantiation) {
-        debug_assert!(if self.is_generic() {
-            self.instantiations.contains(&inst)
-        } else {
-            inst == GenericInstantiation::EMPTY
-        });
-        debug_assert_eq!(inst.0.len(), self.generics.len());
-        for (generic, inst) in self.generics.iter_mut().zip(inst.0) {
-            generic.replacement = Some(inst.upcast());
-        }
-    }
-
-    pub fn unuse_inst(&mut self) {
-        for generic in self.generics.iter_mut() {
-            generic.replacement = None;
-        }
+impl GenericDef {
+    pub fn new(name: Ptr<Ident>, span: Span) -> GenericDef {
+        ast_new!(local GenericDef { name, idx: usize::MAX, cur_inst: None, span })
     }
 }
 
@@ -1930,29 +1938,18 @@ impl RangeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeclMarkers {
-    data: u8,
-}
-
-impl DeclMarkers {
-    pub const IS_MUT_MASK: u8 = 0x1;
-    pub const IS_PUB_MASK: u8 = 0x4;
-    pub const IS_REC_MASK: u8 = 0x2;
-    pub const IS_STATIC_MASK: u8 = 0x8;
-
-    pub const fn default() -> Self {
-        Self { data: 0 }
-    }
-
-    pub fn get(&self, mask: u8) -> bool {
-        self.data & mask != 0
-    }
-
-    pub fn set(&mut self, mask: u8) {
-        self.data |= mask;
-    }
-}
+bitflags!(DeclFlags: u8 {
+    IS_MUT,
+    IS_PUB,
+    IS_REC,
+    IS_STATIC,
+    //IS_CONST,
+    IS_DATA_MEMBER,
+    IS_CONST_MEMBER,
+    IS_PARAMETER,
+    IS_GENERIC,
+    //IS_EXPLICIT_CONST_PARAM,
+});
 
 pub type DeclList = Ptr<[Ptr<Decl>]>;
 
@@ -1975,6 +1972,22 @@ impl DeclListExt for [Ptr<Decl>] {
     }
 }
 
+bitflags!(FnFlags: u8 {
+    /// set during sema
+    HAS_KNOWN_RET_TY,
+    HAS_VARARGS,
+
+    /// ```mylang
+    /// named :: () -> {}
+    /// () -> {}; // unnamed
+    /// ```
+    IS_NAMED,
+
+    IS_TYPE,
+    IS_GENERIC,
+    IS_INSTANTIATION,
+});
+
 pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {
     try_downcast_named_arg(*a).is_none()
 }
@@ -1988,4 +2001,270 @@ pub struct SwitchCase {
     pub case: Ptr<Ast>,
     pub body: Ptr<Ast>,
     pub scope: Ptr<Scope>,
+}
+
+impl SwitchCase {
+    pub fn new(case: Ptr<Ast>, body: Ptr<Ast>, alloc: &Arena) -> Result<Self, AllocErr> {
+        let scope = alloc.alloc(Scope::new(vec![], ScopeKind::SwitchCase))?;
+        Ok(SwitchCase { case, body, scope })
+    }
+}
+
+pub trait CloneAst: Sized {
+    fn clone_ast(&self, alloc: &Arena) -> Self {
+        self._clone_ast(alloc).unwrap_or_else(|_| panic!("oom"))
+    }
+
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr>;
+}
+
+impl<T: CloneAst> CloneAst for Ptr<[T]> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        alloc.alloc_slice_fill_iter(self.iter().map(|t| t.clone_ast(alloc)))
+    }
+}
+
+impl<T: CloneAst> CloneAst for Vec<T> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        Ok(self.iter().map(|t| t.clone_ast(alloc)).collect::<Vec<_>>())
+    }
+}
+
+impl<T: CloneAst> CloneAst for Option<T> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        Ok(self.as_ref().map(|t| t.clone_ast(alloc)))
+    }
+}
+
+impl<A: CloneAst, B: CloneAst> CloneAst for (A, B) {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        Ok((self.0.clone_ast(alloc), self.1.clone_ast(alloc)))
+    }
+}
+
+impl CloneAst for Ptr<Ast> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        macro_rules! clone {
+            ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )?),* $(,)? }) => {
+                alloc.alloc(ast_new!(local $kind { span: self.span, $( $(#[$attr])* $field $(:$val)?),* }))?.upcast()
+            };
+        }
+
+        Ok(match self.matchable().as_ref() {
+            &AstEnum::Ident { sym, .. } => clone!(Ident { sym, decl: None }),
+            &AstEnum::Block { has_trailing_semicolon, stmts, span, .. } => alloc
+                .alloc(Block::new(stmts.clone_ast(alloc), has_trailing_semicolon, span))?
+                .upcast(),
+            &AstEnum::PositionalInitializer { parsed_with_lhs, lhs, args, .. } => {
+                clone!(PositionalInitializer {
+                    parsed_with_lhs,
+                    lhs: lhs.clone_ast(alloc),
+                    args: args.clone_ast(alloc),
+                })
+            },
+            &AstEnum::NamedInitializer { parsed_with_lhs, lhs, fields, .. } => {
+                clone!(NamedInitializer {
+                    parsed_with_lhs,
+                    lhs: lhs.clone_ast(alloc),
+                    fields: fields.clone_ast(alloc),
+                })
+            },
+            &AstEnum::ArrayInitializer { parsed_with_lhs, lhs, elements, .. } => {
+                clone!(ArrayInitializer {
+                    parsed_with_lhs,
+                    lhs: lhs.clone_ast(alloc),
+                    elements: elements.clone_ast(alloc),
+                })
+            },
+            &AstEnum::ArrayInitializerShort { parsed_with_lhs, lhs, val, count, .. } => {
+                clone!(ArrayInitializerShort {
+                    parsed_with_lhs,
+                    lhs: lhs.clone_ast(alloc),
+                    val: val.clone_ast(alloc),
+                    count: count.clone_ast(alloc),
+                })
+            },
+            &AstEnum::Dot { has_lhs, lhs, rhs, .. } => {
+                clone!(Dot { has_lhs, lhs: lhs.clone_ast(alloc), rhs: rhs.clone_ast(alloc) })
+            },
+            &AstEnum::Index { mut_access, lhs, idx, .. } => {
+                clone!(Index { mut_access, lhs: lhs.clone_ast(alloc), idx: idx.clone_ast(alloc) })
+            },
+            &AstEnum::Cast { operand, target_ty, .. } => clone!(Cast {
+                operand: operand.clone_ast(alloc),
+                target_ty: target_ty.clone_ast(alloc),
+            }),
+            &AstEnum::Autocast { operand, .. } => {
+                clone!(Autocast { operand: operand.clone_ast(alloc) })
+            },
+            &AstEnum::Call { func, args, pipe_idx, .. } => clone!(Call {
+                func: func.clone_ast(alloc),
+                args: args.clone_ast(alloc),
+                pipe_idx,
+                resolved_fn_inst: None,
+            }),
+            &AstEnum::UnaryOp { is_postfix, op, operand, .. } => {
+                clone!(UnaryOp { is_postfix, op, operand: operand.clone_ast(alloc) })
+            },
+            &AstEnum::BinOp { lhs, op, rhs, .. } => {
+                clone!(BinOp { lhs: lhs.clone_ast(alloc), op, rhs: rhs.clone_ast(alloc) })
+            },
+            &AstEnum::Range { is_inclusive, start, end, .. } => clone!(Range {
+                is_inclusive,
+                start: start.clone_ast(alloc),
+                end: end.clone_ast(alloc),
+            }),
+            AstEnum::OrElse { lhs, rhs, .. } => {
+                clone!(OrElse { lhs: lhs.clone_ast(alloc), rhs: rhs.clone_ast(alloc) })
+            },
+            &AstEnum::Assign { is_explicit_generic_arg, lhs, rhs, .. } => clone!(Assign {
+                is_explicit_generic_arg,
+                lhs: lhs.clone_ast(alloc),
+                rhs: rhs.clone_ast(alloc),
+            }),
+            &AstEnum::BinOpAssign { lhs, op, rhs, .. } => {
+                clone!(BinOpAssign { lhs: lhs.clone_ast(alloc), op, rhs: rhs.clone_ast(alloc) })
+            },
+            AstEnum::Decl { .. } => self.downcast::<Decl>()._clone_ast(alloc)?.upcast(),
+            &AstEnum::If { was_piped, condition, then_body, else_body, .. } => clone!(If {
+                was_piped,
+                condition: condition.clone_ast(alloc),
+                then_body: then_body.clone_ast(alloc),
+                else_body: else_body.clone_ast(alloc),
+            }),
+            &AstEnum::Switch { was_piped, val, cases, else_body, .. } => clone!(Switch {
+                was_piped,
+                val: val.clone_ast(alloc),
+                cases: cases.clone_ast(alloc),
+                else_body: else_body.clone_ast(alloc),
+            }),
+            &AstEnum::For { was_piped, source_expr, iter_var, body, .. } => For::new(
+                source_expr.clone_ast(alloc),
+                iter_var.ident.clone_ast(alloc),
+                body.clone_ast(alloc),
+                was_piped,
+                self.span,
+                alloc,
+            )?
+            .upcast(),
+            &AstEnum::While { was_piped, condition, body, .. } => clone!(While {
+                was_piped,
+                condition: condition.clone_ast(alloc),
+                body: body.clone_ast(alloc),
+            }),
+            AstEnum::Loop { body, .. } => {
+                clone!(Loop { body: body.clone_ast(alloc), break_ty: None })
+            },
+            AstEnum::Defer { stmt, .. } => clone!(Defer { stmt: stmt.clone_ast(alloc) }),
+            AstEnum::Return { val, .. } => {
+                clone!(Return { val: val.clone_ast(alloc), parent_fn: None })
+            },
+            AstEnum::Break { val, .. } => clone!(Break { val: val.clone_ast(alloc) }),
+            AstEnum::Continue { .. } => clone!(Continue {}),
+            AstEnum::Empty { .. } => clone!(Empty {}),
+            AstEnum::IntVal { val, .. } => clone!(IntVal { val: val.clone() }),
+            &AstEnum::FloatVal { val, .. } => clone!(FloatVal { val }),
+            &AstEnum::BoolVal { val, .. } => clone!(BoolVal { val }),
+            &AstEnum::CharVal { val, .. } => clone!(CharVal { val }),
+            &AstEnum::StrVal { text, .. } => clone!(StrVal { text }),
+            &AstEnum::RawPtrVal { val, .. } => clone!(RawPtrVal { val }),
+            AstEnum::StaticPtrVal { .. }
+            | AstEnum::EnumVal { .. }
+            | AstEnum::OptionalVal { .. }
+            | AstEnum::AggregateVal { .. } => unreachable_debug(),
+            &AstEnum::ImportDirective { path, files_idx, .. } => {
+                clone!(ImportDirective { path, files_idx })
+            },
+            AstEnum::ExternDirective { .. } => clone!(ExternDirective { decl: None }),
+            &AstEnum::IntrinsicDirective { intrinsic_name, .. } => {
+                clone!(IntrinsicDirective { intrinsic_name, decl: None })
+            },
+            AstEnum::ProgramMainDirective { .. } => clone!(ProgramMainDirective {}),
+            &AstEnum::SimpleDirective { ret_ty, .. } => clone!(SimpleDirective { ret_ty }),
+            AstEnum::SizeOfDirective { type_, .. } => {
+                clone!(SizeOfDirective { type_: type_.clone_ast(alloc) })
+            },
+            AstEnum::SizeOfValDirective { val, .. } => {
+                clone!(SizeOfValDirective { val: val.clone_ast(alloc) })
+            },
+            AstEnum::AlignOfDirective { type_, .. } => {
+                clone!(AlignOfDirective { type_: type_.clone_ast(alloc) })
+            },
+            AstEnum::OffsetOfDirective { type_, field, .. } => clone!(OffsetOfDirective {
+                type_: type_.clone_ast(alloc),
+                field: field.clone_ast(alloc)
+            }),
+            AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => *self,
+            &AstEnum::PtrTy { is_mut, pointee, .. } => {
+                clone!(PtrTy { is_mut, pointee: pointee.clone_ast(alloc) })
+            },
+            &AstEnum::SliceTy { is_mut, elem_ty, .. } => {
+                clone!(SliceTy { is_mut, elem_ty: elem_ty.clone_ast(alloc) })
+            },
+            AstEnum::ArrayTy { len, elem_ty, .. } => {
+                clone!(ArrayTy { len: len.clone_ast(alloc), elem_ty: elem_ty.clone_ast(alloc) })
+            },
+            AstEnum::StructDef { .. } | AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => *self,
+            /*
+            AstEnum::StructDef { scope, fields, .. } => {
+                clone!(StructDef { sema_units: None, finished_members: 0 })
+            },
+            AstEnum::UnionDef { .. } => clone!(UnionDef {}),
+            AstEnum::EnumDef { .. } => clone!(EnumDef {}),
+            */
+            AstEnum::RangeTy { .. } => unreachable_debug(),
+            AstEnum::OptionTy { inner_ty, .. } => {
+                clone!(OptionTy { inner_ty: inner_ty.clone_ast(alloc) })
+            },
+            AstEnum::Fn { .. } => self.downcast::<Fn>()._clone_ast(alloc)?.upcast(),
+            AstEnum::GenericDef { name, .. } => {
+                alloc.alloc(GenericDef::new(name.clone_ast(alloc), self.span))?.upcast()
+            },
+            AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
+        })
+    }
+}
+
+impl CloneAst for Ptr<Ident> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        Ok(ast_new!(alloc, Ident { sym: self.sym, decl: None, span: self.span }))
+    }
+}
+
+impl CloneAst for SwitchCase {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        SwitchCase::new(self.case.clone_ast(alloc), self.body.clone_ast(alloc), alloc)
+    }
+}
+
+impl CloneAst for Ptr<Decl> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        alloc.alloc(ast_new!(local Decl {
+            is_const: self.is_const,
+            has_init_expr: self.has_init_expr,
+            flags: self.flags,
+            ident: self.ident.clone_ast(alloc),
+            on_type: self.on_type.clone_ast(alloc),
+            var_ty_expr: self.var_ty_expr.clone_ast(alloc),
+            var_ty: None,
+            init: self.init.clone_ast(alloc),
+            obj_symbol_name: None,
+            span: self.span
+        }))
+    }
+}
+
+impl CloneAst for Ptr<Fn> {
+    fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        let mut f = Fn::new(
+            self.params_scope.decls.clone_ast(alloc),
+            self.param_count,
+            self.ret_ty_expr.clone_ast(alloc),
+            self.body.clone_ast(alloc),
+            self.span,
+        );
+        debug_only_assert!(self.params_scope.was_checked_for_duplicates);
+        f.params_scope.verify_no_duplicates(); // TODO: smarter way of coping `decls_map` and `was_checked_for_duplicates`. Assert that no duplicates can happen.
+        alloc.alloc(f)
+    }
 }

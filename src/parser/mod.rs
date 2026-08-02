@@ -5,7 +5,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclMarkers, SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclFlags, FnFlags, For, SwitchCase, UnaryOpKind,
+        UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -289,13 +290,7 @@ impl Parser {
                         let iter_var = self.advanced().ident()?;
                         self.opt_do();
                         let body = self.expr()?;
-
-                        let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                        let scope = Scope::new(vec![iter_var], ScopeKind::ForLoop);
-                        expr!(
-                            For { source_expr: lhs, iter_var, body, scope, was_piped: true },
-                            t.span
-                        )
+                        For::new(lhs, iter_var, body, true, t.span, &self.cctx.alloc)?.upcast()
                     },
                     TokenKind::Keyword(Keyword::While) => {
                         self.advanced().opt_do();
@@ -352,27 +347,37 @@ impl Parser {
             },
             TokenKind::Keyword(k @ Keyword::Struct) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
+                let ScopeAndAggregateInfo { scope, fields } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
-                    StructDef { scope, sema_units: None, fields, consts, finished_members: 0 },
+                    StructDef {
+                        scope,
+                        sema_units: None,
+                        fields,
+                        external_consts: vec![],
+                        finished_members: 0
+                    },
                     span.join(close_b.span)
                 )
             },
             TokenKind::Keyword(k @ Keyword::Union) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields, consts } = self.struct_body(k)?;
+                let ScopeAndAggregateInfo { scope, fields } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
-                    UnionDef { scope, sema_units: None, fields, consts, finished_members: 0 },
+                    UnionDef {
+                        scope,
+                        sema_units: None,
+                        fields,
+                        external_consts: vec![],
+                        finished_members: 0
+                    },
                     span.join(close_b.span)
                 )
             },
             TokenKind::Keyword(Keyword::Enum) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let mut variants = Vec::new();
-                let mut consts = Vec::new();
-                //let consts = Vec::new(); // TODO: allow constants in enum block
+                let mut decls = Vec::new();
                 parse_in_block!(
                     self,
                     sep = [TokenKind::Semicolon, TokenKind::Comma],
@@ -396,30 +401,27 @@ impl Parser {
                             decl.var_ty_expr = ty;
                             decl.init = variant_index;
                             decl.has_init_expr = decl.init.is_some();
-                            variants.push(decl);
-                        } else {
-                            if !decl.is_const {
-                                return cerror2!(
-                                    decl.full_span(),
-                                    "expected variant or constant declaration; got variable \
-                                     declaration"
-                                );
-                            }
-                            consts.push(decl);
+                        } else if !decl.is_const {
+                            return cerror2!(
+                                decl.full_span(),
+                                "expected variant or constant declaration; got variable \
+                                 declaration"
+                            );
                         }
+                        decls.push(decl);
                         decl.upcast()
                     }
                 );
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                let ScopeAndAggregateInfo { scope, fields, consts } =
-                    Scope::for_aggregate(variants, consts, &self.cctx.alloc, ScopeKind::Enum)?;
+                let ScopeAndAggregateInfo { scope, fields } =
+                    Scope::for_aggregate(decls, &self.cctx.alloc, ScopeKind::Enum)?;
                 expr!(
                     EnumDef {
                         scope,
                         sema_units: None,
                         variants: fields,
                         finished_members: 0,
-                        consts,
+                        external_consts: vec![],
                         is_simple_enum: true,
                         tag_ty: None,
                     },
@@ -441,10 +443,7 @@ impl Parser {
                 let source_expr = self.expr()?;
                 self.opt_do();
                 let body = self.expr()?;
-
-                let iter_var = self.alloc(ast::Decl::from_ident(iter_var))?;
-                let scope = Scope::new(vec![iter_var], ScopeKind::ForLoop);
-                expr!(For { source_expr, iter_var, body, scope, was_piped: false }, span)
+                For::new(source_expr, iter_var, body, false, span, &self.cctx.alloc)?.upcast()
             },
             TokenKind::Keyword(Keyword::While) => {
                 let condition = self.advanced().expr()?;
@@ -743,7 +742,7 @@ impl Parser {
                              directive"
                         );
                     };
-                    func.as_mut().has_varargs = true;
+                    func.as_mut().flags.set(FnFlags::HAS_VARARGS);
                     func.upcast()
                 } else if directive_name == "no_mangle" {
                     return cerror2!(
@@ -790,7 +789,7 @@ impl Parser {
             },
             TokenKind::Dollar => {
                 let name = self.advanced().ident()?;
-                expr!(GenericDef { name, idx: usize::MAX, cur_inst: None }, span)
+                self.alloc(ast::GenericDef::new(name, span))?.upcast()
             },
             //TokenKind::At => todo!("TokenKind::At"),
             //TokenKind::Tilde => todo!("TokenKind::Tilde"),
@@ -913,23 +912,11 @@ impl Parser {
         } else {
             (None, expr)
         };
-        let body = Some(body);
-        let params_scope = Scope::new(params, ScopeKind::Fn);
-        Ok(ast_new!(
-            Fn {
-                params_scope,
-                ret_ty_expr,
-                ret_ty: None,
-                generics: vec![],
-                instantiations: vec![],
-                body,
-                has_known_ret_ty: false,
-                has_varargs: false,
-                #[cfg(debug_assertions)]
-                decl: None,
-            },
-            start_span
-        ))
+        for p in params.iter() {
+            p.as_mut().flags.set(DeclFlags::IS_PARAMETER);
+        }
+        let params_count = params.len();
+        self.alloc(ast::Fn::new(params, params_count, ret_ty_expr, Some(body), start_span))
     }
 
     fn if_after_cond(
@@ -964,8 +951,7 @@ impl Parser {
                 let case = self_.expr()?;
                 self_.tok(TokenKind::ColonGt)?;
                 let body = self_.expr()?;
-                let scope = self_.alloc(Scope::new(vec![], ScopeKind::SwitchCase))?;
-                Ok(SwitchCase { case, body, scope })
+                Ok(SwitchCase::new(case, body, &self_.cctx.alloc)?)
             },
             MIN_PRECEDENCE,
             "case",
@@ -1015,7 +1001,7 @@ impl Parser {
         let mut args = start_args;
         let closing_paren_span = self.parse_call(&mut args)?;
         let args = self.alloc_slice(&args)?;
-        Ok(ast_new!(Call { func, args, pipe_idx, inst_idx: usize::MAX }, closing_paren_span))
+        Ok(ast_new!(Call { func, args, pipe_idx, resolved_fn_inst: None }, closing_paren_span))
     }
 
     /// expects next token to be '{' and parses until and including the '}'
@@ -1079,17 +1065,14 @@ impl Parser {
 
     /// also returns the field_count
     fn struct_body(&mut self, kind: Keyword) -> ParseResult<ScopeAndAggregateInfo> {
-        let mut fields = Vec::new();
-        let mut consts = Vec::new();
+        let mut decls = Vec::new();
         parse_in_block!(self, sep = [TokenKind::Semicolon, TokenKind::Comma], in_block = true, {
             let expr = self.expr()?;
             if let Some(decl) = expr.try_downcast::<ast::Decl>() {
                 if let Some(on_ty_expr) = decl.on_type {
                     cerror!(on_ty_expr.full_span(), "currently not supported"); // TODO
-                } else if decl.is_const {
-                    consts.push(decl);
                 } else {
-                    fields.push(decl);
+                    decls.push(decl);
                 }
             } else {
                 cerror!(expr.full_span(), "expected field or constant declaration");
@@ -1101,14 +1084,14 @@ impl Parser {
             Keyword::Union => ScopeKind::Union,
             _ => unreachable_debug(),
         };
-        Ok(Scope::for_aggregate(fields, consts, &self.cctx.alloc, kind)?)
+        Ok(Scope::for_aggregate(decls, &self.cctx.alloc, kind)?)
     }
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
         let markers = self.decl_markers()?;
         let lhs = self.expr_(ASSIGN_PRECEDENCE)?;
         let decl = self.alloc(ast::Decl::from_lhs(lhs)?)?;
-        decl.as_mut().markers = markers;
+        decl.as_mut().flags = markers;
         self.decl_assign(decl, allow_ident_only)
     }
 
@@ -1128,27 +1111,27 @@ impl Parser {
         self.advanced().decl_tail(decl, kind)
     }
 
-    fn decl_markers(&mut self) -> ParseResult<DeclMarkers> {
-        let mut markers = DeclMarkers::default();
+    fn decl_markers(&mut self) -> ParseResult<DeclFlags> {
+        let mut markers = DeclFlags::default();
         let mut t = self.lex.peek_or_eof();
 
         macro_rules! set_marker {
             ($variant:ident $mask:ident) => {
-                if markers.get(DeclMarkers::$mask) {
+                if markers.get(DeclFlags::$mask) {
                     let marker_text = Keyword::$variant.as_str();
                     return cerror2!(t.span, "duplicate marker '{marker_text}' on declaration");
                 } else {
-                    markers.set(DeclMarkers::$mask)
+                    markers.set(DeclFlags::$mask)
                 }
             };
         }
 
         while t.kind != TokenKind::Ident {
             match t.kind {
-                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut IS_MUT_MASK),
-                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec IS_REC_MASK),
-                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB_MASK),
-                TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC_MASK),
+                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut IS_MUT),
+                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec IS_REC),
+                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB),
+                TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC),
                 _ => {
                     return Err(unexpected_token(t, &[
                         TokenKind::Ident,

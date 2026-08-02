@@ -58,6 +58,13 @@ impl Arena {
     pub fn alloc_slice_default<T: Default + Copy>(&self, len: usize) -> Result<Ptr<[T]>, AllocErr> {
         Ok(Ptr::from(self.0.try_alloc_slice_fill_copy(len, T::default())?))
     }
+
+    pub fn alloc_slice_fill_iter<T>(
+        &self,
+        iter: impl ExactSizeIterator<Item = T>,
+    ) -> Result<Ptr<[T]>, AllocErr> {
+        Ok(Ptr::from_ref(self.0.try_alloc_slice_fill_iter(iter)?))
+    }
 }
 
 impl From<bumpalo::AllocErr> for AllocErr {

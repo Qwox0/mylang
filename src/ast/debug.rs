@@ -1,6 +1,6 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, DeclMarkers, HasAstKind, OPtrTypeExt, TypeEnum, UnaryOpKind,
+        self, Ast, AstEnum, AstKind, DeclFlags, HasAstKind, OPtrTypeExt, TypeEnum, UnaryOpKind,
         UpcastToAst,
     },
     context::{ctx, primitives},
@@ -202,14 +202,14 @@ impl DebugAst for Ast {
                 lines.write_tree(rhs);
             },
             AstEnum::Decl {
-                markers, ident, on_type, var_ty, var_ty_expr, init, is_const, ..
+                flags, ident, on_type, var_ty, var_ty_expr, init, is_const, ..
             } => {
                 lines.write(&format!(
                     "{}{}{}{}",
-                    if markers.get(DeclMarkers::IS_PUB_MASK) { "pub " } else { "" },
-                    if markers.get(DeclMarkers::IS_MUT_MASK) { "mut " } else { "" },
-                    if markers.get(DeclMarkers::IS_REC_MASK) { "rec " } else { "" },
-                    if markers.get(DeclMarkers::IS_STATIC_MASK) { "static " } else { "" },
+                    if flags.get(DeclFlags::IS_PUB) { "pub " } else { "" },
+                    if flags.get(DeclFlags::IS_MUT) { "mut " } else { "" },
+                    if flags.get(DeclFlags::IS_REC) { "rec " } else { "" },
+                    if flags.get(DeclFlags::IS_STATIC) { "static " } else { "" },
                 ));
 
                 if let Some(ty_expr) = on_type {
@@ -374,9 +374,10 @@ impl DebugAst for Ast {
                 },
                 cv => todo!("debug {cv:?}"),
             },
-            AstEnum::Fn { params_scope, ret_ty, ret_ty_expr, body, .. } => {
+            AstEnum::Fn { ret_ty, ret_ty_expr, body, .. } => {
+                let f = ptr.downcast::<ast::Fn>();
                 lines.write("(");
-                lines.write_many_expr(&params_scope.decls, ",");
+                lines.write_many_expr(f.params(), ",");
                 lines.write(")->");
                 if let Some(ret_type) = ret_ty_expr {
                     lines.write_tree(ret_type);
