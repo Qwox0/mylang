@@ -290,6 +290,10 @@ impl Primitives {
             ignored_name: ast_new!(Ident { sym: sym("_"), decl: None }),
         })
     }
+
+    pub fn usize(&self) -> Ptr<ast::Type> {
+        self.u64
+    }
 }
 
 fn insert_symbol_no_duplicate(decls: &mut Vec<Ptr<ast::Decl>>, decl: Ptr<ast::Decl>) {

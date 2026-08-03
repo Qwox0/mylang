@@ -1,4 +1,4 @@
-use crate::tests::{CompileTest, assert_contains, substr, test, test_body};
+use crate::tests::{CompileTest, arr, assert_contains, substr, test, test_body};
 
 #[test]
 fn generic_function_call() {
@@ -144,6 +144,14 @@ fn duplicate_generic_def() {
 }
 
 #[test]
+fn parameter_generic_name_collision() {
+    // TODO: better error?
+    test("f :: (some_name: $some_name) -> {}")
+        .error("duplicate parameter 'some_name'", substr!("some_name"; skip=1))
+        .info("first definition of 'some_name'", substr!("some_name"));
+}
+
+#[test]
 #[ignore = "TODO"]
 fn infer_through_generic() {
     let code = "
@@ -162,24 +170,47 @@ test :: -> {
 #[test]
 #[ignore = "TODO"]
 fn const_positional_parameter() {
+    // type
     let code = "
 sizeof :: ($ty) -> #sizeof(ty);
 test :: -> sizeof(i32);
 ";
     test(code).ok(4);
-}
 
-#[test]
-#[ignore = "TODO"]
-fn non_type_const_parameter() {
+    // number
     let code = "
-init_arr :: (default: $T) -> [$N]T {
+arr_splat :: (val: $T, len: $N) -> [N]T {
     mut arr: [N]T;
     for idx in 0..N do arr[idx] = default;
     arr
-}";
-    test(code).compile_no_err();
+}
+test :: -> arr_splat(123, 5);
+";
+    let res = test(code).ok(arr([123; 5]));
+    drop(res);
+}
+
+#[test]
+fn non_type_const_parameter() {
+    /* TODO
+    init_arr :: (default: $T) -> [$N]T {
+        mut arr: [N]T;
+        for idx in 0..N do arr[idx] = default;
+        arr
+    }
+    */
+    let code = r#"
+arr_len :: (arr: [$N]$T) -> u64 N;
+test :: ->
+    arr_len(.[10, 20, 30, 40, 50])
+    + arr_len(u16.[])
+    + arr_len(.["Hello", "World", "!"])
+;"#;
+    let res = test(code).ok(8_usize);
+    assert_contains!(res.llvm_ir(), "@arr_len.i64.5");
+    assert_contains!(res.llvm_ir(), "@arr_len.u16.0");
+    assert_contains!(res.llvm_ir(), "@\"arr_len.[]u8.3\"");
+    drop(res);
 }
 
 // TODO: generic structs
-// TODO: error: param name == generic name

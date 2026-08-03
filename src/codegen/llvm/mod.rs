@@ -19,7 +19,7 @@ use crate::{
         optional_repr, struct_size, ty_match, union_size,
     },
     util::{
-        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime,
+        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime, hash_val,
         is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64, unreachable_debug,
     },
 };
@@ -60,6 +60,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, hash_map::Entry},
     fmt::{Debug, Write},
+    hash::{BuildHasherDefault, DefaultHasher},
     marker::PhantomData,
     path::Path,
 };
@@ -1842,8 +1843,36 @@ impl<'ctx> Codegen<'ctx> {
         mangled_buf.write_str(name.text()).unwrap();
 
         for c in consts {
-            let cv = c.const_val().downcast_type(); // TODO: non-type generics
-            write!(&mut mangled_buf, ".{}", cv).unwrap();
+            let cv = c.const_val();
+            write!(&mut mangled_buf, ".").unwrap();
+            match cv.matchable2() {
+                _ if let Some(ty) = cv.try_downcast_type() => write!(&mut mangled_buf, "{}", ty),
+                ast::ConstValMatch::IntVal(i) => write!(&mut mangled_buf, "{}", i.val),
+                ast::ConstValMatch::FloatVal(f) => write!(&mut mangled_buf, "{}", f.val),
+                ast::ConstValMatch::BoolVal(b) => write!(&mut mangled_buf, "{}", b.val),
+                ast::ConstValMatch::CharVal(c) => {
+                    if c.val.is_ascii() && !c.val.is_ascii_control() {
+                        write!(&mut mangled_buf, "{}", c.val)
+                    } else {
+                        write!(&mut mangled_buf, "{}", c.val as usize)
+                    }
+                },
+                ast::ConstValMatch::StrVal(ptr) => write!(
+                    &mut mangled_buf,
+                    "{:x}",
+                    hash_val(&BuildHasherDefault::<DefaultHasher>::default(), ptr.text.as_ref())
+                        & 0xffffff
+                ),
+                /*
+                ast::ConstValMatch::RawPtrVal(ptr) => todo!(),
+                ast::ConstValMatch::StaticPtrVal(ptr) => todo!(),
+                ast::ConstValMatch::EnumVal(ptr) => todo!(),
+                ast::ConstValMatch::OptionalVal(ptr) => todo!(),
+                ast::ConstValMatch::AggregateVal(ptr) => todo!(),
+                */
+                _ => write!(&mut mangled_buf, "{:p}", cv),
+            }
+            .unwrap();
         }
 
         mangled_buf.into()

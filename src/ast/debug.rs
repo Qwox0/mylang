@@ -651,6 +651,9 @@ impl Debug for ast::ConstVal {
 
 impl Display for ast::ConstVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ty) = Ptr::from_ref(self).try_downcast_type() {
+            return write!(f, "{}", ty);
+        }
         write!(f, "{}", self.to_text(false))?;
         match self.ty {
             Some(ty) if self.kind != AstKind::AggregateVal => write!(f, "{ty}"),

@@ -262,6 +262,21 @@ macro_rules! ast_variants {
             }
         }
 
+        pub enum ConstValMatch {
+            $($c_name(Ptr<$c_name>),)+
+            $($t_name(Ptr<$t_name>),)+
+        }
+
+        impl ConstVal {
+            pub fn matchable2(self: Ptr<ConstVal>) -> ConstValMatch {
+                match self.kind {
+                    $(|AstKind::$name)+ => unreachable_debug(),
+                    $(AstKind::$c_name => ConstValMatch::$c_name(self.flat_downcast::<$c_name>()),)+
+                    $(AstKind::$t_name => ConstValMatch::$t_name(self.flat_downcast::<$t_name>()),)+
+                }
+            }
+        }
+
         pub enum TypeMatch {
             $($t_name(Ptr<$t_name>),)+
         }
@@ -731,7 +746,7 @@ ast_variants! {
         /// Index into [`Fn::generics`]
         idx: usize,
 
-        cur_inst: OPtr<Type>,
+        cur_inst: OPtr<ConstVal>,
 
         // /// `[$N]$T`
         // ///      ^^ ty=type
@@ -757,11 +772,28 @@ inherit_ast! {
     struct Type {}
 }
 
-pub trait UpcastToAst: Sized {
-    fn upcast(self: Ptr<Self>) -> Ptr<Ast>;
+pub unsafe trait UpcastToAst: Sized {
+    #[cfg(debug_assertions)]
+    fn verify_upcast(self: Ptr<Self>) {}
+
+    fn upcast(self: Ptr<Self>) -> Ptr<Ast> {
+        #[cfg(debug_assertions)]
+        self.verify_upcast();
+
+        self.cast()
+    }
+
+    fn upcast_ref(self: &mut Ptr<Self>) -> &mut Ptr<Ast> {
+        Ptr::from_ref(self).cast::<Ptr<Ast>>().as_mut()
+    }
 
     #[allow(unused)]
-    fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]>;
+    fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]> {
+        #[cfg(debug_assertions)]
+        slice.iter().copied().for_each(Self::verify_upcast);
+
+        slice.cast_slice()
+    }
 
     /// resolve possible replacements of this expression
     fn rep(self: Ptr<Self>) -> Ptr<Ast> {
@@ -773,31 +805,13 @@ pub trait UpcastToAst: Sized {
     }
 }
 
-macro_rules! impl_UpcastToAst {
-    ($($name:ty),*) => { $(
-        impl UpcastToAst for $name {
-            fn upcast(self: Ptr<Self>) -> Ptr<Ast> {
-                self.cast()
-            }
-
-            fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]> {
-                slice.cast_slice()
-            }
-        }
-    )* };
-}
-
-impl_UpcastToAst! { AstEnum, ConstVal, Type }
-
-impl<V: AstVariant> UpcastToAst for V {
-    fn upcast(self: Ptr<V>) -> Ptr<Ast> {
+unsafe impl UpcastToAst for AstEnum {}
+unsafe impl UpcastToAst for ConstVal {}
+unsafe impl UpcastToAst for Type {}
+unsafe impl<V: AstVariant> UpcastToAst for V {
+    #[cfg(debug_assertions)]
+    fn verify_upcast(self: Ptr<Self>) {
         debug_assert_eq!(self.get_kind(), V::KIND);
-        self.cast()
-    }
-
-    fn upcast_slice(slice: Ptr<[Ptr<Self>]>) -> Ptr<[Ptr<Ast>]> {
-        debug_assert!(slice.iter().all(|a| a.get_kind() == V::KIND));
-        slice.cast_slice()
     }
 }
 
@@ -998,8 +1012,19 @@ impl Ptr<Ast> {
 }
 
 impl Ptr<ConstVal> {
+    #[inline]
+    pub fn matchable(&self) -> Ptr<ConstValEnum> {
+        self.cast()
+    }
+
     #[track_caller]
     pub fn downcast<V: ConstValVariant>(self) -> Ptr<V> {
+        debug_assert!(self.replacement.is_none());
+        self.flat_downcast()
+    }
+
+    #[track_caller]
+    pub fn flat_downcast<V: ConstValVariant>(self) -> Ptr<V> {
         debug_assert!(self.replacement.is_none());
         debug_assert_eq!(self.kind, V::KIND);
         debug_assert!(self.upcast().is_const_val());
@@ -1022,6 +1047,11 @@ impl Ptr<ConstVal> {
         then!(self.upcast().has_type_kind() => self.downcast_type())
     }
 
+    pub fn try_downcast_type_ref(&mut self) -> Option<&mut Ptr<Type>> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.upcast().has_type_kind() => self.upcast_ref().downcast_type_ref())
+    }
+
     /// Expects `self` to be an [`IntVal`] or a [`FloatVal`].
     pub fn float_val(self) -> f64 {
         if let Some(int) = self.try_downcast::<IntVal>() {
@@ -1030,9 +1060,20 @@ impl Ptr<ConstVal> {
             self.downcast::<FloatVal>().val
         }
     }
+
+    pub fn finalize(&mut self) -> Self {
+        if let Some(ty) = self.try_downcast_type_ref() {
+            ty.finalize();
+        }
+        *self
+    }
 }
 
 impl Ptr<Type> {
+    pub fn upcast_to_const_val(self) -> Ptr<ConstVal> {
+        self.upcast().downcast_const_val()
+    }
+
     /// always behaves like a `flat_downcast`.
     #[track_caller]
     pub fn downcast<V: TypeVariant>(self) -> Ptr<V> {
@@ -1118,7 +1159,9 @@ impl Ptr<Type> {
             TypeMatch::OptionTy(o) => Some(o.inner_ty.downcast_type()),
             TypeMatch::Fn(_) => None,
             TypeMatch::ArrayLikeContainer(a) => Some(a.elem_ty),
-            TypeMatch::GenericDef(g) => g.cur_inst.and_then(Ptr::inner_ty),
+            TypeMatch::GenericDef(g) => {
+                g.cur_inst.and_then(Ptr::<ConstVal>::try_downcast_type).and_then(Ptr::inner_ty)
+            },
         }
     }
 
@@ -1263,13 +1306,6 @@ impl Ast {
 
     pub fn is_custom_type(&self) -> bool {
         matches!(self.kind, AstKind::StructDef | AstKind::UnionDef | AstKind::EnumDef) // TODO: add `| AstKind::Fn`?
-    }
-}
-
-impl ConstVal {
-    #[inline]
-    pub fn matchable(&self) -> Ptr<ConstValEnum> {
-        Ptr::from_ref(self).cast()
     }
 }
 

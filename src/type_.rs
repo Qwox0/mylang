@@ -4,7 +4,7 @@ use crate::{
     diagnostics::cerror,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    sema::{accumulate_type, primitives::Primitives},
+    sema::{generics::accumulate_generic, primitives::Primitives},
     util::{
         BigIntExt, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
         panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
@@ -115,7 +115,7 @@ fn type_check(
     if let Some(expected) = expected.try_downcast::<ast::GenericDef>() {
         // resolve polymorph instantiation
         debug_assert!(mode == TypeCheckMode::Strict);
-        return if accumulate_type(&mut expected.as_mut().cur_inst, got, None).is_ok() {
+        return if accumulate_generic(expected, got.upcast_to_const_val()) {
             Equal
         } else {
             Mismatch
@@ -132,24 +132,6 @@ fn type_check(
         debug_assert_ne!(expected, got, "exact equality was already checked above");
         return SubtypingLevel::select(got_lvl, expected_lvl);
     }
-
-    // must be above every non-zero `got` value.
-    /*
-    if let Some(expected_opt) = expected.try_downcast::<ast::OptionTy>() {
-        let expected_inner = expected_opt.inner_ty.downcast_type();
-        return if allow_opt_coercion
-            && expected.count_optional_nesting() > got.count_optional_nesting()
-            && got != p.enum_variant
-            && got.is_non_zero()
-        {
-            ty_match_(got, expected_inner, false)
-        } else if let Some(got_opt) = got.try_downcast::<ast::OptionTy>() {
-            ty_match_(got_opt.inner_ty.downcast_type(), expected_inner, false)
-        } else {
-            false
-        };
-    }
-    */
 
     fn opt_coercion(
         mode: TypeCheckMode,
@@ -256,7 +238,15 @@ fn type_check(
 
     if let Some(expected) = expected.try_downcast::<ast::ArrayTy>() {
         let got = got.try_downcast::<ast::ArrayTy>()?;
-        if got.len.downcast::<ast::IntVal>().val != expected.len.downcast::<ast::IntVal>().val {
+        if let Some(expected) = expected.len.try_downcast::<ast::GenericDef>() {
+            debug_assert!(mode == TypeCheckMode::Strict);
+            debug_assert_eq!(got.len.ty, p.usize());
+            if !accumulate_generic(expected, got.len.downcast_const_val()) {
+                return Mismatch;
+            }
+        } else if got.len.downcast::<ast::IntVal>().val
+            != expected.len.downcast::<ast::IntVal>().val
+        {
             return Mismatch;
         }
         return type_check(
