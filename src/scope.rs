@@ -5,7 +5,10 @@ use crate::{
     diagnostics::{DiagnosticReporter, HandledErr, cerror, chint},
     intern_pool::Symbol,
     ptr::{OPtr, Ptr},
-    util::{debug_only_assert, hash_val, panic_debug, unreachable_debug},
+    util::{
+        BitFlags, OptionExt, UnwrapDebug, bitflags, debug_only_assert, hash_val, panic_debug,
+        unreachable_debug,
+    },
 };
 use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 use std::assert_matches::debug_assert_matches;
@@ -21,6 +24,8 @@ pub enum ScopeKind {
     Struct,
     Union,
     Enum,
+
+    Generics,
 }
 
 impl ScopeKind {
@@ -49,6 +54,7 @@ impl ScopeKind {
 #[derive(Debug)]
 pub struct Scope {
     pub kind: ScopeKind,
+    pub flags: ScopeFlags,
     pub parent: OPtr<Scope>,
     /// TODO: use `struct { ptr: *mut T, len: u32, cap: u32 }` instead
     pub decls: Vec<Ptr<Decl>>,
@@ -57,29 +63,39 @@ pub struct Scope {
     ///
     /// Currently only used for unordered scopes because those scopes don't allow shadowing.
     decls_map: Option<UnorderedDeclMap>,
-
-    #[cfg(debug_assertions)]
-    pub was_checked_for_duplicates: bool,
 }
+
+bitflags!(ScopeFlags: u8 {
+    WAS_CHECKED_FOR_DUPLICATES,
+    WAS_SETUP,
+});
 
 const SMALL_SCOPE_MAX_SIZE: usize = 32;
 
 impl Scope {
     pub fn new(decls: Vec<Ptr<Decl>>, kind: ScopeKind) -> Scope {
         debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
-        Scope {
-            parent: None,
-            decls,
-            decls_map: None,
-            kind,
+        Scope { parent: None, decls, decls_map: None, kind, flags: ScopeFlags::default() }
+    }
 
-            #[cfg(debug_assertions)]
-            was_checked_for_duplicates: false,
+    pub fn for_generics(generics: Vec<Ptr<Decl>>) -> Scope {
+        debug_assert!(generics.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
+        debug_assert!(generics.iter().all(|p| p.is_const));
+        Scope::new(generics, ScopeKind::Generics)
+    }
+
+    pub fn setup(&mut self, parent: Ptr<Scope>) {
+        if self.flags.get(ScopeFlags::WAS_SETUP) {
+            debug_assert!(self.parent.u() == parent);
+            debug_assert!(self.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
+            return;
         }
+        self.flags.set(ScopeFlags::WAS_SETUP);
+        self.parent.set_once(parent);
+        let _ignore = self.verify_no_duplicates();
     }
 
     pub fn from_stmts(stmts: &[Ptr<ast::Ast>], kind: ScopeKind) -> Scope {
-        // TODO: bench copy vs preallocate `stmts.len`
         let decls = stmts
             .iter()
             .filter_map(|s| s.try_downcast::<Decl>())
@@ -116,7 +132,9 @@ impl Scope {
     }
 
     /// also sets up [`Scope::decls_map`] if needed.
-    pub fn verify_no_duplicates(&mut self) {
+    pub fn verify_no_duplicates(&mut self) -> Result<(), HandledErr> {
+        debug_assert!(!self.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
+        let mut err = false;
         if !self.kind.allows_shadowing() {
             if self.decls.len() <= SMALL_SCOPE_MAX_SIZE {
                 for (idx, decl) in self.decls.iter().copied().enumerate() {
@@ -125,6 +143,7 @@ impl Scope {
                         linear_search_symbol(&self.decls[..idx], decl.ident.sym, false, false)
                     {
                         error_duplicate_in_unordered_scope(self.kind, decl, dup);
+                        err = true;
                         for d in &self.decls {
                             if d.ident.sym == decl.ident.sym {
                                 d.as_mut().var_ty = Some(primitives().err_ty);
@@ -139,20 +158,19 @@ impl Scope {
                     debug_assert!(decl.on_type.is_none());
                     if let Err(dup) = map.try_insert_no_dup(decl) {
                         error_duplicate_in_unordered_scope(self.kind, decl, dup);
+                        err = true;
                     }
                 }
                 self.decls_map = Some(map);
             }
         }
-        #[cfg(debug_assertions)]
-        {
-            self.was_checked_for_duplicates = true;
-        }
+        self.flags.set(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES);
+        if err { Err(HandledErr) } else { Ok(()) }
     }
 
     pub fn add_decl_to_block(&mut self, decl: Ptr<Decl>) {
         debug_assert!(self.kind.allows_shadowing());
-        debug_only_assert!(self.was_checked_for_duplicates);
+        debug_assert!(self.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
         debug_assert!(decl.on_type.is_none());
         if let Some(map) = self.decls_map.as_mut() {
             map.insert_or_replace(decl);
@@ -177,7 +195,7 @@ impl Scope {
     }
 
     pub fn find_decl_norec(&self, sym: Symbol, ignore_fields: bool) -> OPtr<Decl> {
-        debug_only_assert!(self.was_checked_for_duplicates);
+        debug_only_assert!(self.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
         debug_assert_eq!(self.decls_map.is_some(), self.decls.len() > SMALL_SCOPE_MAX_SIZE);
         // TODO: remove this
         let ignore_non_const =
@@ -224,7 +242,28 @@ impl Scope {
             ScopeKind::Struct => get_scope_container!(self, ast::StructDef, scope).upcast(),
             ScopeKind::Union => get_scope_container!(self, ast::UnionDef, scope).upcast(),
             ScopeKind::Enum => get_scope_container!(self, ast::EnumDef, scope).upcast(),
+            ScopeKind::Generics => todo!(),
         })
+    }
+}
+
+pub fn setup_scopes(item_scope: &mut Scope, generics_scope: OPtr<Scope>, parent: Ptr<Scope>) {
+    if item_scope.parent.is_none() {
+        if let Some(generics_scope) = generics_scope {
+            debug_assert_eq!(generics_scope.kind, ScopeKind::Generics);
+            generics_scope.as_mut().setup(parent);
+            item_scope.setup(generics_scope);
+        } else {
+            item_scope.setup(parent);
+        }
+    } else {
+        #[cfg(debug_assertions)]
+        if let Some(generics_scope) = generics_scope {
+            debug_assert!(generics_scope.parent.u() == parent);
+            debug_assert!(item_scope.parent.u() == generics_scope);
+        } else {
+            debug_assert!(item_scope.parent.u() == parent);
+        }
     }
 }
 
@@ -342,6 +381,9 @@ pub fn error_duplicate_in_unordered_scope(
             cerror!(decl.ident.span, "duplicate parameter '{}'", decl.ident.sym);
         },
         ScopeKind::Block => unreachable_debug(),
+        ScopeKind::Generics => {
+            cerror!(decl.ident.span, "duplicate generic '${}'", decl.ident.sym);
+        },
     }
     chint!(first.ident.span, "first definition of '{}'", decl.ident.sym);
     HandledErr

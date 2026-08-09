@@ -7,7 +7,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     sema::primitives::{FLOAT_LIT_TYPE_NAME, INT_LIT_TYPE_NAME, SINT_LIT_TYPE_NAME},
-    util::{self, unreachable_debug},
+    util::{self, BitFlags, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};
 

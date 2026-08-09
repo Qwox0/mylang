@@ -236,7 +236,7 @@ impl Primitives {
 
             err_ty: new_primitive_ty!("{error}", simple_ty, finalized: true),
             //unknown_ty: new_primitive_ty!("{unknown}", simple_ty, finalized: false),
-            rec_ret_ty: new_primitive_ty!("{recursive return ty}", simple_ty, finalized: false),
+            rec_ret_ty: new_primitive_ty!("{recursive return type}", simple_ty, finalized: false),
             int_lit: new_primitive_ty!(INT_LIT_TYPE_NAME, raw IntTy { bits: None, is_signed: false }),
             sint_lit: new_primitive_ty!(SINT_LIT_TYPE_NAME, raw IntTy { bits: None, is_signed: true }),
             float_lit: new_primitive_ty!(FLOAT_LIT_TYPE_NAME, raw FloatTy { bits: None }),
@@ -270,10 +270,13 @@ impl Primitives {
                 let fields_vec = vec![untyped_slice_ptr_field, slice_len_field];
                 let fields = Ptr::from_ref(fields_vec.as_slice());
                 let def = ast_new!(StructDef {
+                    flags: ast::StructFlags::default(),
                     scope: Scope::new(fields_vec, ScopeKind::Struct),
-                    sema_units: None,
+                    generics_scope: None,
                     fields,
                     external_consts: Vec::new(),
+                    instantiations: Vec::new(),
+                    sema_units: None,
                     finished_members: 2,
                 });
                 init_ty(def.upcast_to_type());

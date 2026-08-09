@@ -1,8 +1,8 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclFlags, DeclList,
-        DeclListExt, FnFlags, OPtrTypeExt, RangeKind, TypeEnum, TypeMatch, UnaryOpKind,
-        UpcastToAst, is_pos_arg, try_downcast_named_arg,
+        DeclListExt, FnFlags, OPtrTypeExt, RangeKind, StructFlags, TypeEnum, TypeMatch,
+        UnaryOpKind, UpcastToAst, is_pos_arg, try_downcast_named_arg,
     },
     codegen::llvm::{bindings::*, error::get_inner_err},
     context::{ctx, primitives, tmp_alloc},
@@ -13,14 +13,15 @@ use crate::{
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     scoped_stack::ScopedStack,
-    sema,
+    sema::{self, generics::PolymorphableType},
     type_::{
         EnumRepr, NonZeroFieldType, OptionalRepr, enum_alignment, enum_repr, finalize_ty,
         optional_repr, struct_size, ty_match, union_size,
     },
     util::{
-        self, BigIntExt, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime, hash_val,
-        is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64, unreachable_debug,
+        self, BigIntExt, BitFlags, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime,
+        hash_val, is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64,
+        unreachable_debug,
     },
 };
 use error::{
@@ -216,21 +217,25 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         macro_rules! compile_initializer {
-            ($lhs:expr, $values:expr, $compile_fn:ident) => {{
+            ($lhs:expr, $values:expr, $resolved_struct_inst:expr, $compile_fn:ident) => {{
                 let lhs = $lhs.u();
                 let values = $values;
+                //let resolved_struct_inst = ($resolved_struct_inst).u();
                 if let Some(s_def) = lhs.try_downcast_struct_def() {
-                    let s_ty = s_def.upcast_to_type();
+                    let resolved_struct_inst = ($resolved_struct_inst).unwrap_or(s_def);
+                    debug_assert!(s_def.polymorphs_or_self().contains(&resolved_struct_inst));
+                    let s_ty = resolved_struct_inst.upcast_to_type();
                     let struct_ty = self.llvm_type(s_ty).struct_ty();
                     let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
-                    self.$compile_fn(struct_ty, ptr, &s_def.fields, values)?;
+                    self.$compile_fn(struct_ty, ptr, &resolved_struct_inst.fields, values)?;
                     stack_val(ptr)
                 } else if let Some(ptr) = lhs.ty.u().try_downcast::<ast::PtrTy>() {
                     debug_assert_eq!(lhs.ty, out_ty);
-                    let s_def = ptr.pointee.downcast::<ast::StructDef>();
-                    let struct_ty = self.type_table[&s_def.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
+                    let resolved_struct_inst = ($resolved_struct_inst).unwrap_or(ptr.pointee.downcast::<ast::StructDef>());
+                    debug_assert!(ptr.pointee.downcast::<ast::StructDef>().polymorphs_or_self().contains(&resolved_struct_inst));
+                    let struct_ty = self.type_table[&resolved_struct_inst.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
                     let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
-                    self.$compile_fn(struct_ty, ptr, &s_def.fields, values)?;
+                    self.$compile_fn(struct_ty, ptr, &resolved_struct_inst.fields, values)?;
                     reg(ptr)
                 } else {
                     panic_debug!("invalid out_ty for initializer: {out_ty}")
@@ -267,11 +272,22 @@ impl<'ctx> Codegen<'ctx> {
                 self.close_scope(res.do_continue())?;
                 res
             },
-            AstEnum::PositionalInitializer { lhs, args, .. } => {
-                compile_initializer!(lhs, args, compile_positional_initializer_body)
+            AstEnum::PositionalInitializer { lhs, args, resolved_struct_inst, .. } => {
+                compile_initializer!(
+                    lhs,
+                    args,
+                    resolved_struct_inst,
+                    compile_positional_initializer_body
+                )
             },
-            AstEnum::NamedInitializer { lhs, fields: values, .. } => {
-                compile_initializer!(lhs, values, compile_named_initializer_body)
+            AstEnum::NamedInitializer { lhs, fields, resolved_struct_inst, .. } => {
+                //lhs.u().try_downcast_struct_def().u().instantiations_or_self().contains(x)
+                compile_initializer!(
+                    lhs,
+                    fields,
+                    resolved_struct_inst,
+                    compile_named_initializer_body
+                )
             },
             AstEnum::ArrayInitializer { lhs, elements, .. } => {
                 if let Some(arr_ty) = out_ty.try_downcast::<ast::ArrayTy>() {
@@ -1556,7 +1572,9 @@ impl<'ctx> Codegen<'ctx> {
 
     fn get_or_compile_fn(&mut self, f: Ptr<ast::Fn>) -> CodegenResult<Symbol<'ctx>> {
         Ok(if f.flags.get(FnFlags::IS_GENERIC) {
-            debug_assert!(f.instantiations().iter().all(|inst| self.fn_table.contains_key(&inst)));
+            debug_assert!(
+                f.polymorphs_or_self().iter().all(|inst| self.fn_table.contains_key(&inst))
+            );
             Symbol::GenericFunction(f)
         } else if let Some(first_inst) = self.fn_table.get(&f) {
             Symbol::FunctionInst(*first_inst)
@@ -1575,7 +1593,7 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<Symbol<'ctx>> {
         debug_assert!(match def {
             FnKind::FnDef(_) if !during_precompile => f
-                .instantiations()
+                .polymorphs_or_self()
                 .iter()
                 .all(|inst| !is_fn_val_compiled(*self.fn_table.get(&inst).u())),
             _ => !self.fn_table.contains_key(&f),
@@ -1585,7 +1603,7 @@ impl<'ctx> Codegen<'ctx> {
         let prev_sret_ptr = self.sret_ptr.take();
 
         let mut last_fn_val = None;
-        for &inst in f.instantiations() {
+        for &inst in f.polymorphs_or_self() {
             let (fn_val, use_sret) = self.compile_prototype(inst, def);
             last_fn_val = Some(fn_val);
 
@@ -1609,7 +1627,7 @@ impl<'ctx> Codegen<'ctx> {
         Ok(if f.flags.get(FnFlags::IS_GENERIC) {
             Symbol::GenericFunction(f)
         } else {
-            debug_assert_eq!(f.instantiations().len(), 1);
+            debug_assert_eq!(f.polymorphs_or_self().len(), 1);
             Symbol::FunctionInst(last_fn_val.u())
         })
     }
@@ -3226,7 +3244,8 @@ impl<'ctx> Codegen<'ctx> {
                 self.llvm_type(elem_ty.downcast_type()).basic_ty().array_type(len.int()),
             ),
             //TypeEnum::FunctionTy { .. } => todo!(),
-            TypeEnum::StructDef { fields, .. } => {
+            TypeEnum::StructDef { fields, flags, .. } => {
+                debug_assert!(!flags.get(StructFlags::IS_GENERIC));
                 CodegenType::new(self.new_struct_type(fields, None))
             },
             TypeEnum::UnionDef { fields, .. } => {
@@ -3650,7 +3669,7 @@ impl<'ctx> Codegen<'ctx> {
                     AstMatch::Fn(f) => {
                         #[cfg(debug_assertions)]
                         if !during_precompile {
-                            for inst in f.instantiations() {
+                            for inst in f.polymorphs_or_self() {
                                 debug_assert!(
                                     self.fn_table.contains_key(&inst),
                                     "function prototype {inst:p} should have been precompiled",
@@ -3660,7 +3679,7 @@ impl<'ctx> Codegen<'ctx> {
                         self.compile_fn(f, FnKind::FnDef(decl), during_precompile)?;
                     },
                     AstMatch::ExternDirective(_) if during_precompile => {
-                        debug_assert_eq!(f.constants_count(), 0); // TODO: add sema check
+                        debug_assert_eq!(f.constants().len(), 0); // TODO: add sema check
                         debug_assert!(f.instantiations.is_empty());
                         let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
                         self.symbols.push((decl, Symbol::FunctionInst(fn_val))); // TODO: seems hacky
@@ -3676,19 +3695,29 @@ impl<'ctx> Codegen<'ctx> {
                 && let Some(ty) = init.u().try_flat_downcast_type_by_kind()
             // don't compile aliases again
             {
-                // Ensure that the type is in `type_table`
-                self.llvm_type(ty);
-                if let Some(ty_scope) = ty.get_scope() {
-                    // Alternatively we could compile all associated constants here and
-                    // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
+                let insts = match ty.try_downcast_polymorphable() {
+                    Some(p) if let Some(insts) = p.try_get_polymorphs() => insts.as_ref(),
+                    _ => &[ty],
+                };
+                for &ty in insts {
+                    // Ensure that the type is in `type_table`
+                    self.llvm_type(ty);
+                    if let Some(ty_scope) = ty.get_scope() {
+                        // Alternatively we could compile all associated constants here and
+                        // skip all external definitions (like `MyStruct.my_fn :: /* ... */`).
 
-                    if during_precompile {
-                        for d in ty_scope.decls.iter().copied() {
-                            debug_assert!(d.on_type.is_none_or(|t| t.downcast_type() == ty));
-                            d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
+                        if during_precompile {
+                            for d in ty_scope.decls.iter().copied() {
+                                debug_assert!(d.on_type.is_none_or(|t| t.downcast_type() == ty));
+                                d.as_mut().on_type = Some(ty.upcast()); // only needed for mangling
+                            }
                         }
+                        self.compile_decls(
+                            ty_scope.decls.iter().copied(),
+                            during_precompile,
+                            false,
+                        )?;
                     }
-                    self.compile_decls(ty_scope.decls.iter().copied(), during_precompile, false)?;
                 }
             }
 

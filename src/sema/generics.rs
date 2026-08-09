@@ -1,4 +1,15 @@
-use crate::{ast, ptr::Ptr, sema::accumulate_type_inner, type_::ty_match, util::UnwrapDebug};
+use crate::{
+    ast::{
+        self, Ast, AstKind, CloneAst, EnumFlags, FnFlags, HasAstKind, StructFlags, TypeVariant,
+        UpcastToAst, inherit_ast,
+    },
+    parser::lexer::Span,
+    ptr::{OPtr, Ptr},
+    scope::Scope,
+    sema::accumulate_type_inner,
+    type_::ty_match,
+    util::{BitFlags, UnwrapDebug, then, unreachable_debug},
+};
 
 pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> bool {
     if let Some(expected) = expected.try_downcast_type() {
@@ -83,5 +94,121 @@ pub fn accumulate_generic(generic: Ptr<ast::GenericDef>, next_val: Ptr<ast::Cons
                 generic_match(next_val, *generic)
             }
         },
+    }
+}
+
+pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
+    type Flags: BitFlags + 'static;
+
+    const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr;
+    const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr;
+
+    fn main_scope(self: Ptr<Self>) -> &'static mut Scope;
+
+    fn generics_scope(&self) -> OPtr<Scope>;
+
+    fn instantiations(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>>;
+
+    fn flags(self: Ptr<Self>) -> &'static mut Self::Flags;
+
+    fn constants(&self) -> &[Ptr<ast::Decl>] {
+        self.generics_scope().map(|s| s.as_ref().decls.as_slice()).unwrap_or(&[])
+    }
+
+    fn try_get_polymorphs(self: Ptr<Self>) -> OPtr<[Ptr<Self>]> {
+        if self.flags().get(Self::FLAG_IS_GENERIC) {
+            Some(Ptr::from_ref(&self.instantiations()[..]))
+        } else {
+            debug_assert!(self.instantiations().is_empty());
+            None
+        }
+    }
+
+    fn polymorphs_or_self(self: &Ptr<Self>) -> &[Ptr<Self>] {
+        self.try_get_polymorphs().unwrap_or(Ptr::from_ref(self).as_slice1()).as_ref()
+    }
+}
+
+inherit_ast! {
+    struct Polymorphable {}
+}
+
+macro_rules! impl_PolymorphableType {
+    ($($ty:ident, $flags_ty:ty, $main_scope:ident);* $(;)?) => {
+        $(impl PolymorphableType for ast::$ty {
+            type Flags = $flags_ty;
+
+            const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr = Self::Flags::IS_GENERIC;
+            const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr =
+                Self::Flags::IS_INSTANTIATION;
+
+            #[inline]
+            fn main_scope(self: Ptr<Self>) -> &'static mut Scope {
+                &mut self.as_mut().$main_scope
+            }
+
+            #[inline]
+            fn generics_scope(&self) -> OPtr<Scope> {
+                self.generics_scope
+            }
+
+            #[inline]
+            fn instantiations(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>> {
+                &mut self.as_mut().instantiations
+            }
+
+            #[inline]
+            fn flags(self: Ptr<Self>) -> &'static mut Self::Flags {
+                &mut self.as_mut().flags
+            }
+        })*
+
+        pub const POLYMORPHABLE_AST_KINDS: &[AstKind] = &[$(<ast::$ty as ast::AstVariant>::KIND),*];
+
+        unsafe impl UpcastToAst for Polymorphable {}
+        impl Polymorphable {
+            pub fn main_scope(self: Ptr<Self>) -> &'static mut Scope {
+                match self.upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.main_scope(),)*
+                    _ => unreachable_debug(),
+                }
+            }
+
+            pub fn generics_scope(&self) -> OPtr<Scope> {
+                match Ptr::from_ref(self).upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.generics_scope(),)*
+                    _ => unreachable_debug(),
+                }
+            }
+
+            pub fn try_get_polymorphs(self: Ptr<Self>) -> OPtr<[Ptr<ast::Type>]> {
+                Some(match self.upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.try_get_polymorphs()?.cast_slice(),)*
+                    _ => unreachable_debug(),
+                })
+            }
+        }
+    };
+}
+impl_PolymorphableType! {
+    Fn, FnFlags, params_scope;
+    StructDef, StructFlags, scope;
+    EnumDef, EnumFlags, scope;
+}
+
+impl ast::Ast {
+    pub fn try_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
+        then!(POLYMORPHABLE_AST_KINDS.contains(&self.kind) => self.downcast_polymorphable())
+    }
+
+    pub fn downcast_polymorphable(self: Ptr<Self>) -> Ptr<Polymorphable> {
+        debug_assert!(POLYMORPHABLE_AST_KINDS.contains(&self.kind));
+        self.cast()
+    }
+}
+
+impl ast::Type {
+    pub fn try_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
+        self.upcast().try_downcast_polymorphable()
     }
 }

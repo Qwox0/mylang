@@ -480,17 +480,15 @@ macro_rules! wrap_display {
 }
 pub(crate) use wrap_display;
 
-macro_rules! orelse {
-    ($lhs:expr, $(@$capture:ident)? $rhs:expr) => {
-        match ::std::ops::Try::branch($lhs) {
-            ::std::ops::ControlFlow::Continue(val) => val,
-            ::std::ops::ControlFlow::Break($($capture,)? ..) => $rhs,
-        }
-    };
-}
-pub(crate) use orelse;
-
 pub const BITFLAGS_DEBUG_ALL: bool = false;
+
+pub trait BitFlags: Copy + Eq + std::fmt::Debug {
+    type Repr;
+
+    fn get(&self, mask: Self::Repr) -> bool;
+    fn set(&mut self, mask: Self::Repr);
+    fn unset(&mut self, mask: Self::Repr);
+}
 
 macro_rules! bitflags {
     ($ty_name:ident : $repr:ty { $( $(#[$attr:meta])* $flag_name:ident),* $(,)? }) => {
@@ -501,6 +499,7 @@ macro_rules! bitflags {
 
         impl ::std::fmt::Debug for $ty_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                use $crate::util::BitFlags;
                 if $crate::util::BITFLAGS_DEBUG_ALL {
                     f.debug_struct(stringify!($ty_name))
                         $(.field(stringify!($flag_name), &self.get($ty_name::$flag_name)))*
@@ -520,13 +519,21 @@ macro_rules! bitflags {
             pub const fn default() -> Self {
                 Self { data: 0 }
             }
+        }
 
-            pub fn get(&self, mask: $repr) -> bool {
+        impl $crate::util::BitFlags for $ty_name {
+            type Repr = $repr;
+
+            fn get(&self, mask: Self::Repr) -> bool {
                 self.data & mask != 0
             }
 
-            pub fn set(&mut self, mask: $repr) {
+            fn set(&mut self, mask: Self::Repr) {
                 self.data |= mask;
+            }
+
+            fn unset(&mut self, mask: Self::Repr) {
+                self.data &= !mask;
             }
         }
     };

@@ -5,8 +5,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclFlags, FnFlags, For, SwitchCase, UnaryOpKind,
-        UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, StructFlags, SwitchCase,
+        UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -14,7 +14,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
     source_file::SourceFile,
-    util::{OptionExt, UnwrapDebug, concat_arr, then, unreachable_debug},
+    util::{BitFlags, OptionExt, UnwrapDebug, concat_arr, then, unreachable_debug},
 };
 use core::{fmt, str};
 pub use error::*;
@@ -27,27 +27,19 @@ pub mod error;
 pub mod lexer;
 pub mod parser_helper;
 
+fn peek_is_invalid_start(parser: &Parser, prec: u8) -> bool {
+    parser.lex.peek_or_eof().kind.is_invalid_start(prec)
+}
+
 macro_rules! opt {
     ($self:expr, $method:ident($($arg:expr),* $(,)?), $prec:expr) => {{
         let _self: &mut Parser = $self;
-        if _self.lex.peek_or_eof().kind.is_invalid_start($prec) {
+        if peek_is_invalid_start(_self, $prec) {
             Ok(None)
         } else {
             _self.$method($($arg),*).map(Some)
         }
     }};
-}
-
-fn opt<T>(
-    parser: &mut Parser,
-    parse_item: impl FnOnce(&mut Parser) -> ParseResult<T>,
-    prec: u8,
-) -> ParseResult<Option<T>> {
-    if parser.lex.peek_or_eof().kind.is_invalid_start(prec) {
-        Ok(None)
-    } else {
-        parse_item(parser).map(Some)
-    }
 }
 
 macro_rules! expr {
@@ -233,12 +225,12 @@ impl Parser {
                 let close_p_span = self.parse_call(&mut args)?;
                 let span = span.join(close_p_span);
                 let args = self.alloc_slice(&args)?;
-                expr!(PositionalInitializer { lhs: Some(lhs), args, parsed_with_lhs: true }, span)
+                self.alloc(ast::PositionalInitializer::new(Some(lhs), args, span))?.upcast()
             },
             FollowingOperator::NamedInitializer => {
                 let (fields, close_b_span) = self.parse_initializer_fields()?;
                 let span = span.join(close_b_span);
-                expr!(NamedInitializer { lhs: Some(lhs), fields, parsed_with_lhs: true }, span)
+                self.alloc(ast::NamedInitializer::new(Some(lhs), fields, span))?.upcast()
             },
             FollowingOperator::ArrayInitializer => self.parse_array_initializer(Some(lhs), span)?,
             FollowingOperator::SingleArgNoParenFn => {
@@ -346,12 +338,42 @@ impl Parser {
                 self.var_decl(false)?.upcast()
             },
             TokenKind::Keyword(k @ Keyword::Struct) => {
-                self.advanced().tok(TokenKind::OpenBrace)?;
+                self.lex.advance();
+                let mut flags = StructFlags::default();
+
+                // generic parameters
+                let mut generics_scope = None;
+                if self.lex.advance_if_kind(TokenKind::OpenParenthesis) {
+                    let mut generics = Vec::new();
+                    self.parse_with_sep(
+                        &[TokenKind::Comma],
+                        &mut generics,
+                        |self_| {
+                            let dollar = self_.tok(TokenKind::Dollar)?;
+                            // TODO: self_.var_decl()
+                            let name = self_.ident()?;
+                            let g_def = self_.alloc(ast::GenericDef::new(name, dollar.span))?;
+                            Ok(g_def.generate_decl(&self_.cctx.alloc)?)
+                        },
+                        MIN_PRECEDENCE,
+                        "parameter",
+                    )?;
+                    self.tok(TokenKind::CloseParenthesis)?;
+                    if generics.len() > 0 {
+                        flags.set(StructFlags::IS_GENERIC);
+                        generics_scope = Some(self.alloc(Scope::for_generics(generics))?);
+                    }
+                }
+
+                self.tok(TokenKind::OpenBrace)?;
                 let ScopeAndAggregateInfo { scope, fields } = self.struct_body(k)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
                     StructDef {
+                        flags,
                         scope,
+                        generics_scope,
+                        instantiations: vec![],
                         sema_units: None,
                         fields,
                         external_consts: vec![],
@@ -417,13 +439,16 @@ impl Parser {
                     Scope::for_aggregate(decls, &self.cctx.alloc, ScopeKind::Enum)?;
                 expr!(
                     EnumDef {
-                        scope,
-                        sema_units: None,
-                        variants: fields,
-                        finished_members: 0,
-                        external_consts: vec![],
+                        flags: EnumFlags::default(),
                         is_simple_enum: true,
+                        scope,
+                        generics_scope: None,
+                        variants: fields,
+                        external_consts: vec![],
                         tag_ty: None,
+                        instantiations: vec![],
+                        sema_units: None,
+                        finished_members: 0,
                     },
                     span.join(close_b.span)
                 )
@@ -655,12 +680,12 @@ impl Parser {
                 let close_p_span = self.advanced().parse_call(&mut args)?;
                 let span = span.join(close_p_span);
                 let args = self.alloc_slice(&args)?;
-                expr!(PositionalInitializer { lhs: None, args, parsed_with_lhs: false }, span)
+                self.alloc(ast::PositionalInitializer::new(None, args, span))?.upcast()
             },
             TokenKind::DotOpenBrace => {
                 let (fields, close_b_span) = self.advanced().parse_initializer_fields()?;
                 let span = span.join(close_b_span);
-                expr!(NamedInitializer { lhs: None, fields, parsed_with_lhs: false }, span)
+                self.alloc(ast::NamedInitializer::new(None, fields, span))?.upcast()
             },
             TokenKind::DotOpenBracket => self.advanced().parse_array_initializer(None, span)?,
             TokenKind::Colon => todo!("TokenKind::Colon"),
@@ -915,8 +940,7 @@ impl Parser {
         for p in params.iter() {
             p.as_mut().flags.set(DeclFlags::IS_PARAMETER);
         }
-        let params_count = params.len();
-        self.alloc(ast::Fn::new(params, params_count, ret_ty_expr, Some(body), start_span))
+        Ok(ast::Fn::new(params, ret_ty_expr, Some(body), start_span, &self.cctx.alloc)?)
     }
 
     fn if_after_cond(
@@ -1037,7 +1061,6 @@ impl Parser {
         }))
     }
 
-    /// Returns a `has_trailing_sep` [`bool`].
     fn parse_with_sep<T>(
         &mut self,
         sep: &[TokenKind],
@@ -1048,8 +1071,10 @@ impl Parser {
     ) -> ParseResult<bool> {
         let mut has_trailing_sep = false;
         loop {
-            let Some(t) = opt(self, &mut parse_item, opt_prec)? else { break };
-            items.push(t);
+            if peek_is_invalid_start(self, opt_prec) {
+                break;
+            }
+            items.push(parse_item(self)?);
             has_trailing_sep = self.lex.advance_if(|t| sep.contains(&t.kind));
             if !has_trailing_sep {
                 break;

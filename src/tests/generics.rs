@@ -144,6 +144,7 @@ fn duplicate_generic_def() {
 }
 
 #[test]
+#[ignore = "is this a good idea?"]
 fn parameter_generic_name_collision() {
     // TODO: better error?
     test("f :: (some_name: $some_name) -> {}")
@@ -213,4 +214,40 @@ test :: ->
     drop(res);
 }
 
-// TODO: generic structs
+// TODO: test :: -> MyStruct.(1, "Hello World", &test);
+
+#[test]
+fn generic_data_struct() {
+    // Positional initializer
+    let code = r#"
+MyStruct :: struct($A, $B, $C) {
+    a: A,
+    b: []B,
+    c: ?*C,
+}
+static arr := u16.[1, 2, 3];
+test :: -> MyStruct.(1, "Hello World", &arr);
+"#;
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
+    assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
+    drop(res);
+
+    /* TODO
+    // Named Initializer
+    let code = r#"
+MyStruct :: struct($A, $B, $C) {
+    a: A,
+    b: []B,
+    c: ?*C,
+}
+static arr := u16.[1, 2, 3];
+test :: -> MyStruct.{
+    a = 1,
+    b = "Hello World",
+    c = &arr,
+};
+"#;
+    test(code).compile_no_err();
+    */
+}

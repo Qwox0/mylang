@@ -119,6 +119,7 @@ impl<T> Ptr<[T]> {
     }
 
     pub fn cast_slice<U>(self) -> Ptr<[U]> {
+        const { assert!(size_of::<T>() == size_of::<U>()) }
         Ptr::new(unsafe { NonNull::new_unchecked(self.raw() as *mut [U]) })
     }
 }

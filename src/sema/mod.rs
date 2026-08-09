@@ -4,8 +4,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, CloneAst, DeclFlags, DeclListExt,
-        FnFlags, OPtrExt, OPtrTypeExt, RangeKind, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclFlags, DeclListExt, FnFlags, OPtrExt,
+        OPtrTypeExt, RangeKind, StructFlags, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst,
         ast_new, debug::DebugAst, is_pos_arg, type_new,
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
@@ -14,16 +14,16 @@ use crate::{
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopeKind, error_duplicate_in_unordered_scope},
+    scope::{Scope, ScopeFlags, ScopeKind, error_duplicate_in_unordered_scope, setup_scopes},
     scoped_stack::ScopedStack,
-    sema::generics::{accumulate_generic, generic_match},
+    sema::generics::{PolymorphableType, accumulate_generic, generic_match},
     type_::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, struct_offset,
         ty_match,
     },
     util::{
-        self, BigIntExt, IteratorExt, OptionExt, UnwrapDebug, VecExt, debug_only_assert, orelse,
-        then, ui, unreachable_debug, wrap_display,
+        self, BigIntExt, BitFlags, IteratorExt, UnwrapDebug, VecExt, debug_only_assert, then, ui,
+        unreachable_debug, wrap_display,
     },
 };
 use err::{SemaResult, SemaResult::*};
@@ -69,9 +69,9 @@ macro_rules! check_or_infer_target {
 pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
     let p = p();
     // validate top level stmts
-    cctx.primitives_scope.as_mut().verify_no_duplicates();
+    let _ignore = cctx.primitives_scope.as_mut().verify_no_duplicates();
     for file in cctx.files().iter().copied() {
-        file.as_mut().scope.as_mut().u().verify_no_duplicates();
+        let _ignore = file.as_mut().scope.as_mut().u().verify_no_duplicates();
         for &s in stmts[file.stmt_range.u()].iter() {
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
                 if !s.kind.is_allowed_top_level() {
@@ -455,7 +455,7 @@ impl Sema {
                 },
             },
             AstEnum::Block { stmts, finished, has_trailing_semicolon, decl_scope, .. } => {
-                debug_only_assert!(decl_scope.was_checked_for_duplicates);
+                debug_assert!(decl_scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
                 let osh = self.open_scope(decl_scope);
                 let res: SemaResult<()> = try {
                     let max_idx = stmts.len().wrapping_sub(1);
@@ -488,16 +488,24 @@ impl Sema {
                     p.void_ty
                 })
             },
-            AstEnum::PositionalInitializer { args, .. } => {
+            AstEnum::PositionalInitializer { args, resolved_struct_inst, .. } => {
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(s) = lhs.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
-                    let fields = s.downcast_struct_def().fields;
-                    self.validate_call(&fields, args, false, span.end(), is_const, false)?;
-                    expr.ty = Some(s);
+                    let inst = self.validate_call(
+                        CallKind::PositionalInitializer,
+                        s.downcast_struct_def(),
+                        args,
+                        span.end(),
+                        is_const,
+                        lhs, // only used for span
+                    )?;
+                    *resolved_struct_inst = Some(inst);
+                    expr.ty = Some(inst.upcast_to_type());
 
                     if is_const {
+                        let fields = s.downcast_struct_def().fields;
                         let all_args =
                             fields.iter().enumerate().map(|(idx, f)| args.get(idx).or(f.init).u());
                         let cv = self.create_aggregate_const_val(all_args)?;
@@ -507,14 +515,28 @@ impl Sema {
                     && let Some(s) = ptr_ty.pointee.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
+                    let s = s.downcast_struct_def();
                     self.validate_mutation(MutationKind::Initialize, lhs, expr)?;
-                    expr.ty = Some(ptr_ty.upcast_to_type());
 
                     if is_const {
                         return error_const_ptr_initializer(expr).into();
                     } else {
-                        let fields = s.downcast_struct_def().fields;
-                        self.validate_call(&fields, args, false, span.end(), false, false)?;
+                        let inst = self.validate_call(
+                            CallKind::PositionalInitializer,
+                            s,
+                            args,
+                            span.end(),
+                            false,
+                            expr, // only used for span
+                        )?;
+                        *resolved_struct_inst = Some(inst);
+
+                        expr.ty = Some(if s.flags.get(StructFlags::IS_GENERIC) {
+                            type_new!(PtrTy { is_mut: ptr_ty.is_mut, pointee: inst.upcast() })
+                                .upcast_to_type()
+                        } else {
+                            ptr_ty.upcast_to_type()
+                        });
                     }
                 } else if lhs.ty.u().propagates_out() {
                     expr.ty = Some(lhs.ty.u());
@@ -528,13 +550,14 @@ impl Sema {
                     return error_cannot_apply_initializer(lhs, expr).into();
                 };
             },
-            AstEnum::NamedInitializer { fields: values, .. } => {
+            AstEnum::NamedInitializer { fields, resolved_struct_inst, .. } => {
+                let _ = resolved_struct_inst; // TODO
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(struct_ty) = lhs.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
                     let const_values =
-                        self.validate_named_initializer(struct_ty, *values, is_const, span)?;
+                        self.validate_named_initializer(struct_ty, *fields, is_const, span)?;
                     debug_assert_eq!(const_values.is_some(), is_const);
                     expr.ty = Some(struct_ty);
                     if let Some(elements) = const_values {
@@ -549,7 +572,7 @@ impl Sema {
                     if is_const {
                         return error_const_ptr_initializer(expr).into();
                     } else {
-                        self.validate_named_initializer(struct_ty, *values, is_const, span)?;
+                        self.validate_named_initializer(struct_ty, *fields, is_const, span)?;
                         expr.ty = Some(ptr_ty.upcast_to_type());
                     }
                 } else if lhs.ty.u().propagates_out() {
@@ -894,15 +917,12 @@ impl Sema {
                         return error_const_call(call).into();
                     }
 
-                    expr.ty = Some(self.validate_call2(
+                    expr.ty = Some(self.validate_fn_call(
                         fn_ty,
                         args,
-                        ty_hint,
-                        span.end(),
-                        false,
-                        false,
+                        *ty_hint,
                         resolved_fn_inst,
-                        expr,
+                        call,
                     )?);
                 } else if fn_ty == p.method_stub {
                     if is_const {
@@ -913,15 +933,12 @@ impl Sema {
                     let args = std::iter::once(dot.lhs.u())
                         .chain(args.iter().copied())
                         .collect::<Vec<_>>(); // TODO: bench no allocation
-                    expr.ty = Some(self.validate_call2(
+                    expr.ty = Some(self.validate_fn_call(
                         fn_ty,
                         &args,
-                        ty_hint,
-                        span.end(),
-                        false,
-                        false,
+                        *ty_hint,
                         resolved_fn_inst,
-                        expr,
+                        call,
                     )?);
                 } else if fn_ty == p.enum_variant
                     && let Some(i) = func.try_flat_downcast::<ast::Ident>()
@@ -961,7 +978,14 @@ impl Sema {
                     let dot = func.flat_downcast::<ast::Dot>();
                     let enum_ty = dot.lhs.u().downcast::<ast::EnumDef>();
                     let variant = enum_ty.variants.find_field(dot.rhs.sym).u().1;
-                    self.validate_call(&[variant], args, false, span.end(), is_const, true)?;
+                    self.validate_call(
+                        CallKind::EnumInit { variant },
+                        enum_ty,
+                        args,
+                        span.end(),
+                        is_const,
+                        expr,
+                    )?;
                     expr.ty = Some(enum_ty.upcast_to_type());
 
                     if is_const {
@@ -1383,7 +1407,9 @@ impl Sema {
                         }
                     }
 
-                    case.scope.verify_no_duplicates();
+                    if !case.scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES) {
+                        let _ignore = case.scope.verify_no_duplicates();
+                    }
                     let osh = self.open_scope(&mut case.scope);
                     let res =
                         self.analyze_and_accumulate_type(case.body, &mut out_ty, ty_hint, is_const);
@@ -1441,7 +1467,9 @@ impl Sema {
                 expr.ty = Some(out_ty.unwrap_or(p.never));
             },
             AstEnum::For { source_expr, iter_var, body, scope, .. } => {
-                scope.verify_no_duplicates();
+                if !scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES) {
+                    let _ignore = scope.verify_no_duplicates();
+                }
 
                 let source_ty = analyze!(*source_expr, None).finalize();
                 let source = PatternSource::new(source_ty);
@@ -1707,23 +1735,102 @@ impl Sema {
             AstEnum::AggregateVal { .. } => todo!(),
             AstEnum::Fn { ret_ty_expr, ret_ty, body, flags, .. } => {
                 let mut f = expr.downcast::<ast::Fn>();
-                debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
 
-                f.params_scope.verify_no_duplicates();
-                for param in f.params_scope.decls.iter() {
-                    if param.is_const {
-                        return cerror2!(
-                            param.lhs_span(),
-                            "constant function parameters are currently not implemented"
-                        );
+                if !f.flags.get(FnFlags::IS_INSTANTIATION) {
+                    let _ignore = f.params_scope.setup(self.cur_scope);
+                } else {
+                    debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
+                    debug_assert!(f.generics_scope.u().flags.get(ScopeFlags::WAS_SETUP));
+                }
+
+                let fn_hint = ty_hint.try_downcast_ty_hint::<ast::Fn>();
+                let might_be_fn_ty = *ty_hint == p.type_ty;
+
+                let osh = self.jump_open_scope(&f.params_scope);
+                let res = (|| {
+                    for (p_idx, param) in f.params_scope.decls.iter().enumerate() {
+                        if param.is_const {
+                            return cerror2!(
+                                param.lhs_span(),
+                                "constant function parameters are currently not implemented"
+                            );
+                            /*
+                            debug_assert!(param.flags.get(DeclFlags::IS_GENERIC));
+                            debug_assert!(param.var_ty.is_some());
+                            debug_assert!(param.init.u().try_downcast_const_val().is_some());
+                            */
+                        } else {
+                            if param.var_ty_expr.is_none()
+                                && let Some(fn_hint) = fn_hint
+                                && let Some(p_hint) = fn_hint.params().get(p_idx)
+                            {
+                                //debug_assert!(param.var_ty.is_none()); // TODO: without NotFinished
+                                param.as_mut().var_ty = Some(p_hint.var_ty.u());
+                            }
+                            self.analyze_decl(
+                                *param,
+                                then!(might_be_fn_ty => VarDeclSpecialCase::FnTyParam),
+                            )?;
+                        }
                     }
-                }
-                debug_assert!(f.params_scope.parent.is_none_or(|p| p == self.cur_scope));
-                if f.params_scope.parent.is_none() {
-                    f.params_scope.parent = Some(self.cur_scope);
-                }
 
-                let () = self.analyze_fn_inst(f, *ty_hint)?;
+                    if f.flags.get(FnFlags::HAS_KNOWN_RET_TY) {
+                        // Happens iff sema of analyze_fn_body has to yield
+                        debug_assert!(f.ret_ty.is_some())
+                    } else if let Some(ret) = f.ret_ty_expr {
+                        f.ret_ty = Some(self.analyze_type(ret)?);
+                        f.flags.set(FnFlags::HAS_KNOWN_RET_TY);
+                    } else if let Some(fn_hint) = fn_hint {
+                        f.ret_ty = Some(fn_hint.ret_ty.u());
+                        f.flags.set(FnFlags::HAS_KNOWN_RET_TY);
+                    }
+
+                    if !might_be_fn_ty
+                        && f.flags.get(FnFlags::HAS_KNOWN_RET_TY)
+                        // decl_stack whould be wrong:
+                        && !f.flags.get(FnFlags::IS_INSTANTIATION)
+                    {
+                        // Needed for indirect recursion. For direct recursion without an explicit
+                        // return type, see `get_symbol_var_ty`
+                        self.allow_unfinished_use(f.upcast(), f.upcast_to_type());
+                    }
+
+                    if f.flags.get(FnFlags::IS_GENERIC) {
+                        debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
+
+                        if might_be_fn_ty {
+                            return cerror2!(
+                                f.constants().first().u().full_span(),
+                                "Currently generic function types are not implemented"
+                            );
+                        }
+                    } else if let Some(body) = f.body {
+                        let body_ty = *self.analyze(body, &f.ret_ty, false)?;
+                        let ret_ty = check_or_infer_target!(
+                            body_ty,
+                            &mut f.as_mut().ret_ty,
+                            f.flags.get(FnFlags::HAS_KNOWN_RET_TY),
+                            body.return_val_span()
+                        );
+                        if *ret_ty == p.rec_ret_ty {
+                            let rec_fn_decl = self
+                                .decl_stack
+                                .last()
+                                .filter(|d| d.init.is_some_and(|i| i.rep().p_eq(f)));
+                            return cerror2!(
+                                rec_fn_decl.map(|d| d.ident.span).unwrap_or_else(|| f.full_span()),
+                                "cannot infer the return type of this recursive function"
+                            );
+                        }
+                        ret_ty.finalize();
+                    } else {
+                        debug_assert!(f.flags.get(FnFlags::IS_TYPE));
+                        //panic_debug!("this function has already been analyzed as a function type")
+                    }
+                    Ok(())
+                })();
+                self.close_scope(osh);
+                res?;
                 debug_assert!(ret_ty.is_some() || flags.get(FnFlags::IS_GENERIC));
 
                 let is_fn_ty = *ty_hint == p.type_ty
@@ -1764,8 +1871,23 @@ impl Sema {
                 }
                 expr.ty = Some(p.type_ty);
             },
-            AstEnum::StructDef { scope, sema_units, finished_members, .. } => {
-                scope.verify_no_duplicates();
+            AstEnum::StructDef {
+                flags,
+                scope,
+                fields,
+                generics_scope,
+                sema_units,
+                finished_members,
+                ..
+            } => {
+                if !flags.get(StructFlags::IS_INSTANTIATION) {
+                    setup_scopes(scope, *generics_scope, self.cur_scope);
+                } else {
+                    debug_assert!(scope.flags.get(ScopeFlags::WAS_SETUP));
+                    debug_assert!(generics_scope.u().flags.get(ScopeFlags::WAS_SETUP));
+                }
+
+                //scope.verify_no_duplicates();
                 self.allow_unfinished_use(expr, p.type_ty);
                 if sema_units.is_none() {
                     *sema_units = Some(
@@ -1778,20 +1900,34 @@ impl Sema {
                             .unwrap(),
                     )
                 }
-                let osh = self.open_scope(scope);
-                let res = analyze_scope(
-                    scope.decls.as_mut(),
-                    sema_units.as_mut().u(),
-                    finished_members,
-                    |member, _unit| self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field)),
-                );
+                let osh = self.jump_open_scope(scope);
+                let res = if !flags.get(StructFlags::IS_GENERIC) {
+                    analyze_scope(
+                        scope.decls.as_mut(),
+                        sema_units.as_mut().u(),
+                        finished_members,
+                        |member, _unit| {
+                            self.var_decl_to_value(member, Some(VarDeclSpecialCase::Field))
+                        },
+                    )
+                    .as_sema_result(expr)
+                } else {
+                    debug_assert!(!flags.get(StructFlags::IS_INSTANTIATION));
+                    try {
+                        for field in fields.into_iter() {
+                            self.var_decl_to_value(field, Some(VarDeclSpecialCase::Field))?
+                        }
+                    }
+                };
                 self.close_scope(osh);
-                res.as_sema_result(expr)?;
+                res?;
                 *sema_units = None;
                 debug_assert_eq!(expr.ty, p.type_ty);
             },
             AstEnum::UnionDef { scope, sema_units, finished_members, .. } => {
-                scope.verify_no_duplicates();
+                if !scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES) {
+                    let _ignore = scope.verify_no_duplicates();
+                }
                 self.allow_unfinished_use(expr, p.type_ty);
                 if sema_units.is_none() {
                     *sema_units = Some(
@@ -1837,7 +1973,9 @@ impl Sema {
             } => {
                 let mut repr_ty = Some(tag_ty.get_or_insert(p.int_lit).upcast_to_type());
 
-                scope.verify_no_duplicates();
+                if !scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES) {
+                    let _ignore = scope.verify_no_duplicates();
+                }
                 self.allow_unfinished_use(expr, p.type_ty);
                 if sema_units.is_none() {
                     *sema_units = Some(
@@ -1952,28 +2090,21 @@ impl Sema {
                             return Ok(());
                         }
 
-                        let mut generic_decl = ast_new!(Decl {
-                            span: g.span,
-                            is_const: true,
-                            has_init_expr: false,
-                            flags: DeclFlags::default(),
-                            ident: g.name,
-                            on_type: None,
-                            var_ty_expr: None,
+                        let generic_decl = g.generate_decl(&self.cctx.alloc)?;
 
-                            // @FIXME: This is incorrect, but currently needed because otherwise
-                            // uses of this generic are never resolved
-                            // (get_symbol_var_ty would return `NotFinished(VarType)`)
-                            var_ty: Some(g.upcast_to_type()),
-
-                            init: Some(g.upcast()),
-                            obj_symbol_name: None,
+                        g.as_mut().idx = f.constants().len();
+                        let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
+                            let s = self
+                                .cctx
+                                .alloc
+                                .alloc(Scope::new(vec![], ScopeKind::Generics))
+                                .unwrap();
+                            debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
+                            s.as_mut().setup(f.params_scope.parent.u());
+                            f.as_mut().params_scope.parent = Some(s);
+                            s
                         });
-                        generic_decl.flags.set(DeclFlags::IS_GENERIC);
-                        g.as_mut().name.decl.set_once(generic_decl);
-
-                        g.as_mut().idx = f.constants_count();
-                        if let Result::Err(dup) = f.as_mut().params_scope.add_decl(generic_decl) {
+                        if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
                             return error_duplicate_in_unordered_scope(
                                 ScopeKind::FnParams,
                                 generic_decl,
@@ -1998,6 +2129,7 @@ impl Sema {
                             "Generics cannot be defined inside a block",
                         );
                     },
+                    ScopeKind::Generics => todo!(),
                 }
 
                 expr.ty = Some(g.upcast_to_type());
@@ -2530,116 +2662,42 @@ impl Sema {
         Ok(ty)
     }
 
-    fn analyze_fn_inst(&mut self, mut f: Ptr<ast::Fn>, ty_hint: OPtr<ast::Type>) -> SemaResult<()> {
-        debug_assert!(f.flags.get(FnFlags::IS_INSTANTIATION) || !f.flags.get(FnFlags::IS_GENERIC));
-
-        let p = p();
-
-        let fn_hint = ty_hint.try_downcast_ty_hint::<ast::Fn>();
-        let might_be_fn_ty = ty_hint == p.type_ty;
-
-        let osh = self.jump_open_scope(&f.params_scope);
-        let res = (|| {
-            for (p_idx, param) in f.params_scope.decls.iter().enumerate() {
-                if param.is_const {
-                    debug_assert!(param.flags.get(DeclFlags::IS_GENERIC));
-                    debug_assert!(param.var_ty.is_some());
-                    debug_assert!(param.init.u().try_downcast_const_val().is_some());
-                } else {
-                    if param.var_ty_expr.is_none()
-                        && let Some(fn_hint) = fn_hint
-                        && let Some(p_hint) = fn_hint.params().get(p_idx)
-                    {
-                        //debug_assert!(param.var_ty.is_none()); // TODO: without NotFinished
-                        param.as_mut().var_ty = Some(p_hint.var_ty.u());
-                    }
-                    self.analyze_decl(
-                        *param,
-                        then!(might_be_fn_ty => VarDeclSpecialCase::FnTyParam),
-                    )?;
-                }
-            }
-
-            if f.flags.get(FnFlags::HAS_KNOWN_RET_TY) {
-                // Happens iff sema of analyze_fn_body has to yield
-                debug_assert!(f.ret_ty.is_some())
-            } else if let Some(ret) = f.ret_ty_expr {
-                f.ret_ty = Some(self.analyze_type(ret)?);
-                f.flags.set(FnFlags::HAS_KNOWN_RET_TY);
-            } else if let Some(fn_hint) = fn_hint {
-                f.ret_ty = Some(fn_hint.ret_ty.u());
-                f.flags.set(FnFlags::HAS_KNOWN_RET_TY);
-            }
-
-            if !might_be_fn_ty
-                && f.flags.get(FnFlags::HAS_KNOWN_RET_TY)
-                // decl_stack whould be wrong:
-                && !f.flags.get(FnFlags::IS_INSTANTIATION)
-            {
-                // Needed for indirect recursion. For direct recursion without an explicit
-                // return type, see `get_symbol_var_ty`
-                self.allow_unfinished_use(f.upcast(), f.upcast_to_type());
-            }
-
-            if f.flags.get(FnFlags::IS_GENERIC) {
-                debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
-
-                if might_be_fn_ty {
-                    return cerror2!(
-                        f.constants().first().u().full_span(),
-                        "Currently generic function types are not implemented"
-                    );
-                }
-            } else if let Some(body) = f.body {
-                let body_ty = *self.analyze(body, &f.ret_ty, false)?;
-                let ret_ty = check_or_infer_target!(
-                    body_ty,
-                    &mut f.as_mut().ret_ty,
-                    f.flags.get(FnFlags::HAS_KNOWN_RET_TY),
-                    body.return_val_span()
-                );
-                if *ret_ty == p.rec_ret_ty {
-                    let rec_fn_decl =
-                        self.decl_stack.last().filter(|d| d.init.is_some_and(|i| i.rep().p_eq(f)));
-                    return cerror2!(
-                        rec_fn_decl.map(|d| d.ident.span).unwrap_or_else(|| f.full_span()),
-                        "cannot infer the return type of this recursive function"
-                    );
-                }
-                ret_ty.finalize();
-            } else {
-                debug_assert!(f.flags.get(FnFlags::IS_TYPE));
-                //panic_debug!("this function has already been analyzed as a function type")
-            }
-            Ok(())
-        })();
-        self.close_scope(osh);
-        res
-    }
-
-    fn validate_call2(
+    fn validate_fn_call(
         &mut self,
         fn_ty: Ptr<ast::Fn>,
         args: &[Ptr<ast::Ast>],
-        ty_hint: &OPtr<ast::Type>,
-        close_p_span: Span,
-        is_const: bool,
-        is_enum_init: bool,
-        resolved_fn_inst: &mut OPtr<ast::Fn>,
-        expr: Ptr<Ast>,
+        ty_hint: OPtr<ast::Type>,
+        resolved_inst: &mut OPtr<ast::Fn>,
+        expr: Ptr<ast::Call>,
     ) -> SemaResult<Ptr<ast::Type>> {
-        let res = self._validate_call2(
+        let inst = self.validate_call(
+            CallKind::Function { ty_hint },
             fn_ty,
             args,
-            ty_hint,
-            close_p_span,
-            is_const,
-            is_enum_init,
-            resolved_fn_inst,
-            expr,
-        );
+            expr.span.end(),
+            false,
+            expr.upcast(),
+        )?;
+        *resolved_inst = Some(inst);
 
-        for g in fn_ty.constants() {
+        Ok(inst.ret_ty.unwrap_or_else(|| {
+            debug_assert!(inst == self.get_cur_fn().u()); // TODO: check all previous fns
+            p().rec_ret_ty
+        }))
+    }
+
+    fn validate_call<T: PolymorphableType>(
+        &mut self,
+        kind: CallKind,
+        ty: Ptr<T>,
+        args: &[Ptr<ast::Ast>],
+        close_p_span: Span,
+        is_const: bool,
+        expr: Ptr<Ast>,
+    ) -> SemaResult<Ptr<T>> {
+        let res = self._validate_call(kind, ty, args, close_p_span, is_const, expr);
+
+        for g in ty.constants() {
             let g = g.init.u().downcast::<ast::GenericDef>();
             g.as_mut().cur_inst = None;
         }
@@ -2647,21 +2705,21 @@ impl Sema {
         res
     }
 
-    fn _validate_call2(
+    fn _validate_call<T: PolymorphableType>(
         &mut self,
-        fn_ty: Ptr<ast::Fn>,
+        kind: CallKind,
+        ty: Ptr<T>,
         args: &[Ptr<ast::Ast>],
-        ty_hint: &OPtr<ast::Type>,
         close_p_span: Span,
         is_const: bool,
-        is_enum_init: bool,
-        resolved_fn_inst: &mut OPtr<ast::Fn>,
         expr: Ptr<Ast>,
-    ) -> SemaResult<Ptr<ast::Type>> {
+    ) -> SemaResult<Ptr<T>> {
         let p = p();
 
+        let is_enum_init = matches!(kind, CallKind::EnumInit { .. });
+
         debug_assert!(
-            fn_ty.constants().iter().all(|g| g
+            ty.constants().iter().all(|g| g
                 .init
                 .u()
                 .flat_downcast::<ast::GenericDef>()
@@ -2669,14 +2727,31 @@ impl Sema {
                 .is_none())
         );
 
-        let params = fn_ty.params();
+        let mut has_varargs = false;
+
+        let params = match kind {
+            CallKind::Function { .. } => {
+                let fn_ty = ty.upcast().downcast::<ast::Fn>();
+                has_varargs = fn_ty.flags.get(FnFlags::HAS_VARARGS);
+                fn_ty.as_ref().params()
+            },
+            CallKind::EnumInit { variant } => {
+                debug_assert!(ty.upcast().downcast::<ast::EnumDef>().variants.contains(&variant));
+                &[variant]
+            },
+            CallKind::PositionalInitializer => {
+                // also used for SliceTy
+                let ty = ty.upcast().downcast::<ast::StructDef>();
+                ty.fields.as_ref()
+            },
+        };
 
         // positional args
         let mut pos_idx = 0;
         while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
             if let Some(&param) = params.get(pos_idx) {
                 self.analyze_and_check_type(pos_arg, get_var_ty(param)?, is_const)?;
-            } else if fn_ty.flags.get(FnFlags::HAS_VARARGS) {
+            } else if has_varargs {
                 self.analyze(pos_arg, &None, is_const)?.finalize();
             } else {
                 let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
@@ -2714,11 +2789,9 @@ impl Sema {
                     was_set[param_idx] = true;
                 }
                 self.analyze_and_check_type(named_arg.rhs, get_var_ty(param)?, is_const)?;
-            } else if let Some((g_idx, g_decl)) =
-                fn_ty.constants().iter().enumerate().find(|(_, g)| g.ident.sym == arg_name.sym)
+            } else if let Some(g_decl) = ty.generics_scope().and_then(|g| g.find_decl(arg_name.sym))
             {
                 let g = g_decl.init.u().downcast::<ast::GenericDef>(); // TODO: improve this
-                debug_assert_eq!(g.idx, g_idx);
                 named_arg.as_mut().is_explicit_generic_arg = true;
                 // TODO: correct type hint for non types
                 self.analyze_and_check_type(named_arg.rhs, p.type_ty, is_const)?;
@@ -2768,174 +2841,85 @@ impl Sema {
             return SemaResult::HandledErr;
         }
 
-        // infer generic based on return value
-        // TODO: this is not called when type return type is inferred (see infer_generic_based_on_inferred_return_type)
-        if let Some(ty_hint) = ty_hint
-            && let Some(g_def) = fn_ty.ret_ty.try_downcast::<ast::GenericDef>()
+        if let CallKind::Function { ty_hint: Some(ty_hint) } = kind
+            && let Some(g_def) =
+                ty.upcast().downcast::<ast::Fn>().ret_ty.try_downcast::<ast::GenericDef>()
         {
+            // infer generic based on return value
+            // TODO: this is not called when type return type is inferred (see infer_generic_based_on_inferred_return_type)
             let _ignore = accumulate_generic(g_def, ty_hint.upcast_to_const_val());
         }
 
-        // finalize generics & handle missing generics
-        let inst = if !fn_ty.flags.get(FnFlags::IS_GENERIC) {
-            fn_ty
-        } else {
-            let mut err = false;
-            let mut generic_inst = Vec::with_capacity(fn_ty.constants_count());
-            for g_decl in fn_ty.constants() {
-                let g = g_decl.init.u().flat_downcast::<ast::GenericDef>();
-                let Some(inst_val) = g.as_mut().cur_inst.as_mut() else {
-                    cerror!(
-                        expr.full_span(),
-                        "Cannot infer value of generic argument `{}`",
-                        g.name.sym
-                    );
-                    err = true;
-                    continue;
-                };
-                generic_inst.push(inst_val.finalize());
-            }
-            if err {
-                return Err(HandledErr);
-            }
-
-            orelse!(
-                fn_ty.instantiations.iter().copied().find(|i| {
-                    debug_assert!(i.flags.get(FnFlags::IS_INSTANTIATION));
-                    debug_assert_eq!(i.constants().len(), generic_inst.len());
-                    //i[..] == generic_inst[..]
-                    i.constants()
-                        .iter()
-                        .zip(&generic_inst)
-                        .all(|(c, inst)| generic_match(*inst, c.const_val()))
-                }),
-                {
-                    debug_assert!(!fn_ty.flags.get(FnFlags::IS_INSTANTIATION));
-
-                    let mut fn_inst = fn_ty.clone_ast(&self.cctx.alloc);
-                    fn_inst.flags.set(FnFlags::IS_INSTANTIATION);
-                    fn_inst.params_scope.parent.set_once(fn_ty.params_scope.parent.u());
-                    for (idx, c) in fn_inst.constants().iter().enumerate() {
-                        let inst_val = generic_inst.get(idx).u().upcast();
-                        c.as_mut().var_ty = Some(inst_val.ty.u());
-                        c.as_mut().init = Some(inst_val);
-                    }
-
-                    let () = self.analyze_fn_inst(fn_inst, None)?;
-                    debug_assert!(fn_inst.ret_ty.is_some());
-                    debug_assert!(fn_inst.body.u().ty.is_some());
-
-                    fn_ty.as_mut().instantiations.push(fn_inst);
-                    fn_inst
-                }
-            )
-        };
-        *resolved_fn_inst = Some(inst);
-
-        Ok(inst.ret_ty.unwrap_or_else(|| {
-            debug_assert!(inst == self.get_cur_fn().u()); // TODO: check all previous fns
-            p.rec_ret_ty
-        }))
+        self.finalize_instantiation(ty, expr)
     }
 
-    /// works for function calls and call initializers
-    /// ...(arg1, ..., argX, paramX1=argX1, ... paramN=argN)
-    /// paramN1, ... -> default values
-    fn validate_call(
+    fn finalize_instantiation<T: PolymorphableType>(
         &mut self,
-        params: &[Ptr<ast::Decl>],
-        args: &[Ptr<ast::Ast>],
-        allows_varargs: bool,
-        close_p_span: Span,
-        is_const: bool,
-        is_enum_init: bool,
-    ) -> SemaResult<()> {
-        // positional args
-        let mut pos_idx = 0;
-        while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
-            if let Some(&param) = params.get(pos_idx) {
-                let param_ty = get_var_ty(param)?;
-                self.analyze_and_check_type(pos_arg, param_ty, is_const)?;
-            } else if allows_varargs {
-                self.analyze(pos_arg, &None, is_const)?.finalize();
-            } else {
-                let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
-                return cerror2!(
-                    pos_arg.full_span(),
-                    "Got {pos_arg_count} positional arguments, but expected at most {} arguments",
-                    params.len(),
+        ty: Ptr<T>,
+        expr: Ptr<Ast>,
+    ) -> SemaResult<Ptr<T>> {
+        debug_assert!(!ty.flags().get(T::FLAG_IS_INSTANTIATION));
+        if !ty.flags().get(T::FLAG_IS_GENERIC) {
+            return Ok(ty);
+        }
+
+        // finalize generics & handle missing generics
+        let mut err = false;
+        let mut generic_inst = Vec::with_capacity(ty.generics_scope().u().decls.len());
+        for g_decl in ty.generics_scope().u().decls.iter() {
+            let g = g_decl.init.u().flat_downcast::<ast::GenericDef>();
+            let Some(inst_val) = g.as_mut().cur_inst.as_mut() else {
+                cerror!(
+                    expr.full_span(),
+                    "Cannot infer value of generic argument `{}`",
+                    g.name.sym
                 );
+                err = true;
+                continue;
             };
-
-            pos_idx += 1;
+            generic_inst.push(inst_val.finalize());
+        }
+        if err {
+            return Err(HandledErr);
         }
 
-        // named args
-        let remaining_args = &args[pos_idx..];
-        let remaining_params = params.get(pos_idx..).unwrap_or(&[]);
-        let mut was_set = vec![false; remaining_params.len()];
-        for &arg in remaining_args {
-            if is_pos_arg(&arg) {
-                return cerror2!(
-                    arg.full_span(),
-                    "Cannot specify a positional argument after named arguments"
-                );
+        // Look for already compiled instantiation
+        for inst in ty.instantiations().iter().copied() {
+            debug_assert!(inst.flags().get(T::FLAG_IS_INSTANTIATION));
+            let i_generics = &inst.generics_scope().u().decls;
+            debug_assert_eq!(i_generics.len(), generic_inst.len());
+            if i_generics
+                .iter()
+                .zip(&generic_inst)
+                .all(|(c, inst)| generic_match(*inst, c.const_val()))
+            {
+                return Ok(inst);
             }
-            let named_arg = arg.downcast::<ast::Assign>();
-            let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
-                return cerror2!(named_arg.lhs.full_span(), "Expected a parameter name");
-            };
-            let Some((param_idx, param)) = remaining_params.find_field(arg_name.sym) else {
-                if let Some((idx, _)) = params[..pos_idx].find_field(arg_name.sym) {
-                    error_duplicate_named_arg(arg_name);
-                    chint!(
-                        args[idx].full_span(),
-                        "The parameter has already been set by this positional argument"
-                    )
-                } else {
-                    cerror!(arg_name.span, "Unknown parameter");
-                }
-                return SemaResult::HandledErr;
-            };
-            if was_set[param_idx] {
-                error_duplicate_named_arg(arg_name);
-                chint!(remaining_args[param_idx].full_span(), "set here already");
-                return SemaResult::HandledErr;
-            } else {
-                was_set[param_idx] = true;
-            }
-            let param_ty = get_var_ty(param)?;
-            self.analyze_and_check_type(named_arg.rhs, param_ty, is_const)?;
         }
 
-        // missing args
-        let mut missing_params = remaining_params
-            .iter()
-            .copied()
-            .zip(was_set)
-            .filter(|(p, was_set)| !was_set && !p.has_default(is_enum_init))
-            .map(|(p, _)| p);
-        if let Some(first) = missing_params.next() {
-            let mut missing_params_list = String::new();
-            let mut idx = 0;
-            for p in iter::once(first).chain(missing_params) {
-                if idx != 0 {
-                    write!(&mut missing_params_list, ", ").unwrap();
-                }
-                let param_ty = get_var_ty(p)?;
-                write!(&mut missing_params_list, "`{}: {}`", p.ident.sym, param_ty).unwrap();
-                idx += 1;
-            }
-            cerror!(
-                close_p_span,
-                "Missing argument{0} for parameter{0} {1}",
-                if idx > 1 { "s" } else { "" },
-                missing_params_list
-            );
-            chint!(first.upcast().full_span(), "parameter defined here");
-            return SemaResult::HandledErr;
+        // Compile and Add new instantiation
+        let inst = ty.clone_ast(&self.cctx.alloc);
+        inst.flags().set(T::FLAG_IS_INSTANTIATION);
+        inst.flags().unset(T::FLAG_IS_GENERIC);
+
+        debug_assert!(ty.main_scope().flags.get(ScopeFlags::WAS_SETUP));
+        debug_assert!(ty.generics_scope().u().flags.get(ScopeFlags::WAS_SETUP));
+        setup_scopes(
+            &mut inst.main_scope(),
+            inst.generics_scope(),
+            ty.generics_scope().u().parent.u(),
+        );
+
+        for (idx, c) in inst.generics_scope().u().decls.iter().enumerate() {
+            let inst_val = generic_inst.get(idx).u().upcast();
+            c.as_mut().var_ty = Some(inst_val.ty.u());
+            c.as_mut().init = Some(inst_val);
         }
-        Ok(())
+
+        self.analyze(inst.upcast(), &None, false)?;
+
+        ty.instantiations().push(inst);
+        Ok(inst)
     }
 
     fn validate_mutation(
@@ -3217,7 +3201,7 @@ impl Sema {
     }
 
     fn open_scope(&mut self, new_scope: &mut Scope) -> OpenScopeHandle {
-        debug_only_assert!(new_scope.was_checked_for_duplicates);
+        debug_only_assert!(new_scope.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES));
         if new_scope.kind == ScopeKind::File {
             debug_assert!(new_scope.parent.is_some());
         } else {
@@ -3421,3 +3405,22 @@ fn find_in_namespace(ty: Ptr<ast::Type>, sym: Symbol) -> OPtr<ast::Decl> {
         .find_decl_norec(sym, false)
         .or_else(|| Some(ty.get_associated_external_consts()?.find_field(sym)?.1))
 }
+
+/// Maybe merge Ast Nodes
+#[derive(Debug)]
+enum CallKind {
+    Function { ty_hint: OPtr<ast::Type> },
+    EnumInit { variant: Ptr<ast::Decl> },
+    PositionalInitializer,
+}
+
+/*
+bitflags!(CallFlags: u8 {
+    IS_FUNCTION_CALL,
+    IS_METHOD_CALL,
+
+    IS_ENUM_INIT,
+
+    IS_POSITIONAL_INITIALIZER,
+});
+*/
