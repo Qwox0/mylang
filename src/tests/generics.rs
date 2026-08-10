@@ -233,7 +233,6 @@ test :: -> MyStruct.(1, "Hello World", &arr);
     assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
     drop(res);
 
-    /* TODO
     // Named Initializer
     let code = r#"
 MyStruct :: struct($A, $B, $C) {
@@ -248,6 +247,25 @@ test :: -> MyStruct.{
     c = &arr,
 };
 "#;
-    test(code).compile_no_err();
-    */
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
+    assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
+    drop(res);
+}
+
+#[test]
+fn generics_without_instantiations() {
+    let code = "
+my_generic_function :: (a: $A) -> a;
+MyGenericStruct :: struct($A) {
+    some_method :: -> {};
+    some_generic_method :: (b: $B) -> b;
+}
+test :: -> 1 + 1;
+";
+    let res = test(code).ok(2);
+    assert!(!res.llvm_ir().contains("my_generic_function"));
+    assert!(!res.llvm_ir().contains("MyGenericStruct"));
+    assert!(!res.llvm_ir().contains("some_method"));
+    assert!(!res.llvm_ir().contains("some_generic_method"));
 }

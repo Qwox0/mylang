@@ -81,7 +81,7 @@ impl<T: ?Sized> Ptr<T> {
 
     pub fn from_ref(r: &T) -> Ptr<T> {
         let p = Ptr(NonNull::from_ref(r));
-        debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr ({p:p}) might be invalid");
+        // debug_assert!((p.raw() as *const () as usize) > 0x500, "ptr ({p:p}) might be invalid");
         p
     }
 

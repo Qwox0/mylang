@@ -493,16 +493,15 @@ impl Sema {
                 if let Some(s) = lhs.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
-                    let inst = self.validate_call(
-                        CallKind::PositionalInitializer,
-                        s.downcast_struct_def(),
+                    let inst = self.validate_pos_initializer(
+                        s,
                         args,
                         span.end(),
                         is_const,
                         lhs, // only used for span
                     )?;
                     *resolved_struct_inst = Some(inst);
-                    expr.ty = Some(inst.upcast_to_type());
+                    expr.ty = Some(inst);
 
                     if is_const {
                         let fields = s.downcast_struct_def().fields;
@@ -515,14 +514,12 @@ impl Sema {
                     && let Some(s) = ptr_ty.pointee.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
-                    let s = s.downcast_struct_def();
                     self.validate_mutation(MutationKind::Initialize, lhs, expr)?;
 
                     if is_const {
                         return error_const_ptr_initializer(expr).into();
                     } else {
-                        let inst = self.validate_call(
-                            CallKind::PositionalInitializer,
+                        let inst = self.validate_pos_initializer(
                             s,
                             args,
                             span.end(),
@@ -531,12 +528,17 @@ impl Sema {
                         )?;
                         *resolved_struct_inst = Some(inst);
 
-                        expr.ty = Some(if s.flags.get(StructFlags::IS_GENERIC) {
-                            type_new!(PtrTy { is_mut: ptr_ty.is_mut, pointee: inst.upcast() })
-                                .upcast_to_type()
-                        } else {
-                            ptr_ty.upcast_to_type()
-                        });
+                        expr.ty = Some(
+                            if let Some(struct_def) = s.try_downcast::<ast::StructDef>()
+                                && struct_def.flags.get(StructFlags::IS_GENERIC)
+                            {
+                                debug_assert_eq!(inst.kind, AstKind::StructDef);
+                                type_new!(PtrTy { is_mut: ptr_ty.is_mut, pointee: inst.upcast() })
+                                    .upcast_to_type()
+                            } else {
+                                ptr_ty.upcast_to_type()
+                            },
+                        );
                     }
                 } else if lhs.ty.u().propagates_out() {
                     expr.ty = Some(lhs.ty.u());
@@ -551,19 +553,15 @@ impl Sema {
                 };
             },
             AstEnum::NamedInitializer { fields, resolved_struct_inst, .. } => {
-                let _ = resolved_struct_inst; // TODO
+                let initializer = expr.downcast::<ast::NamedInitializer>();
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(struct_ty) = lhs.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
                 {
-                    let const_values =
-                        self.validate_named_initializer(struct_ty, *fields, is_const, span)?;
-                    debug_assert_eq!(const_values.is_some(), is_const);
-                    expr.ty = Some(struct_ty);
-                    if let Some(elements) = const_values {
-                        let val = ast_new!(AggregateVal { elements }, expr.span);
-                        expr.set_replacement(val.upcast());
-                    }
+                    let inst =
+                        self.validate_named_initializer(struct_ty, *fields, is_const, initializer)?;
+                    *resolved_struct_inst = Some(inst);
+                    expr.ty = Some(inst);
                 } else if let Some(ptr_ty) = lhs.ty.try_downcast::<ast::PtrTy>()
                     && let Some(struct_ty) = ptr_ty.pointee.try_downcast_type()
                     && struct_ty.kind.is_struct_kind()
@@ -572,7 +570,41 @@ impl Sema {
                     if is_const {
                         return error_const_ptr_initializer(expr).into();
                     } else {
-                        self.validate_named_initializer(struct_ty, *fields, is_const, span)?;
+                        let inst = self.validate_named_initializer(
+                            struct_ty,
+                            *fields,
+                            is_const,
+                            initializer,
+                        )?;
+                        *resolved_struct_inst = Some(inst);
+                        expr.ty = Some(
+                            if let Some(struct_def) = struct_ty.try_downcast::<ast::StructDef>()
+                                && struct_def.flags.get(StructFlags::IS_GENERIC)
+                            {
+                                debug_assert_eq!(inst.kind, AstKind::StructDef);
+                                type_new!(PtrTy { is_mut: ptr_ty.is_mut, pointee: inst.upcast() })
+                                    .upcast_to_type()
+                            } else {
+                                ptr_ty.upcast_to_type()
+                            },
+                        );
+                        expr.ty = Some(if inst != struct_ty {
+                            debug_assert!(
+                                struct_ty
+                                    .downcast::<ast::StructDef>()
+                                    .flags
+                                    .get(StructFlags::IS_GENERIC)
+                            );
+                            debug_assert!(
+                                inst.downcast::<ast::StructDef>()
+                                    .flags
+                                    .get(StructFlags::IS_INSTANTIATION)
+                            );
+                            type_new!(PtrTy { is_mut: ptr_ty.is_mut, pointee: inst.upcast() })
+                                .upcast_to_type()
+                        } else {
+                            ptr_ty.upcast_to_type()
+                        });
                         expr.ty = Some(ptr_ty.upcast_to_type());
                     }
                 } else if lhs.ty.u().propagates_out() {
@@ -1800,7 +1832,7 @@ impl Sema {
 
                         if might_be_fn_ty {
                             return cerror2!(
-                                f.constants().first().u().full_span(),
+                                f.generics().first().u().full_span(),
                                 "Currently generic function types are not implemented"
                             );
                         }
@@ -1822,7 +1854,7 @@ impl Sema {
                                 "cannot infer the return type of this recursive function"
                             );
                         }
-                        ret_ty.finalize();
+                        ret_ty.finalize2(Some(f.ret_ty_expr.unwrap_or(body)))?;
                     } else {
                         debug_assert!(f.flags.get(FnFlags::IS_TYPE));
                         //panic_debug!("this function has already been analyzed as a function type")
@@ -2092,7 +2124,7 @@ impl Sema {
 
                         let generic_decl = g.generate_decl(&self.cctx.alloc)?;
 
-                        g.as_mut().idx = f.constants().len();
+                        g.as_mut().idx = f.generics().len();
                         let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
                             let s = self
                                 .cctx
@@ -2351,8 +2383,8 @@ impl Sema {
         struct_ty: Ptr<ast::Type>,
         initializer_values: Ptr<[(Ptr<ast::Ident>, Option<Ptr<Ast>>)]>,
         is_const: bool,
-        initializer_span: Span,
-    ) -> SemaResult<OPtr<[Ptr<ast::ConstVal>]>> {
+        initializer_expr: Ptr<ast::NamedInitializer>,
+    ) -> SemaResult<Ptr<ast::Type>> {
         let fields = match struct_ty.matchable().as_ref() {
             TypeEnum::StructDef { fields, .. } => &**fields,
             TypeEnum::SliceTy { elem_ty, is_mut, .. } => {
@@ -2414,7 +2446,7 @@ impl Sema {
             let field = fields[f_idx];
             let Some(init) = field.init else {
                 cerror!(
-                    initializer_span,
+                    initializer_expr.span,
                     "missing field `{}` in initializer of `{struct_ty}`",
                     field.ident.sym
                 );
@@ -2423,11 +2455,53 @@ impl Sema {
             get_ty(init)?;
             handle_const_val!(f_idx, init);
         }
-        if ok {
-            Ok(const_values.map(|cvalues| cvalues.u()))
-        } else {
-            SemaResult::HandledErr
+
+        if !ok {
+            return SemaResult::HandledErr;
         }
+
+        let inst = match struct_ty.try_downcast::<ast::StructDef>() {
+            Some(struct_ty) => self
+                .finalize_instantiation(struct_ty, initializer_expr.upcast())?
+                .upcast_to_type(),
+            None => struct_ty,
+        };
+
+        if is_const {
+            let elements = const_values.u().u();
+            debug_assert_eq!(initializer_expr.lhs.u().downcast_type(), struct_ty);
+            let val = ast_new!(AggregateVal { elements }, initializer_expr.span);
+            val.as_mut().ty = Some(inst);
+            initializer_expr.upcast().set_replacement(val.upcast());
+        }
+
+        // TODO: check if this is a good idea for SliceTy
+        Ok(inst)
+    }
+
+    fn validate_pos_initializer(
+        &mut self,
+        struct_ty: Ptr<ast::Type>,
+        args: &[Ptr<ast::Ast>],
+        close_p_span: Span,
+        is_const: bool,
+        expr: Ptr<Ast>,
+    ) -> SemaResult<Ptr<ast::Type>> {
+        let inst = self.validate_call(
+            CallKind::PositionalInitializer,
+            struct_ty.downcast_struct_def(),
+            args,
+            close_p_span,
+            is_const,
+            expr,
+        )?;
+
+        Ok(if let Some(_) = struct_ty.try_downcast::<ast::SliceTy>() {
+            debug_assert!(!inst.flags.get(StructFlags::IS_INSTANTIATION));
+            struct_ty
+        } else {
+            inst.upcast_to_type()
+        })
     }
 
     fn create_aggregate_const_val(
@@ -2520,6 +2594,7 @@ impl Sema {
         if let Some(init) = decl.init {
             if init.is_custom_type() {
                 let ty = init.downcast_type();
+                // TODO: bench vs decl field on individual ast nodes
                 let _old = crate::context::ctx_mut().ty_names.insert(ty, decl.ident.sym);
                 //debug_assert!(old.is_none());
             }
@@ -2697,7 +2772,7 @@ impl Sema {
     ) -> SemaResult<Ptr<T>> {
         let res = self._validate_call(kind, ty, args, close_p_span, is_const, expr);
 
-        for g in ty.constants() {
+        for g in ty.generics() {
             let g = g.init.u().downcast::<ast::GenericDef>();
             g.as_mut().cur_inst = None;
         }
@@ -2719,7 +2794,7 @@ impl Sema {
         let is_enum_init = matches!(kind, CallKind::EnumInit { .. });
 
         debug_assert!(
-            ty.constants().iter().all(|g| g
+            ty.generics().iter().all(|g| g
                 .init
                 .u()
                 .flat_downcast::<ast::GenericDef>()

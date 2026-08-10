@@ -1,7 +1,7 @@
 use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum, UpcastToAst, type_new},
     context::{ctx, primitives},
-    diagnostics::cerror,
+    diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema::{generics::accumulate_generic, primitives::Primitives},
@@ -453,12 +453,41 @@ impl ast::Type {
     /// This might mutate values behind [`Ptr`]s in `self`.
     /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
     pub fn finalize(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
+        self.finalize2(None).unwrap_or(*self)
+    }
+
+    pub fn finalize2(
+        self: &mut Ptr<Self>,
+        err_expr: OPtr<ast::Ast>,
+    ) -> Result<Ptr<ast::Type>, HandledErr> {
         let p = primitives();
         debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
+
+        let err_span = || {
+            if err_expr.is_none() {
+                cwarn!(Span::ZERO, "TODO: provide err_expr");
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+            err_expr.map(Ptr::return_val_span).unwrap_or(Span::ZERO)
+        };
+
+        if let Some(polymorphable) = self.try_downcast_polymorphable()
+            && polymorphable.is_generic()
+        {
+            let self_label = if self.kind == AstKind::Fn { "function" } else { "type" };
+            return cerror2!(
+                err_span(),
+                "Cannot infer generic parameters of {self_label} `{}`",
+                polymorphable.upcast().downcast_type()
+            );
+        }
+
         match self.matchable().as_mut() {
             TypeEnum::SimpleTy { .. } => {
                 if *self == p.rec_ret_ty {
-                    cerror!(Span::ZERO, "Cannot infer return type"); // TODO: correct span
+                    cerror!(err_span(), "Cannot infer return type of recursive function");
+                    chint!(err_span(), "Consider adding an explicit return type");
+                    return HandledErr.into();
                 }
             },
             TypeEnum::IntTy { bits: None, .. } => *self = p.i64,
@@ -485,7 +514,7 @@ impl ast::Type {
             TypeEnum::GenericDef { .. } => panic_debug!("cannot finalize GenericDef"),
         }
         debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
-        *self
+        Ok(*self)
     }
 
     /// size of stack allocation in bytes

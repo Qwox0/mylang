@@ -378,7 +378,8 @@ ast_variants! {
         lhs: OPtr<Ast>,
         args: Ptr<[Ptr<Ast>]>,
 
-        resolved_struct_inst: OPtr<StructDef>,
+        /// can be [`StructDef`] or [`SliceTy`]
+        resolved_struct_inst: OPtr<Type>,
     },
     /// `alloc(MyStruct).{ a = <expr>, b, }`
     /// `               ^^^^^^^^^^^^^^^^^^^` expr.span
@@ -390,7 +391,8 @@ ast_variants! {
         lhs: OPtr<Ast>,
         fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SoA
 
-        resolved_struct_inst: OPtr<StructDef>,
+        /// can be [`StructDef`] or [`SliceTy`]
+        resolved_struct_inst: OPtr<Type>,
     },
     /// `alloc(MyArray).[<expr>, <expr>, ..., <expr>,]`
     ArrayInitializer {

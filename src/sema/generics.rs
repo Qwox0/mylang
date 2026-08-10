@@ -111,7 +111,7 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
 
     fn flags(self: Ptr<Self>) -> &'static mut Self::Flags;
 
-    fn constants(&self) -> &[Ptr<ast::Decl>] {
+    fn generics(&self) -> &[Ptr<ast::Decl>] {
         self.generics_scope().map(|s| s.as_ref().decls.as_slice()).unwrap_or(&[])
     }
 
@@ -177,6 +177,13 @@ macro_rules! impl_PolymorphableType {
             pub fn generics_scope(&self) -> OPtr<Scope> {
                 match Ptr::from_ref(self).upcast().matchable2() {
                     $(ast::AstMatch::$ty(t) => t.generics_scope(),)*
+                    _ => unreachable_debug(),
+                }
+            }
+
+            pub fn is_generic(&self) -> bool {
+                match Ptr::from_ref(self).upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.flags.get(ast::$ty::FLAG_IS_GENERIC),)*
                     _ => unreachable_debug(),
                 }
             }

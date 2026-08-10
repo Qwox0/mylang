@@ -220,22 +220,19 @@ impl<'ctx> Codegen<'ctx> {
             ($lhs:expr, $values:expr, $resolved_struct_inst:expr, $compile_fn:ident) => {{
                 let lhs = $lhs.u();
                 let values = $values;
-                //let resolved_struct_inst = ($resolved_struct_inst).u();
-                if let Some(s_def) = lhs.try_downcast_struct_def() {
-                    let resolved_struct_inst = ($resolved_struct_inst).unwrap_or(s_def);
-                    debug_assert!(s_def.polymorphs_or_self().contains(&resolved_struct_inst));
-                    let s_ty = resolved_struct_inst.upcast_to_type();
-                    let struct_ty = self.llvm_type(s_ty).struct_ty();
-                    let ptr = write_target_or!(self.build_alloca(struct_ty, "struct", s_ty)?);
-                    self.$compile_fn(struct_ty, ptr, &resolved_struct_inst.fields, values)?;
+                let struct_inst = ($resolved_struct_inst).u();
+                let struct_ty = self.llvm_type(struct_inst).struct_ty();
+                let s_def = struct_inst.downcast_struct_def();
+                debug_assert!(!s_def.flags.get(StructFlags::IS_GENERIC));
+                if let Some(_) = lhs.try_downcast_struct_def() {
+                    let ptr =
+                        write_target_or!(self.build_alloca(struct_ty, "struct", struct_inst)?);
+                    self.$compile_fn(struct_ty, ptr, &s_def.fields, values)?;
                     stack_val(ptr)
-                } else if let Some(ptr) = lhs.ty.u().try_downcast::<ast::PtrTy>() {
+                } else if let Some(_) = lhs.ty.u().try_downcast::<ast::PtrTy>() {
                     debug_assert_eq!(lhs.ty, out_ty);
-                    let resolved_struct_inst = ($resolved_struct_inst).unwrap_or(ptr.pointee.downcast::<ast::StructDef>());
-                    debug_assert!(ptr.pointee.downcast::<ast::StructDef>().polymorphs_or_self().contains(&resolved_struct_inst));
-                    let struct_ty = self.type_table[&resolved_struct_inst.upcast_to_type()].struct_ty(); // TODO: test if `*struct {...}` syntax works
                     let ptr = try_compile_expr_as_val!(self, lhs).ptr_val();
-                    self.$compile_fn(struct_ty, ptr, &resolved_struct_inst.fields, values)?;
+                    self.$compile_fn(struct_ty, ptr, &s_def.fields, values)?;
                     reg(ptr)
                 } else {
                     panic_debug!("invalid out_ty for initializer: {out_ty}")
@@ -1679,7 +1676,7 @@ impl<'ctx> Codegen<'ctx> {
             return (fn_val, ret_type.do_use_sret());
         }
         let name = match def {
-            FnKind::FnDef(decl) => self.mangle_symbol(decl, f.constants()),
+            FnKind::FnDef(decl) => self.mangle_symbol(decl, f.generics()),
             FnKind::Lambda => "lambda".into(), // TODO: also mangle lambda (e.g. `my_fn.lambda`)
         };
         debug_assert!(
@@ -3679,7 +3676,7 @@ impl<'ctx> Codegen<'ctx> {
                         self.compile_fn(f, FnKind::FnDef(decl), during_precompile)?;
                     },
                     AstMatch::ExternDirective(_) if during_precompile => {
-                        debug_assert_eq!(f.constants().len(), 0); // TODO: add sema check
+                        debug_assert_eq!(f.generics().len(), 0); // TODO: add sema check
                         debug_assert!(f.instantiations.is_empty());
                         let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
                         self.symbols.push((decl, Symbol::FunctionInst(fn_val))); // TODO: seems hacky
