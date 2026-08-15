@@ -241,11 +241,7 @@ MyStruct :: struct($A, $B, $C) {
     c: ?*C,
 }
 static arr := u16.[1, 2, 3];
-test :: -> MyStruct.{
-    a = 1,
-    b = "Hello World",
-    c = &arr,
-};
+test :: -> MyStruct.{ a=1, b="Hello World", c=&arr };
 "#;
     let res = test(code).compile_no_err();
     assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
@@ -268,4 +264,39 @@ test :: -> 1 + 1;
     assert!(!res.llvm_ir().contains("MyGenericStruct"));
     assert!(!res.llvm_ir().contains("some_method"));
     assert!(!res.llvm_ir().contains("some_generic_method"));
+}
+
+#[test]
+fn generic_struct_detect_uninferred_generics() {
+    let code = "
+MyStruct :: struct($T) {
+    val: T;
+    debug :: (self: *MyStruct) -> { } // No error here because MyStruct in never instantiated
+};
+take_val :: (x: MyStruct) -> {
+    x.&.debug();
+    MyStruct.debug(&x);
+}
+";
+    // before fix this emitted a cycle error
+    test(code)
+        .error(
+            "Cannot infer generic parameters of type `MyStruct`",
+            substr!("x: MyStruct";.until_end(8)),
+        )
+        .error(
+            "Cannot infer generic parameters of type `MyStruct`",
+            substr!("MyStruct.debug";.start_with_len(8)),
+        );
+}
+
+#[test]
+fn generic_def_in_struct_body() {
+    test("MyStruct :: struct($A) { a: A; val: $B; }")
+        .error("Cannot define generics inside a struct body", substr!("$B"))
+        .info("Consider adding the struct generic here. $B", substr!("struct($A)";.end()));
+
+    test("MyStruct :: struct { val: $B; }")
+        .error("Cannot define generics inside a struct body", substr!("$B"))
+        .info("Consider adding the struct generic here. ($B)", substr!("struct ";.end()));
 }

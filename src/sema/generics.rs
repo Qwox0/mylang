@@ -205,10 +205,18 @@ impl_PolymorphableType! {
 
 impl ast::Ast {
     pub fn try_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
+        self.rep().try_flat_downcast_polymorphable()
+    }
+
+    pub fn try_flat_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
         then!(POLYMORPHABLE_AST_KINDS.contains(&self.kind) => self.downcast_polymorphable())
     }
 
     pub fn downcast_polymorphable(self: Ptr<Self>) -> Ptr<Polymorphable> {
+        self.rep().flat_downcast_polymorphable()
+    }
+
+    pub fn flat_downcast_polymorphable(self: Ptr<Self>) -> Ptr<Polymorphable> {
         debug_assert!(POLYMORPHABLE_AST_KINDS.contains(&self.kind));
         self.cast()
     }
@@ -216,6 +224,7 @@ impl ast::Ast {
 
 impl ast::Type {
     pub fn try_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
-        self.upcast().try_downcast_polymorphable()
+        debug_assert!(self.replacement.is_none());
+        self.upcast().try_flat_downcast_polymorphable()
     }
 }

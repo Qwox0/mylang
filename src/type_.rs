@@ -1,7 +1,7 @@
 use crate::{
     ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum, UpcastToAst, type_new},
     context::{ctx, primitives},
-    diagnostics::{HandledErr, cerror, cerror2, chint, cwarn},
+    diagnostics::{HandledErr, cerror, chint, common::error_cannot_infer_generics, cwarn},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema::{generics::accumulate_generic, primitives::Primitives},
@@ -474,12 +474,7 @@ impl ast::Type {
         if let Some(polymorphable) = self.try_downcast_polymorphable()
             && polymorphable.is_generic()
         {
-            let self_label = if self.kind == AstKind::Fn { "function" } else { "type" };
-            return cerror2!(
-                err_span(),
-                "Cannot infer generic parameters of {self_label} `{}`",
-                polymorphable.upcast().downcast_type()
-            );
+            return error_cannot_infer_generics(err_expr.u()).into();
         }
 
         match self.matchable().as_mut() {
@@ -501,10 +496,11 @@ impl ast::Type {
             | TypeEnum::SliceTy { elem_ty: t, .. }
             | TypeEnum::ArrayTy { elem_ty: t, .. }
             | TypeEnum::OptionTy { inner_ty: t, .. } => {
-                t.downcast_type_ref().finalize();
+                let t_expr = Some(*t).filter(|a| a.span != Span::ZERO);
+                t.downcast_type_ref().finalize2(t_expr)?;
             },
             TypeEnum::RangeTy { elem_ty, .. } => {
-                elem_ty.finalize();
+                elem_ty.finalize2(None)?;
             },
             TypeEnum::Fn { params_scope, ret_ty, .. } => {
                 debug_assert!(params_scope.decls.iter().all(|p| p.var_ty.u().is_finalized()));

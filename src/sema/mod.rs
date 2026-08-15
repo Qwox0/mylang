@@ -184,8 +184,8 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                         .try_downcast::<ast::Decl>()
                         .map(|d| d.ident.span)
                         .unwrap_or_else(|| stmt.full_span());
-                    display(span).finish();
-                    //let dep = units.get(idx).u().waiting_for.as_ref().u();
+                    let dep = units.get(idx).u().waiting_for.as_ref().u();
+                    display(span).label(&format!("waiting for: {dep:?}")).finish();
                 }
             }
             break;
@@ -490,7 +490,7 @@ impl Sema {
             },
             AstEnum::PositionalInitializer { args, resolved_struct_inst, .. } => {
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
-                if let Some(s) = lhs.try_downcast_type()
+                if let Some(s) = lhs.try_downcast_type2()
                     && s.kind.is_struct_kind()
                 {
                     let inst = self.validate_pos_initializer(
@@ -555,7 +555,7 @@ impl Sema {
             AstEnum::NamedInitializer { fields, resolved_struct_inst, .. } => {
                 let initializer = expr.downcast::<ast::NamedInitializer>();
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
-                if let Some(struct_ty) = lhs.try_downcast_type()
+                if let Some(struct_ty) = lhs.try_downcast_type2()
                     && struct_ty.kind.is_struct_kind()
                 {
                     let inst =
@@ -716,7 +716,7 @@ impl Sema {
                     }
                     ty
                 } else if lhs_ty == p.type_ty {
-                    let lhs = lhs.downcast_type();
+                    let lhs = lhs.downcast_type_inst()?;
                     let Some(member) = find_in_namespace(lhs, rhs.sym) else {
                         return NotFinished(UnitDependency::AssociatedConst(dot));
                     };
@@ -932,7 +932,7 @@ impl Sema {
                 }
             },
             AstEnum::Cast { operand, target_ty, .. } => {
-                let target_ty = self.analyze_type(*target_ty)?;
+                let target_ty = self.analyze_type_inst(*target_ty)?;
                 let () = self.analyze_cast(*operand, target_ty, expr, is_const)?;
             },
             AstEnum::Autocast { operand, .. } => {
@@ -1700,7 +1700,7 @@ impl Sema {
                 expr.set_replacement(main.const_val().upcast());
             },
             AstEnum::SizeOfDirective { type_, .. } => {
-                let ty = self.analyze_type(*type_)?;
+                let ty = self.analyze_type_inst(*type_)?;
                 if !are_sub_types_finished(ty) {
                     return NotFinished(UnitDependency::AllSubTypes(ty));
                 }
@@ -1716,7 +1716,7 @@ impl Sema {
                 expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
-                let ty = self.analyze_type(*type_)?;
+                let ty = self.analyze_type_inst(*type_)?;
                 if !are_sub_types_finished(ty) {
                     return NotFinished(UnitDependency::AllSubTypes(ty));
                 }
@@ -1724,7 +1724,7 @@ impl Sema {
                 expr.set_replacement(ast::IntVal::new(ty.alignment())?.upcast());
             },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
-                let ty = self.analyze_type(*type_)?;
+                let ty = self.analyze_type_inst(*type_)?;
                 let Some(s_def) = ty.try_downcast_struct_def() else {
                     return cerror2!(type_.full_span(), "expected struct type");
                 };
@@ -1810,7 +1810,7 @@ impl Sema {
                         // Happens iff sema of analyze_fn_body has to yield
                         debug_assert!(f.ret_ty.is_some())
                     } else if let Some(ret) = f.ret_ty_expr {
-                        f.ret_ty = Some(self.analyze_type(ret)?);
+                        f.ret_ty = Some(self.analyze_type_inst(ret)?);
                         f.flags.set(FnFlags::HAS_KNOWN_RET_TY);
                     } else if let Some(fn_hint) = fn_hint {
                         f.ret_ty = Some(fn_hint.ret_ty.u());
@@ -1883,15 +1883,15 @@ impl Sema {
                 expr.ty = Some(p.type_ty)
             },
             AstEnum::PtrTy { pointee, .. } => {
-                self.analyze_type(*pointee)?;
+                self.analyze_type_inst(*pointee)?;
                 expr.ty = Some(p.type_ty);
             },
             AstEnum::SliceTy { elem_ty, .. } => {
-                self.analyze_type(*elem_ty)?;
+                self.analyze_type_inst(*elem_ty)?;
                 expr.ty = Some(p.type_ty);
             },
             AstEnum::ArrayTy { len, elem_ty, .. } => {
-                self.analyze_type(*elem_ty)?;
+                self.analyze_type_inst(*elem_ty)?;
                 let u64_ty = p.u64;
                 analyze!(*len, Some(u64_ty), true);
                 self.ty_match(*len, u64_ty)?;
@@ -2105,11 +2105,11 @@ impl Sema {
             },
             AstEnum::RangeTy { .. } => todo!(),
             AstEnum::OptionTy { inner_ty, .. } => {
-                self.analyze_type(*inner_ty)?;
+                self.analyze_type_inst(*inner_ty)?;
                 expr.ty = Some(p.type_ty);
             },
             AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
-            AstEnum::GenericDef { .. } => {
+            AstEnum::GenericDef { name, .. } => {
                 let g = expr.downcast::<ast::GenericDef>();
 
                 match self.cur_scope.kind {
@@ -2146,7 +2146,28 @@ impl Sema {
                         }
                         f.as_mut().flags.set(FnFlags::IS_GENERIC);
                     },
-                    ScopeKind::Struct => todo!(),
+                    ScopeKind::Struct => {
+                        let s = self.cur_scope.get_expr().u().downcast::<ast::StructDef>();
+                        let err = cerror!(
+                            expr.full_span(),
+                            "Cannot define generics inside a struct body"
+                        );
+                        debug_assert!(&s.span.file.u().code[s.span].starts_with("struct"));
+                        if let Some(last_generic) = s.generics().last() {
+                            chint!(
+                                last_generic.full_span().after(),
+                                "Consider adding the struct generic here. ${}",
+                                name.sym,
+                            );
+                        } else {
+                            chint!(
+                                Span::pos(s.span.start + "struct".len(), s.span.file),
+                                "Consider adding the struct generic here. (${})",
+                                name.sym,
+                            );
+                        }
+                        return err.into();
+                    },
                     ScopeKind::Union => todo!(),
                     ScopeKind::Enum => todo!(),
                     ScopeKind::Root | ScopeKind::File => {
@@ -2207,11 +2228,11 @@ impl Sema {
         Ok(ty)
     }
 
-    fn analyze_type(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
+    fn analyze_type_inst(&mut self, ty_expr: Ptr<Ast>) -> SemaResult<Ptr<ast::Type>> {
         let p = p();
         let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
         if ty_match(ty, p.type_ty) {
-            Ok(ty_expr.downcast_type())
+            Ok(ty_expr.downcast_type_inst()?)
         } else {
             error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
         }
@@ -2553,7 +2574,7 @@ impl Sema {
 
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this
         if is_first_pass && let Some(ty_expr) = decl.on_type {
-            let ty = self.analyze_type(ty_expr)?;
+            let ty = self.analyze_type_inst(ty_expr)?; // TODO: Don't require a generic instantiation
             match ty.matchable().as_mut() {
                 TypeEnum::StructDef { fields, external_consts, .. }
                 | TypeEnum::UnionDef { fields, external_consts, .. }
@@ -2584,7 +2605,7 @@ impl Sema {
         }
         decl.ty = Some(p.void_ty);
         if let Some(t) = decl.var_ty_expr {
-            let ty = self.analyze_type(t)?;
+            let ty = self.analyze_type_inst(t)?;
             debug_assert!(decl.var_ty.is_none_or(|t| ty_match(t, ty))); // TODO(without `NotFinished`): remove this
             decl.var_ty = Some(ty);
             if ty == p.err_ty {
@@ -2593,7 +2614,7 @@ impl Sema {
         }
         if let Some(init) = decl.init {
             if init.is_custom_type() {
-                let ty = init.downcast_type();
+                let ty = init.downcast_type2();
                 // TODO: bench vs decl field on individual ast nodes
                 let _old = crate::context::ctx_mut().ty_names.insert(ty, decl.ident.sym);
                 //debug_assert!(old.is_none());
@@ -2634,7 +2655,7 @@ impl Sema {
             // finding the parameter itself as a type definition.
             decl.ident = p.ignored_name;
             decl.var_ty_expr = Some(ty_name);
-            let ty = self.analyze_type(ty_name)?;
+            let ty = self.analyze_type_inst(ty_name)?;
             decl.var_ty = Some(ty);
             Ok(())
         } else {

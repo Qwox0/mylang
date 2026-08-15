@@ -478,6 +478,12 @@ impl TestSpan {
         TestSpan(self.0.end())
     }
 
+    pub fn until_end(self, len: usize) -> TestSpan {
+        let mut span = self.0.end();
+        span.start = span.end - len;
+        TestSpan(span)
+    }
+
     pub fn after(self) -> TestSpan {
         TestSpan(self.0.after())
     }

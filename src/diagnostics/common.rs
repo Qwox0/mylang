@@ -88,11 +88,7 @@ pub fn error_cannot_apply_initializer(
             chint!(initializer_expr.span, "Consider using an array initializer (`.[...]`) instead")
         }
     } else {
-        cerror!(
-            span,
-            "Cannot apply {initializer_kind} to value of type `{}`",
-            analyzed_lhs.ty.u()
-        );
+        cerror!(span, "Cannot apply {initializer_kind} to value of type `{}`", analyzed_lhs.ty.u());
         debug_assert!(analyzed_lhs == lhs_expr.u());
     }
     HandledErr
@@ -153,4 +149,16 @@ pub fn error_const_call(call: Ptr<ast::Call>) -> HandledErr {
 #[track_caller]
 pub fn error_unimplemented(span: Span, what: fmt::Arguments<'_>) -> HandledErr {
     cerror!(span, "{what} is currently not implemented")
+}
+
+#[track_caller]
+pub fn error_cannot_infer_generics(expr: Ptr<ast::Ast>) -> HandledErr {
+    let ty = expr.downcast_polymorphable();
+    debug_assert!(ty.is_generic());
+    let ty_label = if ty.kind == AstKind::Fn { "function" } else { "type" };
+    cerror!(
+        expr.return_val_span(),
+        "Cannot infer generic parameters of {ty_label} `{}`",
+        ty.upcast().downcast_type2()
+    )
 }

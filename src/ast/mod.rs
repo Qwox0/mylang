@@ -2,7 +2,7 @@ use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
     context::{FilesIndex, ctx, primitives},
-    diagnostics::{HandledErr, cerror2},
+    diagnostics::{HandledErr, cerror2, common::error_cannot_infer_generics},
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
@@ -856,7 +856,7 @@ impl Ptr<Ast> {
         if self.ty.u() == p.type_ty {
             debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
             true
-        } else if self.rep().kind == AstKind::Fn {
+        } else if [AstKind::Fn, AstKind::GenericDef].contains(&self.rep().kind) {
             debug_assert!(self.ty.u().p_eq(self));
             true
         } else if self == p.err_ty.upcast() {
@@ -960,13 +960,50 @@ impl Ptr<Ast> {
         then!(self.has_type_kind() => self.flat_downcast_type())
     }
 
+    /// allows generic type definitions
     #[inline]
-    pub fn downcast_type(self) -> Ptr<Type> {
+    pub fn downcast_type2(self) -> Ptr<Type> {
         self.rep().flat_downcast_type()
+    }
+
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn downcast_type(self) -> Ptr<Type> {
+        let ty = self.downcast_type2();
+
+        #[cfg(debug_assertions)]
+        if let Some(polymorphable) = self.try_downcast_polymorphable()
+            && polymorphable.is_generic()
+        {
+            crate::diagnostics::cwarn!(
+                self.span,
+                "Called downcast_type on generic type `{ty}`\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+
+        ty
+    }
+
+    /// returns [`error_cannot_infer_generics2`] for generic type definitions
+    pub fn downcast_type_inst(self) -> Result<Ptr<Type>, HandledErr> {
+        let ty = self.downcast_type2();
+
+        if let Some(polymorphable) = ty.try_downcast_polymorphable()
+            && polymorphable.is_generic()
+        {
+            return Err(error_cannot_infer_generics(self));
+        }
+
+        Ok(ty)
     }
 
     pub fn try_downcast_type(self) -> OPtr<Type> {
         then!(self.is_type() => self.downcast_type())
+    }
+
+    pub fn try_downcast_type2(self) -> OPtr<Type> {
+        then!(self.is_type() => self.downcast_type2())
     }
 
     pub fn try_downcast_type_by_kind(self) -> OPtr<Type> {
@@ -980,7 +1017,7 @@ impl Ptr<Ast> {
     }
 
     pub fn try_downcast_struct_def(self) -> OPtr<StructDef> {
-        self.try_downcast_type()?.try_downcast_struct_def()
+        self.try_downcast_type2()?.try_downcast_struct_def()
     }
 
     #[track_caller]
@@ -1113,6 +1150,7 @@ impl Ptr<Type> {
     }
 
     pub fn try_downcast<V: TypeVariant>(self) -> OPtr<V> {
+        debug_assert!(self.replacement.is_none());
         then!(self.kind == V::KIND => self.downcast())
     }
 
@@ -1259,10 +1297,10 @@ impl Ast {
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
-            AstEnum::Decl { has_init_expr, init, var_ty_expr, .. } => {
-                match init.filter(|_| *has_init_expr) {
+            AstEnum::Decl { ident, var_ty_expr, has_init_expr, init, .. } => {
+                match init.filter(|_| *has_init_expr).or(*var_ty_expr) {
                     Some(e) => span.join(e.full_span()),
-                    None => span.maybe_join(var_ty_expr.map(|e| e.full_span())),
+                    None => span.join(ident.span),
                 }
             },
             AstEnum::If { condition, then_body, else_body, was_piped, .. } => {
@@ -1356,6 +1394,9 @@ impl Type {
 
     /// For custom types this returns the constants defined inside the scope of the type.
     pub fn get_scope(&self) -> Option<&Scope> {
+        debug_assert!(
+            Ptr::from_ref(self).try_downcast_polymorphable().is_none_or(|p| !p.is_generic())
+        );
         match self.matchable().as_ref() {
             TypeEnum::StructDef { scope, .. }
             | TypeEnum::UnionDef { scope, .. }
