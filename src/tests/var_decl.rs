@@ -56,7 +56,7 @@ fn good_invalid_token_error() {
     test_body("mut a = 1").error("expected `:`, `:=` or `::`, got `=`", substr!("="));
 
     test_body("mut 1").error(
-        "expected an identifier, `mut`, `rec`, `pub` or `static`, got an integer literal",
+        "expected an identifier, `mut`, `rec`, `pub`, `static` or `$`, got an integer literal",
         substr!("1"),
     );
 }

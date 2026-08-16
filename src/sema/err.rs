@@ -28,6 +28,22 @@ impl<T> SemaResult<T> {
             Err(HandledErr) => Err(HandledErr),
         }
     }
+
+    pub fn is_ok(self) -> SemaResult<bool> {
+        match self {
+            Ok(_) => Ok(true),
+            NotFinished(dep) => NotFinished(dep),
+            Err(HandledErr) => Ok(false),
+        }
+    }
+}
+impl SemaResult<()> {
+    pub fn ignore_error(self) -> Self {
+        match self {
+            Err(HandledErr) => Ok(()),
+            res => res,
+        }
+    }
 }
 
 impl<T> Try for SemaResult<T> {

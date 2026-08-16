@@ -25,10 +25,16 @@ pub enum ScopeKind {
     Union,
     Enum,
 
-    Generics,
+    FnGenerics,
+    StructGenerics,
+    EnumGenerics,
 }
 
 impl ScopeKind {
+    pub fn is_generic(self) -> bool {
+        matches!(self, ScopeKind::FnGenerics | ScopeKind::StructGenerics | ScopeKind::EnumGenerics)
+    }
+
     pub fn allows_shadowing(self) -> bool {
         matches!(self, ScopeKind::Block)
     }
@@ -51,7 +57,6 @@ impl ScopeKind {
     }
 }
 
-#[derive(Debug)]
 pub struct Scope {
     pub kind: ScopeKind,
     pub flags: ScopeFlags,
@@ -63,6 +68,25 @@ pub struct Scope {
     ///
     /// Currently only used for unordered scopes because those scopes don't allow shadowing.
     decls_map: Option<UnorderedDeclMap>,
+
+    /// only for debugging
+    pub expr: OPtr<Ast>,
+}
+
+impl std::fmt::Debug for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("Scope");
+
+        use ast::debug::special_debug_handlers::*;
+
+        debug.field("kind", &self.kind);
+        never_alternate(&mut debug, "flags", &self.flags);
+        hex_inline(&mut debug, "parent", &self.parent);
+        debug.field("decls", &self.decls);
+        debug.field("decls_map", &self.decls_map);
+        debug.field("expr", &self.expr);
+        debug.finish()
+    }
 }
 
 bitflags!(ScopeFlags: u8 {
@@ -75,13 +99,20 @@ const SMALL_SCOPE_MAX_SIZE: usize = 32;
 impl Scope {
     pub fn new(decls: Vec<Ptr<Decl>>, kind: ScopeKind) -> Scope {
         debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
-        Scope { parent: None, decls, decls_map: None, kind, flags: ScopeFlags::default() }
-    }
+        #[cfg(debug_assertions)]
+        if kind.is_generic() {
+            debug_assert!(decls.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
+            debug_assert!(decls.iter().all(|p| p.is_const));
+        }
 
-    pub fn for_generics(generics: Vec<Ptr<Decl>>) -> Scope {
-        debug_assert!(generics.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
-        debug_assert!(generics.iter().all(|p| p.is_const));
-        Scope::new(generics, ScopeKind::Generics)
+        Scope {
+            parent: None,
+            decls,
+            decls_map: None,
+            kind,
+            flags: ScopeFlags::default(),
+            expr: None,
+        }
     }
 
     pub fn setup(&mut self, parent: Ptr<Scope>) {
@@ -176,6 +207,7 @@ impl Scope {
             map.insert_or_replace(decl);
         }
         self.decls.push(decl);
+        decl.as_mut().scope.set_or_expect(Ptr::from_ref(self));
     }
 
     pub fn add_decl(&mut self, decl: Ptr<Decl>) -> Result<(), Ptr<Decl>> {
@@ -190,6 +222,7 @@ impl Scope {
                 return Err(dup);
             }
             self.decls.push(decl);
+            decl.as_mut().scope.set_or_expect(Ptr::from_ref(self));
         }
         Ok(())
     }
@@ -219,15 +252,13 @@ impl Scope {
         return None;
     }
 
-    // Currently only for debugging
     pub fn get_expr(self: Ptr<Self>) -> OPtr<Ast> {
         macro_rules! get_scope_container {
-            ($scope:expr, $container_ty:path, $scope_field:ident) => {{
+            ($container_ty:path, $scope_field:ident) => {{
                 use crate::ast::AstVariant;
-                let scope: Ptr<Scope> = $scope;
-                debug_assert_eq!(scope.kind, ScopeKind::for_container(<$container_ty>::KIND));
+                debug_assert_eq!(self.kind, ScopeKind::for_container(<$container_ty>::KIND));
                 crate::util::assert_has_field!($container_ty, $scope_field: Scope);
-                scope
+                self
                     .byte_sub(std::mem::offset_of!($container_ty, $scope_field))
                     .cast::<$container_ty>()
             }};
@@ -235,14 +266,16 @@ impl Scope {
 
         Some(match self.kind {
             ScopeKind::Root | ScopeKind::File => return None,
-            ScopeKind::Block => get_scope_container!(self, ast::Block, decl_scope).upcast(),
-            ScopeKind::ForLoop => get_scope_container!(self, ast::For, scope).upcast(),
+            ScopeKind::Block => get_scope_container!(ast::Block, decl_scope).upcast(),
+            ScopeKind::ForLoop => get_scope_container!(ast::For, scope).upcast(),
             ScopeKind::SwitchCase => todo!(),
-            ScopeKind::FnParams => get_scope_container!(self, ast::Fn, params_scope).upcast(),
-            ScopeKind::Struct => get_scope_container!(self, ast::StructDef, scope).upcast(),
-            ScopeKind::Union => get_scope_container!(self, ast::UnionDef, scope).upcast(),
-            ScopeKind::Enum => get_scope_container!(self, ast::EnumDef, scope).upcast(),
-            ScopeKind::Generics => todo!(),
+            ScopeKind::FnParams => get_scope_container!(ast::Fn, params_scope).upcast(),
+            ScopeKind::Struct => get_scope_container!(ast::StructDef, scope).upcast(),
+            ScopeKind::Union => get_scope_container!(ast::UnionDef, scope).upcast(),
+            ScopeKind::Enum => get_scope_container!(ast::EnumDef, scope).upcast(),
+            ScopeKind::FnGenerics | ScopeKind::StructGenerics | ScopeKind::EnumGenerics => {
+                panic_debug!("generic scopes are not supported")
+            },
         })
     }
 }
@@ -250,7 +283,7 @@ impl Scope {
 pub fn setup_scopes(item_scope: &mut Scope, generics_scope: OPtr<Scope>, parent: Ptr<Scope>) {
     if item_scope.parent.is_none() {
         if let Some(generics_scope) = generics_scope {
-            debug_assert_eq!(generics_scope.kind, ScopeKind::Generics);
+            debug_assert!(generics_scope.kind.is_generic());
             generics_scope.as_mut().setup(parent);
             item_scope.setup(generics_scope);
         } else {
@@ -381,7 +414,7 @@ pub fn error_duplicate_in_unordered_scope(
             cerror!(decl.ident.span, "duplicate parameter '{}'", decl.ident.sym);
         },
         ScopeKind::Block => unreachable_debug(),
-        ScopeKind::Generics => {
+        ScopeKind::FnGenerics | ScopeKind::StructGenerics | ScopeKind::EnumGenerics => {
             cerror!(decl.ident.span, "duplicate generic '${}'", decl.ident.sym);
         },
     }

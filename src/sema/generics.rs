@@ -79,7 +79,7 @@ pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> b
     }
 }
 
-pub fn accumulate_generic(generic: Ptr<ast::GenericDef>, next_val: Ptr<ast::ConstVal>) -> bool {
+pub fn accumulate_generic(generic: Ptr<ast::GenericSlot>, next_val: Ptr<ast::ConstVal>) -> bool {
     let expr = None; // quiet
     match &mut generic.as_mut().cur_inst {
         cur_inst @ None => {
@@ -107,7 +107,7 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
 
     fn generics_scope(&self) -> OPtr<Scope>;
 
-    fn instantiations(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>>;
+    fn polymorphs(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>>;
 
     fn flags(self: Ptr<Self>) -> &'static mut Self::Flags;
 
@@ -117,14 +117,14 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
 
     fn try_get_polymorphs(self: Ptr<Self>) -> OPtr<[Ptr<Self>]> {
         if self.flags().get(Self::FLAG_IS_GENERIC) {
-            Some(Ptr::from_ref(&self.instantiations()[..]))
+            Some(Ptr::from_ref(&self.polymorphs()[..]))
         } else {
-            debug_assert!(self.instantiations().is_empty());
+            debug_assert!(self.polymorphs().is_empty());
             None
         }
     }
 
-    fn polymorphs_or_self(self: &Ptr<Self>) -> &[Ptr<Self>] {
+    fn instantiations(self: &Ptr<Self>) -> &[Ptr<Self>] {
         self.try_get_polymorphs().unwrap_or(Ptr::from_ref(self).as_slice1()).as_ref()
     }
 }
@@ -153,8 +153,8 @@ macro_rules! impl_PolymorphableType {
             }
 
             #[inline]
-            fn instantiations(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>> {
-                &mut self.as_mut().instantiations
+            fn polymorphs(self: Ptr<Self>) -> &'static mut Vec<Ptr<Self>> {
+                &mut self.as_mut().polymorphs
             }
 
             #[inline]
@@ -193,6 +193,19 @@ macro_rules! impl_PolymorphableType {
                     $(ast::AstMatch::$ty(t) => t.try_get_polymorphs()?.cast_slice(),)*
                     _ => unreachable_debug(),
                 })
+            }
+        }
+
+        pub enum PolymorphableMatch {
+            $($ty(Ptr<ast::$ty>),)+
+        }
+
+        impl Polymorphable {
+            pub fn matchable2(self: Ptr<Polymorphable>) -> PolymorphableMatch {
+                match self.kind {
+                    $(AstKind::$ty => PolymorphableMatch::$ty(self.upcast().flat_downcast::<ast::$ty>()),)+
+                    _ => unreachable_debug(),
+                }
             }
         }
     };

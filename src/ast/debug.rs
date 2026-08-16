@@ -7,7 +7,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     sema::primitives::{FLOAT_LIT_TYPE_NAME, INT_LIT_TYPE_NAME, SINT_LIT_TYPE_NAME},
-    util::{self, BitFlags, unreachable_debug},
+    util::{self, BitFlags, OptionExt, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};
 
@@ -398,7 +398,7 @@ impl DebugAst for Ast {
                     lines.write("}");
                 }
             },
-            AstEnum::GenericDef { name, .. } => {
+            AstEnum::GenericSlot { name, .. } => {
                 lines.write("$");
                 lines.write(name.sym.text());
             },
@@ -633,7 +633,7 @@ impl Debug for Ast {
         } else if ptr.get_kind().is_const_val_kind() {
             Debug::fmt(ptr.cast::<ast::ConstVal>().as_ref(), f)
         } else {
-            self.matchable().as_ref().fmt(f)
+            self.debug_fmt(f)
         }
     }
 }
@@ -663,11 +663,15 @@ impl Display for ast::ConstVal {
     }
 }
 
-const DEBUG_TYPES: bool = false;
+/*
+const DEBUG_TYPES: bool = true;
 const DEBUG_SIMPLE_TYPES: bool = false;
+*/
 
 impl Debug for ast::Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.debug_fmt(f)
+        /*
         let ptr = Ptr::from_ref(self);
         if !DEBUG_TYPES {
             write!(f, "{}", self)
@@ -688,6 +692,7 @@ impl Debug for ast::Type {
         } else {
             Debug::fmt(self.matchable().as_ref(), f)
         }
+        */
     }
 }
 
@@ -695,4 +700,109 @@ impl Display for ast::Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_text(true))
     }
+}
+
+pub fn debug_ast_base_fields(debug_struct: &mut fmt::DebugStruct, value: Ptr<Ast>) {
+    use special_debug_handlers::*;
+
+    //debug_ast_variant_field(debug_struct, "kind", &value.kind, DebugAstVariantFieldKind::Normal);
+    always_display_opt(debug_struct, "ty", &value.ty);
+    normal(debug_struct, "replacement", &value.replacement);
+    normal(debug_struct, "span", &value.span);
+    //normal(debug_struct, "parenthesis_count", &value.parenthesis_count);
+}
+
+#[allow(unused)]
+pub mod special_debug_handlers {
+    use super::*;
+    use crate::{ast::ConstVal, display_code::display, ptr::OPtr};
+
+    pub fn normal(debug_struct: &mut fmt::DebugStruct, name: &str, value: &dyn fmt::Debug) {
+        debug_struct.field(name, value);
+    }
+
+    pub fn always_display(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &dyn fmt::Display,
+    ) {
+        debug_struct.field_with(name, |f| fmt::Display::fmt(&value, f));
+    }
+
+    pub fn always_display_opt(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &Option<impl fmt::Display>,
+    ) {
+        always_display(debug_struct, name, &value.display())
+    }
+
+    pub trait TryAsConstVal: fmt::Debug {
+        fn try_as_const_val(&self) -> OPtr<ConstVal>;
+    }
+
+    impl TryAsConstVal for Ptr<Ast> {
+        fn try_as_const_val(&self) -> OPtr<ConstVal> {
+            self.try_downcast_const_val()
+        }
+    }
+
+    impl<T: TryAsConstVal> TryAsConstVal for Option<T> {
+        fn try_as_const_val(&self) -> OPtr<ConstVal> {
+            self.as_ref().and_then(T::try_as_const_val)
+        }
+    }
+
+    pub fn display_if_const_val(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &dyn TryAsConstVal,
+    ) {
+        if let Some(cv) = value.try_as_const_val() {
+            always_display(debug_struct, name, &cv)
+        } else {
+            normal(debug_struct, name, value)
+        }
+    }
+
+    pub fn never_alternate(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &dyn fmt::Debug,
+    ) {
+        debug_struct
+            .field_with(name, |f| value.fmt(&mut f.with_options(*f.options().alternate(false))));
+    }
+
+    pub fn hex(debug_struct: &mut fmt::DebugStruct, name: &str, value: &dyn fmt::Debug) {
+        debug_struct.field_with(name, |f| {
+            value.fmt(&mut f.with_options(*f.options().debug_as_hex(Some(fmt::DebugAsHex::Lower))))
+        });
+    }
+
+    pub fn hex_inline(debug_struct: &mut fmt::DebugStruct, name: &str, value: &dyn fmt::Debug) {
+        debug_struct.field_with(name, |f| f.write_fmt(core::format_args!("{value:x?} ...")));
+    }
+
+    pub fn display_span(debug_struct: &mut fmt::DebugStruct, name: &str, value: &OPtr<Ast>) {
+        match value {
+            Some(value) => debug_struct.field_with(name, |f| {
+                // not great
+                f.write_str(&display(value.full_span()).finish_to_string())
+            }),
+            None => debug_struct.field(name, &"None"),
+        };
+    }
+
+    pub fn simple_ident(debug_struct: &mut fmt::DebugStruct, name: &str, value: &Ptr<ast::Ident>) {
+        debug_struct.field_with(name, |f| {
+            let mut ident = f.debug_struct("Ident");
+            debug_ast_base_fields(&mut ident, value.upcast());
+            ident.field("sym", &value.sym);
+            hex_inline(&mut ident, "decl", &value.decl);
+            ident.finish()
+        });
+    }
+
+    pub fn skip(_debug_struct: &mut fmt::DebugStruct, _name: &str, _value: &dyn fmt::Debug) {}
 }

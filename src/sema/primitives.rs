@@ -5,6 +5,7 @@ use crate::{
     parser::lexer::Span,
     ptr::Ptr,
     scope::{Scope, ScopeKind},
+    util::OptionExt,
 };
 
 pub const INT_LIT_TYPE_NAME: &str = "{integer}";
@@ -275,11 +276,12 @@ impl Primitives {
                     generics_scope: None,
                     fields,
                     external_consts: Vec::new(),
-                    instantiations: Vec::new(),
+                    polymorphs: Vec::new(),
                     sema_units: None,
                     finished_members: 2,
                 });
                 init_ty(def.upcast_to_type());
+                def.as_mut().scope.expr.set_once(def.upcast());
                 def
             },
             empty_array_ty: {

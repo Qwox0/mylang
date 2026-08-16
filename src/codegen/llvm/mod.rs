@@ -480,14 +480,17 @@ impl<'ctx> Codegen<'ctx> {
                     let fn_val = match self.compile_expr(*func)? {
                         Symbol::FunctionInst(val) => {
                             debug_assert!(!f.flags.get(FnFlags::IS_GENERIC));
-                            debug_assert_eq!(val, *self.fn_table.get(&resolved_fn_inst.u()).u());
+                            debug_assert_eq!(
+                                val,
+                                *self.fn_table.get(&resolved_fn_inst.u().downcast::<ast::Fn>()).u()
+                            );
                             CallFnVal::Direct(val)
                         },
                         Symbol::GenericFunction(f) => {
-                            inst = resolved_fn_inst.u();
+                            inst = resolved_fn_inst.u().downcast::<ast::Fn>();
                             debug_assert!(f.flags.get(FnFlags::IS_GENERIC));
                             debug_assert!(inst.flags.get(FnFlags::IS_INSTANTIATION));
-                            debug_assert!(f.instantiations.contains(&inst));
+                            debug_assert!(f.polymorphs.contains(&inst));
                             CallFnVal::Direct(*self.fn_table.get(&inst).u())
                         },
                         Symbol::Stack(fn_ptr) => CallFnVal::FnPtr(fn_ptr, self.fn_type(f).0),
@@ -1048,7 +1051,7 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::OffsetOfDirective { .. } => {
                 panic_debug!("{:?} should have been replaced during sema", expr.kind)
             },
-            AstEnum::GenericDef { .. } => todo!(),
+            AstEnum::GenericSlot { .. } => todo!(),
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -1270,7 +1273,7 @@ impl<'ctx> Codegen<'ctx> {
         mut write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         debug_assert!(!f.flags.get(FnFlags::IS_GENERIC));
-        debug_assert!(f.instantiations.is_empty());
+        debug_assert!(f.polymorphs.is_empty());
 
         let ret_ty = f.ret_ty.u();
         let ret_ffi_ty = self.c_ffi_type(ret_ty);
@@ -1569,9 +1572,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn get_or_compile_fn(&mut self, f: Ptr<ast::Fn>) -> CodegenResult<Symbol<'ctx>> {
         Ok(if f.flags.get(FnFlags::IS_GENERIC) {
-            debug_assert!(
-                f.polymorphs_or_self().iter().all(|inst| self.fn_table.contains_key(&inst))
-            );
+            debug_assert!(f.instantiations().iter().all(|inst| self.fn_table.contains_key(&inst)));
             Symbol::GenericFunction(f)
         } else if let Some(first_inst) = self.fn_table.get(&f) {
             Symbol::FunctionInst(*first_inst)
@@ -1590,7 +1591,7 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<Symbol<'ctx>> {
         debug_assert!(match def {
             FnKind::FnDef(_) if !during_precompile => f
-                .polymorphs_or_self()
+                .instantiations()
                 .iter()
                 .all(|inst| !is_fn_val_compiled(*self.fn_table.get(&inst).u())),
             _ => !self.fn_table.contains_key(&f),
@@ -1600,7 +1601,7 @@ impl<'ctx> Codegen<'ctx> {
         let prev_sret_ptr = self.sret_ptr.take();
 
         let mut last_fn_val = None;
-        for &inst in f.polymorphs_or_self() {
+        for &inst in f.instantiations() {
             let (fn_val, use_sret) = self.compile_prototype(inst, def);
             last_fn_val = Some(fn_val);
 
@@ -1624,7 +1625,7 @@ impl<'ctx> Codegen<'ctx> {
         Ok(if f.flags.get(FnFlags::IS_GENERIC) {
             Symbol::GenericFunction(f)
         } else {
-            debug_assert_eq!(f.polymorphs_or_self().len(), 1);
+            debug_assert_eq!(f.instantiations().len(), 1);
             Symbol::FunctionInst(last_fn_val.u())
         })
     }
@@ -1668,7 +1669,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_prototype(&mut self, f: Ptr<ast::Fn>, def: FnKind) -> (FunctionValue<'ctx>, bool) {
         debug_assert!(!f.flags.get(FnFlags::IS_GENERIC));
-        debug_assert!(f.instantiations.is_empty());
+        debug_assert!(f.polymorphs.is_empty());
         if matches!(def, FnKind::FnDef(_))
             && let Some(&fn_val) = self.fn_table.get(&f)
         {
@@ -2680,7 +2681,7 @@ impl<'ctx> Codegen<'ctx> {
                 let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.float_val();
                 self.build_float_binop(lhs_val, rhs_val, op)?
             },
-            TypeMatch::GenericDef(_) => todo!("Generic"),
+            TypeMatch::GenericSlot(_) => todo!("Generic"),
             _ => return Err(CodegenError::UnsupportedBinOp.into()),
         };
         Ok(val)
@@ -3260,7 +3261,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             TypeEnum::Fn { .. } => CodegenType::new(self.ptr_type()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } => todo!("Generic"),
         };
 
         let old_entry = self.type_table.insert(ty, llvm_ty);
@@ -3473,7 +3474,7 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 },
                 TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-                TypeEnum::GenericDef { .. } => todo!("Generic"),
+                TypeEnum::GenericSlot { .. } => todo!("Generic"),
             }
         }
 
@@ -3666,7 +3667,7 @@ impl<'ctx> Codegen<'ctx> {
                     AstMatch::Fn(f) => {
                         #[cfg(debug_assertions)]
                         if !during_precompile {
-                            for inst in f.polymorphs_or_self() {
+                            for inst in f.instantiations() {
                                 debug_assert!(
                                     self.fn_table.contains_key(&inst),
                                     "function prototype {inst:p} should have been precompiled",
@@ -3677,7 +3678,7 @@ impl<'ctx> Codegen<'ctx> {
                     },
                     AstMatch::ExternDirective(_) if during_precompile => {
                         debug_assert_eq!(f.generics().len(), 0); // TODO: add sema check
-                        debug_assert!(f.instantiations.is_empty());
+                        debug_assert!(f.polymorphs.is_empty());
                         let fn_val = self.compile_prototype(f, FnKind::FnDef(decl)).0;
                         self.symbols.push((decl, Symbol::FunctionInst(fn_val))); // TODO: seems hacky
                     },

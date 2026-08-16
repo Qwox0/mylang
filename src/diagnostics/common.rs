@@ -19,7 +19,7 @@ pub fn error_mismatched_types(
     expected: Ptr<ast::Type>,
     got: Ptr<ast::Type>,
 ) -> HandledErr {
-    if let Some(g) = expected.try_downcast::<ast::GenericDef>()
+    if let Some(g) = expected.try_downcast::<ast::GenericSlot>()
         && let Some(cur_inst) = g.cur_inst
     {
         error_mismatched_types_custom(

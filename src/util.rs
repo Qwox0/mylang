@@ -160,25 +160,38 @@ macro_rules! panic_debug {
 pub(crate) use panic_debug;
 
 pub trait OptionExt<T> {
-    fn set_once(&mut self, val: T) -> &mut T;
+    fn set_once(&mut self, val: T) -> &mut T
+    where T: fmt::Debug;
 
-    fn display(self) -> impl std::fmt::Display
-    where T: std::fmt::Display;
+    fn set_or_expect(&mut self, val: T)
+    where T: PartialEq + fmt::Debug;
+
+    fn display(&self) -> impl fmt::Display
+    where T: fmt::Display;
 }
 
-impl<T: fmt::Debug> OptionExt<T> for Option<T> {
+impl<T> OptionExt<T> for Option<T> {
     #[inline]
     #[track_caller]
-    fn set_once(&mut self, val: T) -> &mut T {
+    fn set_once(&mut self, val: T) -> &mut T
+    where T: fmt::Debug {
         debug_assert!(self.is_none(), "called set_once on {:?}", self);
         *self = Some(val);
         self.as_mut().u()
     }
 
-    fn display(self) -> impl std::fmt::Display
+    fn set_or_expect(&mut self, val: T)
+    where T: PartialEq + fmt::Debug {
+        match self {
+            Some(prev) => debug_assert_eq!(prev, &val),
+            None => *self = Some(val),
+        }
+    }
+
+    fn display(&self) -> impl std::fmt::Display
     where T: std::fmt::Display {
-        struct DisplayOption<T>(Option<T>);
-        impl<T: std::fmt::Display> std::fmt::Display for DisplayOption<T> {
+        struct DisplayOption<'a, T>(&'a Option<T>);
+        impl<'a, T: std::fmt::Display> std::fmt::Display for DisplayOption<'a, T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match &self.0 {
                     Some(t) => write!(f, "{t}"),
@@ -361,10 +374,8 @@ pub fn hash_val(h: &impl BuildHasher, val: impl Hash) -> u64 {
 macro_rules! assert_has_field {
     ($ty:ty, $field:ident : $f_ty:ty) => {
         const {
-            #[allow(unreachable_code, unused_variables)]
-            if false {
-                let x: $ty = unreachable_debug();
-                let _: $f_ty = x.$field;
+            fn _f(x: $ty) -> $f_ty {
+                x.$field
             }
         }
     };
@@ -547,3 +558,13 @@ macro_rules! bitflags {
     };
 }
 pub(crate) use bitflags;
+
+macro_rules! macro_orelse {
+    (; $default:expr) => {
+        $default
+    };
+    ($val:expr; $default:expr) => {
+        $val
+    };
+}
+pub(crate) use macro_orelse;

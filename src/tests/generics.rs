@@ -1,4 +1,4 @@
-use crate::tests::{CompileTest, arr, assert_contains, substr, test, test_body};
+use crate::tests::{CompileTest, arr, assert_contains, fields, substr, test, test_body};
 
 #[test]
 fn generic_function_call() {
@@ -218,35 +218,44 @@ test :: ->
 
 #[test]
 fn generic_data_struct() {
-    // Positional initializer
-    let code = r#"
-MyStruct :: struct($A, $B, $C) {
-    a: A,
-    b: []B,
-    c: ?*C,
-}
+    // infer generics
+    for init in [r#".(1, "Hello World", &arr)"#, r#".{ a=1, b="Hello World", c=&arr }"#] {
+        #[rustfmt::skip]
+        let code = format!("
+MyStruct :: struct($A, $B, $C) {{ a: A, b: []B, c: ?*C }}
 static arr := u16.[1, 2, 3];
-test :: -> MyStruct.(1, "Hello World", &arr);
-"#;
-    let res = test(code).compile_no_err();
-    assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
-    assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
-    drop(res);
+test :: -> MyStruct{init};
+");
+        let res = test(code).compile_no_err();
+        assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
+        assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
+    }
 
-    // Named Initializer
-    let code = r#"
-MyStruct :: struct($A, $B, $C) {
-    a: A,
-    b: []B,
-    c: ?*C,
-}
+    // explicit generics
+    for init in [r#".(1, "Hello World", &arr)"#, r#".{ a=1, b="Hello World", c=&arr }"#] {
+        #[rustfmt::skip]
+        let code = format!("
+MyStruct :: struct($A, $B, $C) {{ a: A, b: []B, c: ?*C }}
 static arr := u16.[1, 2, 3];
-test :: -> MyStruct.{ a=1, b="Hello World", c=&arr };
-"#;
-    let res = test(code).compile_no_err();
-    assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
-    assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
-    drop(res);
+test :: -> MyStruct(i64, u8, [3]u16){init};
+");
+        let res = test(code).compile_no_err();
+        assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
+        assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
+    }
+
+    // explicit generics -> error
+    for init in [r#".(10, "Hello World", &arr)"#, r#".{ a=10, b="Hello World", c=&arr }"#] {
+        #[rustfmt::skip]
+        let code = format!("
+MyStruct :: struct($A, $B, $C) {{ a: A, b: []B, c: ?*C }}
+static arr := u16.[1, 2, 3];
+test :: -> MyStruct(never, void, any){init};
+");
+        test(code)
+            .error("mismatched types: expected `never`; got `{integer}`", substr!("10"))
+            .error("mismatched types: expected `[]B`; got `[]u8`", substr!("\"Hello World\"")); // TODO: `[]B` is bad
+    }
 }
 
 #[test]
@@ -299,4 +308,50 @@ fn generic_def_in_struct_body() {
     test("MyStruct :: struct { val: $B; }")
         .error("Cannot define generics inside a struct body", substr!("$B"))
         .info("Consider adding the struct generic here. ($B)", substr!("struct ";.end()));
+}
+
+#[test]
+fn generic_struct_explicit_instantiation() {
+    let code = "
+MyStruct :: struct($T) { a: [2]T }
+test :: -> MyStruct(i16).(.[-5, 10]);
+";
+    test(code).ok(fields([-5_i16, 10]));
+}
+
+#[test]
+fn error_instantiate_non_generic_type() {
+    let code = "
+MyStruct :: struct { val: i32 };
+static a: MyStruct(i32);
+";
+    test(code).error("Cannot call non-generic type `MyStruct`", substr!("MyStruct(i32)"));
+}
+
+#[test]
+fn recursive_generic_instantiation() {
+    let code = "
+MyStruct :: struct($T) {
+    val: T;
+    DEFAULT :: MyStruct(i64).{ val=0 };  // 2. During analysis of MyStruct(i64), this requires
+                                         // MyStruct(i64) => Dont instantiate it again!
+    get_val :: (self: MyStruct(T)) -> self.val;
+}
+test :: -> MyStruct(i64).(5);       // 1. this instantiates MyStruct with T=i64
+";
+    let res = test(code).ok(5_i64);
+    assert_eq!(res.llvm_ir().matches("get_val").count(), 1);
+    drop(res);
+
+    let code = "
+MyStruct :: struct($T) {
+    val: T;
+    DEFAULT :: MyStruct.(0);
+    get_val :: (self: MyStruct(T)) -> self.val;
+}
+test :: -> MyStruct(i64).(5);
+";
+    let res = test(code).ok(5_i64);
+    assert_eq!(res.llvm_ir().matches("get_val").count(), 1);
+    drop(res);
 }

@@ -16,8 +16,8 @@ use std::{convert::Infallible, ops::FromResidual};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommonTypeSelection {
     Equal,
-    Lhs,
-    Rhs,
+    Got,
+    Expected,
     Mismatch,
     NewAlloc(Ptr<ast::Type>),
 }
@@ -31,8 +31,8 @@ impl FromResidual<Option<Infallible>> for CommonTypeSelection {
 impl CommonTypeSelection {
     pub fn flip(self) -> CommonTypeSelection {
         match self {
-            CommonTypeSelection::Lhs => CommonTypeSelection::Rhs,
-            CommonTypeSelection::Rhs => CommonTypeSelection::Lhs,
+            CommonTypeSelection::Got => CommonTypeSelection::Expected,
+            CommonTypeSelection::Expected => CommonTypeSelection::Got,
             s => s,
         }
     }
@@ -63,8 +63,8 @@ pub fn common_type_restrict_optional_coerction(
 ) -> OPtr<ast::Type> {
     match type_check(TypeCheckMode::Join, lhs, rhs, allow_opt_coercion) {
         CommonTypeSelection::Equal => Some(lhs),
-        CommonTypeSelection::Lhs => Some(lhs),
-        CommonTypeSelection::Rhs => Some(rhs),
+        CommonTypeSelection::Got => Some(lhs),
+        CommonTypeSelection::Expected => Some(rhs),
         CommonTypeSelection::Mismatch => None,
         CommonTypeSelection::NewAlloc(ty) => Some(ty),
     }
@@ -73,8 +73,8 @@ pub fn common_type_restrict_optional_coerction(
 /// might not be symmetrical
 pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
     match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE) {
-        CommonTypeSelection::Equal | CommonTypeSelection::Rhs => true,
-        CommonTypeSelection::Mismatch | CommonTypeSelection::Lhs => false,
+        CommonTypeSelection::Equal | CommonTypeSelection::Expected => true,
+        CommonTypeSelection::Mismatch | CommonTypeSelection::Got => false,
         CommonTypeSelection::NewAlloc(_) => unreachable_debug(),
     }
 }
@@ -101,18 +101,18 @@ fn type_check(
     }
 
     if expected == p.err_ty {
-        return Rhs;
+        return Expected;
     } else if got == p.err_ty {
-        return if mode == TypeCheckMode::Strict { Equal } else { Lhs };
+        return if mode == TypeCheckMode::Strict { Equal } else { Got };
     }
 
     if is_bottom_type(got, p) || expected == p.any {
-        return Rhs;
+        return Expected;
     } else if is_bottom_type(expected, p) || got == p.any {
-        return Lhs;
+        return Got;
     }
 
-    if let Some(expected) = expected.try_downcast::<ast::GenericDef>() {
+    if let Some(expected) = expected.try_downcast::<ast::GenericSlot>() {
         // resolve polymorph instantiation
         debug_assert!(mode == TypeCheckMode::Strict);
         return if accumulate_generic(expected, got.upcast_to_const_val()) {
@@ -120,11 +120,8 @@ fn type_check(
         } else {
             Mismatch
         };
-    } else if let Some(_got) = got.try_downcast::<ast::GenericDef>() {
-        //todo!();
-        //debug_assert!(got.var_ty.is_none_or(|t| t == expected));
-        //got.as_mut().var_ty = Some(expected);
-        return Rhs;
+    } else if let Some(_got) = got.try_downcast::<ast::GenericSlot>() {
+        return Expected;
     }
 
     if let Some(expected_lvl) = number_subtyping_level(expected) {
@@ -147,8 +144,8 @@ fn type_check(
             && lhs.is_non_zero()
         {
             match type_check(mode, lhs, rhs_inner, AllowOptionalCoercion::FALSE) {
-                Equal | Rhs => Rhs,
-                Lhs => NewAlloc(type_new!(OptionTy { inner_ty: lhs.upcast() }).upcast_to_type()),
+                Equal | Expected => Expected,
+                Got => NewAlloc(type_new!(OptionTy { inner_ty: lhs.upcast() }).upcast_to_type()),
                 NewAlloc(inner_common) => NewAlloc(
                     type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type(),
                 ),
@@ -201,8 +198,8 @@ fn type_check(
             );
             match child_sel {
                 Mismatch => Mismatch,
-                Lhs | Rhs => {
-                    let sel = if child_sel == Lhs { got } else { expected };
+                Got | Expected => {
+                    let sel = if child_sel == Got { got } else { expected };
                     if sel.is_mut == out_mut {
                         child_sel
                     } else {
@@ -213,10 +210,10 @@ fn type_check(
                     }
                 },
                 Equal if got.is_mut == expected.is_mut => Equal,
-                Equal if got.is_mut == out_mut => Lhs,
+                Equal if got.is_mut == out_mut => Got,
                 Equal => {
                     debug_assert!(expected.is_mut == out_mut);
-                    Rhs
+                    Expected
                 },
                 NewAlloc(child) => NewAlloc(
                     type_new!($ty { is_mut: out_mut, $child_field: child.upcast() })
@@ -238,7 +235,7 @@ fn type_check(
 
     if let Some(expected) = expected.try_downcast::<ast::ArrayTy>() {
         let got = got.try_downcast::<ast::ArrayTy>()?;
-        if let Some(expected) = expected.len.try_downcast::<ast::GenericDef>() {
+        if let Some(expected) = expected.len.try_downcast::<ast::GenericSlot>() {
             debug_assert!(mode == TypeCheckMode::Strict);
             debug_assert_eq!(got.len.ty, p.usize());
             if !accumulate_generic(expected, got.len.downcast_const_val()) {
@@ -305,8 +302,8 @@ impl SubtypingLevel {
     /// `lhs == rhs` => [`CommonTypeSelection::Mismatch`]
     fn select(lhs: Self, rhs: Self) -> CommonTypeSelection {
         match lhs.level.cmp(&rhs.level) {
-            std::cmp::Ordering::Less if !lhs.is_leaf => CommonTypeSelection::Rhs,
-            std::cmp::Ordering::Greater if !rhs.is_leaf => CommonTypeSelection::Lhs,
+            std::cmp::Ordering::Less if !lhs.is_leaf => CommonTypeSelection::Expected,
+            std::cmp::Ordering::Greater if !rhs.is_leaf => CommonTypeSelection::Got,
             _ => CommonTypeSelection::Mismatch,
         }
     }
@@ -446,7 +443,7 @@ impl ast::Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
             TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => false,
+            TypeEnum::GenericSlot { .. } => false,
         }
     }
 
@@ -507,7 +504,7 @@ impl ast::Type {
                 debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => panic_debug!("cannot finalize GenericDef"),
+            TypeEnum::GenericSlot { .. } => panic_debug!("cannot finalize GenericDef"),
         }
         debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
         Ok(*self)
@@ -547,7 +544,7 @@ impl ast::Type {
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } => todo!("Generic"),
         }
     }
 
@@ -578,7 +575,7 @@ impl ast::Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { inner_ty, .. } => inner_ty.downcast_type().alignment(),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } => todo!("Generic"),
         };
         debug_assert!(alignment.is_power_of_two());
         alignment
@@ -615,7 +612,7 @@ impl ast::Type {
             },
             TypeEnum::Fn { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericDef { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } => todo!("Generic"),
         }
     }
 
@@ -830,7 +827,7 @@ pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
         TypeEnum::RangeTy { elem_ty, .. } => optional_repr(*elem_ty),
         TypeEnum::OptionTy { .. } => Tagged,
         TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-        TypeEnum::GenericDef { .. } => todo!("Generic"),
+        TypeEnum::GenericSlot { .. } => todo!("Generic"),
     }
 }
 

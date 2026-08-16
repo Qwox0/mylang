@@ -5,8 +5,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, StructFlags, SwitchCase,
-        UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, StructDef, StructFlags,
+        SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -14,7 +14,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
     source_file::SourceFile,
-    util::{BitFlags, OptionExt, UnwrapDebug, concat_arr, then, unreachable_debug},
+    util::{BitFlags, OptionExt, UnwrapDebug, concat_arr, then},
 };
 use core::{fmt, str};
 pub use error::*;
@@ -323,7 +323,7 @@ impl Parser {
                 expr!(BinOpAssign { lhs, op, rhs }, span)
             },
             FollowingOperator::Decl(kind) => {
-                self.decl_tail(self.alloc(ast::Decl::from_lhs(lhs)?)?, kind)?.upcast()
+                self.decl_tail(ast::Decl::from_lhs(lhs, &self.cctx.alloc)?, kind)?.upcast()
             },
         });
     }
@@ -337,7 +337,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Mut | Keyword::Rec | Keyword::Pub | Keyword::Static) => {
                 self.var_decl(false)?.upcast()
             },
-            TokenKind::Keyword(k @ Keyword::Struct) => {
+            TokenKind::Keyword(Keyword::Struct) => {
                 self.lex.advance();
                 let mut flags = StructFlags::default();
 
@@ -349,11 +349,14 @@ impl Parser {
                         &[TokenKind::Comma],
                         &mut generics,
                         |self_| {
-                            let dollar = self_.tok(TokenKind::Dollar)?;
-                            // TODO: self_.var_decl()
-                            let name = self_.ident()?;
-                            let g_def = self_.alloc(ast::GenericDef::new(name, dollar.span))?;
-                            Ok(g_def.generate_decl(&self_.cctx.alloc)?)
+                            let dollar = self_.lex.peek_or_eof();
+                            if dollar.kind != TokenKind::Dollar {
+                                return Err(unexpected_token(dollar, &[TokenKind::Dollar]));
+                            }
+                            let decl = self_.var_decl_no_markers(true)?;
+                            debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
+                            debug_assert!(decl.is_const);
+                            Ok(decl)
                         },
                         MIN_PRECEDENCE,
                         "parameter",
@@ -361,30 +364,23 @@ impl Parser {
                     self.tok(TokenKind::CloseParenthesis)?;
                     if generics.len() > 0 {
                         flags.set(StructFlags::IS_GENERIC);
-                        generics_scope = Some(self.alloc(Scope::for_generics(generics))?);
+                        generics_scope =
+                            Some(self.alloc(Scope::new(generics, ScopeKind::StructGenerics))?);
                     }
                 }
 
                 self.tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields } = self.struct_body(k)?;
+                let decls = self.struct_body()?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(
-                    StructDef {
-                        flags,
-                        scope,
-                        generics_scope,
-                        instantiations: vec![],
-                        sema_units: None,
-                        fields,
-                        external_consts: vec![],
-                        finished_members: 0
-                    },
-                    span.join(close_b.span)
-                )
+
+                let span = span.join(close_b.span);
+                StructDef::new(flags, decls, generics_scope, span, &self.cctx.alloc)?.upcast()
             },
-            TokenKind::Keyword(k @ Keyword::Union) => {
+            TokenKind::Keyword(Keyword::Union) => {
                 self.advanced().tok(TokenKind::OpenBrace)?;
-                let ScopeAndAggregateInfo { scope, fields } = self.struct_body(k)?;
+                let decls = self.struct_body()?;
+                let ScopeAndAggregateInfo { scope, fields } =
+                    Scope::for_aggregate(decls, &self.cctx.alloc, ScopeKind::Union)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 expr!(
                     UnionDef {
@@ -446,7 +442,7 @@ impl Parser {
                         variants: fields,
                         external_consts: vec![],
                         tag_ty: None,
-                        instantiations: vec![],
+                        polymorphs: vec![],
                         sema_units: None,
                         finished_members: 0,
                     },
@@ -814,7 +810,7 @@ impl Parser {
             },
             TokenKind::Dollar => {
                 let name = self.advanced().ident()?;
-                self.alloc(ast::GenericDef::new(name, span))?.upcast()
+                self.alloc(ast::GenericSlot::new(name, span))?.upcast()
             },
             //TokenKind::At => todo!("TokenKind::At"),
             //TokenKind::Tilde => todo!("TokenKind::Tilde"),
@@ -959,7 +955,6 @@ impl Parser {
 
     /// switch val { ... } else ...
     ///            ^
-    #[allow(unused)]
     fn switch_body(
         &mut self,
         val: Ptr<Ast>,
@@ -979,13 +974,18 @@ impl Parser {
             },
             MIN_PRECEDENCE,
             "case",
-        );
+        )?;
         let close_b = self.tok(TokenKind::CloseBrace)?;
         let else_body = then!(self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Else))
             => self.expr_(ELSE_PRECEDENCE)?);
 
         let cases = self.alloc_slice(&cases)?;
-        Ok(ast_new!(Switch { val, cases, else_body, was_piped }, start_span.join(close_b.span)))
+        let switch =
+            ast_new!(Switch { val, cases, else_body, was_piped }, start_span.join(close_b.span));
+        for c in cases.iter() {
+            c.scope.as_mut().expr.set_once(switch.upcast());
+        }
+        Ok(switch)
     }
 
     /// `... ( ... )`
@@ -1040,7 +1040,7 @@ impl Parser {
 
         let span = open_b.span.join(close_b.span);
         let stmts = self.alloc_slice(&stmts)?;
-        Ok(self.alloc(ast::Block::new(stmts, has_trailing_semicolon, span))?)
+        Ok(ast::Block::new(stmts, has_trailing_semicolon, span, &self.cctx.alloc)?)
     }
 
     /// Parses the insides of a [`Parser::block`]: Expressions and statements seperated by ';'.
@@ -1089,7 +1089,7 @@ impl Parser {
     }
 
     /// also returns the field_count
-    fn struct_body(&mut self, kind: Keyword) -> ParseResult<ScopeAndAggregateInfo> {
+    fn struct_body(&mut self) -> ParseResult<Vec<Ptr<ast::Decl>>> {
         let mut decls = Vec::new();
         parse_in_block!(self, sep = [TokenKind::Semicolon, TokenKind::Comma], in_block = true, {
             let expr = self.expr()?;
@@ -1104,19 +1104,55 @@ impl Parser {
             };
             expr
         });
-        let kind = match kind {
-            Keyword::Struct => ScopeKind::Struct,
-            Keyword::Union => ScopeKind::Union,
-            _ => unreachable_debug(),
-        };
-        Ok(Scope::for_aggregate(decls, &self.cctx.alloc, kind)?)
+        Ok(decls)
     }
 
     fn var_decl(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
-        let markers = self.decl_markers()?;
+        let mut markers = DeclFlags::default();
+        {
+            let mut t = self.lex.peek_or_eof();
+
+            macro_rules! set_marker {
+                ($variant:ident $mask:ident) => {
+                    if markers.get(DeclFlags::$mask) {
+                        let marker_text = Keyword::$variant.as_str();
+                        return cerror2!(t.span, "duplicate marker '{marker_text}' on declaration");
+                    } else {
+                        markers.set(DeclFlags::$mask)
+                    }
+                };
+            }
+
+            loop {
+                match t.kind {
+                    TokenKind::Ident | TokenKind::Dollar => break,
+                    TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut IS_MUT),
+                    TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec IS_REC),
+                    TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB),
+                    TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC),
+                    _ => {
+                        return Err(unexpected_token(t, &[
+                            TokenKind::Ident,
+                            TokenKind::Keyword(Keyword::Mut),
+                            TokenKind::Keyword(Keyword::Rec),
+                            TokenKind::Keyword(Keyword::Pub),
+                            TokenKind::Keyword(Keyword::Static),
+                            TokenKind::Dollar,
+                        ]));
+                    },
+                }
+                t = self.advanced().lex.peek_or_eof();
+            }
+        }
+
+        let mut decl = self.var_decl_no_markers(allow_ident_only)?;
+        decl.flags.data |= markers.data;
+        Ok(decl)
+    }
+
+    fn var_decl_no_markers(&mut self, allow_ident_only: bool) -> ParseResult<Ptr<ast::Decl>> {
         let lhs = self.expr_(ASSIGN_PRECEDENCE)?;
-        let decl = self.alloc(ast::Decl::from_lhs(lhs)?)?;
-        decl.as_mut().flags = markers;
+        let decl = ast::Decl::from_lhs(lhs, &self.cctx.alloc)?;
         self.decl_assign(decl, allow_ident_only)
     }
 
@@ -1134,43 +1170,6 @@ impl Parser {
             _ => return Err(unexpected_token(t, &DECL_TAIL_TOKENS)),
         };
         self.advanced().decl_tail(decl, kind)
-    }
-
-    fn decl_markers(&mut self) -> ParseResult<DeclFlags> {
-        let mut markers = DeclFlags::default();
-        let mut t = self.lex.peek_or_eof();
-
-        macro_rules! set_marker {
-            ($variant:ident $mask:ident) => {
-                if markers.get(DeclFlags::$mask) {
-                    let marker_text = Keyword::$variant.as_str();
-                    return cerror2!(t.span, "duplicate marker '{marker_text}' on declaration");
-                } else {
-                    markers.set(DeclFlags::$mask)
-                }
-            };
-        }
-
-        while t.kind != TokenKind::Ident {
-            match t.kind {
-                TokenKind::Keyword(Keyword::Mut) => set_marker!(Mut IS_MUT),
-                TokenKind::Keyword(Keyword::Rec) => set_marker!(Rec IS_REC),
-                TokenKind::Keyword(Keyword::Pub) => set_marker!(Pub IS_PUB),
-                TokenKind::Keyword(Keyword::Static) => set_marker!(Static IS_STATIC),
-                _ => {
-                    return Err(unexpected_token(t, &[
-                        TokenKind::Ident,
-                        TokenKind::Keyword(Keyword::Mut),
-                        TokenKind::Keyword(Keyword::Rec),
-                        TokenKind::Keyword(Keyword::Pub),
-                        TokenKind::Keyword(Keyword::Static),
-                    ]));
-                },
-            }
-            t = self.advanced().lex.peek_or_eof();
-        }
-
-        Ok(markers)
     }
 
     /// `mut x : ...`
@@ -1406,13 +1405,14 @@ impl FollowingOperator {
     fn precedence(&self) -> u8 {
         match self {
             FollowingOperator::Dot => DOT_PRECEDENCE,
-            FollowingOperator::Call
-            | FollowingOperator::Index
+            FollowingOperator::Call => CALL_PRECEDENCE,
+            FollowingOperator::Index
             | FollowingOperator::PositionalInitializer
             | FollowingOperator::NamedInitializer
-            | FollowingOperator::ArrayInitializer
-            | FollowingOperator::SingleArgNoParenFn
-            | FollowingOperator::PostOp(_) => DIRECT_POSTOP_PRECEDENCE,
+            | FollowingOperator::ArrayInitializer => INITIALIZER_PRECEDENCE,
+            FollowingOperator::SingleArgNoParenFn | FollowingOperator::PostOp(_) => {
+                DIRECT_POSTOP_PRECEDENCE
+            },
             FollowingOperator::BinOp(k) => k.precedence(),
             FollowingOperator::Range { .. } => RANGE_PRECEDENCE,
             FollowingOperator::OrElse => ORELSE_PRECEDENCE,
@@ -1424,31 +1424,51 @@ impl FollowingOperator {
     }
 }
 
+const __PRECEDENCE_CHECKS: () = const {
+    assert!(DOT_PRECEDENCE > PIPE_TARGET_PRECEDENCE); // ... |> (A.func)(...)
+    assert!(PIPE_TARGET_PRECEDENCE > CALL_PRECEDENCE); // (... |> A.func)(...)
+
+    assert!(TY_PREFIX_PRECEDENCE > INITIALIZER_PRECEDENCE); // ([]u8).{ ptr, len }
+
+    assert!(ORELSE_PRECEDENCE > PIPE_PRECEDENCE); // (optional orelse default) |> do_something()
+
+    assert!(DECL_TYPE_PRECEDENCE > ASSIGN_PRECEDENCE); // a: (ty) = init
+
+    assert!(CALL_PRECEDENCE > TY_PREFIX_PRECEDENCE); // *(MyType(i32))
+};
+
 const MAX_PRECEDENCE: u8 = u8::MAX;
-const DOT_PRECEDENCE: u8 = 24;
-/// must be higher than [`POSTOP_PRECEDENCE`] and lower than [`DOT_PRECEDENCE`] to parse `... |> A.func(...)` correctly
-const PIPE_TARGET_PRECEDENCE: u8 = 23;
+
+const DOT_PRECEDENCE: u8 = 25;
+const PIPE_TARGET_PRECEDENCE: u8 = 24;
+const CALL_PRECEDENCE: u8 = 23;
+
 /// for `*ty`, `[]ty`, `?ty`
 const TY_PREFIX_PRECEDENCE: u8 = 22;
-const DIRECT_POSTOP_PRECEDENCE: u8 = 21;
-const PREOP_PRECEDENCE: u8 = 20;
 
+const DIRECT_POSTOP_PRECEDENCE: u8 = 21;
+const INITIALIZER_PRECEDENCE: u8 = DIRECT_POSTOP_PRECEDENCE;
+
+const PREOP_PRECEDENCE: u8 = 20;
+// BinOp precedence: 11..=19
 const RANGE_PRECEDENCE: u8 = 10;
 
-/// (optional orelse default) |> do_something()
 const ORELSE_PRECEDENCE: u8 = 5;
 const PIPE_PRECEDENCE: u8 = 4;
+
 /// `a: ty = init`
 /// `   ^^`
-/// must be higher than [`FollowingOperator::Assign`]!
 const DECL_TYPE_PRECEDENCE: u8 = 3;
+
 /// `a = 1`
 /// `a := init`
 /// `a : ty = init`
 /// `  ^`
 const ASSIGN_PRECEDENCE: u8 = 2;
+
 const IF_PRECEDENCE: u8 = 1;
 const ELSE_PRECEDENCE: u8 = 1;
+
 const MIN_PRECEDENCE: u8 = 0;
 
 impl BinOpKind {
