@@ -355,3 +355,42 @@ test :: -> MyStruct(i64).(5);
     assert_eq!(res.llvm_ir().matches("get_val").count(), 1);
     drop(res);
 }
+
+#[test]
+fn pass_generic_to_generic() {
+    let code = r#"
+MyStruct :: struct($A) { val: A, get_val :: (self: MyStruct(A)) -> self.val; }
+f :: (s: MyStruct($B)) -> {}
+test :: -> {
+    f(.{ val = 1 });
+    // find f/typeof(f)
+    // get typeof(s): `MyStruct($B)`
+    // analyze and type check `.{ val = 1 }` with hint `MyStruct($B)`
+    // infer $B := typeof(1)
+    // instantiate MyStruct(A=i64)
+    // instantiate f(B=i64)
+    // finalize `.{ val = 1 }` with `MyStruct(i64)`
+
+    f(.{ val = "" });
+    f(.{ val = .[&1, &2, &3] });
+}
+"#;
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@f.i64(i64 %s)");
+    assert_contains!(res.llvm_ir(), "@\"f.[]u8\"(");
+    assert_contains!(res.llvm_ir(), "@\"f.[3]*i64\"(");
+
+    assert_contains!(res.llvm_ir(), "call void @f.i64(");
+    assert_contains!(res.llvm_ir(), "call void @\"f.[]u8\"(");
+    assert_contains!(res.llvm_ir(), "call void @\"f.[3]*i64\"(");
+    drop(res);
+
+    let code = r#"
+MyStruct :: struct($A) { val: ?A = null, get_val :: (self: MyStruct(A)) -> self.val; }
+f :: (s: MyStruct($B)) -> {}
+test :: -> f(.{ val = Some(1) });
+"#;
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@f.i64(");
+    assert_contains!(res.llvm_ir(), "call void @f.i64(");
+}

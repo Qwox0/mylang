@@ -7,14 +7,15 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::Scope,
     sema::accumulate_type_inner,
-    type_::ty_match,
+    type_::{ty_match, ty_match_quiet},
     util::{BitFlags, UnwrapDebug, then, unreachable_debug},
 };
 
-pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> bool {
+pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>, quiet: bool) -> bool {
     if let Some(expected) = expected.try_downcast_type() {
         let Some(got) = got.try_downcast_type() else { return false };
-        return ty_match(got, expected);
+        //return ty_match_quiet(got, expected, quiet); // for IS_INSTANTIATION_WITH_GENERICS expected is a GenericSlot. This causes an incorrect `true` return value.
+        return got == expected;
     }
     if got.kind != expected.kind {
         return false;
@@ -56,13 +57,17 @@ pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> b
                 return false;
             }
 
-            ty_match(got.enum_ty.upcast_to_type(), expected.enum_ty.upcast_to_type())
+            ty_match_quiet(got.enum_ty.upcast_to_type(), expected.enum_ty.upcast_to_type(), quiet)
                 && got.variant_idx == expected.variant_idx
-                && got.data.zip(expected.data).map(|(g, e)| generic_match(g, e)).unwrap_or(true)
+                && got
+                    .data
+                    .zip(expected.data)
+                    .map(|(g, e)| generic_match(g, e, quiet))
+                    .unwrap_or(true)
         },
         ast::ConstValMatch::OptionalVal(expected) => {
             let got = got.downcast::<ast::OptionalVal>();
-            generic_match(got.val.u(), expected.val.u())
+            generic_match(got.val.u(), expected.val.u(), quiet)
         },
         ast::ConstValMatch::AggregateVal(expected) => {
             let got = got.downcast::<ast::AggregateVal>();
@@ -73,25 +78,30 @@ pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> b
             got.elements
                 .into_iter()
                 .zip(expected.elements)
-                .all(|(g, e)| generic_match(g, e))
+                .all(|(g, e)| generic_match(g, e, quiet))
         },
         _ => todo!(),
     }
 }
 
-pub fn accumulate_generic(generic: Ptr<ast::GenericSlot>, next_val: Ptr<ast::ConstVal>) -> bool {
-    let expr = None; // quiet
+pub fn accumulate_generic(
+    generic: Ptr<ast::GenericSlot>,
+    next_val: Ptr<ast::ConstVal>,
+    quiet: bool,
+) -> bool {
     match &mut generic.as_mut().cur_inst {
         cur_inst @ None => {
-            *cur_inst = Some(next_val);
+            if !quiet {
+                *cur_inst = Some(next_val);
+            }
             true
         },
         Some(generic) => {
             if let Some(ty_acc) = generic.try_downcast_type_ref() {
                 let Some(next_ty) = next_val.try_downcast_type() else { return false };
-                accumulate_type_inner(ty_acc, next_ty, expr).is_ok()
+                accumulate_type_inner(ty_acc, next_ty, None, quiet).is_ok()
             } else {
-                generic_match(next_val, *generic)
+                generic_match(next_val, *generic, quiet)
             }
         },
     }
@@ -102,6 +112,7 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
 
     const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr;
     const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr;
+    const FLAG_IS_INSTANTIATION_WITH_GENERICS: <Self::Flags as BitFlags>::Repr;
 
     fn main_scope(self: Ptr<Self>) -> &'static mut Scope;
 
@@ -141,6 +152,7 @@ macro_rules! impl_PolymorphableType {
             const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr = Self::Flags::IS_GENERIC;
             const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr =
                 Self::Flags::IS_INSTANTIATION;
+            const FLAG_IS_INSTANTIATION_WITH_GENERICS: <Self::Flags as BitFlags>::Repr = Self::Flags::IS_INSTANTIATION_WITH_GENERICS;
 
             #[inline]
             fn main_scope(self: Ptr<Self>) -> &'static mut Scope {
@@ -184,6 +196,20 @@ macro_rules! impl_PolymorphableType {
             pub fn is_generic(&self) -> bool {
                 match Ptr::from_ref(self).upcast().matchable2() {
                     $(ast::AstMatch::$ty(t) => t.flags.get(ast::$ty::FLAG_IS_GENERIC),)*
+                    _ => unreachable_debug(),
+                }
+            }
+
+            pub fn is_instantiation(&self) -> bool {
+                match Ptr::from_ref(self).upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.flags.get(ast::$ty::FLAG_IS_INSTANTIATION),)*
+                    _ => unreachable_debug(),
+                }
+            }
+
+            pub fn is_instantiation_with_generics(&self) -> bool {
+                match Ptr::from_ref(self).upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => t.flags.get(ast::$ty::FLAG_IS_INSTANTIATION_WITH_GENERICS),)*
                     _ => unreachable_debug(),
                 }
             }
@@ -236,6 +262,11 @@ impl ast::Ast {
 }
 
 impl ast::Type {
+    pub fn downcast_polymorphable(self: Ptr<Self>) -> Ptr<Polymorphable> {
+        debug_assert!(self.replacement.is_none());
+        self.upcast().flat_downcast_polymorphable()
+    }
+
     pub fn try_downcast_polymorphable(self: Ptr<Self>) -> OPtr<Polymorphable> {
         debug_assert!(self.replacement.is_none());
         self.upcast().try_flat_downcast_polymorphable()

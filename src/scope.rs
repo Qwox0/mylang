@@ -84,7 +84,7 @@ impl std::fmt::Debug for Scope {
         hex_inline(&mut debug, "parent", &self.parent);
         debug.field("decls", &self.decls);
         debug.field("decls_map", &self.decls_map);
-        debug.field("expr", &self.expr);
+        display_span(&mut debug, "expr", &self.expr);
         debug.finish()
     }
 }

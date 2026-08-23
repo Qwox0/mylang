@@ -13,7 +13,6 @@ pub struct DisplayCodeBuilder<'l> {
 }
 
 impl<'l> DisplayCodeBuilder<'l> {
-    #[must_use]
     pub fn label(&mut self, label: &'l str) -> &mut DisplayCodeBuilder<'l> {
         self.label = label;
         self

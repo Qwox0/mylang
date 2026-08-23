@@ -1,12 +1,15 @@
 use crate::{
-    ast::{self, AstKind, DeclList, DeclListExt, RangeKind, TypeEnum, UpcastToAst, type_new},
+    ast::{
+        self, AstKind, DeclList, DeclListExt, RangeKind, StructFlags, TypeEnum, UpcastToAst,
+        type_new,
+    },
     context::{ctx, primitives},
     diagnostics::{HandledErr, cerror, chint, common::error_cannot_infer_generics, cwarn},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema::{generics::accumulate_generic, primitives::Primitives},
     util::{
-        BigIntExt, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
+        BigIntExt, BitFlags, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
         panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
         variant_count_to_tag_size_bits,
     },
@@ -61,7 +64,7 @@ pub fn common_type_restrict_optional_coerction(
     rhs: Ptr<ast::Type>,
     allow_opt_coercion: AllowOptionalCoercion,
 ) -> OPtr<ast::Type> {
-    match type_check(TypeCheckMode::Join, lhs, rhs, allow_opt_coercion) {
+    match type_check(TypeCheckMode::Join, lhs, rhs, allow_opt_coercion, false) {
         CommonTypeSelection::Equal => Some(lhs),
         CommonTypeSelection::Got => Some(lhs),
         CommonTypeSelection::Expected => Some(rhs),
@@ -71,12 +74,17 @@ pub fn common_type_restrict_optional_coerction(
 }
 
 /// might not be symmetrical
-pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
-    match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE) {
+#[inline]
+pub fn ty_match_quiet(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, quiet: bool) -> bool {
+    match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE, quiet) {
         CommonTypeSelection::Equal | CommonTypeSelection::Expected => true,
         CommonTypeSelection::Mismatch | CommonTypeSelection::Got => false,
         CommonTypeSelection::NewAlloc(_) => unreachable_debug(),
     }
+}
+
+pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
+    ty_match_quiet(got, expected, false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +98,7 @@ fn type_check(
     got: Ptr<ast::Type>,
     expected: Ptr<ast::Type>,
     allow_opt_coercion: AllowOptionalCoercion,
-    //quiet: bool,
+    quiet: bool,
 ) -> CommonTypeSelection {
     use CommonTypeSelection::*;
 
@@ -115,7 +123,7 @@ fn type_check(
     if let Some(expected) = expected.try_downcast::<ast::GenericSlot>() {
         // resolve polymorph instantiation
         debug_assert!(mode == TypeCheckMode::Strict);
-        return if accumulate_generic(expected, got.upcast_to_const_val()) {
+        return if accumulate_generic(expected, got.upcast_to_const_val(), quiet) {
             Equal
         } else {
             Mismatch
@@ -135,6 +143,7 @@ fn type_check(
         lhs: Ptr<ast::Type>,
         rhs: Ptr<ast::OptionTy>,
         allow_opt_coercion: bool,
+        quiet: bool,
     ) -> CommonTypeSelection {
         debug_assert!(lhs.kind != AstKind::OptionTy);
         let rhs_inner = rhs.inner_ty.downcast_type();
@@ -143,7 +152,7 @@ fn type_check(
             && lhs != primitives().enum_variant // why is this needed?
             && lhs.is_non_zero()
         {
-            match type_check(mode, lhs, rhs_inner, AllowOptionalCoercion::FALSE) {
+            match type_check(mode, lhs, rhs_inner, AllowOptionalCoercion::FALSE, quiet) {
                 Equal | Expected => Expected,
                 Got => NewAlloc(type_new!(OptionTy { inner_ty: lhs.upcast() }).upcast_to_type()),
                 NewAlloc(inner_common) => NewAlloc(
@@ -164,14 +173,15 @@ fn type_check(
                 got.inner_ty.downcast_type(),
                 expected.inner_ty.downcast_type(),
                 AllowOptionalCoercion::FALSE,
+                quiet,
             )
         } else {
-            opt_coercion(mode, got, expected, allow_opt_coercion.lhs)
+            opt_coercion(mode, got, expected, allow_opt_coercion.lhs, quiet)
         };
     } else if let Some(got) = got.try_downcast::<ast::OptionTy>()
         && mode == TypeCheckMode::Join
     {
-        return opt_coercion(mode, expected, got, allow_opt_coercion.rhs).flip();
+        return opt_coercion(mode, expected, got, allow_opt_coercion.rhs, quiet).flip();
     }
 
     /// common_type([]T, []mut T) == []T
@@ -192,9 +202,10 @@ fn type_check(
             let out_mut = expected.is_mut && got.is_mut;
             let child_sel = type_check(
                 mode,
-                got.$child_field.downcast_type(),
-                expected.$child_field.downcast_type(),
+                got.$child_field.downcast_type_inst(),
+                expected.$child_field.downcast_type_inst(),
                 AllowOptionalCoercion::TRUE, // *NonNull -> *?NonNull coercion is valid
+                quiet,
             );
             match child_sel {
                 Mismatch => Mismatch,
@@ -238,7 +249,7 @@ fn type_check(
         if let Some(expected) = expected.len.try_downcast::<ast::GenericSlot>() {
             debug_assert!(mode == TypeCheckMode::Strict);
             debug_assert_eq!(got.len.ty, p.usize());
-            if !accumulate_generic(expected, got.len.downcast_const_val()) {
+            if !accumulate_generic(expected, got.len.downcast_const_val(), quiet) {
                 return Mismatch;
             }
         } else if got.len.downcast::<ast::IntVal>().val
@@ -251,6 +262,7 @@ fn type_check(
             got.elem_ty.downcast_type(),
             expected.elem_ty.downcast_type(),
             allow_opt_coercion,
+            quiet,
         );
     }
 
@@ -259,14 +271,20 @@ fn type_check(
         if got_range.rkind != expected_range.rkind {
             return Mismatch;
         }
-        return type_check(mode, got_range.elem_ty, expected_range.elem_ty, allow_opt_coercion);
+        return type_check(
+            mode,
+            got_range.elem_ty,
+            expected_range.elem_ty,
+            allow_opt_coercion,
+            quiet,
+        );
     }
 
     if let Some(got_fn) = got.try_downcast::<ast::Fn>() {
         let expected_fn = expected.try_downcast::<ast::Fn>()?;
         // Currently function types must match exactly (see <https://en.wikipedia.org/wiki/Subtyping#Function_types>)
         let eq = got_fn.params().len() == expected_fn.params().len()
-            && ty_match(got_fn.ret_ty.u(), expected_fn.ret_ty.u())
+            && ty_match_quiet(got_fn.ret_ty.u(), expected_fn.ret_ty.u(), quiet)
             && got_fn
                 .params()
                 .iter()
@@ -275,7 +293,7 @@ fn type_check(
                 .all(|(g, e)|
                     // g and e are swapped because functions are contravariant wrt. parameter types
                     // TODO: better errors messages
-                    ty_match(e, g));
+                    ty_match_quiet(e, g, quiet));
         return if eq { Equal } else { Mismatch };
     }
 
@@ -379,7 +397,7 @@ pub fn finalize_ty(
     *ty
 }
 
-fn remove_optional_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
+pub fn remove_optional_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
     if let Some(out_opt) = out_ty.try_downcast::<ast::OptionTy>()
         && expr_ty.is_non_zero()
     {
@@ -433,8 +451,12 @@ impl ast::Type {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { is_finalized, .. } => *is_finalized,
             TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => bits.is_some(),
-            TypeEnum::StructDef { .. } | TypeEnum::UnionDef { .. } | TypeEnum::EnumDef { .. } => {
-                true
+            TypeEnum::StructDef { flags, .. } => {
+                !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS)
+            },
+            TypeEnum::UnionDef { .. } => true, // TODO
+            TypeEnum::EnumDef { flags, .. } => {
+                !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS)
             },
             TypeEnum::PtrTy { pointee: t, .. }
             | TypeEnum::SliceTy { elem_ty: t, .. }
@@ -504,7 +526,13 @@ impl ast::Type {
                 debug_assert!(ret_ty.u().is_finalized());
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => panic_debug!("cannot finalize GenericDef"),
+            //TypeEnum::GenericSlot { .. } => panic_debug!("cannot finalize GenericDef"),
+            TypeEnum::GenericSlot { cur_inst, .. } => {
+                // this can only happen when a GenericSlot is passed to an instantiation.
+                // e.g. `f :: (a: MyType($T)) -> {}`
+                debug_assert!(cur_inst.is_none());
+                return Ok(*self);
+            },
         }
         debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
         Ok(*self)

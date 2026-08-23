@@ -21,10 +21,13 @@ MyStruct :: struct {
     a: I;
     arr: [NEW.a]I = .[0; NEW.a];
     NEW :: MyStruct.(7);
+    not_part_of_cycle :: -> struct {}.MISSING;
 };
 I :: u64;
 test :: -> MyStruct.NEW.a;";
-    test(code).error("cycle(s) detected:", |_| TestSpan::ZERO); // TODO: test full cycle report
+    test(code)
+        .error("no associated constant `MISSING` on type `struct{}`", substr!("MISSING"))
+        .error("cycle(s) detected:", |_| TestSpan::ZERO); // TODO: test full cycle report
 }
 
 #[test]
@@ -128,4 +131,19 @@ trim_partial_prefix :: (name: *mut []mut u8) -> {
 
     // Is it possible to have `*mut {integer}` which is then finalized to `*i64`, instead of
     // `*mut i64`?
+}
+
+#[test]
+#[ignore = "todo"]
+fn analyze_after_unknown_associated_const() {
+    let code = "
+MyStruct :: struct {};
+test :: -> {
+    a := MyStruct.UNKNOWN;
+    b: []u8 = 1;
+}
+";
+    test(code)
+        .error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+        .error("mismatched types: expected `[]u8`; got `{integer}`", substr!("1"));
 }

@@ -712,10 +712,11 @@ pub fn debug_ast_base_fields(debug_struct: &mut fmt::DebugStruct, value: Ptr<Ast
     //normal(debug_struct, "parenthesis_count", &value.parenthesis_count);
 }
 
-#[allow(unused)]
 pub mod special_debug_handlers {
     use super::*;
-    use crate::{ast::ConstVal, display_code::display, ptr::OPtr};
+    use crate::{
+        ast::ConstVal, display_code::display, ptr::OPtr, scratch_allocator::TmpPtr, sema::SemaUnit,
+    };
 
     pub fn normal(debug_struct: &mut fmt::DebugStruct, name: &str, value: &dyn fmt::Debug) {
         debug_struct.field(name, value);
@@ -765,6 +766,10 @@ pub mod special_debug_handlers {
         }
     }
 
+    pub fn none(debug_struct: &mut fmt::DebugStruct, name: &str) {
+        debug_struct.field(name, &"None");
+    }
+
     pub fn never_alternate(
         debug_struct: &mut fmt::DebugStruct,
         name: &str,
@@ -785,10 +790,21 @@ pub mod special_debug_handlers {
     }
 
     pub fn display_span(debug_struct: &mut fmt::DebugStruct, name: &str, value: &OPtr<Ast>) {
+        const MAX_SPAN_LEN: usize = 200;
         match value {
             Some(value) => debug_struct.field_with(name, |f| {
-                // not great
-                f.write_str(&display(value.full_span()).finish_to_string())
+                let span = value.full_span();
+                if !f.alternate() {
+                    return f.write_fmt(format_args!("{:?}", span.get_text().as_ref()));
+                }
+
+                let mut d = display(if span.len() > MAX_SPAN_LEN { span.start() } else { span });
+                let l;
+                if span.len() > MAX_SPAN_LEN {
+                    l = format!("start only (len = {})", span.len());
+                    d.label(&l);
+                }
+                f.write_str(&d.finish_to_string()) // unnecessary copy
             }),
             None => debug_struct.field(name, &"None"),
         };
@@ -804,5 +820,18 @@ pub mod special_debug_handlers {
         });
     }
 
+    pub fn sema_units(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &Option<TmpPtr<[SemaUnit]>>,
+    ) {
+        let Some(units) = value else { return none(debug_struct, name) };
+        let finished = units.iter().map(|u| u.waiting_for.is_none()).count();
+        debug_struct.field_with(name, |f| {
+            write!(f, "{:p} (finished: {}/{})", units, finished, units.len())
+        });
+    }
+
+    #[allow(unused)]
     pub fn skip(_debug_struct: &mut fmt::DebugStruct, _name: &str, _value: &dyn fmt::Debug) {}
 }

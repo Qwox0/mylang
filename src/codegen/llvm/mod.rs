@@ -3698,6 +3698,21 @@ impl<'ctx> Codegen<'ctx> {
                     _ => &[ty],
                 };
                 for &ty in insts {
+                    if let Some(p) = ty.try_downcast_polymorphable() {
+                        debug_assert!(p.is_instantiation());
+                        if p.is_instantiation_with_generics() {
+                            continue;
+                        }
+                    }
+                    debug_assert!(
+                        ty.try_downcast_polymorphable()
+                            .and_then(|p| p.generics_scope())
+                            .is_none_or(|generics_scope| generics_scope.decls.iter().all(|g| g
+                                .init
+                                .u()
+                                .kind
+                                != AstKind::GenericSlot))
+                    );
                     // Ensure that the type is in `type_table`
                     self.llvm_type(ty);
                     if let Some(ty_scope) = ty.get_scope() {

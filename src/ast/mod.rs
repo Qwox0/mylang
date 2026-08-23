@@ -236,6 +236,7 @@ macro_rules! ast_variants {
                 pub fn debug_fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     let mut debug = f.debug_struct(stringify!($t_name));
 
+                    debug.field_with("impl Display", |f| write!(f, "{self}"));
                     debug::debug_ast_base_fields(&mut debug, Ptr::from_ref(self).upcast());
 
                     #[allow(unused_imports)]
@@ -479,6 +480,7 @@ ast_variants! {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     NamedInitializer {
+        flags: InitializerFlags,
         parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SoA
@@ -749,6 +751,7 @@ ast_variants! {
     /// `void`, `never`, `bool`, `type`
     SimpleTy {
         is_finalized: bool,
+        @debug(hex)
         decl: Ptr<Decl>,
     },
     IntTy {
@@ -797,6 +800,7 @@ ast_variants! {
         polymorphs: Vec<Ptr<StructDef>>,
 
         /// only valid during sema
+        @debug(sema_units)
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
     },
@@ -810,6 +814,7 @@ ast_variants! {
         external_consts: Vec<Ptr<Decl>>,
 
         /// only valid during sema
+        @debug(sema_units)
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
     },
@@ -833,6 +838,7 @@ ast_variants! {
         polymorphs: Vec<Ptr<EnumDef>>,
 
         /// only valid during sema
+        @debug(sema_units)
         sema_units: Option<TmpPtr<[SemaUnit]>>,
         finished_members: usize,
     },
@@ -910,6 +916,70 @@ ast_variants! {
     },
 
 }
+
+bitflags!(DeclFlags: u16 {
+    IS_MUT,
+    IS_PUB,
+    IS_REC,
+    IS_STATIC,
+    //IS_CONST,
+    IS_DATA_MEMBER,
+    IS_CONST_MEMBER,
+    IS_PARAMETER,
+    IS_FN_TY_PARAM,
+
+    IS_GENERIC,
+    IS_INSTANTIATION_VALUE,
+    //IS_EXPLICIT_CONST_PARAM,
+});
+
+bitflags!(InitializerFlags: u8 {
+    // # parser flags:
+    // HAS_LHS_EXPR, // TODO: replace `parsed_with_lhs`
+
+    // # sema flags:
+    IS_TYPE_INIT,
+    IS_PTR_INIT,
+});
+
+bitflags!(FnFlags: u8 {
+    // # sema flags:
+    /// set during sema
+    HAS_KNOWN_RET_TY,
+    HAS_VARARGS,
+
+    /// ```mylang
+    /// named :: () -> {}
+    /// () -> {}; // unnamed
+    /// ```
+    IS_NAMED,
+
+    IS_TYPE,
+    IS_GENERIC,
+    IS_INSTANTIATION,
+    /// instantiation which contains at least one external [`GenericSlot`] as an instantiation
+    /// value.
+    IS_INSTANTIATION_WITH_GENERICS,
+});
+
+bitflags!(StructFlags: u8 {
+    IS_GENERIC,
+    GENERICS_ANALYZED,
+    IS_INSTANTIATION,
+    /// instantiation which contains at least one external [`GenericSlot`] as an instantiation
+    /// value.
+    IS_INSTANTIATION_WITH_GENERICS,
+});
+
+bitflags!(EnumFlags: u8 {
+    IS_TAGGED_UNION,
+
+    IS_GENERIC,
+    IS_INSTANTIATION,
+    /// instantiation which contains at least one external [`GenericSlot`] as an instantiation
+    /// value.
+    IS_INSTANTIATION_WITH_GENERICS,
+});
 
 inherit_ast! {
     struct ConstVal {}
@@ -1111,7 +1181,7 @@ impl Ptr<Ast> {
     }
 
     /// returns [`error_cannot_infer_generics2`] for generic type definitions
-    pub fn downcast_type_inst(self) -> Result<Ptr<Type>, HandledErr> {
+    pub fn try_downcast_type_inst(self) -> Result<Ptr<Type>, HandledErr> {
         let ty = self.downcast_type2();
 
         if let Some(polymorphable) = ty.try_downcast_polymorphable()
@@ -1121,6 +1191,12 @@ impl Ptr<Ast> {
         }
 
         Ok(ty)
+    }
+
+    pub fn downcast_type_inst(self) -> Ptr<Type> {
+        let ty = self.downcast_type2();
+        debug_assert!(!ty.try_downcast_polymorphable().is_some_and(|p| p.is_generic()));
+        ty
     }
 
     pub fn try_downcast_type(self) -> OPtr<Type> {
@@ -1530,6 +1606,18 @@ impl Type {
         }
     }
 
+    pub fn unfinished(&self) -> UnfinishedMembers<'_> {
+        match self.matchable().as_ref() {
+            TypeEnum::StructDef { scope, sema_units, finished_members, .. }
+            | TypeEnum::UnionDef { scope, sema_units, finished_members, .. }
+            | TypeEnum::EnumDef { scope, sema_units, finished_members, .. } => UnfinishedMembers {
+                decls: &scope.decls[*finished_members..],
+                units: &sema_units.as_ref().u()[*finished_members..],
+            },
+            _ => UnfinishedMembers { decls: &[], units: &[] },
+        }
+    }
+
     pub fn get_associated_external_consts(&self) -> Option<&[Ptr<Decl>]> {
         match self.matchable().as_ref() {
             TypeEnum::StructDef { external_consts, .. }
@@ -1593,6 +1681,21 @@ impl Type {
             TypeMatch::ArrayLikeContainer(_) => unreachable_debug(),
             TypeMatch::GenericSlot(_) => todo!("Generic"),
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UnfinishedMembers<'a> {
+    pub decls: &'a [Ptr<Decl>],
+    pub units: &'a [SemaUnit],
+}
+
+impl<'a> UnfinishedMembers<'a> {
+    pub fn iter(self) -> impl ExactSizeIterator<Item = (&'a SemaUnit, Ptr<Decl>)> {
+        debug_assert_eq!(self.decls.len(), self.units.len());
+        (0..self.decls.len())
+            .into_iter()
+            .map(|idx| (self.units.get(idx).u(), *self.decls.get(idx).u()))
     }
 }
 
@@ -1864,7 +1967,7 @@ impl PositionalInitializer {
 
 impl NamedInitializer {
     pub fn new(lhs: OPtr<Ast>, fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, span: Span) -> Self {
-        ast_new!(local NamedInitializer { lhs, fields, parsed_with_lhs: lhs.is_some(), resolved_struct_inst: None, span })
+        ast_new!(local NamedInitializer { lhs, fields, parsed_with_lhs: lhs.is_some(), flags: InitializerFlags::default(), resolved_struct_inst: None, span })
     }
 }
 
@@ -2237,20 +2340,6 @@ impl RangeKind {
     }
 }
 
-bitflags!(DeclFlags: u16 {
-    IS_MUT,
-    IS_PUB,
-    IS_REC,
-    IS_STATIC,
-    //IS_CONST,
-    IS_DATA_MEMBER,
-    IS_CONST_MEMBER,
-    IS_PARAMETER,
-    IS_FN_TY_PARAM,
-    IS_GENERIC,
-    //IS_EXPLICIT_CONST_PARAM,
-});
-
 pub type DeclList = Ptr<[Ptr<Decl>]>;
 
 pub trait DeclListExt {
@@ -2271,35 +2360,6 @@ impl DeclListExt for [Ptr<Decl>] {
         })
     }
 }
-
-bitflags!(FnFlags: u8 {
-    /// set during sema
-    HAS_KNOWN_RET_TY,
-    HAS_VARARGS,
-
-    /// ```mylang
-    /// named :: () -> {}
-    /// () -> {}; // unnamed
-    /// ```
-    IS_NAMED,
-
-    IS_TYPE,
-    IS_GENERIC,
-    IS_INSTANTIATION,
-});
-
-bitflags!(StructFlags: u8 {
-    IS_GENERIC,
-    GENERICS_ANALYZED,
-    IS_INSTANTIATION,
-});
-
-bitflags!(EnumFlags: u8 {
-    IS_TAGGED_UNION,
-
-    IS_GENERIC,
-    IS_INSTANTIATION,
-});
 
 pub fn is_pos_arg(a: &Ptr<Ast>) -> bool {
     try_downcast_named_arg(*a).is_none()
@@ -2379,6 +2439,7 @@ impl CloneAst for Ptr<Ast> {
             &AstEnum::NamedInitializer { parsed_with_lhs, lhs, fields, .. } => {
                 clone!(NamedInitializer {
                     parsed_with_lhs,
+                    flags: InitializerFlags::default(),
                     lhs: lhs.clone_ast(alloc),
                     fields: fields.clone_ast(alloc),
                     resolved_struct_inst: None
