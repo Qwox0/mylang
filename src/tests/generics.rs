@@ -169,25 +169,30 @@ test :: -> {
 }
 
 #[test]
-#[ignore = "TODO"]
 fn const_positional_parameter() {
     // type
     let code = "
-sizeof :: ($ty) -> #sizeof(ty);
+sizeof :: ($ty: type) -> #sizeof(ty);
 test :: -> sizeof(i32);
 ";
-    test(code).ok(4);
+    let res = test(code).ok(4);
+    assert_contains!(res.llvm_ir(), "i64 @sizeof.i32() {{");
+    assert_contains!(res.llvm_ir(), "ret i64 4");
+    assert_contains!(res.llvm_ir(), "call noundef i64 @sizeof.i32()");
+    drop(res);
 
     // number
     let code = "
-arr_splat :: (val: $T, len: $N) -> [N]T {
-    mut arr: [N]T;
-    for idx in 0..N do arr[idx] = default;
+arr_splat :: (val: $T, $LEN: u64) -> [LEN]T {
+    mut arr: [LEN]T;
+    for idx in 0..LEN do arr[idx] = val;
     arr
 }
 test :: -> arr_splat(123, 5);
 ";
-    let res = test(code).ok(arr([123; 5]));
+    let res = test(code).ok(arr([123_i64; 5]));
+    assert_contains!(res.llvm_ir(), "@arr_splat.i64.5(");
+    assert_contains!(res.llvm_ir(), "call void @arr_splat.i64.5(");
     drop(res);
 }
 
@@ -393,4 +398,43 @@ test :: -> f(.{ val = Some(1) });
     let res = test(code).compile_no_err();
     assert_contains!(res.llvm_ir(), "@f.i64(");
     assert_contains!(res.llvm_ir(), "call void @f.i64(");
+}
+
+#[test]
+fn invalid_position_for_generic() {
+    let code = "
+test :: -> { a: $T = 1; }
+";
+    test(code).error("Generics cannot be defined inside a block", substr!("$T"));
+}
+
+#[test]
+#[ignore = "todo"]
+fn error_non_generic_type_parameter() {
+    // any non const decl with var_ty `type` causes a panic when trying to access the type, because
+    // it doesn't have a const_val
+    let code = "
+get_size :: (T: type) -> #sizeof(T);
+test :: -> get_size(i32);
+";
+    test(code).compile_no_err();
+}
+
+#[test]
+//#[ignore = "todo"]
+fn todo_fix_cannot_finalize_generic_error() {
+    let code = "
+MyStruct :: struct($T) { val: T; }
+f :: (a: MyStruct($Num) = .{ val=1 }) -> {}
+";
+    test(code).compile_no_err();
+
+    let code = "
+MyStruct :: struct($T) { val: T; }
+f :: (
+    a: MyStruct($Num) = .{ val=1 }, // don't analyze default for generic f
+    b := MyStruct.{ val=2 },        // causes an cannot infer error if the default is not analyzed
+) -> {}
+";
+    test(code).compile_no_err();
 }

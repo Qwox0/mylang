@@ -6,7 +6,7 @@ use crate::{
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopeAndAggregateInfo, ScopeKind},
+    scope::{Scope, ScopeAndAggregateInfo, ScopeFlags, ScopeKind},
     scratch_allocator::TmpPtr,
     sema::SemaUnit,
     type_::{finalize_ty, ty_match},
@@ -893,6 +893,8 @@ ast_variants! {
     /// *Generic decl*: [`Decl`] in a `generics_scope`. has flag [`DeclFlags::IS_GENERIC`].
     /// *Generic item*: Item with `IS_GENERIC` flag. contains a `generics_scope`.
     GenericSlot {
+        flags: GenericSlotFlags,
+
         name: Ptr<Ident>,
 
         cur_inst: OPtr<ConstVal>,
@@ -981,6 +983,11 @@ bitflags!(EnumFlags: u8 {
     IS_INSTANTIATION_WITH_GENERICS,
 });
 
+bitflags!(GenericSlotFlags: u8 {
+    // # sema flags:
+    WAS_ADDED_TO_SCOPE,
+});
+
 inherit_ast! {
     struct ConstVal {}
 }
@@ -1058,8 +1065,7 @@ impl Ptr<Ast> {
             debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
             true
         } else if [AstKind::Fn, AstKind::GenericSlot].contains(&self.rep().kind) {
-            debug_assert!(self.ty.u().p_eq(self));
-            true
+            self.ty.u().p_eq(self)
         } else if self == p.err_ty.upcast() {
             true
         } else {
@@ -2041,7 +2047,7 @@ impl Fn {
         alloc: &Arena,
     ) -> Result<Ptr<Fn>, AllocErr> {
         debug_assert!(params.iter().all(|p| p.flags.get(DeclFlags::IS_PARAMETER)));
-        debug_assert!(params.iter().all(|p| !p.is_const));
+        debug_assert!(params.iter().all(|p| !p.is_const || p.flags.get(DeclFlags::IS_GENERIC)));
         let fn_ = ast_new!(alloc, Fn {
             flags: FnFlags::default(),
             params_scope: Scope::new(params, ScopeKind::FnParams),
@@ -2066,7 +2072,7 @@ impl Fn {
 
 impl GenericSlot {
     pub fn new(name: Ptr<Ident>, span: Span) -> GenericSlot {
-        ast_new!(local GenericSlot { name, cur_inst: None, default: None, span })
+        ast_new!(local GenericSlot { name, cur_inst: None, default: None, flags: GenericSlotFlags::default(), span })
     }
 
     pub fn generate_decl(
@@ -2625,7 +2631,7 @@ impl CloneAst for Ptr<Decl> {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
         let generic = self.generic.clone_ast(alloc);
         let ident = generic.map(|g| g.name).unwrap_or_else(|| self.ident.clone_ast(alloc));
-        alloc.alloc(ast_new!(local Decl {
+        let decl = alloc.alloc(ast_new!(local Decl {
             is_const: self.is_const,
             has_init_expr: self.has_init_expr,
             flags: self.flags,
@@ -2638,14 +2644,31 @@ impl CloneAst for Ptr<Decl> {
             obj_symbol_name: None,
             span: self.span,
             scope: None,
-        }))
+        }))?;
+        ident.as_mut().decl.set_once(decl);
+        Ok(decl)
     }
 }
 
 impl CloneAst for Ptr<Fn> {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
+        let generics_scope = self.generics_scope._clone_ast(alloc)?;
+
+        let params = self
+            .params_scope
+            .decls
+            .iter()
+            .map(|p| {
+                if p.flags.get(DeclFlags::IS_GENERIC) {
+                    generics_scope.u().find_decl_norec(p.ident.sym, true).u()
+                } else {
+                    p.clone_ast(alloc)
+                }
+            })
+            .collect::<Vec<_>>();
+
         let mut f = Fn::new(
-            self.params_scope.decls.clone_ast(alloc),
+            params,
             self.ret_ty_expr.clone_ast(alloc),
             self.body.clone_ast(alloc),
             self.span,
@@ -2657,7 +2680,7 @@ impl CloneAst for Ptr<Fn> {
         // from StructDef cloning.
         debug_assert_eq!(self.generics_scope.is_some(), self.flags.get(FnFlags::IS_GENERIC));
         debug_assert!(self.generics_scope.is_none_or(|s| s.kind == ScopeKind::FnGenerics));
-        f.generics_scope = self.generics_scope._clone_ast(alloc)?;
+        f.generics_scope = generics_scope;
         Ok(f)
     }
 }
@@ -2671,7 +2694,9 @@ impl CloneAst for Ptr<GenericSlot> {
 impl CloneAst for Ptr<Scope> {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
         debug_assert!(self.kind.is_generic());
-        alloc.alloc(Scope::new(self.decls.clone_ast(alloc), self.kind))
+        let mut s = alloc.alloc(Scope::new(self.decls.clone_ast(alloc), self.kind))?;
+        s.flags.data |= self.flags.data & ScopeFlags::WAS_CHECKED_FOR_DUPLICATES;
+        Ok(s)
     }
 }
 

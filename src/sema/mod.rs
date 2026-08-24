@@ -4,13 +4,14 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclFlags, DeclListExt, FnFlags,
-        InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind, StructFlags, TypeEnum, TypeMatch,
-        UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg, type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, AstVariant, BinOpKind, DeclFlags, DeclListExt,
+        FnFlags, GenericSlotFlags, InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind, StructFlags,
+        TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg,
+        type_new,
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
-    display_code::display,
+    display_code::{debug_expr, display},
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -244,6 +245,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
     }
 }
 
+#[derive(Debug)]
 struct AnalyzeScopeResult {
     ok: bool,
     finished: bool,
@@ -310,10 +312,11 @@ fn analyze_scope<T>(
             idx += 1;
             continue;
         }
+        continued = true;
+
         let i = *items.get(idx).u();
         let res = analyze_item(i, unit);
         if !matches!(res, SemaResult::NotFinished { .. }) {
-            continued = true;
             finish_item_in_scope(idx, items, units, finished_count);
         }
         match res {
@@ -1885,35 +1888,46 @@ impl Sema {
                 let fn_hint = ty_hint.try_downcast_ty_hint::<ast::Fn>();
                 let might_be_fn_ty = *ty_hint == p.type_ty;
 
-                let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
-                    || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
-
                 let osh = self.jump_open_scope(&f.params_scope);
                 let res = (|| {
-                    for (p_idx, param) in f.params_scope.decls.iter().enumerate() {
-                        if param.is_const {
-                            return cerror2!(
+                    for (p_idx, param) in f.as_ref().params_scope.decls.iter().enumerate() {
+                        if param.is_const && !param.flags.get(DeclFlags::IS_GENERIC) {
+                            let err = cerror2!(
                                 param.lhs_span(),
                                 "constant function parameters are currently not implemented"
                             );
-                            /*
-                            debug_assert!(param.flags.get(DeclFlags::IS_GENERIC));
-                            debug_assert!(param.var_ty.is_some());
-                            debug_assert!(param.init.u().try_downcast_const_val().is_some());
-                            */
-                        } else {
-                            if might_be_fn_ty {
-                                param.as_mut().flags.set(DeclFlags::IS_FN_TY_PARAM);
-                            } else if param.var_ty_expr.is_none()
-                                && let Some(fn_hint) = fn_hint
-                                && let Some(p_hint) = fn_hint.params().get(p_idx)
-                            {
-                                //debug_assert!(param.var_ty.is_none()); // TODO: without NotFinished
-                                param.as_mut().var_ty = Some(p_hint.var_ty.u());
-                            }
-
-                            self.analyze_decl(*param, contains_generic).ignore_error()?;
+                            chint!(param.lhs_span(), "Consider using a generic parameter instead");
+                            return err;
                         }
+                        if might_be_fn_ty {
+                            param.as_mut().flags.set(DeclFlags::IS_FN_TY_PARAM);
+                        } else if param.var_ty_expr.is_none()
+                            && let Some(fn_hint) = fn_hint
+                            && let Some(p_hint) = fn_hint.params().get(p_idx)
+                        {
+                            //debug_assert!(param.var_ty.is_none()); // TODO: without NotFinished
+                            param.as_mut().var_ty = Some(p_hint.var_ty.u());
+                        }
+
+                        if param.flags.get(DeclFlags::IS_GENERIC) {
+                            if !f.flags.get(FnFlags::IS_INSTANTIATION) {
+                                self.analyze_fn_generic(*param, f)?;
+                                param.as_mut().scope = None;
+                                param.as_mut().is_const = true;
+                                self.analyze_generic_decl(*param)
+                            } else {
+                                debug_assert!(param.is_const);
+                                debug_assert!(param.var_ty.is_some());
+                                debug_assert!(param.init.is_some());
+                                Ok(())
+                            }
+                        } else {
+                            // TODO: see `todo_fix_cannot_finalize_generic_error`
+                            let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
+                                || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
+                            self.analyze_decl(*param, contains_generic)
+                        }
+                        .ignore_error()?
                     }
 
                     if f.flags.get(FnFlags::HAS_KNOWN_RET_TY) {
@@ -1937,9 +1951,9 @@ impl Sema {
                         self.allow_unfinished_use(f.upcast(), f.upcast_to_type());
                     }
 
-                    if f.flags.get(FnFlags::IS_GENERIC) {
-                        debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
-
+                    let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
+                        || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
+                    if contains_generic {
                         if might_be_fn_ty {
                             return cerror2!(
                                 f.generics().first().u().full_span(),
@@ -2040,28 +2054,7 @@ impl Sema {
                         generics_scope.as_mut().decls.as_mut(),
                         sema_units,
                         finished_members,
-                        |generic, _unit| {
-                            debug_assert!(generic.flags.get(DeclFlags::IS_GENERIC));
-                            debug_assert!(generic.is_const);
-                            if generic.var_ty_expr.is_none() && generic.init.is_none() {
-                                generic.as_mut().var_ty = Some(p.type_ty);
-                            }
-
-                            let () = self.analyze_decl(generic, false)?;
-
-                            if let Some(default_expr) =
-                                generic.as_mut().init.replace(generic.generic.u().upcast())
-                            {
-                                debug_assert!(default_expr.kind != AstKind::GenericSlot);
-                                generic
-                                    .generic
-                                    .u()
-                                    .default
-                                    .set_once(default_expr.downcast_const_val());
-                            }
-
-                            Ok(())
-                        },
+                        |generic, _unit| self.analyze_generic_decl(generic),
                     );
                     self.close_scope(osh);
                     res.as_sema_result(expr.upcast_to_type()); // TODO: implementation of UnitDependency::Scope is not correct for this case
@@ -2241,35 +2234,12 @@ impl Sema {
                             return Ok(());
                         }
 
-                        if let Some(_generic_decl) = g.name.decl {
-                            debug_assert!(f.flags.get(FnFlags::IS_GENERIC));
-                            debug_assert!(f.generics_scope.is_some());
-                            return Ok(());
-                        }
+                        let generic_decl = match g.name.decl {
+                            Some(d) => d,
+                            None => g.generate_decl(ty_hint.u(), &self.cctx.alloc)?,
+                        };
 
-                        let generic_decl = g.generate_decl(ty_hint.u(), &self.cctx.alloc)?;
-
-                        let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
-                            let s = self
-                                .cctx
-                                .alloc
-                                .alloc(Scope::new(vec![], ScopeKind::FnGenerics))
-                                .unwrap();
-                            s.as_mut().expr.set_once(f.upcast());
-                            debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
-                            s.as_mut().setup(f.params_scope.parent.u());
-                            f.as_mut().params_scope.parent = Some(s);
-                            s
-                        });
-                        if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
-                            return error_duplicate_in_unordered_scope(
-                                ScopeKind::FnParams,
-                                generic_decl,
-                                dup,
-                            )
-                            .into();
-                        }
-                        f.as_mut().flags.set(FnFlags::IS_GENERIC);
+                        self.analyze_fn_generic(generic_decl, f)?
                     },
                     ScopeKind::Struct => {
                         let s = self.cur_scope.get_expr().u().downcast::<ast::StructDef>();
@@ -2743,8 +2713,10 @@ impl Sema {
                 //debug_assert!(old.is_none());
             }
 
-            let is_init_const =
-                decl.is_const || is_static || decl.flags.get(DeclFlags::IS_DATA_MEMBER);
+            let is_init_const = decl.is_const
+                || is_static
+                || decl.flags.get(DeclFlags::IS_DATA_MEMBER)
+                || decl.flags.get(DeclFlags::IS_GENERIC);
             let init_ty = *self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty = check_or_infer_target!(init_ty, &mut decl.var_ty, true, init.full_span());
             let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
@@ -2832,6 +2804,27 @@ impl Sema {
         res
     }
 
+    fn analyze_generic_decl(&mut self, decl: Ptr<ast::Decl>) -> SemaResult<()> {
+        let p = p();
+
+        debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
+        debug_assert!(decl.is_const);
+        if decl.var_ty_expr.is_none() && decl.init.is_none() {
+            decl.as_mut().var_ty = Some(p.type_ty);
+        }
+
+        let () = self.analyze_decl(decl, false)?;
+
+        // The GenericSlot is put as the const_val of `decl`, which causes it to be distributed to
+        // uses of `decl`
+        if let Some(default_expr) = decl.as_mut().init.replace(decl.generic.u().upcast()) {
+            debug_assert!(default_expr.kind != AstKind::GenericSlot);
+            decl.generic.u().default.set_once(default_expr.downcast_const_val());
+        }
+
+        Ok(())
+    }
+
     /// Also used for `#intrinsic` directive.
     fn analyze_extern_directive(
         &self,
@@ -2865,6 +2858,38 @@ impl Sema {
             );
         }
         Ok(ty)
+    }
+
+    fn analyze_fn_generic(
+        &mut self,
+        generic_decl: Ptr<ast::Decl>,
+        f: Ptr<ast::Fn>,
+    ) -> SemaResult<()> {
+        let generic = generic_decl.generic.u();
+        debug_assert_eq!(generic.name.decl, generic_decl);
+
+        if generic.as_mut().flags.get(GenericSlotFlags::WAS_ADDED_TO_SCOPE) {
+            debug_assert!(f.flags.get(FnFlags::IS_GENERIC));
+            debug_assert!(f.generics_scope.u().decls.contains(&generic.name.decl.u()));
+            return Ok(());
+        }
+
+        let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
+            let s = self.cctx.alloc.alloc(Scope::new(vec![], ScopeKind::FnGenerics)).unwrap();
+            s.as_mut().expr.set_once(f.upcast());
+            debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
+            s.as_mut().setup(f.params_scope.parent.u());
+            f.as_mut().params_scope.parent = Some(s);
+            s
+        });
+        if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
+            return error_duplicate_in_unordered_scope(ScopeKind::FnParams, generic_decl, dup)
+                .into();
+        }
+        f.as_mut().flags.set(FnFlags::IS_GENERIC);
+        generic.as_mut().flags.set(GenericSlotFlags::WAS_ADDED_TO_SCOPE);
+
+        Ok(())
     }
 
     fn validate_fn_call(
@@ -2902,9 +2927,11 @@ impl Sema {
     ) -> SemaResult<Ptr<T>> {
         let res = self._validate_call(kind, ty, args, close_p_span, is_const, expr);
 
-        for g in ty.generics() {
-            let g = g.init.u().downcast::<ast::GenericSlot>();
-            g.as_mut().cur_inst = None;
+        if ty.flags().get(T::FLAG_IS_GENERIC) {
+            for g in ty.generics() {
+                let g = g.init.u().downcast::<ast::GenericSlot>();
+                g.as_mut().cur_inst = None;
+            }
         }
 
         res
@@ -3083,14 +3110,35 @@ impl Sema {
             let pos_args = args[..pos_idx].iter().zip(inst_params).map(|d| (*d.0, *d.1));
             let named_args = args[pos_idx..].iter().map(|assign| {
                 let named_arg = assign.downcast::<ast::Assign>();
-                (named_arg.rhs, named_arg.lhs.downcast::<ast::Ident>().decl.u())
+                let lhs = named_arg.lhs.downcast::<ast::Ident>();
+                let param = if ty.flags().get(T::FLAG_IS_GENERIC) {
+                    let ty_param_decl = lhs.decl.u();
+                    debug_assert!(!inst.main_scope().decls.contains(&ty_param_decl)); // ty_param_decl cannot be used
+                    if ty_param_decl.flags.get(DeclFlags::IS_GENERIC) {
+                        inst.generics_scope().u().as_ref()
+                    } else {
+                        inst.main_scope()
+                    }
+                    .find_decl_norec(lhs.sym, false)
+                    .u()
+                } else {
+                    debug_assert!(ty == inst);
+                    lhs.decl.u()
+                };
+                (named_arg.rhs, param)
             });
 
-            for (pos_arg, inst_param) in pos_args.chain(named_args) {
-                self.finalize_expr(pos_arg, inst_param.var_ty.u())?;
+            for (arg, inst_param) in pos_args.chain(named_args) {
+                debug_assert!(
+                    inst.main_scope().decls.contains(&inst_param)
+                        || inst.generics_scope().is_some_and(|s| s.decls.contains(&inst_param))
+                );
+                self.finalize_expr(arg, inst_param.var_ty.u())?;
+                debug_assert!(ty.generics().iter().all(|g| g.generic.u().cur_inst.is_none()));
             }
         }
 
+        debug_assert!(ty.generics().iter().all(|g| g.generic.u().cur_inst.is_none()));
         Ok(inst)
     }
 
@@ -3178,6 +3226,7 @@ impl Sema {
             self.unfinished_instantiation_units
                 .push(SemaUnit { stmt: inst.upcast(), waiting_for: None });
         }
+        res?;
 
         Ok(inst)
     }
@@ -3198,9 +3247,8 @@ impl Sema {
         }
 
         // This seams very fragile, but maybe it's fine.
+        // TODO: recursively finalize children aswell
         match expr.matchable2() {
-            AstMatch::Ident(_) => todo!(),
-            AstMatch::Block(_) => todo!(),
             AstMatch::PositionalInitializer(_) => todo!(),
             AstMatch::NamedInitializer(i) => {
                 let i = i.as_mut();
@@ -3217,63 +3265,7 @@ impl Sema {
                 debug_assert_matches!(struct_ty.kind, AstKind::StructDef | AstKind::SliceTy);
                 i.resolved_struct_inst = Some(struct_ty);
             },
-            AstMatch::ArrayInitializer(_) => todo!(),
-            AstMatch::ArrayInitializerShort(_) => todo!(),
-            AstMatch::Dot(_) => todo!(),
-            AstMatch::Index(_) => todo!(),
-            AstMatch::Cast(_) => todo!(),
-            AstMatch::Autocast(_) => todo!(),
-            AstMatch::Call(_) => todo!(),
-            AstMatch::UnaryOp(_) => todo!(),
-            AstMatch::BinOp(_) => todo!(),
-            AstMatch::Range(_) => todo!(),
-            AstMatch::OrElse(_) => todo!(),
-            AstMatch::Assign(_) => todo!(),
-            AstMatch::BinOpAssign(_) => todo!(),
-            AstMatch::Decl(_) => todo!(),
-            AstMatch::If(_) => todo!(),
-            AstMatch::Switch(_) => todo!(),
-            AstMatch::For(_) => todo!(),
-            AstMatch::While(_) => todo!(),
-            AstMatch::Loop(_) => todo!(),
-            AstMatch::Defer(_) => todo!(),
-            AstMatch::Return(_) => todo!(),
-            AstMatch::Break(_) => todo!(),
-            AstMatch::Continue(_) => todo!(),
-            AstMatch::Empty(_) => todo!(),
-            AstMatch::IntVal(_) => todo!(),
-            AstMatch::FloatVal(_) => todo!(),
-            AstMatch::BoolVal(_) => todo!(),
-            AstMatch::CharVal(_) => todo!(),
-            AstMatch::StrVal(_) => todo!(),
-            AstMatch::RawPtrVal(_) => todo!(),
-            AstMatch::StaticPtrVal(_) => todo!(),
-            AstMatch::EnumVal(_) => todo!(),
-            AstMatch::OptionalVal(_) => todo!(),
-            AstMatch::AggregateVal(_) => todo!(),
-            AstMatch::ImportDirective(_) => todo!(),
-            AstMatch::ExternDirective(_) => todo!(),
-            AstMatch::IntrinsicDirective(_) => todo!(),
-            AstMatch::ProgramMainDirective(_) => todo!(),
-            AstMatch::SimpleDirective(_) => todo!(),
-            AstMatch::SizeOfDirective(_) => todo!(),
-            AstMatch::SizeOfValDirective(_) => todo!(),
-            AstMatch::AlignOfDirective(_) => todo!(),
-            AstMatch::OffsetOfDirective(_) => todo!(),
-            AstMatch::SimpleTy(_) => todo!(),
-            AstMatch::IntTy(_) => todo!(),
-            AstMatch::FloatTy(_) => todo!(),
-            AstMatch::PtrTy(_) => todo!(),
-            AstMatch::SliceTy(_) => todo!(),
-            AstMatch::ArrayTy(_) => todo!(),
-            AstMatch::StructDef(_) => todo!(),
-            AstMatch::UnionDef(_) => todo!(),
-            AstMatch::EnumDef(_) => todo!(),
-            AstMatch::RangeTy(_) => todo!(),
-            AstMatch::OptionTy(_) => todo!(),
-            AstMatch::Fn(_) => todo!(),
-            AstMatch::GenericSlot(_) => todo!(),
-            AstMatch::ArrayLikeContainer(_) => todo!(),
+            _ => {},
         }
 
         // TODO: dedup: finalize_ty(expr.as_mut().ty.as_mut().u(), out_ty, false);

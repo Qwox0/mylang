@@ -1737,7 +1737,11 @@ impl<'ctx> Codegen<'ctx> {
         let outer_return_depth = self.return_depth;
         self.return_depth = 0;
 
-        debug_assert!(f.params().iter().all(|d| !d.might_need_precompilation()));
+        debug_assert!(
+            f.params()
+                .iter()
+                .all(|d| !d.might_need_precompilation() || d.flags.get(DeclFlags::IS_GENERIC))
+        );
         self.open_scope();
         let res: CodegenResult<()> = (|| {
             self.symbols.reserve(f.params().len());
@@ -3699,8 +3703,8 @@ impl<'ctx> Codegen<'ctx> {
                 };
                 for &ty in insts {
                     if let Some(p) = ty.try_downcast_polymorphable() {
-                        debug_assert!(p.is_instantiation());
                         if p.is_instantiation_with_generics() {
+                            debug_assert!(p.is_instantiation());
                             continue;
                         }
                     }

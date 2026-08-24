@@ -123,7 +123,9 @@ impl Scope {
         }
         self.flags.set(ScopeFlags::WAS_SETUP);
         self.parent.set_once(parent);
-        let _ignore = self.verify_no_duplicates();
+        if !self.flags.get(ScopeFlags::WAS_CHECKED_FOR_DUPLICATES) {
+            let _ignore = self.verify_no_duplicates();
+        }
     }
 
     pub fn from_stmts(stmts: &[Ptr<ast::Ast>], kind: ScopeKind) -> Scope {

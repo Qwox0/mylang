@@ -5,8 +5,8 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, StructDef, StructFlags,
-        SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
+        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, GenericSlotFlags,
+        StructDef, StructFlags, SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -356,6 +356,11 @@ impl Parser {
                             let decl = self_.var_decl_no_markers(true)?;
                             debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
                             debug_assert!(decl.is_const);
+                            decl.generic
+                                .u()
+                                .as_mut()
+                                .flags
+                                .set(GenericSlotFlags::WAS_ADDED_TO_SCOPE);
                             Ok(decl)
                         },
                         MIN_PRECEDENCE,
