@@ -1,10 +1,10 @@
 use crate::{
     ast::{
-        self, AstKind, DeclList, DeclListExt, RangeKind, StructFlags, TypeEnum, UpcastToAst,
-        type_new,
+        self, AstKind, DeclList, DeclListExt, EnumFlags, RangeKind, StructFlags, TypeEnum,
+        UpcastToAst, type_new,
     },
     context::{ctx, primitives},
-    diagnostics::{HandledErr, cerror, chint, common::error_cannot_infer_generics, cwarn},
+    diagnostics::{HandledErr, cerror, chint, cwarn},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
     sema::{generics::accumulate_generic, primitives::Primitives},
@@ -372,7 +372,13 @@ pub fn finalize_ty(
     can_have_type_coercion: bool,
 ) -> Ptr<ast::Type> {
     let p = primitives();
-    debug_assert!(ty_match(*ty, out_ty), "{ty} matches {out_ty}");
+    debug_assert!(
+        ty_match_quiet(*ty, out_ty, true)
+            || ty
+                .try_downcast_polymorphable()
+                .is_some_and(|p| p.is_instantiation_with_generics()),
+        "{ty} matches {out_ty}"
+    );
     if *ty == p.never {
         // never is important for trimming unreachable code
         return *ty;
@@ -448,36 +454,47 @@ impl ast::Type {
     }
 
     pub fn is_finalized(&self) -> bool {
+        self.is_finalized2(false)
+    }
+
+    pub fn is_finalized2(&self, allow_generic: bool) -> bool {
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { is_finalized, .. } => *is_finalized,
             TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => bits.is_some(),
             TypeEnum::StructDef { flags, .. } => {
-                !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS)
+                !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS) || allow_generic
             },
             TypeEnum::UnionDef { .. } => true, // TODO
             TypeEnum::EnumDef { flags, .. } => {
-                !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS)
+                !flags.get(EnumFlags::IS_INSTANTIATION_WITH_GENERICS) || allow_generic
             },
             TypeEnum::PtrTy { pointee: t, .. }
             | TypeEnum::SliceTy { elem_ty: t, .. }
             | TypeEnum::ArrayTy { elem_ty: t, .. }
-            | TypeEnum::OptionTy { inner_ty: t, .. } => t.downcast_type().is_finalized(),
-            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized(),
-            TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized()),
+            | TypeEnum::OptionTy { inner_ty: t, .. } => {
+                t.downcast_type().is_finalized2(allow_generic)
+            },
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized2(allow_generic),
+            TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized2(allow_generic)),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => false,
+            TypeEnum::GenericSlot { .. } => allow_generic,
         }
     }
 
     /// This might mutate values behind [`Ptr`]s in `self`.
-    /// Example: the value behind `elem_ty` on [`TypeInfo::Array`] might change.
     pub fn finalize(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
-        self.finalize2(None).unwrap_or(*self)
+        self.finalize2(None, false).unwrap_or(*self)
+    }
+
+    /// This might mutate values behind [`Ptr`]s in `self`.
+    pub fn finalize_allow_generic(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
+        self.finalize2(None, true).unwrap_or(*self)
     }
 
     pub fn finalize2(
         self: &mut Ptr<Self>,
         err_expr: OPtr<ast::Ast>,
+        allow_generic: bool,
     ) -> Result<Ptr<ast::Type>, HandledErr> {
         let p = primitives();
         debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
@@ -490,11 +507,13 @@ impl ast::Type {
             err_expr.map(Ptr::return_val_span).unwrap_or(Span::ZERO)
         };
 
+        /*
         if let Some(polymorphable) = self.try_downcast_polymorphable()
             && polymorphable.is_generic()
         {
             return error_cannot_infer_generics(err_expr.u()).into();
         }
+        */
 
         match self.matchable().as_mut() {
             TypeEnum::SimpleTy { .. } => {
@@ -516,25 +535,22 @@ impl ast::Type {
             | TypeEnum::ArrayTy { elem_ty: t, .. }
             | TypeEnum::OptionTy { inner_ty: t, .. } => {
                 let t_expr = Some(*t).filter(|a| a.span != Span::ZERO);
-                t.downcast_type_ref().finalize2(t_expr)?;
+                t.downcast_type_ref().finalize2(t_expr, allow_generic)?;
             },
             TypeEnum::RangeTy { elem_ty, .. } => {
-                elem_ty.finalize2(None)?;
+                elem_ty.finalize2(None, allow_generic)?;
             },
             TypeEnum::Fn { params_scope, ret_ty, .. } => {
-                debug_assert!(params_scope.decls.iter().all(|p| p.var_ty.u().is_finalized()));
-                debug_assert!(ret_ty.u().is_finalized());
+                debug_assert!(
+                    params_scope.decls.iter().all(|p| p.var_ty.u().is_finalized2(allow_generic))
+                );
+                debug_assert!(ret_ty.u().is_finalized2(allow_generic));
             },
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
             //TypeEnum::GenericSlot { .. } => panic_debug!("cannot finalize GenericDef"),
-            TypeEnum::GenericSlot { cur_inst, .. } => {
-                // this can only happen when a GenericSlot is passed to an instantiation.
-                // e.g. `f :: (a: MyType($T)) -> {}`
-                debug_assert!(cur_inst.is_none());
-                return Ok(*self);
-            },
+            TypeEnum::GenericSlot { .. } => {},
         }
-        debug_assert!(self.is_finalized(), "Cannot finalize `{self}`");
+        debug_assert!(self.is_finalized2(allow_generic), "Cannot finalize `{self}`");
         Ok(*self)
     }
 

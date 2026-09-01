@@ -1,11 +1,11 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
-    ast::{self, RangeKind, UpcastToAst},
+    ast::{self, DeclFlags, RangeKind, UpcastToAst},
     intern_pool::{InternPool, Symbol},
     parser::lexer::Span,
     ptr::Ptr,
     scope::{Scope, ScopeKind},
-    util::OptionExt,
+    util::{BitFlags, OptionExt},
 };
 
 pub const INT_LIT_TYPE_NAME: &str = "{integer}";
@@ -139,7 +139,7 @@ impl Primitives {
             d.var_ty = Some(t);
             //d.ident.ty = Some(t); // TODO: include this?
             d.init = init;
-            d.has_init_expr = true;
+            d.flags.set(DeclFlags::HAS_INIT_EXPR);
             if let Some(init) = init {
                 init.as_mut().ty = Some(t);
             }

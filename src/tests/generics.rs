@@ -106,7 +106,7 @@ test :: -> {
     f(1, "Hello");
 }"#;
     test(code).error(
-        "mismatched types: expected `$T` (inferred as `{integer}`); got `[]u8`",
+        "mismatched types: expected `{integer}` (value of `$T`); got `[]u8`",
         substr!("\"Hello\""),
     );
 
@@ -421,20 +421,73 @@ test :: -> get_size(i32);
 }
 
 #[test]
-//#[ignore = "todo"]
-fn todo_fix_cannot_finalize_generic_error() {
+fn generic_param_with_init() {
     let code = "
-MyStruct :: struct($T) { val: T; }
-f :: (a: MyStruct($Num) = .{ val=1 }) -> {}
+f :: (
+    a: $Num = 1, // this init causes a call to finalize, which must not fail for `$Num`
+    b := 2,      // init must be analyzed to infer param type (i64)
+) -> {}
 ";
     test(code).compile_no_err();
 
     let code = "
 MyStruct :: struct($T) { val: T; }
 f :: (
-    a: MyStruct($Num) = .{ val=1 }, // don't analyze default for generic f
-    b := MyStruct.{ val=2 },        // causes an cannot infer error if the default is not analyzed
+    a: MyStruct($Num) = .{ val=1 },  // this init causes a call to finalize, which must not fail for `MyStruct($Num)`
+    b := MyStruct.{ val=2 },
 ) -> {}
 ";
     test(code).compile_no_err();
+}
+
+#[test]
+fn all_generic_param_cases() {
+    let code = "
+f :: (
+    // currently function parameters are analyzed in order -> Generics are not available
+    //use_a: A, use_b: B, use_c: C, use_d: D, use_e: E,
+
+    normal: i32,
+
+    a: $A,          // inferred (pos arg)
+    $B: type,       // explicitly set (pos arg)
+
+    c: $C,          // inferred (named arg)
+    $D: type,       // explicitly set (named arg)
+    e: $E,          // explicitly set (named arg)
+
+    use_a2: A, use_b2: B, use_c2: C, use_d2: D, use_e2: E,
+) -> {}
+
+test :: -> f(
+    //10      , 20      , 30      , 40      , 50      ,
+
+    0,
+
+    1.as(u64),      // infer A
+    i128,           // set B
+
+    c=2.as(u64),    // infer C
+    D=i16,          // set D
+    e=3, E=u8,      // set E
+
+    use_a2=10, use_b2=20, use_c2=30, use_d2=40, use_e2=50,
+);";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "void @f.u64.i128.u64.i16.u8");
+
+    // same cases, but more compilcated data
+    // TODO
+}
+
+// generic inference and explicit generic values are diffent and have to be handled seperately.
+// e.g. explicit annotations first to determine if a strict type check is needed
+#[test]
+fn generic_param_mismatch() {
+    let code = "
+f :: (val: $T) -> {}
+test :: -> f(1, T=[]u8);
+";
+    test(code)
+        .error("mismatched types: expected `[]u8` (value of `$T`); got `{integer}`", substr!("1"));
 }

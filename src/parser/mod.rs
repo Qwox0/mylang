@@ -423,7 +423,9 @@ impl Parser {
                                 then!(self.lex.advance_if_kind(TokenKind::Eq) => self.expr()?);
                             decl.var_ty_expr = ty;
                             decl.init = variant_index;
-                            decl.has_init_expr = decl.init.is_some();
+                            if decl.init.is_some() {
+                                decl.flags.set(DeclFlags::HAS_INIT_EXPR);
+                            }
                         } else if !decl.is_const {
                             return cerror2!(
                                 decl.full_span(),
@@ -1199,7 +1201,9 @@ impl Parser {
                 decl.init = then!(eq.is_some() => self.expr()?);
             },
         }
-        decl.has_init_expr = decl.init.is_some();
+        if decl.init.is_some() {
+            decl.flags.set(DeclFlags::HAS_INIT_EXPR);
+        }
         Ok(decl)
     }
 

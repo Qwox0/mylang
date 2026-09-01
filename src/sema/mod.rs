@@ -4,14 +4,13 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, AstVariant, BinOpKind, DeclFlags, DeclListExt,
-        FnFlags, GenericSlotFlags, InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind, StructFlags,
-        TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg,
-        type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclFlags, DeclListExt, FnFlags,
+        GenericSlotFlags, InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind, StructFlags, TypeEnum,
+        TypeMatch, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg, type_new,
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
-    display_code::{debug_expr, display},
+    display_code::display,
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -22,8 +21,8 @@ use crate::{
         Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic, generic_match,
     },
     type_::{
-        AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction,
-        remove_optional_coercion_for_finalize, struct_offset, ty_match,
+        AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, finalize_ty,
+        struct_offset, ty_match, ty_match_quiet,
     },
     util::{
         self, BigIntExt, BitFlags, IteratorExt, OptionExt, UnwrapDebug, VecExt, debug_only_assert,
@@ -912,7 +911,7 @@ impl Sema {
                         let var_ty = self.get_symbol_var_ty(s)?;
                         if let Some(f) = var_ty.try_downcast::<ast::Fn>()
                             && let Some(first_param) = f.params().get(0)
-                            && ty_match(lhs.ty.u(), first_param.var_ty.u())
+                            && ty_match_quiet(lhs.ty.u(), first_param.var_ty.u(), true)
                         {
                             debug_assert!(s.is_const);
                             rhs.ty = Some(var_ty);
@@ -1914,7 +1913,7 @@ impl Sema {
                                 self.analyze_fn_generic(*param, f)?;
                                 param.as_mut().scope = None;
                                 param.as_mut().is_const = true;
-                                self.analyze_generic_decl(*param)
+                                self.analyze_explicit_generic_decl(*param)
                             } else {
                                 debug_assert!(param.is_const);
                                 debug_assert!(param.var_ty.is_some());
@@ -1922,10 +1921,7 @@ impl Sema {
                                 Ok(())
                             }
                         } else {
-                            // TODO: see `todo_fix_cannot_finalize_generic_error`
-                            let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
-                                || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
-                            self.analyze_decl(*param, contains_generic)
+                            self.analyze_decl(*param, false)
                         }
                         .ignore_error()?
                     }
@@ -1978,7 +1974,7 @@ impl Sema {
                                 "cannot infer the return type of this recursive function"
                             );
                         }
-                        ret_ty.finalize2(Some(f.ret_ty_expr.unwrap_or(body)))?;
+                        ret_ty.finalize2(Some(f.ret_ty_expr.unwrap_or(body)), false)?;
                     } else {
                         debug_assert!(f.flags.get(FnFlags::IS_TYPE));
                         //panic_debug!("this function has already been analyzed as a function type")
@@ -2054,10 +2050,11 @@ impl Sema {
                         generics_scope.as_mut().decls.as_mut(),
                         sema_units,
                         finished_members,
-                        |generic, _unit| self.analyze_generic_decl(generic),
+                        |generic, _unit| self.analyze_explicit_generic_decl(generic),
                     );
                     self.close_scope(osh);
-                    res.as_sema_result(expr.upcast_to_type()); // TODO: implementation of UnitDependency::Scope is not correct for this case
+                    let res = res.as_sema_result(expr.upcast_to_type()); // TODO: implementation of UnitDependency::Scope is not correct for this case
+                    debug_assert_matches!(res, Ok(()));
 
                     *sema_units = None;
                     flags.set(StructFlags::GENERICS_ANALYZED);
@@ -2184,7 +2181,10 @@ impl Sema {
                         }
                         */
 
-                        debug_assert_eq!(member.init.is_some(), member.has_init_expr);
+                        debug_assert_eq!(
+                            member.init.is_some(),
+                            member.flags.get(DeclFlags::HAS_INIT_EXPR)
+                        );
                         match &mut member.as_mut().init {
                             Some(init) => debug_assert_eq!(init.rep().kind, AstKind::IntVal),
                             i @ None => {
@@ -2697,7 +2697,9 @@ impl Sema {
             }
         }
         decl.ty = Some(p.void_ty);
-        if let Some(t) = decl.var_ty_expr {
+        if let Some(t) = decl.var_ty_expr
+            && decl.var_ty.is_none()
+        {
             let ty = self.analyze_type_inst(t)?;
             debug_assert!(decl.var_ty.is_none_or(|t| ty_match(t, ty))); // TODO(without `NotFinished`): remove this
             decl.var_ty = Some(ty);
@@ -2719,7 +2721,7 @@ impl Sema {
                 || decl.flags.get(DeclFlags::IS_GENERIC);
             let init_ty = *self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty = check_or_infer_target!(init_ty, &mut decl.var_ty, true, init.full_span());
-            let var_ty = if !decl.is_const { var_ty.finalize() } else { *var_ty };
+            let var_ty = if !decl.is_const { var_ty.finalize_allow_generic() } else { *var_ty };
             // init.ty is finalized later
             if is_init_const && var_ty != p.err_ty && !init.rep().is_const_val() {
                 // Ideally all branches in `_analyze_inner` should handle the `is_const` parameter.
@@ -2804,7 +2806,7 @@ impl Sema {
         res
     }
 
-    fn analyze_generic_decl(&mut self, decl: Ptr<ast::Decl>) -> SemaResult<()> {
+    fn analyze_explicit_generic_decl(&mut self, decl: Ptr<ast::Decl>) -> SemaResult<()> {
         let p = p();
 
         debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
@@ -2817,9 +2819,11 @@ impl Sema {
 
         // The GenericSlot is put as the const_val of `decl`, which causes it to be distributed to
         // uses of `decl`
-        if let Some(default_expr) = decl.as_mut().init.replace(decl.generic.u().upcast()) {
+        if let Some(default_expr) = decl.as_mut().init.replace(decl.generic.u().upcast())
+            && decl.flags.get(DeclFlags::HAS_INIT_EXPR)
+        {
             debug_assert!(default_expr.kind != AstKind::GenericSlot);
-            decl.generic.u().default.set_once(default_expr.downcast_const_val());
+            decl.generic.u().default.set_or_expect(default_expr.downcast_const_val());
         }
 
         Ok(())
@@ -2941,13 +2945,11 @@ impl Sema {
         &mut self,
         kind: CallKind,
         ty: Ptr<T>,
-        args: &[Ptr<ast::Ast>],
+        args: &[Ptr<Ast>],
         close_p_span: Span,
         is_const: bool,
         expr: Ptr<Ast>,
     ) -> SemaResult<Ptr<T>> {
-        let p = p();
-
         debug_assert!(
             ty.flags().get(T::FLAG_IS_INSTANTIATION)
                 || ty.generics().iter().all(|g| g.generic.u().cur_inst.is_none())
@@ -2980,45 +2982,58 @@ impl Sema {
 
         let params = get_params(&kind, ty);
 
-        // positional args
+        let pos_arg_count = args.iter().copied().take_while(is_pos_arg).count();
+
+        let mut normal_pos_arg_count = pos_arg_count;
+        if pos_arg_count > params.len() {
+            if has_varargs {
+                normal_pos_arg_count = params.len();
+            } else {
+                return cerror2!(
+                    args.get(params.len()).u().full_span(),
+                    "Got {pos_arg_count} positional arguments, but expected at most {} arguments",
+                    params.len(),
+                );
+            }
+        }
+
+        let normal_pos_args = &args[..normal_pos_arg_count];
+        let var_args = &args[normal_pos_arg_count..pos_arg_count];
+        let named_args = &args[pos_arg_count..];
+
+        let params_for_normal_pos_args = &params[..normal_pos_arg_count];
+        let params_for_named_args = params.get(pos_arg_count..).unwrap_or(&[]);
+
+        fn analyze_if_generic_arg(
+            sema: &mut Sema,
+            param: Ptr<ast::Decl>,
+            arg_val: Ptr<ast::Ast>,
+        ) -> SemaResult<()> {
+            if param.flags.get(DeclFlags::IS_GENERIC) {
+                sema.analyze_and_check_type(arg_val, get_var_ty(param)?, true)?;
+                param
+                    .generic
+                    .u()
+                    .as_mut()
+                    .cur_inst
+                    .set_once(arg_val.downcast_const_val().finalize_allow_generic());
+            }
+            Ok(())
+        }
+
         let mut ok = true;
-        let mut pos_idx = 0;
-        while let Some(pos_arg) = args.get(pos_idx).copied().filter(is_pos_arg) {
-            let res: SemaResult<()> = try {
-                if let Some(&param) = params.get(pos_idx) {
-                    if !param.flags.get(DeclFlags::IS_GENERIC) {
-                        self.analyze_and_check_type(pos_arg, get_var_ty(param)?, is_const)?;
-                    } else {
-                        self.analyze_and_check_type(pos_arg, get_var_ty(param)?, true)?;
-                        param.generic.u().as_mut().cur_inst.set_once(pos_arg.downcast_const_val());
-                    }
-                } else if has_varargs {
-                    self.analyze(pos_arg, &None, is_const)?.finalize();
-                } else {
-                    let pos_arg_count = args.iter().copied().filter(is_pos_arg).count();
-                    return cerror2!(
-                        pos_arg.full_span(),
-                        "Got {pos_arg_count} positional arguments, but expected at most {} \
-                         arguments",
-                        params.len(),
-                    );
-                };
-            };
-            ok = res.is_ok()? && ok;
 
-            pos_idx += 1;
-        }
-        if !ok {
-            return Err(HandledErr);
+        // handle explicit positional generics
+        for (idx, pos_arg) in normal_pos_args.iter().enumerate() {
+            let res = analyze_if_generic_arg(self, *params.get(idx).u(), *pos_arg);
+            ok = res.is_ok()? && ok
         }
 
-        // named args
-        let named_args = &args[pos_idx..];
-        let remaining_params = params.get(pos_idx..).unwrap_or(&[]);
-        let mut was_set = vec![false; remaining_params.len()];
-        debug_assert!(!has_varargs || named_args.is_empty());
-        for &arg in named_args {
-            if is_pos_arg(&arg) {
+        // resolve params of named args; handle duplicate (named) args;
+        // handle named explicit generic annotations
+        let mut was_set_by_named = vec![false; params_for_named_args.len()];
+        for arg in named_args {
+            if is_pos_arg(arg) {
                 return cerror2!(
                     arg.full_span(),
                     "Cannot specify a positional argument after named arguments"
@@ -3028,29 +3043,21 @@ impl Sema {
             let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
                 return cerror2!(named_arg.lhs.full_span(), "Expected a parameter name");
             };
-            if let Some((param_idx, param)) = remaining_params.find_field(arg_name.sym) {
-                if was_set[param_idx] {
+            let param = if let Some((param_idx, param)) =
+                params_for_named_args.find_field(arg_name.sym)
+            {
+                if was_set_by_named[param_idx] {
                     error_duplicate_named_arg(arg_name);
                     chint!(named_args[param_idx].full_span(), "set here already");
                     return SemaResult::HandledErr;
-                } else {
-                    was_set[param_idx] = true;
                 }
-                arg_name.as_mut().decl.set_once(param);
-                self.analyze_and_check_type(named_arg.rhs, get_var_ty(param)?, is_const)?;
+                was_set_by_named[param_idx] = true;
+                param
             } else if let Some(g_decl) = ty.generics_scope().and_then(|g| g.find_decl(arg_name.sym))
             {
-                let g = g_decl.init.u().downcast::<ast::GenericSlot>(); // TODO: improve this
-                named_arg.as_mut().is_explicit_generic_arg = true;
-                arg_name.as_mut().decl.set_once(g_decl);
-                // TODO: correct type hint for non types
-                self.analyze_and_check_type(named_arg.rhs, p.type_ty, true)?;
-                let arg_ty = named_arg.rhs.downcast_const_val();
-                //g.as_mut().cur_inst.set_once(arg_ty);
-                g.as_mut().cur_inst = Some(arg_ty);
-                // TODO: check uses of generic
+                g_decl
             } else {
-                if let Some((idx, _)) = params[..pos_idx].find_field(arg_name.sym) {
+                if let Some((idx, _)) = params_for_normal_pos_args.find_field(arg_name.sym) {
                     error_duplicate_named_arg(arg_name);
                     chint!(
                         args[idx].full_span(),
@@ -3061,71 +3068,112 @@ impl Sema {
                 }
                 return SemaResult::HandledErr;
             };
+            arg_name.as_mut().decl.set_once(param);
+            let res = analyze_if_generic_arg(self, param, named_arg.rhs);
+            ok = res.is_ok()? && ok
         }
 
-        // missing args
-        let mut missing_params = remaining_params
-            .iter()
-            .copied()
-            .zip(was_set)
-            .filter(|(p, was_set)| !was_set && !p.has_default(is_enum_init))
-            .map(|(p, _)| p);
-        if let Some(first) = missing_params.next() {
-            let mut missing_params_list = String::new();
-            let mut idx = 0;
-            for p in iter::once(first).chain(missing_params) {
-                if idx != 0 {
-                    write!(&mut missing_params_list, ", ").unwrap();
-                }
-                let param_ty = get_var_ty(p)?;
-                write!(&mut missing_params_list, "`{}: {}`", p.ident.sym, param_ty).unwrap();
-                idx += 1;
-            }
-            cerror!(
-                close_p_span,
-                "Missing argument{0} for parameter{0} {1}",
-                if idx > 1 { "s" } else { "" },
-                missing_params_list
-            );
-            chint!(first.upcast().full_span(), "parameter defined here");
-            return SemaResult::HandledErr;
+        if !ok {
+            return Err(HandledErr);
         }
 
+        // infer generic based on return value
         if let CallKind::Function { ty_hint: Some(ty_hint) } = kind
             && let Some(g_def) =
                 ty.upcast().downcast::<ast::Fn>().ret_ty.try_downcast::<ast::GenericSlot>()
         {
-            // infer generic based on return value
             // TODO: this is not called when type return type is inferred (see infer_generic_based_on_inferred_return_type)
             let _ignore = accumulate_generic(g_def, ty_hint.upcast_to_const_val(), false);
         }
 
+        // analyze non-generic parameters (might cause generics to be inferred)
+        {
+            let pos_args = normal_pos_args
+                .iter()
+                .copied()
+                .zip_exact(params_for_normal_pos_args.iter().copied());
+            let named_args = named_args.iter().map(|a| {
+                let assign = a.downcast::<ast::Assign>();
+                (assign.rhs, assign.lhs.downcast::<ast::Ident>().decl.u())
+            });
+            for (arg_val, param) in pos_args.chain(named_args) {
+                let res = self.analyze_and_check_type(arg_val, get_var_ty(param)?, is_const);
+                ok = res.is_ok()? && ok;
+            }
+
+            for var_arg in var_args {
+                match self.analyze(*var_arg, &None, is_const) {
+                    Ok(ty) => {
+                        ty.finalize();
+                    },
+                    NotFinished(dep) => return NotFinished(dep),
+                    Err(HandledErr) => ok = false,
+                }
+            }
+
+            if !ok {
+                return Err(HandledErr);
+            }
+        }
+
+        // missing args
+        struct MissingParam(Ptr<ast::Decl>);
+        impl std::fmt::Display for MissingParam {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "`{}: {}`", self.0.ident.sym, self.0.var_ty.u())
+            }
+        }
+        let mut missing_params = params_for_named_args
+            .iter()
+            .copied()
+            .zip_exact(was_set_by_named)
+            .filter(|(p, was_set)| !was_set && !p.has_default(is_enum_init))
+            .map(|(p, _)| MissingParam(p));
+        if let Some(first) = missing_params.next() {
+            let mut missing_params_list = first.to_string();
+            let mut plural = false;
+            for p in missing_params {
+                missing_params_list.push_str(", ");
+                let _ = missing_params_list.write_fmt(format_args!("{p}"));
+                plural = true;
+            }
+            cerror!(
+                close_p_span,
+                "Missing argument{0} for parameter{0} {1}",
+                if plural { "s" } else { "" },
+                missing_params_list
+            );
+            chint!(first.0.upcast().full_span(), "parameter defined here");
+            return SemaResult::HandledErr;
+        }
+
+        // generic instantiation
         let inst = self.finalize_instantiation(ty, expr)?;
 
-        // finalize args to prevent leaking GenericSlot into arg expressions
+        // finalize args to prevent leaking GenericSlot type into arg expressions
         if inst.flags().get(T::FLAG_IS_INSTANTIATION) && ty.get_kind() == AstKind::Fn {
             let inst_params = get_params(&kind, inst);
-            debug_assert!(args[..pos_idx].len() <= inst_params.len() || has_varargs);
+            debug_assert!(normal_pos_args.len() <= inst_params.len());
 
-            let pos_args = args[..pos_idx].iter().zip(inst_params).map(|d| (*d.0, *d.1));
-            let named_args = args[pos_idx..].iter().map(|assign| {
+            let pos_args = normal_pos_args.iter().zip(inst_params).map(|d| (*d.0, *d.1));
+            let named_args = named_args.iter().map(|assign| {
                 let named_arg = assign.downcast::<ast::Assign>();
                 let lhs = named_arg.lhs.downcast::<ast::Ident>();
-                let param = if ty.flags().get(T::FLAG_IS_GENERIC) {
+                if ty.flags().get(T::FLAG_IS_GENERIC) {
                     let ty_param_decl = lhs.decl.u();
                     debug_assert!(!inst.main_scope().decls.contains(&ty_param_decl)); // ty_param_decl cannot be used
-                    if ty_param_decl.flags.get(DeclFlags::IS_GENERIC) {
+                    let inst_param = if ty_param_decl.flags.get(DeclFlags::IS_GENERIC) {
                         inst.generics_scope().u().as_ref()
                     } else {
                         inst.main_scope()
                     }
                     .find_decl_norec(lhs.sym, false)
-                    .u()
+                    .u();
+                    lhs.as_mut().decl = Some(inst_param);
                 } else {
                     debug_assert!(ty == inst);
-                    lhs.decl.u()
-                };
-                (named_arg.rhs, param)
+                }
+                (named_arg.rhs, lhs.decl.u())
             });
 
             for (arg, inst_param) in pos_args.chain(named_args) {
@@ -3167,7 +3215,7 @@ impl Sema {
                 err = true;
                 continue;
             };
-            inst_val.finalize();
+            inst_val.finalize_allow_generic();
             debug_assert!(inst_val.replacement.is_none());
             if inst_val.kind == AstKind::GenericSlot {
                 is_instantiation_with_generics = true;
@@ -3231,14 +3279,9 @@ impl Sema {
         Ok(inst)
     }
 
-    fn finalize_expr(
-        &mut self,
-        expr: Ptr<Ast>,
-        mut out_ty: Ptr<ast::Type>,
-    ) -> Result<(), HandledErr> {
+    fn finalize_expr(&mut self, expr: Ptr<Ast>, out_ty: Ptr<ast::Type>) -> Result<(), HandledErr> {
         use Result::*;
 
-        let p = p();
         let ty = expr.as_mut().ty.as_mut().u();
 
         if ty.propagates_out() {
@@ -3268,24 +3311,7 @@ impl Sema {
             _ => {},
         }
 
-        // TODO: dedup: finalize_ty(expr.as_mut().ty.as_mut().u(), out_ty, false);
-        debug_assert!(
-            ty_match(*ty, out_ty)
-                || ty
-                    .try_downcast_polymorphable()
-                    .is_some_and(|p| p.is_instantiation_with_generics()),
-            "{ty} matches {out_ty}"
-        );
-
-        remove_optional_coercion_for_finalize(*ty, &mut out_ty);
-
-        // this is probably incorrect in general.
-        // TODO: finalize during `ty_match`
-        if !ty.is_finalized()
-            || ty.iter_nested_optionals().any(|o| o.upcast_to_type().equals(p.null_ty))
-        {
-            *ty = out_ty;
-        }
+        finalize_ty(ty, out_ty, true);
         Ok(())
     }
 
@@ -3553,7 +3579,14 @@ impl Sema {
             debug_assert!(sym.init.u().replacement.is_none());
             f.upcast_to_type()
         } else {
-            debug_assert!(!sym.flags.get(DeclFlags::IS_GENERIC), "Generic was not inferred");
+            #[cfg(debug_assertions)]
+            if sym.flags.get(DeclFlags::IS_GENERIC) {
+                cwarn!(
+                    sym.full_span(),
+                    "Trying to access generic decl var_ty before it's analyzed. Maybe the Generic \
+                     was not inferred"
+                );
+            }
             return NotFinished(UnitDependency::VarType(sym));
         })
     }

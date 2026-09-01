@@ -402,3 +402,14 @@ alias :: f;
 ";
     test(code).compile_no_err();
 }
+
+#[test]
+fn named_arg_conflicts_with_pos_arg() {
+    let code = "
+f :: (a: i32) -> {}
+test :: -> f(1, a=2);
+";
+    test(code)
+        .error("Parameter 'a' specified multiple times", substr!("a=2";.start()))
+        .info("The parameter has already been set by this positional argument", substr!("1"));
+}

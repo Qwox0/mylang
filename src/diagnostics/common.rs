@@ -24,7 +24,7 @@ pub fn error_mismatched_types(
     {
         error_mismatched_types_custom(
             span,
-            format_args!("`{expected}` (inferred as `{cur_inst}`)"),
+            format_args!("`{cur_inst}` (value of `{expected}`)"),
             got,
         )
     } else {

@@ -2,7 +2,7 @@ use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclFlags, DeclList,
         DeclListExt, FnFlags, OPtrTypeExt, RangeKind, StructFlags, TypeEnum, TypeMatch,
-        UnaryOpKind, UpcastToAst, is_pos_arg, try_downcast_named_arg,
+        UnaryOpKind, UpcastToAst, is_pos_arg,
     },
     codegen::llvm::{bindings::*, error::get_inner_err},
     context::{ctx, primitives, tmp_alloc},
@@ -1296,15 +1296,10 @@ impl<'ctx> Codegen<'ctx> {
             let mut cur_llvm_arg_offset = sret_offset;
 
             let param_types = f.params().iter_types();
-            let vararg_types = args.clone().skip(f.params().len()).map_while(|arg| {
-                match try_downcast_named_arg(arg) {
-                    None => Some(arg.ty.u()),
-                    Some(named) => {
-                        debug_assert!(named.is_explicit_generic_arg);
-                        None
-                    },
-                }
-            });
+            let vararg_types = args
+                .clone()
+                .skip(f.params().len())
+                .map_while(|arg| then!(is_pos_arg(&arg) => arg.ty.u()));
 
             for ty in param_types.chain(vararg_types) {
                 let c_ffi_ty = self.c_ffi_type(ty);
@@ -4259,7 +4254,9 @@ pub fn for_each_call_arg<'ctx, U>(
     while args.peek().is_some_and(is_pos_arg) {
         let pos_arg = args.next().u();
         let param_def = params.get(pos_idx).copied();
-        f(pos_arg, param_def, pos_idx)?;
+        if !param_def.is_some_and(|d| d.flags.get(DeclFlags::IS_GENERIC)) {
+            f(pos_arg, param_def, pos_idx)?;
+        }
         pos_idx += 1;
     }
 
@@ -4272,7 +4269,12 @@ pub fn for_each_call_arg<'ctx, U>(
             continue;
         }
         let arg_name = named_arg.lhs.downcast::<ast::Ident>();
-        let (rem_param_idx, param_def) = remaining_params.find_field(arg_name.sym).u();
+        let param_def = arg_name.decl.u();
+        if param_def.flags.get(DeclFlags::IS_GENERIC) {
+            continue;
+        }
+        debug_assert_eq!(param_def, remaining_params.find_field(arg_name.sym).u().1);
+        let rem_param_idx = remaining_params.iter().position(|p| *p == param_def).u();
         debug_assert!(!was_set[rem_param_idx]);
         was_set[rem_param_idx] = true;
         f(named_arg.rhs, Some(param_def), pos_idx + rem_param_idx)?

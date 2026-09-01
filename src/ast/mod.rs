@@ -590,7 +590,6 @@ ast_variants! {
         is_const: bool,
         @debug(never_alternate)
         flags: DeclFlags,
-        has_init_expr: bool,
 
         @debug(simple_ident)
         ident: Ptr<Ident>,
@@ -920,11 +919,16 @@ ast_variants! {
 }
 
 bitflags!(DeclFlags: u16 {
+    // # parser flags:
     IS_MUT,
     IS_PUB,
     IS_REC,
     IS_STATIC,
     //IS_CONST,
+
+    HAS_INIT_EXPR,
+
+    // # sema flags:
     IS_DATA_MEMBER,
     IS_CONST_MEMBER,
     IS_PARAMETER,
@@ -1321,9 +1325,9 @@ impl Ptr<ConstVal> {
         }
     }
 
-    pub fn finalize(&mut self) -> Self {
+    pub fn finalize_allow_generic(&mut self) -> Self {
         if let Some(ty) = self.try_downcast_type_ref() {
-            ty.finalize();
+            let _ = ty.finalize_allow_generic();
         }
         *self
     }
@@ -1504,8 +1508,8 @@ impl Ast {
             AstEnum::Range { start, end, .. } => span
                 .maybe_join(start.map(|s| s.full_span()))
                 .maybe_join(end.map(|s| s.full_span())),
-            AstEnum::Decl { ident, var_ty_expr, has_init_expr, init, .. } => {
-                match init.filter(|_| *has_init_expr).or(*var_ty_expr) {
+            AstEnum::Decl { ident, var_ty_expr, flags, init, .. } => {
+                match init.filter(|_| flags.get(DeclFlags::HAS_INIT_EXPR)).or(*var_ty_expr) {
                     Some(e) => span.join(e.full_span()),
                     None => span.join(ident.span),
                 }
@@ -1812,7 +1816,6 @@ impl Decl {
             span: ident.span,
             flags: DeclFlags::default(),
             is_const: false,
-            has_init_expr: false,
             ident,
             on_type: None,
             generic: None,
@@ -1830,7 +1833,6 @@ impl Decl {
         let mut generic_decl = ast_new!(alloc, Decl {
             span: generic.span,
             is_const: true,
-            has_init_expr: false,
             flags: DeclFlags::default(),
             ident: generic.name,
             on_type: None,
@@ -1856,7 +1858,6 @@ impl Decl {
                     span: lhs.full_span(),
                     flags: DeclFlags::default(),
                     is_const: false,
-                    has_init_expr: false,
                     ident: dot.rhs,
                     on_type: Some(ty_expr),
                     generic: None,
@@ -2633,7 +2634,6 @@ impl CloneAst for Ptr<Decl> {
         let ident = generic.map(|g| g.name).unwrap_or_else(|| self.ident.clone_ast(alloc));
         let decl = alloc.alloc(ast_new!(local Decl {
             is_const: self.is_const,
-            has_init_expr: self.has_init_expr,
             flags: self.flags,
             ident,
             on_type: self.on_type.clone_ast(alloc),

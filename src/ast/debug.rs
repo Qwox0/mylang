@@ -795,7 +795,7 @@ pub mod special_debug_handlers {
             Some(value) => debug_struct.field_with(name, |f| {
                 let span = value.full_span();
                 if !f.alternate() {
-                    return f.write_fmt(format_args!("{:?}", span.get_text().as_ref()));
+                    return f.write_fmt(format_args!("`{}`", span.get_text().as_ref()));
                 }
 
                 let mut d = display(if span.len() > MAX_SPAN_LEN { span.start() } else { span });

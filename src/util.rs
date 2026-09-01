@@ -182,10 +182,8 @@ impl<T> OptionExt<T> for Option<T> {
 
     fn set_or_expect(&mut self, val: T)
     where T: PartialEq + fmt::Debug {
-        match self {
-            Some(prev) => debug_assert_eq!(prev, &val),
-            None => *self = Some(val),
-        }
+        debug_assert!(self.as_ref().is_none_or(|s| *s == val));
+        *self = Some(val)
     }
 
     fn display(&self) -> impl std::fmt::Display
@@ -316,6 +314,16 @@ pub trait IteratorExt: Iterator + Sized {
         self.join_into(", ", &mut buf);
         write!(&mut buf, " {last_sep} {last}").u();
         buf
+    }
+
+    fn zip_exact<O>(self, other: impl IntoIterator<IntoIter = O>) -> std::iter::Zip<Self, O>
+    where
+        Self: ExactSizeIterator,
+        O: ExactSizeIterator,
+    {
+        let other = other.into_iter();
+        debug_assert_eq!(self.len(), other.len(), "Expected iterators to have same length");
+        self.zip(other)
     }
 }
 
