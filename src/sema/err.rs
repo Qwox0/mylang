@@ -36,6 +36,14 @@ impl<T> SemaResult<T> {
             Err(HandledErr) => Ok(false),
         }
     }
+
+    pub fn handle_err(self) -> SemaResult<Option<T>> {
+        match self {
+            Ok(t) => Ok(Some(t)),
+            NotFinished(dep) => NotFinished(dep),
+            Err(HandledErr) => Ok(None),
+        }
+    }
 }
 impl SemaResult<()> {
     pub fn ignore_error(self) -> Self {

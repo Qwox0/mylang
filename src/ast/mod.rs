@@ -8,7 +8,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeFlags, ScopeKind},
     scratch_allocator::TmpPtr,
-    sema::SemaUnit,
+    sema::{SemaUnit, UnfinishedMembers},
     type_::{finalize_ty, ty_match},
     util::{
         BitFlags, OptionExt, UnwrapDebug, bitflags, macro_orelse, panic_debug, then, to_f64,
@@ -1069,7 +1069,7 @@ impl Ptr<Ast> {
             debug_assert!(self.rep().has_type_kind(), "expected type kind; got: {:?}", self.kind);
             true
         } else if [AstKind::Fn, AstKind::GenericSlot].contains(&self.rep().kind) {
-            self.ty.u().p_eq(self)
+            self.ty.u().p_eq(self) || self.ty.u() == p.err_ty
         } else if self == p.err_ty.upcast() {
             true
         } else {
@@ -1157,7 +1157,12 @@ impl Ptr<Ast> {
 
     pub fn flat_downcast_type(self) -> Ptr<Type> {
         debug_assert!(self.has_type_kind(), "expected type kind, got {:?}", self.kind);
-        debug_assert!(self.ty.is_none() || self.is_type(), "`{}`", self.ty.display());
+        debug_assert!(
+            self.ty.is_none() || self.is_type(),
+            "expected type, got kind {:?} with type {}",
+            self.kind,
+            self.ty.display()
+        );
         self.cast()
     }
 
@@ -1605,10 +1610,12 @@ impl Type {
 
     /// For custom types this returns the constants defined inside the scope of the type.
     pub fn get_scope(&self) -> Option<&Scope> {
-        debug_assert!(
-            Ptr::from_ref(self).try_downcast_polymorphable().is_none_or(|p| !p.is_generic())
-        );
-        match self.matchable().as_ref() {
+        Some(Ptr::from_ref(self).as_mut().get_scope_mut()?)
+    }
+
+    /// For custom types this returns the constants defined inside the scope of the type.
+    pub fn get_scope_mut(&mut self) -> Option<&mut Scope> {
+        match self.matchable().as_mut() {
             TypeEnum::StructDef { scope, .. }
             | TypeEnum::UnionDef { scope, .. }
             | TypeEnum::EnumDef { scope, .. } => Some(scope),
@@ -1616,20 +1623,32 @@ impl Type {
         }
     }
 
-    pub fn unfinished(&self) -> UnfinishedMembers<'_> {
-        match self.matchable().as_ref() {
+    pub fn member_sema_state(self: &Self) -> Option<UnfinishedMembers<'_, Decl>> {
+        match self.matchable().as_mut() {
             TypeEnum::StructDef { scope, sema_units, finished_members, .. }
             | TypeEnum::UnionDef { scope, sema_units, finished_members, .. }
-            | TypeEnum::EnumDef { scope, sema_units, finished_members, .. } => UnfinishedMembers {
-                decls: &scope.decls[*finished_members..],
-                units: &sema_units.as_ref().u()[*finished_members..],
+            | TypeEnum::EnumDef { scope, sema_units, finished_members, .. } => {
+                Some(UnfinishedMembers {
+                    items: &mut scope.decls,
+                    units: sema_units.as_mut().u(),
+                    finished_count: finished_members,
+                })
             },
-            _ => UnfinishedMembers { decls: &[], units: &[] },
+            _ => None,
         }
     }
 
     pub fn get_associated_external_consts(&self) -> Option<&[Ptr<Decl>]> {
         match self.matchable().as_ref() {
+            TypeEnum::StructDef { external_consts, .. }
+            | TypeEnum::UnionDef { external_consts, .. }
+            | TypeEnum::EnumDef { external_consts, .. } => Some(external_consts),
+            _ => None,
+        }
+    }
+
+    pub fn get_associated_external_consts_mut(&mut self) -> Option<&mut Vec<Ptr<Decl>>> {
+        match self.matchable().as_mut() {
             TypeEnum::StructDef { external_consts, .. }
             | TypeEnum::UnionDef { external_consts, .. }
             | TypeEnum::EnumDef { external_consts, .. } => Some(external_consts),
@@ -1691,21 +1710,6 @@ impl Type {
             TypeMatch::ArrayLikeContainer(_) => unreachable_debug(),
             TypeMatch::GenericSlot(_) => todo!("Generic"),
         })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct UnfinishedMembers<'a> {
-    pub decls: &'a [Ptr<Decl>],
-    pub units: &'a [SemaUnit],
-}
-
-impl<'a> UnfinishedMembers<'a> {
-    pub fn iter(self) -> impl ExactSizeIterator<Item = (&'a SemaUnit, Ptr<Decl>)> {
-        debug_assert_eq!(self.decls.len(), self.units.len());
-        (0..self.decls.len())
-            .into_iter()
-            .map(|idx| (self.units.get(idx).u(), *self.decls.get(idx).u()))
     }
 }
 

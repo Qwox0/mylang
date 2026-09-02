@@ -85,13 +85,51 @@ fn generic_type_error() {
     let code = r#"
 add_pi :: (val: $Num) -> val + 3.1415;
 test :: -> {
-    add_pi(1.0);
     add_pi(1);
     add_pi("Hello World");
     add_pi(struct { val := 1 }.{});
+    add_pi(1.0);
 }
 "#;
-    // TODO: also print call which generated instantiation
+    // TODO: also show the call expression which generated instantiation error
+    test(code)
+        .error("mismatched types (left: `i64`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `[]u8`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `struct{val:i64}`, right: `{float}`)", substr!("+"));
+}
+
+#[test]
+fn generic_type_error_after_pause() {
+    // error in block returns Ok(err_ty)
+    let code = r#"
+add_pi :: (val: $Num) -> {
+    PAUSE1;
+    val + 3.1415
+}
+test :: -> {
+    add_pi(1);
+    add_pi("Hello World");
+    add_pi(struct { val := 1 }.{});
+    add_pi(1.0);
+}
+PAUSE1 :: PAUSE2; PAUSE2 :: PAUSE3; PAUSE3 :: PAUSE4; PAUSE4 :: 1;
+"#;
+    test(code)
+        .error("mismatched types (left: `i64`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `[]u8`, right: `{float}`)", substr!("+"))
+        .error("mismatched types (left: `struct{val:i64}`, right: `{float}`)", substr!("+"));
+
+    // error in expression returns Err(HandledErr)
+    let code = r#"
+add_pi :: (val: $Num) -> PAUSE1 * (val + 3.1415);
+test :: -> {
+    add_pi(1);
+    add_pi("Hello World");
+    add_pi(struct { val := 1 }.{});
+    add_pi(1.0);
+}
+PAUSE1 :: PAUSE2; PAUSE2 :: PAUSE3; PAUSE3 :: PAUSE4; PAUSE4 :: 1;
+"#;
     test(code)
         .error("mismatched types (left: `i64`, right: `{float}`)", substr!("+"))
         .error("mismatched types (left: `[]u8`, right: `{float}`)", substr!("+"))
@@ -433,7 +471,8 @@ f :: (
     let code = "
 MyStruct :: struct($T) { val: T; }
 f :: (
-    a: MyStruct($Num) = .{ val=1 },  // this init causes a call to finalize, which must not fail for `MyStruct($Num)`
+    a: MyStruct($Num) = .{ val=1 },  // this init causes a call to finalize, which must not fail \
+                for `MyStruct($Num)`
     b := MyStruct.{ val=2 },
 ) -> {}
 ";
@@ -490,4 +529,25 @@ test :: -> f(1, T=[]u8);
 ";
     test(code)
         .error("mismatched types: expected `[]u8` (value of `$T`); got `{integer}`", substr!("1"));
+}
+
+#[test]
+fn dont_duplicate_dependency_errors_in_generic_items() {
+    // previously finalize_instantiation returned NotFinished analyze result of the newly created
+    // instantiation. This meant that units for both instantiation expr and call expr stored the
+    // dependency. Thus errors, like UNKNOWN associated constant, where emitted twice.
+    // Even worse, other identical instantiation expressions assumed that sema of the instantiation
+    // was finished. This also proves that the instantiation expression cannot be used wait for
+    // sema of the instantiation, meaning that sema.unfinished_instantiations is required.
+    let code = "
+MyStruct :: struct {
+    val: i32;
+}
+f :: ($T: type) -> MyStruct.UNKNOWN;
+test :: -> f(i32);
+test2 :: -> f(i32);
+";
+    test(code).error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+    // no cycle error!
+    ;
 }

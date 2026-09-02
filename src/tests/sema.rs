@@ -41,6 +41,65 @@ test :: -> CONST.arr[4];";
 }
 
 #[test]
+fn no_cycle_error_after_other_dependency_errors() {
+    // 1. sema of `f` pauses because UNKNOWN might be defined outside of MyStruct
+    // 2. cycle detection emits unknown `UNKNOWN` error
+    // 3. sema has to run again and mark `f` as error
+    // 4. cycle detection has to emit remaining cycle errors
+
+    {
+        let code = "
+MyStruct :: struct {
+    val: i32;
+    f :: -> MyStruct.UNKNOWN;
+}
+test :: -> MyStruct.f();
+";
+        test(code).error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+    // no cycle error!
+    ;
+
+        test(format!("{code}cycle :: cycle;"))
+            .error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+            .error("cycle(s) detected:", |_| TestSpan::ZERO);
+    }
+
+    {
+        let code = "
+MyStruct :: struct {
+    val: i32;
+}
+f :: -> MyStruct.UNKNOWN;
+test :: -> f();
+";
+        test(code).error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+    // no cycle error!
+    ;
+
+        test(format!("{code}cycle :: cycle;"))
+            .error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+            .error("cycle(s) detected:", |_| TestSpan::ZERO);
+    }
+
+    {
+        let code = "
+MyStruct :: struct {
+    val: i32;
+}
+f :: ($T: type) -> T MyStruct.UNKNOWN;
+test :: -> f(i32);
+";
+        test(code).error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+    // no cycle error!
+    ;
+
+        test(format!("{code}cycle :: cycle;"))
+            .error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
+            .error("cycle(s) detected:", |_| TestSpan::ZERO);
+    }
+}
+
+#[test]
 fn recursive_type() {
     let code = "
 A :: struct { a: *A };
@@ -146,4 +205,26 @@ test :: -> {
     test(code)
         .error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
         .error("mismatched types: expected `[]u8`; got `{integer}`", substr!("1"));
+}
+
+#[test]
+fn error_access_field_on_function() {
+    // Previously this generated a UnitDependency::Dot, which panicked during UnitDependency::resolved.
+    let code = "
+f :: (a: i32, b: i32) -> a + b;
+test :: -> f.some_field;
+";
+    test(code)
+        .with_prelude()
+        .error("no field `some_field` on type `(a:i32,b:i32)->i32`", substr!("some_field"));
+
+    // same thing for UnitDependency::AssociatedConst
+    let code = "
+MyFunctionType :: (a:i32,b:i32)->i32;
+test :: -> MyFunctionType.SOME_CONST;
+";
+    test(code).with_prelude().error(
+        "no associated constant `SOME_CONST` on type `(a:i32,b:i32)->i32`",
+        substr!("SOME_CONST"),
+    );
 }

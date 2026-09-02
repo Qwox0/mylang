@@ -162,3 +162,23 @@ pub fn error_cannot_infer_generics(expr: Ptr<ast::Ast>) -> HandledErr {
         ty.upcast().downcast_type2()
     )
 }
+
+#[track_caller]
+pub fn error_missing_associated_const(dot: Ptr<ast::Dot>) -> HandledErr {
+    let lhs = dot.lhs.u().downcast_type();
+    if lhs.kind == AstKind::EnumDef {
+        cerror!(
+            dot.rhs.span,
+            "no variant or associated constant `{}` on enum type `{lhs}`",
+            dot.rhs.sym,
+        )
+    } else {
+        cerror!(dot.rhs.span, "no associated constant `{}` on type `{lhs}`", dot.rhs.sym)
+    }
+}
+
+#[track_caller]
+pub fn error_missing_field(dot: Ptr<ast::Dot>) -> HandledErr {
+    let ty = dot.lhs.u().ty.u().flatten_transparent();
+    cerror!(dot.rhs.span, "no field `{}` on type `{ty}`", dot.rhs.sym)
+}

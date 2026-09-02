@@ -20,6 +20,7 @@ use crate::{
     sema::generics::{
         Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic, generic_match,
     },
+    source_file::SourceFile,
     type_::{
         AllowOptionalCoercion, common_type, common_type_restrict_optional_coerction, finalize_ty,
         struct_offset, ty_match, ty_match_quiet,
@@ -70,7 +71,6 @@ macro_rules! check_or_infer_target {
 }
 
 pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
-    let p = p();
     // validate top level stmts
     let _ignore = cctx.primitives_scope.as_mut().verify_no_duplicates();
     for file in cctx.files().iter().copied() {
@@ -79,8 +79,8 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             let Some(decl) = s.try_downcast::<ast::Decl>() else {
                 if !s.kind.is_allowed_top_level() {
                     cerror!(s.full_span(), "unexpected top level expression");
-                    s.as_mut().ty = Some(p.err_ty);
-                    s.set_replacement(p.err_ty.upcast());
+                    s.as_mut().ty = Some(p().err_ty);
+                    s.set_replacement(p().err_ty.upcast());
                 }
                 continue;
             };
@@ -107,29 +107,39 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             waiting_for: None,
         }))
         .unwrap();
+
+    fn iter_unfinished_files<'a>(
+        cctx: Ptr<CompilationContextInner>,
+        stmts: &'a mut [Ptr<Ast>],
+        units: &'a mut [SemaUnit],
+    ) -> impl Iterator<Item = (Ptr<SourceFile>, UnfinishedMembers<'a, Ast>)> {
+        let stmts = Ptr::from_ref(stmts);
+        let units = Ptr::from_ref(units);
+        cctx.as_ref().files().iter().filter_map(move |&file| {
+            let stmt_range = file.as_mut().stmt_range.as_mut().u();
+            then!(!stmt_range.is_empty() => (file, UnfinishedMembers {
+                items: &mut stmts.as_mut()[..stmt_range.end],
+                units: &mut units.as_mut()[..stmt_range.end],
+                finished_count: &mut stmt_range.start,
+            }))
+        })
+    }
+
     let mut finished = 0;
-    while finished != units.len() {
-        debug_assert!(finished < units.len());
+    while finished < units.len() + sema.unfinished_instantiation_units.len() {
         let mut continued = false;
 
-        // files
-        for file in cctx.files().iter().copied() {
-            let stmt_range = file.as_mut().stmt_range.as_mut().u();
-            if stmt_range.start == stmt_range.end {
-                continue;
-            }
-
+        for (file, UnfinishedMembers { items: stmts, units, finished_count }) in
+            iter_unfinished_files(cctx, stmts, &mut units)
+        {
             debug_assert!(file.scope.as_ref().u().parent.is_some());
             let osh = sema.open_scope(file.as_mut().scope.as_mut().u());
-            let prev_start = stmt_range.start;
-            let res = analyze_scope(
-                &mut stmts[..stmt_range.end],
-                &mut units[..stmt_range.end],
-                &mut stmt_range.start,
-                |stmt, _unit| sema.analyze_top_level(stmt),
-            );
-            continued = continued || res.continued;
-            finished += stmt_range.start - prev_start;
+            let prev_count = *finished_count;
+            let res = analyze_scope(stmts, units, finished_count, |stmt, _unit| {
+                sema.analyze_top_level(stmt)
+            });
+            continued |= res.continued;
+            finished += *finished_count - prev_count;
             debug_assert!(
                 sema.defer_stack.get_cur_scope().is_empty(),
                 "file scope must not contain defer statements"
@@ -137,108 +147,67 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             sema.close_scope(osh);
         }
 
-        // unfinished_instantiations
-        {
-            debug_assert_eq!(
-                sema.unfinished_instantiations.len(),
-                sema.unfinished_instantiation_units.len()
-            );
-            let mut idx = 0;
-            while let Some(&inst) = sema.unfinished_instantiations.get(idx) {
-                let res = sema.analyze(inst.upcast(), &None, false);
-                if let NotFinished(dep) = res {
-                    sema.unfinished_instantiation_units.get_mut(idx).u().update_dep(dep);
-                    idx += 1;
-                    finished = finished.saturating_sub(1);
-                } else {
-                    sema.unfinished_instantiations.swap_remove(idx);
-                    sema.unfinished_instantiation_units.swap_remove(idx);
-                    continued = true;
-                }
+        traverse_unfinished_insts!(sema; unit, inst => {
+            // open_scope/close_scope are not needed
+            debug_assert!(inst.main_scope().parent.is_some());
+            debug_assert!(inst.generics_scope().u().parent.is_some());
+            if !unit.waiting_for.as_ref().is_none_or(UnitDependency::resolved) {
+                TraverseResult::Skip
+            } else {
+                continued = true;
+                sema.analyze(inst.upcast(), &None, false).into()
             }
-        }
+        });
 
         if !continued {
-            let mut cycles = vec![];
+            struct CycleDetectionState {
+                has_non_cycle_error: bool,
+                has_cycle: bool,
+            }
+            let mut state = CycleDetectionState { has_non_cycle_error: false, has_cycle: false };
 
             fn unknown_symbol_error<'u>(
                 unit: &'u SemaUnit,
-                cycles: &mut Vec<(&'u SemaUnit, Ptr<Ast>)>,
-            ) -> bool {
-                match unit.waiting_for.as_ref().u() {
-                    UnitDependency::AssociatedConst(dot) => {
-                        let lhs = dot.lhs.u().downcast_type();
-                        if lhs.kind == AstKind::EnumDef {
-                            cerror!(
-                                dot.rhs.span,
-                                "no variant or associated constant `{}` on enum type `{lhs}`",
-                                dot.rhs.sym,
-                            )
-                        } else {
-                            cerror!(
-                                dot.rhs.span,
-                                "no associated constant `{}` on type `{lhs}`",
-                                dot.rhs.sym,
-                            )
-                        }
-                    },
-                    UnitDependency::Dot(dot) => {
-                        let ty = dot.lhs.u().ty.u().flatten_transparent();
-                        cerror!(dot.rhs.span, "no field `{}` on type `{ty}`", dot.rhs.sym)
-                    },
-                    UnitDependency::Scope(s) => {
-                        let mut ret = false;
-                        let unfinished_units = s.unfinished();
-                        debug_assert!(unfinished_units.iter().len() >= 1);
-                        for (unit, member) in unfinished_units.iter() {
-                            if unknown_symbol_error(unit, cycles) {
-                                ret = true;
-                            } else {
-                                cycles.push((unit, member.upcast()));
-                            }
-                        }
-                        return ret;
-                    },
-                    UnitDependency::ExprType(_)
-                    | UnitDependency::VarType(_)
-                    | UnitDependency::AllSubTypes(_)
-                    | UnitDependency::EnumVariantTag(_) => return false,
-                };
-                true
-            }
-            debug_assert_eq!(
-                sema.unfinished_instantiations.len(),
-                sema.unfinished_instantiation_units.len()
-            );
-            for (unit, inst) in cctx
-                .files()
-                .iter()
-                .copied()
-                .flat_map(|f| f.as_mut().stmt_range.as_mut().u().into_iter())
-                .map(|idx| (units.get(idx).u(), *stmts.get(idx).u()))
-                .chain(
-                    sema.unfinished_instantiation_units
-                        .iter()
-                        .zip(sema.unfinished_instantiations.iter().map(|inst| inst.upcast())),
-                )
-            {
-                if !unknown_symbol_error(unit, &mut cycles) {
-                    cycles.push((unit, inst));
+                expr: Ptr<Ast>,
+                state: &mut CycleDetectionState,
+            ) -> TraverseResult {
+                let dep = unit.waiting_for.as_ref().u();
+                let was_handled = dep.emit_missing_dep_error(expr);
+                if was_handled {
+                    state.has_non_cycle_error = true;
+                    TraverseResult::CompleteItem
+                } else {
+                    state.has_cycle = true;
+                    TraverseResult::Skip
                 }
             }
+            for (_, mut stmts) in iter_unfinished_files(cctx, stmts, &mut units) {
+                stmts.traverse_unfinished(|s, unit| unknown_symbol_error(unit, s, &mut state));
+            }
+            traverse_unfinished_insts!(sema; unit, inst => unknown_symbol_error(unit, inst.upcast(), &mut state));
 
-            if cycles.is_empty() {
+            // see `no_cycle_error_after_other_dependency_errors`
+            if state.has_non_cycle_error {
+                continue;
+            } else if !state.has_cycle {
                 break;
             }
+
             cerror!(Span::ZERO, "cycle(s) detected:"); // TODO: detect individual cycles
-            for (unit, stmt) in cycles {
+            fn print_cycle_element(stmt: Ptr<Ast>, unit: &SemaUnit) -> TraverseResult {
                 let span = stmt
                     .try_downcast::<ast::Decl>()
                     .map(|d| d.ident.span)
                     .unwrap_or_else(|| stmt.full_span());
                 let dep = unit.waiting_for.as_ref().u();
                 display(span).label(&format!("waiting for: {dep:?}")).finish();
+                TraverseResult::Skip
             }
+            for (_, mut stmts) in iter_unfinished_files(cctx, stmts, &mut units) {
+                stmts.traverse_unfinished(print_cycle_element);
+            }
+            traverse_unfinished_insts!(sema; unit, inst => print_cycle_element(inst.upcast(), unit));
+
             break;
         }
     }
@@ -253,6 +222,7 @@ struct AnalyzeScopeResult {
 
 impl AnalyzeScopeResult {
     fn as_sema_result(self, ty_with_scope: Ptr<ast::Type>) -> SemaResult<()> {
+        debug_assert!(ty_with_scope.get_scope().is_some());
         match self.ok {
             false => Err(HandledErr),
             true if self.finished => Ok(()),
@@ -281,6 +251,55 @@ fn analyze_scope2(
     analyze_scope(decls, units.as_mut().u(), finished_count, analyze_item)
 }
 
+fn analyze_scope<T>(
+    items: &mut [Ptr<T>],
+    units: &mut [SemaUnit],
+    finished_count: &mut usize,
+    mut analyze_item: impl FnMut(Ptr<T>, &SemaUnit) -> SemaResult<()>,
+) -> AnalyzeScopeResult {
+    let mut ok = true;
+    let mut continued = false;
+
+    traverse_unfinished_scope_members(items, units, finished_count, |item, unit| {
+        if !unit.waiting_for.as_ref().is_none_or(UnitDependency::resolved) {
+            return TraverseResult::Skip;
+        }
+        continued = true;
+
+        let res = analyze_item(item, unit);
+        if matches!(res, Err(_)) {
+            ok = false;
+        }
+        res.into()
+    });
+
+    debug_assert!(*finished_count <= items.len());
+    AnalyzeScopeResult { ok, finished: *finished_count == items.len(), continued }
+}
+
+pub enum TraverseResult {
+    /// keep member unfinished and keep current dependency
+    Skip,
+    /// keep member unfinished
+    UpdateDep(UnitDependency),
+    CompleteItem,
+}
+
+impl<T> From<SemaResult<T>> for TraverseResult {
+    fn from(res: SemaResult<T>) -> Self {
+        match res {
+            NotFinished(dep) => TraverseResult::UpdateDep(dep),
+            Ok(_) | Err(HandledErr) => TraverseResult::CompleteItem,
+        }
+    }
+}
+
+impl TraverseResult {
+    fn from_finished(finished: bool) -> Self {
+        if finished { TraverseResult::CompleteItem } else { TraverseResult::Skip }
+    }
+}
+
 /// 0 1 2 3 4 5 6 7 8 9
 /// . . x|.
 /// 0 1 3 2 4 5 6 7 8 9
@@ -293,48 +312,89 @@ fn analyze_scope2(
 /// . . . . . . x x x|
 ///
 /// . = sema finished; x = sema waiting
-fn analyze_scope<T>(
+fn traverse_unfinished_scope_members<T>(
     items: &mut [Ptr<T>],
     units: &mut [SemaUnit],
-    finished_count: &mut usize,
-    mut analyze_item: impl FnMut(Ptr<T>, &SemaUnit) -> SemaResult<()>,
-) -> AnalyzeScopeResult {
-    debug_assert!(*finished_count <= items.len());
+    finished_members: &mut usize,
+    mut analyze_item: impl FnMut(Ptr<T>, &SemaUnit) -> TraverseResult,
+) {
+    debug_assert!(*finished_members <= items.len());
     debug_assert_eq!(items.len(), units.len());
-    let mut ok = true;
-    let mut continued = false;
-    // index-based loop because `items` is mutated during the loop. In theory an iterator should
-    // also work because only previous/already consumed items are swapped.
-    let mut idx = *finished_count;
-    while let Some(unit) = units.get(idx) {
-        if !unit.waiting_for.as_ref().is_none_or(UnitDependency::resolved) {
-            idx += 1;
-            continue;
-        }
-        continued = true;
 
-        let i = *items.get(idx).u();
-        let res = analyze_item(i, unit);
-        if !matches!(res, SemaResult::NotFinished { .. }) {
-            finish_item_in_scope(idx, items, units, finished_count);
-        }
-        match res {
-            Ok(()) => {},
-            NotFinished(dep) => units.get_mut(idx).u().update_dep(dep),
-            Err(HandledErr) => ok = false,
+    let mut idx = *finished_members;
+    while let Some(unit) = units.get_mut(idx) {
+        let item = *items.get(idx).u();
+        match analyze_item(item, unit) {
+            TraverseResult::Skip => {},
+            TraverseResult::UpdateDep(dep) => unit.update_dep(dep),
+            TraverseResult::CompleteItem => {
+                finish_item_in_scope(idx, items, units, finished_members);
+            },
         }
         idx += 1;
     }
-    debug_assert!(*finished_count <= items.len());
-    AnalyzeScopeResult { ok, finished: *finished_count == items.len(), continued }
 }
 
-fn finish_item_in_scope<T>(
+// Has to be a macro because `sema` reference cannot be used while `unit` reference is active.
+// Normal predicate signatures cannot express this kind of information.
+macro_rules! traverse_unfinished_insts {
+    ($sema:ident; $unit:ident, $inst:ident => $body:expr) => {{
+        debug_assert_eq!(
+            $sema.unfinished_instantiations.len(),
+            $sema.unfinished_instantiation_units.len()
+        );
+        let mut idx = 0;
+        while let Some($unit) = $sema.unfinished_instantiation_units.get(idx) {
+            let $inst = *$sema.unfinished_instantiations.get(idx).u();
+            let res: TraverseResult = $body;
+            match res {
+                TraverseResult::Skip => idx += 1,
+                TraverseResult::UpdateDep(dep) => {
+                    // Note: body might mutate unfinished_instantiation_units which
+                    // invalidates `unit`. Rust catches this.
+                    $sema.unfinished_instantiation_units.get_mut(idx).u().update_dep(dep);
+                    idx += 1;
+                },
+                TraverseResult::CompleteItem => {
+                    $sema.unfinished_instantiations.swap_remove(idx);
+                    $sema.unfinished_instantiation_units.swap_remove(idx);
+                },
+            }
+        }
+    }};
+}
+use traverse_unfinished_insts;
+
+#[derive(Debug)]
+pub struct UnfinishedMembers<'a, T> {
+    pub items: &'a mut [Ptr<T>],
+    pub units: &'a mut [SemaUnit],
+    pub finished_count: &'a mut usize,
+}
+
+impl<'a, T> UnfinishedMembers<'a, T> {
+    #[inline]
+    pub fn unfinished_units(&self) -> &[SemaUnit] {
+        &self.units[*self.finished_count..]
+    }
+
+    pub fn iter(self) -> impl ExactSizeIterator<Item = (&'a mut SemaUnit, Ptr<T>)> {
+        self.units.iter_mut().zip_exact(self.items.iter().copied())
+    }
+
+    #[inline]
+    fn traverse_unfinished(&mut self, f: impl FnMut(Ptr<T>, &SemaUnit) -> TraverseResult) {
+        traverse_unfinished_scope_members(self.items, self.units, self.finished_count, f);
+    }
+}
+
+pub fn finish_item_in_scope<T>(
     item_idx: usize,
     items: &mut [Ptr<T>],
     units: &mut [SemaUnit],
     finished_count: &mut usize,
 ) {
+    debug_assert!(*finished_count <= item_idx);
     items.swap(item_idx, *finished_count);
     units.swap(item_idx, *finished_count);
     *finished_count += 1;
@@ -360,38 +420,111 @@ pub struct Sema {
 pub enum UnitDependency {
     ExprType(Ptr<ast::Ast>),
     VarType(Ptr<ast::Decl>),
+    RetTy(Ptr<ast::Fn>),
     AllSubTypes(Ptr<ast::Type>),
     EnumVariantTag(Ptr<ast::Decl>),
 
-    AssociatedConst(Ptr<ast::Dot>),
-    Dot(Ptr<ast::Dot>),
+    _AssociatedConst(Ptr<ast::Dot>),
+    _Dot(Ptr<ast::Dot>),
     Scope(Ptr<ast::Type>),
 }
 
 impl UnitDependency {
+    #[allow(non_snake_case)]
+    pub fn AssociatedConst(dot: Ptr<ast::Dot>) -> Result<UnitDependency, HandledErr> {
+        let ok: Option<()> = try {
+            dot.lhs?.downcast_type().get_associated_external_consts()?;
+        };
+
+        if ok.is_some() {
+            Result::Ok(UnitDependency::_AssociatedConst(dot))
+        } else {
+            Result::Err(error_missing_associated_const(dot))
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Dot(dot: Ptr<ast::Dot>) -> Result<UnitDependency, HandledErr> {
+        let ok: Option<()> = try {
+            dot.lhs?.ty?.flatten_transparent().get_associated_external_consts()?;
+        };
+
+        if ok.is_some() {
+            Result::Ok(UnitDependency::_Dot(dot))
+        } else {
+            Result::Err(error_missing_field(dot))
+        }
+    }
+
     pub fn resolved(&self) -> bool {
         match self {
             UnitDependency::ExprType(expr) => expr.ty.is_some(),
             UnitDependency::VarType(d) => d.var_ty.is_some(),
+            UnitDependency::RetTy(f) => f.ret_ty.is_some(),
             UnitDependency::AllSubTypes(ty) => are_sub_types_finished(*ty),
             UnitDependency::EnumVariantTag(variant) => try_get_enum_variant_tag(*variant).is_some(),
-            UnitDependency::AssociatedConst(dot) => {
+            UnitDependency::_AssociatedConst(dot) => {
                 debug_assert_eq!(dot.lhs.u().ty, p().type_ty);
                 let ty = dot.lhs.u().downcast_type();
                 ty.get_associated_external_consts().u().find_field(dot.rhs.sym).is_some()
             },
-            UnitDependency::Dot(dot) => {
+            UnitDependency::_Dot(dot) => {
                 debug_assert_ne!(dot.lhs.u().ty, p().type_ty);
                 let ty = dot.lhs.u().ty.u().flatten_transparent();
                 debug_assert!(ty.get_fields().is_none_or(|f| f.find_field(dot.rhs.sym).is_none()));
                 ty.get_associated_external_consts().u().find_field(dot.rhs.sym).is_some()
             },
             UnitDependency::Scope(ty_with_scope) => ty_with_scope
-                .unfinished()
-                .units
+                .member_sema_state()
+                .u()
+                .unfinished_units()
                 .iter()
                 .any(|u| u.waiting_for.as_ref().is_none_or(UnitDependency::resolved)),
         }
+    }
+
+    pub fn emit_missing_dep_error(&self, stmt: Ptr<Ast>) -> bool {
+        match self {
+            UnitDependency::_AssociatedConst(dot) => {
+                error_missing_associated_const(*dot);
+            },
+            UnitDependency::_Dot(dot) => {
+                error_missing_field(*dot);
+            },
+            UnitDependency::Scope(s) => {
+                let mut member_state = s.member_sema_state().u();
+                debug_assert!(member_state.unfinished_units().len() >= 1);
+                member_state.traverse_unfinished(|member, unit| {
+                    TraverseResult::from_finished(
+                        unit.waiting_for.as_ref().u().emit_missing_dep_error(member.upcast()),
+                    )
+                });
+                // skips marking type definition as error, because it seams unnecessary
+                return member_state.unfinished_units().is_empty();
+            },
+            UnitDependency::ExprType(_)
+            | UnitDependency::VarType(_)
+            | UnitDependency::RetTy(_)
+            | UnitDependency::AllSubTypes(_)
+            | UnitDependency::EnumVariantTag(_) => return false,
+        }
+
+        // mark expression as error to resolve other dependencies
+        let p = p();
+        stmt.as_mut().ty = Some(p.err_ty);
+        match stmt.matchable2() {
+            AstMatch::Decl(d) => d.as_mut().var_ty = Some(p.err_ty),
+            AstMatch::Fn(f) if f.ret_ty.is_none() => f.as_mut().ret_ty = Some(p.err_ty),
+            _ => {},
+        }
+        true
+    }
+
+    /// checks that [`UnitDependency::resolved`] doesn't panic
+    pub fn validate(&self) -> bool {
+        #[cfg(debug_assertions)]
+        let _ = self.resolved();
+        true
     }
 }
 
@@ -406,6 +539,8 @@ pub struct SemaUnit {
 
 impl SemaUnit {
     fn update_dep(&mut self, new_dep: UnitDependency) {
+        debug_only_assert!(new_dep.validate());
+
         #[cfg(debug_assertions)]
         if let Some(prev_dep) = &self.waiting_for
             && !matches!(prev_dep, UnitDependency::Scope(_))
@@ -452,6 +587,12 @@ impl Sema {
 
             display(expr.full_span()).label(&label).finish();
         }
+
+        #[cfg(debug_assertions)]
+        if !matches!(res, NotFinished(_)) {
+            self.check_post_sema_invariance(expr);
+        }
+
         res.map(|()| {
             let ty = expr.as_mut().ty.as_mut().u();
             debug_assert_ne!(ty.kind, AstKind::ArrayLikeContainer);
@@ -797,7 +938,7 @@ impl Sema {
                 } else if lhs_ty == p.type_ty {
                     let lhs = lhs.try_downcast_type_inst()?;
                     let Some(member) = find_in_namespace(lhs, rhs.sym) else {
-                        return NotFinished(UnitDependency::AssociatedConst(dot));
+                        return NotFinished(UnitDependency::AssociatedConst(dot)?);
                     };
                     decl = Some(member);
                     if member.is_const {
@@ -926,7 +1067,7 @@ impl Sema {
                     }
                     match ty {
                         Some(ty) => ty,
-                        None => return NotFinished(UnitDependency::Dot(dot)),
+                        None => return NotFinished(UnitDependency::Dot(dot)?),
                     }
                 };
                 rhs.decl = decl;
@@ -1957,7 +2098,11 @@ impl Sema {
                             );
                         }
                     } else if let Some(body) = f.body {
-                        let body_ty = *self.analyze(body, &f.ret_ty, false)?;
+                        let body_ty = self
+                            .analyze(body, &f.ret_ty, false)
+                            .handle_err()? // prevents some misleading cycle errors
+                            .copied()
+                            .unwrap_or(p.err_ty);
                         let ret_ty = check_or_infer_target!(
                             body_ty,
                             &mut f.as_mut().ret_ty,
@@ -2291,6 +2436,22 @@ impl Sema {
             debug_assert!(expr.ty.is_some());
         }
         Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_post_sema_invariance(&mut self, expr: Ptr<Ast>) {
+        //debug_assert!(expr.ty.is_some());
+
+        match expr.matchable2() {
+            AstMatch::Fn(f) => {
+                if !f.flags.get(FnFlags::IS_GENERIC) {
+                    debug_assert!(f.ret_ty.is_some());
+                    //debug_assert!(f.ret_ty.u().is_finalized2(true));
+                }
+            },
+            AstMatch::ArrayLikeContainer(_) => unreachable_debug(),
+            _ => {}, // TODO
+        }
     }
 
     fn ty_match(&mut self, expr: Ptr<Ast>, expected_ty: Ptr<ast::Type>) -> SemaResult<()> {
@@ -2904,20 +3065,24 @@ impl Sema {
         resolved_inst: &mut OPtr<ast::Type>,
         expr: Ptr<ast::Call>,
     ) -> SemaResult<Ptr<ast::Type>> {
-        let inst = self.validate_call(
-            CallKind::Function { ty_hint },
-            fn_ty,
-            args,
-            expr.span.end(),
-            false,
-            expr.upcast(),
-        )?;
-        *resolved_inst = Some(inst.upcast_to_type());
+        if resolved_inst.is_none() {
+            let inst = self.validate_call(
+                CallKind::Function { ty_hint },
+                fn_ty,
+                args,
+                expr.span.end(),
+                false,
+                expr.upcast(),
+            )?;
+            *resolved_inst = Some(inst.upcast_to_type());
+        }
+        let inst = resolved_inst.u().downcast::<ast::Fn>();
 
-        Ok(inst.ret_ty.unwrap_or_else(|| {
-            debug_assert!(inst == self.get_cur_fn().u()); // TODO: check all previous fns
-            p().rec_ret_ty
-        }))
+        match inst.ret_ty {
+            Some(ty) => Ok(ty),
+            None if inst == self.get_cur_fn().u() => Ok(p().rec_ret_ty), // TODO: check all previous fns
+            None => NotFinished(UnitDependency::RetTy(inst)),
+        }
     }
 
     fn validate_call<T: PolymorphableType>(
@@ -3269,13 +3434,12 @@ impl Sema {
         ty.polymorphs().push(inst);
 
         let res = self.analyze(inst.upcast(), &None, false);
-        if matches!(res, NotFinished(_)) {
+        if let NotFinished(dep) = res {
             self.unfinished_instantiations.push(inst.upcast().downcast_polymorphable());
             self.unfinished_instantiation_units
-                .push(SemaUnit { stmt: inst.upcast(), waiting_for: None });
+                .push(SemaUnit { stmt: inst.upcast(), waiting_for: Some(dep) });
         }
-        res?;
-
+        let _ = res; // ignored. see `dont_duplicate_dependency_errors_in_generic_items`
         Ok(inst)
     }
 
