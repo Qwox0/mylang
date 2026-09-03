@@ -297,7 +297,7 @@ test :: -> MyStruct(never, void, any){init};
 ");
         test(code)
             .error("mismatched types: expected `never`; got `{integer}`", substr!("10"))
-            .error("mismatched types: expected `[]B`; got `[]u8`", substr!("\"Hello World\"")); // TODO: `[]B` is bad
+            .error("mismatched types: expected `[]void`; got `[]u8`", substr!("\"Hello World\""));
     }
 }
 

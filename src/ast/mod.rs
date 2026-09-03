@@ -8,7 +8,7 @@ use crate::{
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeFlags, ScopeKind},
     scratch_allocator::TmpPtr,
-    sema::{SemaUnit, UnfinishedMembers},
+    sema::{SemaUnit, UnfinishedMembers, UnitDependency},
     type_::{finalize_ty, ty_match},
     util::{
         BitFlags, OptionExt, UnwrapDebug, bitflags, macro_orelse, panic_debug, then, to_f64,
@@ -878,7 +878,6 @@ ast_variants! {
         /// are also valid [`Type`]s.
         body: OPtr<Ast>,
 
-        #[cfg(debug_assertions)]
         decl: OPtr<Decl>,
     },
 
@@ -1884,20 +1883,22 @@ impl Decl {
         self.var_ty_expr.is_none() && self.init.is_none()
     }
 
-    pub fn const_val(self: Ptr<Decl>) -> Ptr<ConstVal> {
+    pub fn const_val(self: Ptr<Decl>) -> Result<Ptr<ConstVal>, UnitDependency> {
         debug_assert!(self.is_allowed_in_const());
         debug_assert!(self.var_ty.is_some() || self.init.u().kind == AstKind::Fn);
         if let Some(t) = self.var_ty
             && t.propagates_out()
         {
-            return t.upcast().downcast_const_val();
+            return Ok(t.upcast().downcast_const_val());
         }
         debug_assert!(self.is_const);
-        self.init.u().downcast_const_val()
+        self.init
+            .and_then(Ptr::<Ast>::try_downcast_const_val)
+            .ok_or(UnitDependency::ConstVal(self))
     }
 
-    pub fn try_const_val(self: Ptr<Decl>) -> OPtr<Ast> {
-        then!(self.is_const => self.const_val().upcast())
+    pub fn try_const_val(self: Ptr<Decl>) -> Option<Result<Ptr<ConstVal>, UnitDependency>> {
+        then!(self.is_const => self.const_val())
     }
 
     pub fn lhs_span(&self) -> Span {
@@ -2061,7 +2062,6 @@ impl Fn {
             ret_ty: None,
             polymorphs: vec![],
             body,
-            #[cfg(debug_assertions)]
             decl: None,
             span: start_span,
         });

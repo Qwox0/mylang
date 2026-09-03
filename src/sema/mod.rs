@@ -10,7 +10,7 @@ use crate::{
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
-    display_code::display,
+    display_code::{debug_expr, display},
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -195,12 +195,44 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
 
             cerror!(Span::ZERO, "cycle(s) detected:"); // TODO: detect individual cycles
             fn print_cycle_element(stmt: Ptr<Ast>, unit: &SemaUnit) -> TraverseResult {
+                let dep = unit.waiting_for.as_ref().u();
+                if let UnitDependency::Scope(ty) = dep {
+                    ty.member_sema_state().u().traverse_unfinished(|member, unit| {
+                        print_cycle_element(member.upcast(), unit)
+                    });
+                }
+
                 let span = stmt
                     .try_downcast::<ast::Decl>()
                     .map(|d| d.ident.span)
                     .unwrap_or_else(|| stmt.full_span());
-                let dep = unit.waiting_for.as_ref().u();
-                display(span).label(&format!("waiting for: {dep:?}")).finish();
+
+                let mut label = format!("waiting for ");
+                match dep {
+                    UnitDependency::ExprType(_) => write!(&mut label, ": {dep:?}"),
+                    UnitDependency::VarType(d) => write!(&mut label, "type of {}", d.ident.sym),
+                    UnitDependency::ConstVal(d) => {
+                        write!(&mut label, "constant value of {}", d.ident.sym)
+                    },
+                    UnitDependency::RetTy(f) => write!(
+                        &mut label,
+                        "return type of {}",
+                        f.decl.map(|d| d.ident.sym.text()).unwrap_or("lamda (TODO: more info)")
+                    ),
+                    UnitDependency::TypeLayout(ty) => {
+                        write!(&mut label, "memory layout of type `{ty}`")
+                    },
+                    UnitDependency::EnumVariantTag(variant) => {
+                        write!(&mut label, "tag value of {}", variant.ident.sym) // TODO: print enum ty
+                    },
+                    UnitDependency::_AssociatedConst(_) | UnitDependency::_Dot(_) => {
+                        unreachable_debug()
+                    },
+                    UnitDependency::Scope(_) => write!(&mut label, "some members"),
+                }
+                .unwrap();
+
+                display(span).label(&label).finish();
                 TraverseResult::Skip
             }
             for (_, mut stmts) in iter_unfinished_files(cctx, stmts, &mut units) {
@@ -420,8 +452,9 @@ pub struct Sema {
 pub enum UnitDependency {
     ExprType(Ptr<ast::Ast>),
     VarType(Ptr<ast::Decl>),
+    ConstVal(Ptr<ast::Decl>),
     RetTy(Ptr<ast::Fn>),
-    AllSubTypes(Ptr<ast::Type>),
+    TypeLayout(Ptr<ast::Type>),
     EnumVariantTag(Ptr<ast::Decl>),
 
     _AssociatedConst(Ptr<ast::Dot>),
@@ -460,8 +493,9 @@ impl UnitDependency {
         match self {
             UnitDependency::ExprType(expr) => expr.ty.is_some(),
             UnitDependency::VarType(d) => d.var_ty.is_some(),
+            UnitDependency::ConstVal(d) => d.const_val().is_ok(),
             UnitDependency::RetTy(f) => f.ret_ty.is_some(),
-            UnitDependency::AllSubTypes(ty) => are_sub_types_finished(*ty),
+            UnitDependency::TypeLayout(ty) => type_layout_finished(*ty),
             UnitDependency::EnumVariantTag(variant) => try_get_enum_variant_tag(*variant).is_some(),
             UnitDependency::_AssociatedConst(dot) => {
                 debug_assert_eq!(dot.lhs.u().ty, p().type_ty);
@@ -504,8 +538,9 @@ impl UnitDependency {
             },
             UnitDependency::ExprType(_)
             | UnitDependency::VarType(_)
+            | UnitDependency::ConstVal(_)
             | UnitDependency::RetTy(_)
-            | UnitDependency::AllSubTypes(_)
+            | UnitDependency::TypeLayout(_)
             | UnitDependency::EnumVariantTag(_) => return false,
         }
 
@@ -666,7 +701,7 @@ impl Sema {
                             "the use of extern symbols in constants is currently not implemented"
                         );
                     } else if sym.is_const {
-                        expr.set_replacement(sym.const_val().upcast());
+                        expr.set_replacement(sym.const_val()?.upcast());
                     } else if is_const {
                         // no const-check here. see `prefer_type_error_over_non_const_error`
                     };
@@ -932,7 +967,7 @@ impl Sema {
                     decl = Some(s);
                     let ty = self.get_symbol_var_ty(s)?;
                     if let Some(cv) = s.try_const_val() {
-                        expr.set_replacement(cv);
+                        expr.set_replacement(cv?.upcast());
                     }
                     ty
                 } else if lhs_ty == p.type_ty {
@@ -944,7 +979,7 @@ impl Sema {
                     if member.is_const {
                         // associated consts/methods: `MyType.MY_CONST`, `MyType.my_method`
                         let ty = self.get_symbol_var_ty(member)?;
-                        expr.set_replacement(member.const_val().upcast());
+                        expr.set_replacement(member.const_val()?.upcast());
                         ty
                     } else if let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>() {
                         // enum variant: `MyEnum.Variant`
@@ -1006,7 +1041,7 @@ impl Sema {
                         let method_ty = self.get_symbol_var_ty(member)?;
                         decl = Some(member);
                         rhs.ty = Some(method_ty);
-                        rhs.upcast().set_replacement(member.const_val().upcast());
+                        rhs.upcast().set_replacement(member.const_val()?.upcast());
                         if method_ty.try_downcast::<ast::Fn>().is_some() {
                             p.method_stub
                         } else if method_ty.propagates_out() {
@@ -1947,28 +1982,28 @@ impl Sema {
                         main_ret_ty,
                     );
                 }
-                expr.set_replacement(main.const_val().upcast());
+                expr.set_replacement(main.const_val()?.upcast());
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let ty = self.analyze_type_inst(*type_)?;
-                if !are_sub_types_finished(ty) {
-                    return NotFinished(UnitDependency::AllSubTypes(ty));
+                if !type_layout_finished(ty) {
+                    return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let ty = *analyze!(*val, None);
-                if !are_sub_types_finished(ty) {
-                    return NotFinished(UnitDependency::AllSubTypes(ty));
+                if !type_layout_finished(ty) {
+                    return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 let ty = self.analyze_type_inst(*type_)?;
-                if !are_sub_types_finished(ty) {
-                    return NotFinished(UnitDependency::AllSubTypes(ty));
+                if !type_layout_finished(ty) {
+                    return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast::IntVal::new(ty.alignment())?.upcast());
@@ -2017,6 +2052,12 @@ impl Sema {
             AstEnum::AggregateVal { .. } => todo!(),
             AstEnum::Fn { ret_ty_expr, ret_ty, body, flags, .. } => {
                 let mut f = expr.downcast::<ast::Fn>();
+
+                if let Some(decl) = self.decl_stack.last()
+                    && decl.init == f.upcast()
+                {
+                    f.as_mut().decl.set_or_expect(*decl);
+                }
 
                 if !f.flags.get(FnFlags::IS_INSTANTIATION) {
                     setup_scopes(&mut f.as_mut().params_scope, f.generics_scope, self.cur_scope);
@@ -2295,14 +2336,12 @@ impl Sema {
                             *is_simple_enum = false;
                         }
                         let tag = if let Some(variant_tag) = member.init {
-                            let variant_idx_ty = *self.analyze(variant_tag, &repr_ty, true)?;
-                            let new_repr_ty = check_or_infer_target!(
-                                variant_idx_ty,
+                            check_or_infer_target!(
+                                *self.analyze(variant_tag, &repr_ty, true).no_err_ty()?,
                                 &mut repr_ty,
                                 false,
                                 variant_tag.full_span()
                             );
-                            *tag_ty = Some(new_repr_ty.downcast::<ast::IntTy>());
                             variant_tag.downcast::<ast::IntVal>().val.clone()
                         } else {
                             // PERF: terrible implementation but works for now
@@ -2341,6 +2380,9 @@ impl Sema {
                     },
                 );
                 self.close_scope(osh);
+
+                *tag_ty = Some(repr_ty.u().downcast::<ast::IntTy>());
+
                 res.as_sema_result(expr.upcast_to_type())?;
                 *sema_units = None;
 
@@ -2817,13 +2859,6 @@ impl Sema {
                 decl.lhs_span(),
                 "cannot mark a declaration as `static` and as const (`::`)"
             );
-        }
-
-        #[cfg(debug_assertions)]
-        if let Some(init) = decl.init
-            && let Some(f) = init.try_downcast::<ast::Fn>()
-        {
-            f.as_mut().decl = Some(decl_ptr);
         }
 
         let is_first_pass = decl.ty.is_none(); // TODO(without `NotFinished`): remove this
@@ -3400,7 +3435,7 @@ impl Sema {
             if generic_inst
                 .iter()
                 .zip(i_generics)
-                .all(|(inst, c)| generic_match(*inst, c.const_val(), true))
+                .all(|(inst, c)| generic_match(*inst, c.const_val().u(), true))
             {
                 return Ok(inst);
             }
@@ -3924,7 +3959,7 @@ impl PatternSource {
     }
 }
 
-fn are_sub_types_finished(ty: Ptr<ast::Type>) -> bool {
+fn type_layout_finished(ty: Ptr<ast::Type>) -> bool {
     match ty.matchable().as_ref() {
         TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
             fields.iter().all(|f| f.var_ty.is_some())

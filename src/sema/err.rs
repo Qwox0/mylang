@@ -1,4 +1,10 @@
-use crate::{diagnostics::HandledErr, sema::UnitDependency};
+use crate::{
+    ast,
+    context::{ctx, primitives},
+    diagnostics::{DiagnosticReporter, HandledErr},
+    ptr::Ptr,
+    sema::UnitDependency,
+};
 use SemaResult::*;
 use std::{
     convert::Infallible,
@@ -45,6 +51,19 @@ impl<T> SemaResult<T> {
         }
     }
 }
+
+impl<Ty: AsRef<ast::Type>> SemaResult<Ty> {
+    pub fn no_err_ty(self) -> Self {
+        match self {
+            Ok(ty) if Ptr::from_ref(ty.as_ref()) == primitives().err_ty => {
+                debug_assert!(ctx().diagnostic_reporter.do_abort_compilation());
+                Err(HandledErr)
+            },
+            res => res,
+        }
+    }
+}
+
 impl SemaResult<()> {
     pub fn ignore_error(self) -> Self {
         match self {
@@ -96,6 +115,14 @@ impl<T> FromResidual<Option<Infallible>> for SemaResult<Option<T>> {
     fn from_residual(residual: Option<Infallible>) -> Self {
         match residual {
             None => Ok(None),
+        }
+    }
+}
+
+impl<T> FromResidual<Result<Infallible, UnitDependency>> for SemaResult<T> {
+    fn from_residual(residual: Result<Infallible, UnitDependency>) -> Self {
+        match residual {
+            Result::Err(dep) => SemaResult::NotFinished(dep),
         }
     }
 }

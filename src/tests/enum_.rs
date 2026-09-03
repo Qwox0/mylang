@@ -356,10 +356,18 @@ test :: -> E.A;
 ";
     test(code).ok(5_u8);
 
-    // cycle
+    // cycle (UnitDependency::VarTy)
     let code = "
 E :: enum {
     CONST :: E.A.as(i8);
+    A = CONST,
+}";
+    test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);
+
+    // cycle (UnitDependency::ConstVal)
+    let code = "
+E :: enum {
+    CONST : i8 : E.A.as(i8);
     A = CONST,
 }";
     test(code).error("cycle(s) detected:", |_| TestSpan::ZERO);

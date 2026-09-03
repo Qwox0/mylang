@@ -56,7 +56,8 @@ impl DebugAst for Ast {
         let ty = ptr.ty;
         if ptr.replacement.is_some() {
             let rep = ptr.rep();
-            if rep.span != Span::ZERO {
+            // prints `*i64` instead of `*T`
+            if rep.span != Span::ZERO || lines.do_resolve_type() {
                 ptr = rep;
             }
         }
@@ -386,7 +387,7 @@ impl DebugAst for Ast {
                 } else {
                     lines.write("{unknown}");
                 }
-                if lines.write_fn_as_type() {
+                if lines.do_resolve_type() {
                     return;
                 }
                 let Some(body) = body else { return };
@@ -501,7 +502,7 @@ pub trait DebugAstBuf: fmt::Write {
 
     fn write_tree<T: DebugAst>(&mut self, expr: &T);
 
-    fn write_fn_as_type(&self) -> bool;
+    fn do_resolve_type(&self) -> bool;
 
     /// SAFETY: don't leak the `&mut Self` param out of the body of
     /// `single_write_tree`.
@@ -534,12 +535,12 @@ pub trait DebugAstBuf: fmt::Write {
 
 pub struct DebugOneLine {
     pub line: String,
-    write_fn_as_type: bool,
+    is_type: bool,
 }
 
 impl DebugOneLine {
-    pub fn new(write_fn_as_type: bool) -> Self {
-        Self { line: String::new(), write_fn_as_type }
+    pub fn new(is_type: bool) -> Self {
+        Self { line: String::new(), is_type }
     }
 }
 
@@ -556,8 +557,8 @@ impl DebugAstBuf for DebugOneLine {
         expr.debug_impl(self);
     }
 
-    fn write_fn_as_type(&self) -> bool {
-        self.write_fn_as_type
+    fn do_resolve_type(&self) -> bool {
+        self.is_type
     }
 }
 
@@ -607,7 +608,7 @@ impl DebugAstBuf for DebugTree {
         self.write(&"-".repeat(len))
     }
 
-    fn write_fn_as_type(&self) -> bool {
+    fn do_resolve_type(&self) -> bool {
         false
     }
 }

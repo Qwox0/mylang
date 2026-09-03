@@ -50,6 +50,13 @@ impl<T: ?Sized> From<*mut T> for Ptr<T> {
     }
 }
 
+impl<T: ?Sized> AsRef<T> for Ptr<T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        Ptr::as_ref(&self)
+    }
+}
+
 impl<T: ?Sized> Ptr<T> {
     pub const fn new(ptr: NonNull<T>) -> Ptr<T> {
         Self(ptr)

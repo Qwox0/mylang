@@ -1858,7 +1858,7 @@ impl<'ctx> Codegen<'ctx> {
         mangled_buf.write_str(name.text()).unwrap();
 
         for c in consts {
-            let cv = c.const_val();
+            let cv = c.const_val().u();
             write!(&mut mangled_buf, ".").unwrap();
             match cv.matchable2() {
                 _ if let Some(ty) = cv.try_downcast_type() => write!(&mut mangled_buf, "{}", ty),
