@@ -11,10 +11,24 @@ use crate::{
     util::{BitFlags, UnwrapDebug, then, unreachable_debug},
 };
 
-pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>, quiet: bool) -> bool {
+/// like [`ty_match`]
+pub fn generic_val_match(
+    got: Ptr<ast::ConstVal>,
+    expected: Ptr<ast::ConstVal>,
+    quiet: bool,
+) -> bool {
     if let Some(expected) = expected.try_downcast_type() {
         let Some(got) = got.try_downcast_type() else { return false };
-        //return ty_match_quiet(got, expected, quiet); // for IS_INSTANTIATION_WITH_GENERICS expected is a GenericSlot. This causes an incorrect `true` return value.
+        return ty_match_quiet(got, expected, quiet);
+    } else {
+        generic_val_eq(got, expected)
+    }
+}
+
+/// used to check if instantiations are equal
+pub fn generic_val_eq(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>) -> bool {
+    if let Some(expected) = expected.try_downcast_type() {
+        let Some(got) = got.try_downcast_type() else { return false };
         return got == expected;
     }
     if got.kind != expected.kind {
@@ -57,17 +71,13 @@ pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>, quie
                 return false;
             }
 
-            ty_match_quiet(got.enum_ty.upcast_to_type(), expected.enum_ty.upcast_to_type(), quiet)
+            ty_match_quiet(got.enum_ty.upcast_to_type(), expected.enum_ty.upcast_to_type(), true)
                 && got.variant_idx == expected.variant_idx
-                && got
-                    .data
-                    .zip(expected.data)
-                    .map(|(g, e)| generic_match(g, e, quiet))
-                    .unwrap_or(true)
+                && got.data.zip(expected.data).map(|(g, e)| generic_val_eq(g, e)).unwrap_or(true)
         },
         ast::ConstValMatch::OptionalVal(expected) => {
             let got = got.downcast::<ast::OptionalVal>();
-            generic_match(got.val.u(), expected.val.u(), quiet)
+            generic_val_eq(got.val.u(), expected.val.u())
         },
         ast::ConstValMatch::AggregateVal(expected) => {
             let got = got.downcast::<ast::AggregateVal>();
@@ -78,7 +88,7 @@ pub fn generic_match(got: Ptr<ast::ConstVal>, expected: Ptr<ast::ConstVal>, quie
             got.elements
                 .into_iter()
                 .zip(expected.elements)
-                .all(|(g, e)| generic_match(g, e, quiet))
+                .all(|(g, e)| generic_val_eq(g, e))
         },
         _ => todo!(),
     }
@@ -101,7 +111,7 @@ pub fn accumulate_generic(
                 let Some(next_ty) = next_val.try_downcast_type() else { return false };
                 accumulate_type_inner(ty_acc, next_ty, None, quiet).is_ok()
             } else {
-                generic_match(next_val, *generic, quiet)
+                generic_val_eq(next_val, *generic)
             }
         },
     }

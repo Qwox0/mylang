@@ -7,11 +7,14 @@ use crate::{
     diagnostics::{HandledErr, cerror, chint, cwarn},
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    sema::{generics::accumulate_generic, primitives::Primitives},
+    sema::{
+        generics::{accumulate_generic, generic_val_match},
+        primitives::Primitives,
+    },
     util::{
-        BigIntExt, BitFlags, Layout, UnwrapDebug, aligned_add, debug_only_assert, is_simple_enum,
-        panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
-        variant_count_to_tag_size_bits,
+        BigIntExt, BitFlags, IteratorExt, Layout, UnwrapDebug, aligned_add, debug_only_assert,
+        is_simple_enum, panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two,
+        unreachable_debug, variant_count_to_tag_size_bits,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -278,6 +281,27 @@ fn type_check(
             allow_opt_coercion,
             quiet,
         );
+    }
+
+    if let Some(expected) = expected.try_downcast_polymorphable() {
+        if got.kind != expected.kind {
+            return Mismatch;
+        }
+        let got = got.downcast_polymorphable();
+
+        // seems hacky, but works for not because all instantiations copy the span field.
+        let has_same_definition = got.span == expected.span;
+        if has_same_definition {
+            let expected_generics = expected.generics_scope()?;
+            let got_generics = got.generics_scope().u();
+            let eq = got_generics.decls.iter().zip_exact(&expected_generics.decls).all(|(g, e)| {
+                debug_assert_eq!(g.ident.sym, e.ident.sym);
+                // Is it a problem if only some values match (which might accumulate external generics)?
+                generic_val_match(g.generic_val(), e.generic_val(), quiet)
+            });
+            return if eq { Equal } else { Mismatch };
+        }
+        // no return because Fn has another case below.
     }
 
     if let Some(got_fn) = got.try_downcast::<ast::Fn>() {

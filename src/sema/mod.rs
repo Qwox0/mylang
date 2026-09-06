@@ -18,7 +18,7 @@ use crate::{
     scoped_stack::ScopedStack,
     scratch_allocator::TmpPtr,
     sema::generics::{
-        Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic, generic_match,
+        Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic, generic_val_eq,
     },
     source_file::SourceFile,
     type_::{
@@ -3435,7 +3435,7 @@ impl Sema {
             if generic_inst
                 .iter()
                 .zip(i_generics)
-                .all(|(inst, c)| generic_match(*inst, c.const_val().u(), true))
+                .all(|(inst, c)| generic_val_eq(*inst, c.generic_val()))
             {
                 return Ok(inst);
             }
@@ -3471,8 +3471,11 @@ impl Sema {
         let res = self.analyze(inst.upcast(), &None, false);
         if let NotFinished(dep) = res {
             self.unfinished_instantiations.push(inst.upcast().downcast_polymorphable());
-            self.unfinished_instantiation_units
-                .push(SemaUnit { stmt: inst.upcast(), waiting_for: Some(dep) });
+            self.unfinished_instantiation_units.push(SemaUnit {
+                #[cfg(debug_assertions)]
+                stmt: inst.upcast(),
+                waiting_for: Some(dep),
+            });
         }
         let _ = res; // ignored. see `dont_duplicate_dependency_errors_in_generic_items`
         Ok(inst)

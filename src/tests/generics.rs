@@ -416,6 +416,11 @@ test :: -> {
 
     f(.{ val = "" });
     f(.{ val = .[&1, &2, &3] });
+
+    f(.(1.as(u16)));
+    f(MyStruct.(1.as(i16)));
+    s := MyStruct(MyStruct(u8)).{ val=.(5) };
+    f(s);
 }
 "#;
     let res = test(code).compile_no_err();
@@ -436,6 +441,18 @@ test :: -> f(.{ val = Some(1) });
     let res = test(code).compile_no_err();
     assert_contains!(res.llvm_ir(), "@f.i64(");
     assert_contains!(res.llvm_ir(), "call void @f.i64(");
+}
+
+#[test]
+#[ignore = "todo"]
+fn type_as_generic_value() {
+    // currently panics
+    let code = "
+MyStruct :: struct($A) { val: A, get_val :: (self: MyStruct(A)) -> self.val; }
+f :: (s: MyStruct($B)) -> {}
+test :: -> f(MyStruct.(MyStruct(u8)).{ val=.(5) });
+";
+    test(code).error("todo", substr!("todo"));
 }
 
 #[test]

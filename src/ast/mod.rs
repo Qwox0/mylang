@@ -1901,6 +1901,11 @@ impl Decl {
         then!(self.is_const => self.const_val())
     }
 
+    pub fn generic_val(self: Ptr<Decl>) -> Ptr<ConstVal> {
+        debug_assert!(self.flags.get(DeclFlags::IS_GENERIC));
+        self.const_val().u()
+    }
+
     pub fn lhs_span(&self) -> Span {
         let name_span = self.ident.span;
         name_span.maybe_join(self.on_type.map(|t| t.full_span()))

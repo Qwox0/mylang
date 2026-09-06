@@ -337,3 +337,11 @@ test :: -> f(y="hello", x=1);
 "#;
     test(code).compile_no_err();
 }
+
+#[test]
+fn cast_slice_to_ptr() {
+    let code = "
+test :: (slice: []u8) -> slice.as(*u8);
+";
+    test(code).error("todo", substr!("todo"));
+}
