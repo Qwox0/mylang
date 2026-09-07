@@ -497,7 +497,7 @@ impl<'ctx> Codegen<'ctx> {
                         Symbol::Register(val) => CallFnVal::FnPtr(val.ptr_val(), self.fn_type(f).0),
                         _ => unreachable_debug(),
                     };
-                    self.compile_call(inst, fn_val, args.into_iter(), write_target.take())
+                    self.compile_call(inst, fn_val, args.into_iter(), write_target.take(), expr)
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
                     let f = dot.rhs.ty.u().downcast::<ast::Fn>();
@@ -530,7 +530,7 @@ impl<'ctx> Codegen<'ctx> {
                     }
 
                     let args = IterMethodArgs { lhs: Some(dot.lhs.u()), args: args.iter() };
-                    self.compile_call(f, CallFnVal::Direct(val), args, write_target.take())
+                    self.compile_call(f, CallFnVal::Direct(val), args, write_target.take(), expr)
                 } else if func.ty == p.enum_variant
                     && let Some(i) = func.try_flat_downcast::<ast::Ident>()
                 {
@@ -1271,6 +1271,7 @@ impl<'ctx> Codegen<'ctx> {
         fn_val: CallFnVal<'ctx>,
         args: impl ExactSizeIterator<Item = Ptr<Ast>> + Clone,
         mut write_target: Option<PointerValue<'ctx>>,
+        #[allow(unused)] expr: Ptr<ast::Ast>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
         debug_assert!(!f.flags.get(FnFlags::IS_GENERIC));
         debug_assert!(f.polymorphs.is_empty());
@@ -1290,22 +1291,37 @@ impl<'ctx> Codegen<'ctx> {
 
         let (arg_ffi_types, arg_ffi_offsets, llvm_args_count) = {
             // TODO: bench vs scratch arena
-            let arg_count = args.len().max(f.params().len());
+            let param_count = f.params().len(); // Note: this is an overestimate
+            let arg_count = args.len().max(param_count);
             let mut types = Vec::with_capacity(arg_count);
             let mut offsets = Vec::with_capacity(arg_count);
             let mut cur_llvm_arg_offset = sret_offset;
 
-            let param_types = f.params().iter_types();
-            let vararg_types = args
-                .clone()
-                .skip(f.params().len())
-                .map_while(|arg| then!(is_pos_arg(&arg) => arg.ty.u()));
-
-            for ty in param_types.chain(vararg_types) {
-                let c_ffi_ty = self.c_ffi_type(ty);
+            for param in f.params() {
+                let c_ffi_ty = if !param.flags.get(DeclFlags::IS_GENERIC) {
+                    self.c_ffi_type(param.var_ty.u())
+                } else {
+                    // Currently required because p_idx below is not continuous when there are
+                    // positional generics. TODO: improve
+                    CFfiType::Zst
+                };
                 types.push(c_ffi_ty);
                 offsets.push(cur_llvm_arg_offset);
                 cur_llvm_arg_offset += c_ffi_ty.as_param_count() as u32
+            }
+
+            if f.flags.get(FnFlags::HAS_VARARGS) {
+                // f :: (a: $T, ...) -> {}
+                // `f(a=1, T=i32)` is valid
+                // TODO: cleanup
+                for vararg in args.clone().skip(param_count).skip_while(|arg| !is_pos_arg(arg)) {
+                    debug_assert!(f.flags.get(FnFlags::HAS_VARARGS));
+                    debug_assert!(is_pos_arg(&vararg));
+                    let c_ffi_ty = self.c_ffi_type(vararg.ty.u());
+                    types.push(c_ffi_ty);
+                    offsets.push(cur_llvm_arg_offset);
+                    cur_llvm_arg_offset += c_ffi_ty.as_param_count() as u32
+                }
             }
             (types.into_boxed_slice(), offsets.into_boxed_slice(), cur_llvm_arg_offset as usize)
         };
@@ -1637,7 +1653,7 @@ impl<'ctx> Codegen<'ctx> {
             param_types.push(ptr_type);
         }
 
-        for p in f.params() {
+        for p in f.codegen_params() {
             let var_ty = p.var_ty.u();
             match self.c_ffi_type(var_ty) {
                 CFfiType::Zst => {},
@@ -1692,7 +1708,7 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         let mut cur_ffi_arg_idx = use_sret as u32;
-        for &p in f.params() {
+        for p in f.codegen_params() {
             let ffi_ty = self.c_ffi_type(p.var_ty.u());
             cur_ffi_arg_idx += fn_val.add_param_attributes(self, p, ffi_ty, cur_ffi_arg_idx);
 
@@ -1732,17 +1748,13 @@ impl<'ctx> Codegen<'ctx> {
         let outer_return_depth = self.return_depth;
         self.return_depth = 0;
 
-        debug_assert!(
-            f.params()
-                .iter()
-                .all(|d| !d.might_need_precompilation() || d.flags.get(DeclFlags::IS_GENERIC))
-        );
+        debug_assert!(f.codegen_params().all(|d| !d.might_need_precompilation()));
         self.open_scope();
         let res: CodegenResult<()> = (|| {
-            self.symbols.reserve(f.params().len());
+            self.symbols.reserve(f.params().len()); // Note: this is an overestimate
 
             let mut param_val_iter = func.get_param_iter().skip(use_sret as usize);
-            for &param_def in f.params() {
+            for param_def in f.codegen_params() {
                 let param_ty = param_def.var_ty.u();
                 let s = match self.c_ffi_type(param_ty) {
                     CFfiType::Zst => {
@@ -1820,6 +1832,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_intrinsic(&mut self, intrinsic_name: &str, fn_ty: Ptr<ast::Fn>) -> Symbol<'ctx> {
         debug_assert!(intrinsic_name.starts_with("llvm."));
+        debug_assert!(!fn_ty.flags.get(FnFlags::IS_GENERIC));
         let ret_ty = self.primitive_ty(fn_ty.ret_ty.u()).as_type_ref();
         let param_types = tmp_alloc()
             .alloc_slice_fill_iter(
@@ -4019,11 +4032,17 @@ unsafe impl<'ctx> AsValueRef for CodegenValue<'ctx> {
 
 unsafe impl<'ctx> AnyValue<'ctx> for CodegenValue<'ctx> {}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 #[repr(transparent)]
 pub struct CodegenType<'ctx> {
     inner: *mut LLVMType,
     _marker: PhantomData<&'ctx ()>,
+}
+
+impl<'ctx> Debug for CodegenType<'ctx> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CodegenType").field(&self.any_ty()).finish()
+    }
 }
 
 impl<'ctx> CodegenType<'ctx> {
@@ -4289,6 +4308,7 @@ pub fn for_each_call_arg<'ctx, U>(
     Ok(())
 }
 
+#[derive(Debug)]
 enum CallFnVal<'ctx> {
     Direct(FunctionValue<'ctx>),
     FnPtr(PointerValue<'ctx>, FunctionType<'ctx>),

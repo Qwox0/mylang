@@ -424,13 +424,23 @@ test :: -> {
 }
 "#;
     let res = test(code).compile_no_err();
-    assert_contains!(res.llvm_ir(), "@f.i64(i64 %s)");
+    assert_contains!(
+        res.llvm_ir(),
+        "@f.i64(i64 %{})",
+        if cfg!(debug_assertions) { "s" } else { "0" }
+    );
     assert_contains!(res.llvm_ir(), "@\"f.[]u8\"(");
     assert_contains!(res.llvm_ir(), "@\"f.[3]*i64\"(");
+    assert_contains!(res.llvm_ir(), "@f.u16(");
+    assert_contains!(res.llvm_ir(), "@f.i16(");
+    assert_contains!(res.llvm_ir(), "@\"f.MyStruct(u8)\"(");
 
     assert_contains!(res.llvm_ir(), "call void @f.i64(");
     assert_contains!(res.llvm_ir(), "call void @\"f.[]u8\"(");
     assert_contains!(res.llvm_ir(), "call void @\"f.[3]*i64\"(");
+    assert_contains!(res.llvm_ir(), "call void @f.u16(");
+    assert_contains!(res.llvm_ir(), "call void @f.i16(");
+    assert_contains!(res.llvm_ir(), "call void @\"f.MyStruct(u8)\"(");
     drop(res);
 
     let code = r#"

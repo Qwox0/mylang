@@ -10,7 +10,7 @@ use crate::{
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
-    display_code::{debug_expr, display},
+    display_code::display,
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -742,10 +742,12 @@ impl Sema {
                 })
             },
             AstEnum::PositionalInitializer { args, resolved_struct_inst, .. } => {
+                let initializer = expr.downcast::<ast::PositionalInitializer>();
                 let lhs = self.analyze_initializer_lhs(expr, *ty_hint)?;
                 if let Some(s) = lhs.try_downcast_type2()
                     && s.kind.is_struct_kind()
                 {
+                    initializer.as_mut().flags.set(InitializerFlags::IS_TYPE_INIT);
                     let inst = self.validate_pos_initializer(
                         s,
                         args,
@@ -767,6 +769,7 @@ impl Sema {
                     && let Some(s) = ptr_ty.pointee.try_downcast_type()
                     && s.kind.is_struct_kind()
                 {
+                    initializer.as_mut().flags.set(InitializerFlags::IS_PTR_INIT);
                     self.validate_mutation(MutationKind::Initialize, lhs, expr)?;
 
                     if is_const {
@@ -2220,6 +2223,12 @@ impl Sema {
             } => {
                 let expr = expr.downcast::<ast::StructDef>();
 
+                if let Some(decl) = self.decl_stack.last()
+                    && decl.init == expr.upcast()
+                {
+                    expr.as_mut().decl.set_or_expect(*decl);
+                }
+
                 if !flags.get(StructFlags::IS_INSTANTIATION) {
                     setup_scopes(scope, *generics_scope, self.cur_scope);
                 } else {
@@ -2567,9 +2576,11 @@ impl Sema {
         ty_hint: OPtr<ast::Type>,
     ) -> SemaResult<Ptr<ast::Ast>> {
         let lhs = match initializer_expr.matchable().as_mut() {
-            AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
-            | AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. } => {
-                if !*parsed_with_lhs && let Some(lhs) = *lhs {
+            AstEnum::PositionalInitializer { flags, lhs, .. }
+            | AstEnum::NamedInitializer { flags, lhs, .. } => {
+                if !flags.get(InitializerFlags::HAS_LHS_EXPR)
+                    && let Some(lhs) = *lhs
+                {
                     return Ok(lhs);
                 }
                 lhs
@@ -3493,22 +3504,21 @@ impl Sema {
 
         // This seams very fragile, but maybe it's fine.
         // TODO: recursively finalize children aswell
-        match expr.matchable2() {
-            AstMatch::PositionalInitializer(_) => todo!(),
-            AstMatch::NamedInitializer(i) => {
-                let i = i.as_mut();
+        match expr.matchable().as_mut() {
+            AstEnum::PositionalInitializer { flags, resolved_struct_inst, .. }
+            | AstEnum::NamedInitializer { flags, resolved_struct_inst, .. } => {
                 debug_assert!(
-                    i.flags.get(InitializerFlags::IS_TYPE_INIT)
-                        ^ i.flags.get(InitializerFlags::IS_PTR_INIT)
+                    flags.get(InitializerFlags::IS_TYPE_INIT)
+                        ^ flags.get(InitializerFlags::IS_PTR_INIT)
                 );
 
-                let struct_ty = if i.flags.get(InitializerFlags::IS_TYPE_INIT) {
+                let struct_ty = if flags.get(InitializerFlags::IS_TYPE_INIT) {
                     out_ty
                 } else {
                     out_ty.downcast::<ast::PtrTy>().pointee.downcast_type()
                 };
                 debug_assert_matches!(struct_ty.kind, AstKind::StructDef | AstKind::SliceTy);
-                i.resolved_struct_inst = Some(struct_ty);
+                *resolved_struct_inst = Some(struct_ty);
             },
             _ => {},
         }

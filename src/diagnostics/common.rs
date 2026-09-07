@@ -1,10 +1,10 @@
 use crate::{
-    ast::{self, AstKind, UpcastToAst},
+    ast::{self, AstKind, InitializerFlags, UpcastToAst},
     context::primitives,
     diagnostics::{HandledErr, cerror, chint},
     parser::lexer::Span,
     ptr::Ptr,
-    util::{StrExt, UnwrapDebug, unreachable_debug},
+    util::{BitFlags, StrExt, UnwrapDebug, unreachable_debug},
 };
 use std::fmt::{self, Display};
 
@@ -67,9 +67,11 @@ pub fn error_cannot_apply_initializer(
 ) -> HandledErr {
     let initializer_kind = initializer_expr.kind.initializer_kind();
     let lhs_expr = match initializer_expr.matchable().as_ref() {
-        ast::AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
-        | ast::AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. }
-        | ast::AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
+        ast::AstEnum::PositionalInitializer { lhs, flags, .. }
+        | ast::AstEnum::NamedInitializer { lhs, flags, .. } => {
+            lhs.filter(|_| flags.get(InitializerFlags::HAS_LHS_EXPR))
+        },
+        ast::AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
         | ast::AstEnum::ArrayInitializerShort { lhs, parsed_with_lhs, .. } => {
             lhs.filter(|_| *parsed_with_lhs)
         },

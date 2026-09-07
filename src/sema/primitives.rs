@@ -277,6 +277,7 @@ impl Primitives {
                     fields,
                     external_consts: Vec::new(),
                     polymorphs: Vec::new(),
+                    decl: None,
                     sema_units: None,
                     finished_members: 2,
                 });

@@ -1,13 +1,13 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, DeclFlags, HasAstKind, OPtrTypeExt, TypeEnum, UnaryOpKind,
-        UpcastToAst,
+        self, Ast, AstEnum, AstKind, DeclFlags, HasAstKind, InitializerFlags, OPtrTypeExt,
+        StructFlags, TypeEnum, UnaryOpKind, UpcastToAst,
     },
     context::{ctx, primitives},
     parser::lexer::Span,
     ptr::Ptr,
     sema::primitives::{FLOAT_LIT_TYPE_NAME, INT_LIT_TYPE_NAME, SINT_LIT_TYPE_NAME},
-    util::{self, BitFlags, OptionExt, unreachable_debug},
+    util::{self, BitFlags, OptionExt, UnwrapDebug, unreachable_debug},
 };
 use std::fmt::{self, Debug, Display};
 
@@ -46,7 +46,20 @@ impl DebugAst for Ast {
     fn debug_impl(&self, lines: &mut impl DebugAstBuf) {
         let mut ptr = Ptr::from_ref(self);
 
-        if let Some(ty) = ptr.try_downcast_type_by_kind()
+        if let Some(s) = ptr.try_downcast::<ast::StructDef>()
+            && let Some(s_decl) = s.decl
+        {
+            lines.write(s_decl.ident.sym.text());
+            if s.flags.get(StructFlags::IS_INSTANTIATION) {
+                lines.write("(");
+                lines.write_many_expr(
+                    s.generics_scope.u().decls.iter().map(|d| d.generic_val()),
+                    ",",
+                );
+                lines.write(")");
+            }
+            return;
+        } else if let Some(ty) = ptr.try_downcast_type_by_kind()
             && let Some(&name) = ctx().ty_names.get(&ty)
         {
             lines.write(name.text());
@@ -79,14 +92,18 @@ impl DebugAst for Ast {
                 }
                 lines.write("}");
             },
-            AstEnum::PositionalInitializer { lhs, args, parsed_with_lhs, .. } => {
-                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
+            AstEnum::PositionalInitializer { lhs, args, flags, .. } => {
+                lines.write_opt_tree(
+                    lhs.filter(|_| flags.get(InitializerFlags::HAS_LHS_EXPR)).as_ref(),
+                );
                 lines.write(".(");
-                lines.write_many_expr(args, ",");
+                lines.write_many_expr(*args, ",");
                 lines.write(")");
             },
-            AstEnum::NamedInitializer { lhs, fields, parsed_with_lhs, .. } => {
-                lines.write_opt_tree(lhs.filter(|_| *parsed_with_lhs).as_ref());
+            AstEnum::NamedInitializer { lhs, fields, flags, .. } => {
+                lines.write_opt_tree(
+                    lhs.filter(|_| flags.get(InitializerFlags::HAS_LHS_EXPR)).as_ref(),
+                );
                 lines.write(".{");
                 lines.write_many(
                     fields.iter(),
@@ -358,7 +375,7 @@ impl DebugAst for Ast {
                 TypeEnum::ArrayTy { elem_ty, .. } => {
                     lines.write_tree(elem_ty);
                     lines.write(".[");
-                    lines.write_many_expr(elements, ", ");
+                    lines.write_many_expr(*elements, ", ");
                     lines.write("]");
                 },
                 TypeEnum::StructDef { fields, .. } => {
@@ -378,7 +395,7 @@ impl DebugAst for Ast {
             AstEnum::Fn { ret_ty, ret_ty_expr, body, .. } => {
                 let f = ptr.downcast::<ast::Fn>();
                 lines.write("(");
-                lines.write_many_expr(f.params(), ",");
+                lines.write_many_expr(f.params().iter().copied(), ",");
                 lines.write(")->");
                 if let Some(ret_type) = ret_ty_expr {
                     lines.write_tree(ret_type);
@@ -521,8 +538,13 @@ pub trait DebugAstBuf: fmt::Write {
         }
     }
 
-    fn write_many_expr<'x, 'l, T: DebugAst>(&'l mut self, elements: &'x [T], sep: &str)
-    where Self: Sized {
+    fn write_many_expr<'x, 'l, T: DebugAst>(
+        &'l mut self,
+        elements: impl IntoIterator<Item = T>,
+        sep: &str,
+    ) where
+        Self: Sized,
+    {
         self.write_many(elements, |t, _, buf| t.debug_impl(buf), sep);
     }
 
@@ -717,6 +739,7 @@ pub mod special_debug_handlers {
     use super::*;
     use crate::{
         ast::ConstVal, display_code::display, ptr::OPtr, scratch_allocator::TmpPtr, sema::SemaUnit,
+        util::Extends,
     };
 
     pub fn normal(debug_struct: &mut fmt::DebugStruct, name: &str, value: &dyn fmt::Debug) {
@@ -790,11 +813,15 @@ pub mod special_debug_handlers {
         debug_struct.field_with(name, |f| f.write_fmt(core::format_args!("{value:x?} ...")));
     }
 
-    pub fn display_span(debug_struct: &mut fmt::DebugStruct, name: &str, value: &OPtr<Ast>) {
+    pub fn display_span(
+        debug_struct: &mut fmt::DebugStruct,
+        name: &str,
+        value: &OPtr<impl Extends<Ast>>,
+    ) {
         const MAX_SPAN_LEN: usize = 200;
         match value {
             Some(value) => debug_struct.field_with(name, |f| {
-                let span = value.full_span();
+                let span = value.base().full_span();
                 if !f.alternate() {
                     return f.write_fmt(format_args!("`{}`", span.get_text().as_ref()));
                 }

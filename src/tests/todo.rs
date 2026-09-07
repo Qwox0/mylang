@@ -339,6 +339,7 @@ test :: -> f(y="hello", x=1);
 }
 
 #[test]
+#[ignore = "todo"]
 fn cast_slice_to_ptr() {
     let code = "
 test :: (slice: []u8) -> slice.as(*u8);

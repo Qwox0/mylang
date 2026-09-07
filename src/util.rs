@@ -576,3 +576,13 @@ macro_rules! macro_orelse {
     };
 }
 pub(crate) use macro_orelse;
+
+pub trait Extends<T> {
+    fn base(self: Ptr<Self>) -> Ptr<T>;
+}
+impl<T> Extends<T> for T {
+    #[inline]
+    fn base(self: Ptr<Self>) -> Ptr<T> {
+        self
+    }
+}

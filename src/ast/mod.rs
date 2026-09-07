@@ -11,8 +11,8 @@ use crate::{
     sema::{SemaUnit, UnfinishedMembers, UnitDependency},
     type_::{finalize_ty, ty_match},
     util::{
-        BitFlags, OptionExt, UnwrapDebug, bitflags, macro_orelse, panic_debug, then, to_f64,
-        unreachable_debug,
+        BitFlags, Extends, OptionExt, UnwrapDebug, bitflags, macro_orelse, panic_debug, then,
+        to_f64, unreachable_debug,
     },
 };
 use core::fmt;
@@ -467,7 +467,7 @@ ast_variants! {
     /// [`Type`] -> value
     /// `*T` -> `*T`
     PositionalInitializer {
-        parsed_with_lhs: bool,
+        flags: InitializerFlags,
         lhs: OPtr<Ast>,
         args: Ptr<[Ptr<Ast>]>,
 
@@ -481,7 +481,6 @@ ast_variants! {
     /// `*T` -> `*T`
     NamedInitializer {
         flags: InitializerFlags,
-        parsed_with_lhs: bool,
         lhs: OPtr<Ast>,
         fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, // TODO: SoA
 
@@ -798,6 +797,9 @@ ast_variants! {
 
         polymorphs: Vec<Ptr<StructDef>>,
 
+        @debug(display_span)
+        decl: OPtr<Decl>,
+
         /// only valid during sema
         @debug(sema_units)
         sema_units: Option<TmpPtr<[SemaUnit]>>,
@@ -940,12 +942,16 @@ bitflags!(DeclFlags: u16 {
 
 bitflags!(InitializerFlags: u8 {
     // # parser flags:
-    // HAS_LHS_EXPR, // TODO: replace `parsed_with_lhs`
+    HAS_LHS_EXPR,
 
     // # sema flags:
     IS_TYPE_INIT,
     IS_PTR_INIT,
 });
+
+impl InitializerFlags {
+    const PARSER_FLAGS_MASK: <InitializerFlags as BitFlags>::Repr = InitializerFlags::HAS_LHS_EXPR;
+}
 
 bitflags!(FnFlags: u8 {
     // # sema flags:
@@ -1053,6 +1059,12 @@ impl<V: TypeVariant> Ptr<V> {
     pub fn upcast_to_type(self) -> Ptr<Type> {
         debug_assert_eq!(self.get_kind(), V::KIND);
         self.cast()
+    }
+}
+
+impl<T: UpcastToAst> Extends<Ast> for T {
+    fn base(self: Ptr<Self>) -> Ptr<Ast> {
+        self.upcast()
     }
 }
 
@@ -1486,9 +1498,11 @@ impl Ast {
     pub fn full_span(&self) -> Span {
         let span = self.span;
         let full_span = match self.matchable().as_ref() {
-            AstEnum::PositionalInitializer { lhs, parsed_with_lhs, .. }
-            | AstEnum::NamedInitializer { lhs, parsed_with_lhs, .. }
-            | AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
+            AstEnum::PositionalInitializer { lhs, flags, .. }
+            | AstEnum::NamedInitializer { lhs, flags, .. } => span.maybe_join(
+                lhs.filter(|_| flags.get(InitializerFlags::HAS_LHS_EXPR)).map(|e| e.full_span()),
+            ),
+            AstEnum::ArrayInitializer { lhs, parsed_with_lhs, .. }
             | AstEnum::ArrayInitializerShort { lhs, parsed_with_lhs, .. } => {
                 span.maybe_join(lhs.filter(|_| *parsed_with_lhs).map(|e| e.full_span()))
             },
@@ -1978,13 +1992,33 @@ impl For {
 
 impl PositionalInitializer {
     pub fn new(lhs: OPtr<Ast>, args: Ptr<[Ptr<Ast>]>, span: Span) -> Self {
-        ast_new!(local PositionalInitializer { lhs, args, parsed_with_lhs: lhs.is_some(), resolved_struct_inst: None, span })
+        let mut init = ast_new!(local PositionalInitializer {
+            lhs,
+            args,
+            flags: InitializerFlags::default(),
+            resolved_struct_inst: None,
+            span,
+        });
+        if lhs.is_some() {
+            init.flags.set(InitializerFlags::HAS_LHS_EXPR);
+        }
+        init
     }
 }
 
 impl NamedInitializer {
     pub fn new(lhs: OPtr<Ast>, fields: Ptr<[(Ptr<Ident>, OPtr<Ast>)]>, span: Span) -> Self {
-        ast_new!(local NamedInitializer { lhs, fields, parsed_with_lhs: lhs.is_some(), flags: InitializerFlags::default(), resolved_struct_inst: None, span })
+        let mut init = ast_new!(local NamedInitializer {
+            lhs,
+            fields,
+            flags: InitializerFlags::default(),
+            resolved_struct_inst: None,
+            span,
+        });
+        if lhs.is_some() {
+            init.flags.set(InitializerFlags::HAS_LHS_EXPR);
+        }
+        init
     }
 }
 
@@ -2022,6 +2056,7 @@ impl StructDef {
             polymorphs: vec![],
             fields,
             external_consts: vec![],
+            decl: None,
             span,
             sema_units: None,
             finished_members: 0,
@@ -2077,6 +2112,11 @@ impl Fn {
     #[inline]
     pub fn params(&self) -> &[Ptr<Decl>] {
         &self.params_scope.decls
+    }
+
+    #[inline]
+    pub fn codegen_params(&self) -> impl Iterator<Item = Ptr<Decl>> + Clone {
+        self.params().iter().copied().filter(|d| !d.flags.get(DeclFlags::IS_GENERIC))
     }
 }
 
@@ -2444,18 +2484,21 @@ impl CloneAst for Ptr<Ast> {
             &AstEnum::Block { has_trailing_semicolon, stmts, span, .. } => {
                 Block::new(stmts.clone_ast(alloc), has_trailing_semicolon, span, alloc)?.upcast()
             },
-            &AstEnum::PositionalInitializer { parsed_with_lhs, lhs, args, .. } => {
+            &AstEnum::PositionalInitializer { flags, lhs, args, .. } => {
                 clone!(PositionalInitializer {
-                    parsed_with_lhs,
+                    flags: InitializerFlags {
+                        data: flags.data & InitializerFlags::PARSER_FLAGS_MASK
+                    },
                     lhs: lhs.clone_ast(alloc),
                     args: args.clone_ast(alloc),
                     resolved_struct_inst: None
                 })
             },
-            &AstEnum::NamedInitializer { parsed_with_lhs, lhs, fields, .. } => {
+            &AstEnum::NamedInitializer { flags, lhs, fields, .. } => {
                 clone!(NamedInitializer {
-                    parsed_with_lhs,
-                    flags: InitializerFlags::default(),
+                    flags: InitializerFlags {
+                        data: flags.data & InitializerFlags::PARSER_FLAGS_MASK
+                    },
                     lhs: lhs.clone_ast(alloc),
                     fields: fields.clone_ast(alloc),
                     resolved_struct_inst: None
@@ -2603,11 +2646,13 @@ impl CloneAst for Ptr<Ast> {
             AstEnum::ArrayTy { len, elem_ty, .. } => {
                 clone!(ArrayTy { len: len.clone_ast(alloc), elem_ty: elem_ty.clone_ast(alloc) })
             },
-            AstEnum::StructDef { flags, scope, generics_scope, span, .. } => {
+            AstEnum::StructDef { flags, scope, generics_scope, span, decl, .. } => {
                 let decls = scope.decls.clone_ast(alloc);
                 debug_assert!(generics_scope.is_none_or(|s| s.kind == ScopeKind::StructGenerics));
                 let generics_scope = generics_scope._clone_ast(alloc)?;
-                StructDef::new(*flags, decls, generics_scope, *span, alloc)?.upcast()
+                let s = StructDef::new(*flags, decls, generics_scope, *span, alloc)?;
+                s.as_mut().decl = *decl;
+                s.upcast()
             },
             AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => {
                 todo!()
