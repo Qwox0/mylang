@@ -6,7 +6,7 @@
 use crate::{
     ast::{
         self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, GenericSlotFlags,
-        StructDef, StructFlags, SwitchCase, UnaryOpKind, UpcastToAst, ast_new,
+        StructDef, StructFlags, SwitchCase, TypeFlags, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
     diagnostics::{cerror, cerror2, chint},
@@ -45,6 +45,15 @@ macro_rules! opt {
 macro_rules! expr {
     ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
         ast_new!($kind { $($field $(:$val)?),* }, $span).upcast()
+    };
+    ($expr:expr) => {
+        crate::context::ctx().alloc.alloc($expr)?.upcast()
+    };
+}
+
+macro_rules! ty_expr {
+    ($kind:ident { $( $field:ident $( : $val:expr )? ),* $(,)? }, $span:expr $(,)? ) => {
+        expr!($kind { $($field $(:$val)?),* , type_flags: TypeFlags::default() }, $span)
     };
     ($expr:expr) => {
         crate::context::ctx().alloc.alloc($expr)?.upcast()
@@ -387,7 +396,7 @@ impl Parser {
                 let ScopeAndAggregateInfo { scope, fields } =
                     Scope::for_aggregate(decls, &self.cctx.alloc, ScopeKind::Union)?;
                 let close_b = self.tok(TokenKind::CloseBrace)?;
-                expr!(
+                ty_expr!(
                     UnionDef {
                         scope,
                         sema_units: None,
@@ -440,7 +449,7 @@ impl Parser {
                 let close_b = self.tok(TokenKind::CloseBrace)?;
                 let ScopeAndAggregateInfo { scope, fields } =
                     Scope::for_aggregate(decls, &self.cctx.alloc, ScopeKind::Enum)?;
-                expr!(
+                ty_expr!(
                     EnumDef {
                         flags: EnumFlags::default(),
                         is_simple_enum: true,
@@ -636,8 +645,8 @@ impl Parser {
                     len.is_none() && self.lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let elem_ty = self.expr_(TY_PREFIX_PRECEDENCE)?;
                 match len {
-                    Some(len) => expr!(ArrayTy { len, elem_ty }, span),
-                    None => expr!(SliceTy { elem_ty, is_mut }, span),
+                    Some(len) => ty_expr!(ArrayTy { len, elem_ty }, span),
+                    None => ty_expr!(SliceTy { elem_ty, is_mut }, span),
                 }
             },
             TokenKind::OpenBrace => self.block()?.upcast(),
@@ -655,7 +664,7 @@ impl Parser {
                 // TODO: deref prefix
                 let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
                 let pointee = self.expr_(TY_PREFIX_PRECEDENCE)?;
-                expr!(PtrTy { pointee, is_mut }, span.join(pointee.full_span()))
+                ty_expr!(PtrTy { pointee, is_mut }, span.join(pointee.full_span()))
             },
             TokenKind::Ampersand => {
                 let is_mut = self.advanced().lex.advance_if_kind(TokenKind::Keyword(Keyword::Mut));
@@ -694,7 +703,7 @@ impl Parser {
             TokenKind::Colon => todo!("TokenKind::Colon"),
             TokenKind::Question => {
                 let inner_ty = self.advanced().expr_(TY_PREFIX_PRECEDENCE).expect("type after ?");
-                expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
+                ty_expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
             TokenKind::Pound => {
                 let directive_ident = self.advanced().ident()?;

@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        self, AstKind, DeclList, DeclListExt, EnumFlags, RangeKind, StructFlags, TypeEnum,
-        UpcastToAst, type_new,
+        self, AstKind, DeclList, DeclListExt, EnumFlags, RangeKind, StructFlags, Type, TypeEnum,
+        TypeFlags, UpcastToAst, type_new,
     },
     context::{ctx, primitives},
     diagnostics::{HandledErr, cerror, chint, cwarn},
@@ -25,7 +25,7 @@ enum CommonTypeSelection {
     Got,
     Expected,
     Mismatch,
-    NewAlloc(Ptr<ast::Type>),
+    NewAlloc(Ptr<Type>),
 }
 
 impl FromResidual<Option<Infallible>> for CommonTypeSelection {
@@ -45,7 +45,7 @@ impl CommonTypeSelection {
 }
 
 /// symmetrical
-pub fn common_type(lhs: Ptr<ast::Type>, rhs: Ptr<ast::Type>) -> OPtr<ast::Type> {
+pub fn common_type(lhs: Ptr<Type>, rhs: Ptr<Type>) -> OPtr<Type> {
     common_type_restrict_optional_coerction(lhs, rhs, AllowOptionalCoercion::TRUE)
 }
 
@@ -63,10 +63,10 @@ impl AllowOptionalCoercion {
 }
 
 pub fn common_type_restrict_optional_coerction(
-    lhs: Ptr<ast::Type>,
-    rhs: Ptr<ast::Type>,
+    lhs: Ptr<Type>,
+    rhs: Ptr<Type>,
     allow_opt_coercion: AllowOptionalCoercion,
-) -> OPtr<ast::Type> {
+) -> OPtr<Type> {
     match type_check(TypeCheckMode::Join, lhs, rhs, allow_opt_coercion, false) {
         CommonTypeSelection::Equal => Some(lhs),
         CommonTypeSelection::Got => Some(lhs),
@@ -78,7 +78,7 @@ pub fn common_type_restrict_optional_coerction(
 
 /// might not be symmetrical
 #[inline]
-pub fn ty_match_quiet(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, quiet: bool) -> bool {
+pub fn ty_match_quiet(got: Ptr<Type>, expected: Ptr<Type>, quiet: bool) -> bool {
     match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE, quiet) {
         CommonTypeSelection::Equal | CommonTypeSelection::Expected => true,
         CommonTypeSelection::Mismatch | CommonTypeSelection::Got => false,
@@ -86,7 +86,7 @@ pub fn ty_match_quiet(got: Ptr<ast::Type>, expected: Ptr<ast::Type>, quiet: bool
     }
 }
 
-pub fn ty_match(got: Ptr<ast::Type>, expected: Ptr<ast::Type>) -> bool {
+pub fn ty_match(got: Ptr<Type>, expected: Ptr<Type>) -> bool {
     ty_match_quiet(got, expected, false)
 }
 
@@ -98,8 +98,8 @@ pub enum TypeCheckMode {
 
 fn type_check(
     mode: TypeCheckMode,
-    got: Ptr<ast::Type>,
-    expected: Ptr<ast::Type>,
+    got: Ptr<Type>,
+    expected: Ptr<Type>,
     allow_opt_coercion: AllowOptionalCoercion,
     quiet: bool,
 ) -> CommonTypeSelection {
@@ -143,7 +143,7 @@ fn type_check(
 
     fn opt_coercion(
         mode: TypeCheckMode,
-        lhs: Ptr<ast::Type>,
+        lhs: Ptr<Type>,
         rhs: Ptr<ast::OptionTy>,
         allow_opt_coercion: bool,
         quiet: bool,
@@ -330,7 +330,7 @@ fn type_check(
 /// `ty_match({weak}, i32)` -> `true`
 /// `ty_match(i32, {weak})` -> `false`
 #[inline]
-pub fn is_bottom_type(ty: Ptr<ast::Type>, p: &Primitives) -> bool {
+pub fn is_bottom_type(ty: Ptr<Type>, p: &Primitives) -> bool {
     ty == p.never || ty == p.rec_ret_ty
 }
 
@@ -360,7 +360,7 @@ impl SubtypingLevel {
 /// 1                    ↖︎- int_lit -↗︎
 ///                         bottom
 /// ```
-fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
+fn number_subtyping_level(ty: Ptr<Type>) -> Option<SubtypingLevel> {
     match ty.matchable2() {
         ast::TypeMatch::IntTy(int_ty) => Some(SubtypingLevel {
             level: 1 + int_ty.is_signed as u8 + int_ty.bits.is_some() as u8,
@@ -391,10 +391,10 @@ fn number_subtyping_level(ty: Ptr<ast::Type>) -> Option<SubtypingLevel> {
 /// //          ^^ coercion to `?**i32` is caused by Decl
 /// ```
 pub fn finalize_ty(
-    ty: &mut Ptr<ast::Type>,
-    mut out_ty: Ptr<ast::Type>,
+    ty: &mut Ptr<Type>,
+    mut out_ty: Ptr<Type>,
     can_have_type_coercion: bool,
-) -> Ptr<ast::Type> {
+) -> Ptr<Type> {
     let p = primitives();
     debug_assert!(
         ty_match_quiet(*ty, out_ty, true)
@@ -427,7 +427,7 @@ pub fn finalize_ty(
     *ty
 }
 
-pub fn remove_optional_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &mut Ptr<ast::Type>) {
+pub fn remove_optional_coercion_for_finalize(expr_ty: Ptr<Type>, out_ty: &mut Ptr<Type>) {
     if let Some(out_opt) = out_ty.try_downcast::<ast::OptionTy>()
         && expr_ty.is_non_zero()
     {
@@ -443,7 +443,7 @@ pub fn remove_optional_coercion_for_finalize(expr_ty: Ptr<ast::Type>, out_ty: &m
 }
 
 #[cfg(debug_assertions)]
-fn has_no_optional_coercion(expr_ty: Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> bool {
+fn has_no_optional_coercion(expr_ty: Ptr<Type>, out_ty: Ptr<Type>) -> bool {
     let mut new_out_ty = out_ty;
     remove_optional_coercion_for_finalize(expr_ty, &mut new_out_ty);
     new_out_ty == out_ty
@@ -451,7 +451,7 @@ fn has_no_optional_coercion(expr_ty: Ptr<ast::Type>, out_ty: Ptr<ast::Type>) -> 
 
 const ZST_ALIGNMENT: usize = 1;
 
-impl ast::Type {
+impl Type {
     pub fn matches_int(self: Ptr<Self>) -> bool {
         self.kind == AstKind::IntTy || self.propagates_out()
     }
@@ -506,12 +506,12 @@ impl ast::Type {
     }
 
     /// This might mutate values behind [`Ptr`]s in `self`.
-    pub fn finalize(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
+    pub fn finalize(self: &mut Ptr<Self>) -> Ptr<Type> {
         self.finalize2(None, false).unwrap_or(*self)
     }
 
     /// This might mutate values behind [`Ptr`]s in `self`.
-    pub fn finalize_allow_generic(self: &mut Ptr<Self>) -> Ptr<ast::Type> {
+    pub fn finalize_allow_generic(self: &mut Ptr<Self>) -> Ptr<Type> {
         self.finalize2(None, true).unwrap_or(*self)
     }
 
@@ -519,7 +519,7 @@ impl ast::Type {
         self: &mut Ptr<Self>,
         err_expr: OPtr<ast::Ast>,
         allow_generic: bool,
-    ) -> Result<Ptr<ast::Type>, HandledErr> {
+    ) -> Result<Ptr<Type>, HandledErr> {
         let p = primitives();
         debug_assert!(self.ty == p.type_ty || self.kind.is_type_kind());
 
@@ -578,9 +578,42 @@ impl ast::Type {
         Ok(*self)
     }
 
+    /// Sets [`TypeFlags::TYPE_LAYOUT_DONE`]
+    pub fn check_layout_finished(self: Ptr<Type>) -> bool {
+        if self.type_flags.get(TypeFlags::TYPE_LAYOUT_DONE) {
+            return true;
+        }
+        let ret = match self.matchable().as_ref() {
+            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
+                fields.iter().all(|f| f.var_ty.is_some_and(Type::check_layout_finished))
+            },
+            TypeEnum::EnumDef { variants, tag_ty, .. } => {
+                tag_ty.is_some_and(|i| i.bits.is_some())
+                    && variants.iter().all(|v| v.var_ty.is_some_and(Type::check_layout_finished))
+            },
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.check_layout_finished(),
+            TypeEnum::ArrayTy { elem_ty: t, .. } | TypeEnum::OptionTy { inner_ty: t, .. } => {
+                t.downcast_type().check_layout_finished()
+            },
+            TypeEnum::SimpleTy { .. }
+            | TypeEnum::IntTy { .. } // are unsized integers possible?
+            | TypeEnum::FloatTy { .. }
+            | TypeEnum::PtrTy { .. }
+            | TypeEnum::SliceTy { .. }
+            | TypeEnum::Fn { .. }
+            | TypeEnum::GenericSlot { .. } => true,
+            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => panic_debug!("invalid type"),
+        };
+        if ret {
+            self.as_mut().type_flags.set(TypeFlags::TYPE_LAYOUT_DONE)
+        }
+        ret
+    }
+
     /// size of stack allocation in bytes
     pub fn size(self: Ptr<Self>) -> usize {
         debug_assert!(self.is_finalized(), "`{self}` is not finalized");
+        debug_only_assert!(self.check_layout_finished());
         const PTR_SIZE: usize = 8;
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
@@ -618,6 +651,7 @@ impl ast::Type {
 
     /// alignment of stack allocation in bytes
     pub fn alignment(self: Ptr<Self>) -> usize {
+        debug_only_assert!(self.check_layout_finished());
         let alignment = match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
@@ -651,6 +685,7 @@ impl ast::Type {
 
     /// Returns `(self.size(), self.alignment())`
     pub fn layout(self: Ptr<Self>) -> Layout {
+        debug_only_assert!(self.check_layout_finished());
         Layout::new(self.size(), self.alignment())
     }
 
@@ -741,27 +776,27 @@ pub fn int_alignment(bits: u32) -> usize {
 }
 
 #[inline]
-pub fn struct_size(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> usize {
+pub fn struct_size(field_types: impl IntoIterator<Item = Ptr<Type>>) -> usize {
     struct_layout(field_types).size
 }
 
 #[inline]
 pub fn struct_alignment(fields: &[Ptr<ast::Decl>]) -> usize {
-    fields.iter_types().map(ast::Type::alignment).max().unwrap_or(ZST_ALIGNMENT)
+    fields.iter_types().map(Type::alignment).max().unwrap_or(ZST_ALIGNMENT)
 }
 
-pub fn struct_layout(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> Layout {
+pub fn struct_layout(field_types: impl IntoIterator<Item = Ptr<Type>>) -> Layout {
     let l = struct_layout_unaligned(field_types);
     let size = round_up_to_alignment!(l.size, l.align);
     Layout { size, ..l }
 }
 
 /// doesn't align the [`Layout::size`] to the alignment of the entire struct.
-fn struct_layout_unaligned(field_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> Layout {
+fn struct_layout_unaligned(field_types: impl IntoIterator<Item = Ptr<Type>>) -> Layout {
     let mut align = ZST_ALIGNMENT;
     let size = field_types
         .into_iter()
-        .map(ast::Type::layout)
+        .map(Type::layout)
         .inspect(|layout| align = align.max(layout.align))
         .fold(0, aligned_add);
     Layout { size, align }
@@ -775,7 +810,7 @@ pub fn struct_offset(fields: &[Ptr<ast::Decl>], f_idx: usize) -> usize {
 
 #[inline]
 pub fn union_size(fields: DeclList) -> usize {
-    fields.iter_types().map(ast::Type::size).max().unwrap_or(0)
+    fields.iter_types().map(Type::size).max().unwrap_or(0)
 }
 
 #[inline]
@@ -788,12 +823,12 @@ pub enum EnumRepr {
     /// 0 variants
     Never,
     /// 1 variant
-    Transparent(Ptr<ast::Type>),
+    Transparent(Ptr<Type>),
     /// 2+ variants
     Tagged,
 }
 
-pub fn enum_repr(variant_types: impl IntoIterator<Item = Ptr<ast::Type>>) -> EnumRepr {
+pub fn enum_repr(variant_types: impl IntoIterator<Item = Ptr<Type>>) -> EnumRepr {
     let p = primitives();
     // TODO: deep never check. Replace types like `struct { a: never }` with
     // `never` to make this deep check cheap.
@@ -821,7 +856,8 @@ pub enum OptionalRepr {
     Tagged,
 }
 
-pub fn optional_repr(inner_ty: Ptr<ast::Type>) -> OptionalRepr {
+pub fn optional_repr(inner_ty: Ptr<Type>) -> OptionalRepr {
+    debug_only_assert!(inner_ty.check_layout_finished());
     use OptionalRepr::*;
     match inner_ty.matchable().as_ref() {
         TypeEnum::SimpleTy { .. } => {

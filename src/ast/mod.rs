@@ -21,7 +21,7 @@ use std::iter;
 
 pub mod debug;
 
-// don't forget to change `AstEnum`, `ConstValEnum`, `TypeEnum`
+// don't forget to change `AstEnum`, `ConstValEnum`, `TypeEnum`!
 macro_rules! inherit_ast {
     (
         $(#[$attr:meta])*
@@ -55,6 +55,25 @@ macro_rules! inherit_ast {
 }
 pub(crate) use inherit_ast;
 
+// don't forget to change `TypeEnum`!
+macro_rules! inherit_type {
+    (
+        $(#[$attr:meta])*
+        struct $name:ident {
+            $( $(#[$field_attr:meta])* $field:ident : $ty:ty),* $(,)?
+        }
+    ) => {
+        inherit_ast! {
+            $(#[$attr])*
+            struct $name {
+                type_flags: TypeFlags,
+                $( $(#[$field_attr])* $field : $ty ),*
+            }
+        }
+    };
+}
+pub(crate) use inherit_type;
+
 inherit_ast! {
     struct Ast {}
 }
@@ -71,7 +90,7 @@ macro_rules! ast_new {
         }
     };
     ($alloc:expr, $kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }) => { {
-        $alloc.alloc(ast_new!(local $kind { $( $(#[$attr])* $field $(:$val)?),* }))?
+        $alloc.alloc(crate::ast::ast_new!(local $kind { $( $(#[$attr])* $field $(:$val)?),* }))?
     } };
     ($kind:ident { $( $(#[$attr:meta])* $field:ident $( : $val:expr )? ),* $(,)? }) => { {
         ast_new!(crate::context::ctx().alloc, $kind { $( $(#[$attr])* $field $(:$val)?),* })
@@ -83,6 +102,19 @@ macro_rules! ast_new {
 pub(crate) use ast_new;
 
 macro_rules! type_new {
+    (local $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }, $span:expr) => {{
+        let kind = crate::ast::AstKind::$kind;
+        debug_assert!(crate::ast::Type::KINDS.contains(&kind));
+        crate::ast::$kind {
+            kind,
+            ty: Some(crate::context::primitives().type_ty),
+            replacement: None,
+            parenthesis_count: 0,
+            span: $span,
+            type_flags: crate::ast::TypeFlags::default(),
+            $( $field $(: $val)? ),*
+        }
+    }};
     (local $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {{
         let kind = crate::ast::AstKind::$kind;
         debug_assert!(crate::ast::Type::KINDS.contains(&kind));
@@ -92,14 +124,15 @@ macro_rules! type_new {
             replacement: None,
             parenthesis_count: 0,
             span: Span::ZERO,
+            type_flags: crate::ast::TypeFlags::default(),
             $( $field $(: $val)? ),*
         }
     }};
-    ($kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }, $alloc:expr) => {
+    ($alloc:expr, $kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
         $alloc.alloc(crate::ast::type_new!(local $kind { $($field $(:$val)?),* })).expect("TODO: handle oom")
     };
     ($kind:ident { $( $field:ident $( : $val:expr )?),* $(,)? }) => {
-        crate::ast::type_new!($kind { $($field $(:$val)?),* }, crate::context::ctx().alloc)
+        crate::ast::type_new!(crate::context::ctx().alloc, $kind { $($field $(:$val)?),* })
     };
 }
 pub(crate) use type_new;
@@ -217,7 +250,7 @@ macro_rules! ast_variants {
             unsafe impl ConstValVariant for $c_name {}
         )+
         $(
-            inherit_ast! {
+            inherit_type! {
                 $(#[$t_attr])* struct $t_name {
                     $(
                         $(#[$t_field_attr])*
@@ -303,6 +336,7 @@ macro_rules! ast_variants {
                 replacement: OPtr<Ast>,
                 span: Span,
                 parenthesis_count: u8,
+                type_flags: TypeFlags,
                 $(
                     $(#[$t_field_attr])*
                     $t_field : $t_ty
@@ -373,6 +407,7 @@ macro_rules! ast_variants {
                     replacement: OPtr<Ast>,
                     span: Span,
                     parenthesis_count: u8,
+                    type_flags: TypeFlags,
                     $($t_field : $t_ty),*
                 } = AstKind::$t_name as u8,
             )+
@@ -387,6 +422,7 @@ macro_rules! ast_variants {
                     replacement: OPtr<Ast>,
                     span: Span,
                     parenthesis_count: u8,
+                    type_flags: TypeFlags,
                     $(
                         $(#[$t_field_attr])*
                         $t_field : $t_ty
@@ -997,11 +1033,16 @@ bitflags!(GenericSlotFlags: u8 {
     WAS_ADDED_TO_SCOPE,
 });
 
+bitflags!(TypeFlags: u8 {
+    // # sema flags:
+    TYPE_LAYOUT_DONE,
+});
+
 inherit_ast! {
     struct ConstVal {}
 }
 
-inherit_ast! {
+inherit_type! {
     struct Type {}
 }
 
@@ -2051,6 +2092,7 @@ impl StructDef {
             Scope::for_aggregate(body_decls, alloc, ScopeKind::Struct)?;
         let struct_ = ast_new!(alloc, StructDef {
             flags,
+            type_flags: TypeFlags::default(),
             scope,
             generics_scope,
             polymorphs: vec![],
@@ -2096,6 +2138,7 @@ impl Fn {
         debug_assert!(params.iter().all(|p| !p.is_const || p.flags.get(DeclFlags::IS_GENERIC)));
         let fn_ = ast_new!(alloc, Fn {
             flags: FnFlags::default(),
+            type_flags: TypeFlags::default(),
             params_scope: Scope::new(params, ScopeKind::FnParams),
             generics_scope: None,
             ret_ty_expr,
@@ -2122,7 +2165,14 @@ impl Fn {
 
 impl GenericSlot {
     pub fn new(name: Ptr<Ident>, span: Span) -> GenericSlot {
-        ast_new!(local GenericSlot { name, cur_inst: None, default: None, flags: GenericSlotFlags::default(), span })
+        ast_new!(local GenericSlot {
+            name,
+            cur_inst: None,
+            default: None,
+            flags: GenericSlotFlags::default(),
+            type_flags: TypeFlags::default(),
+            span,
+        })
     }
 
     pub fn generate_decl(
@@ -2638,13 +2688,25 @@ impl CloneAst for Ptr<Ast> {
             }),
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => *self,
             &AstEnum::PtrTy { is_mut, pointee, .. } => {
-                clone!(PtrTy { is_mut, pointee: pointee.clone_ast(alloc) })
+                clone!(PtrTy {
+                    is_mut,
+                    pointee: pointee.clone_ast(alloc),
+                    type_flags: TypeFlags::default()
+                })
             },
             &AstEnum::SliceTy { is_mut, elem_ty, .. } => {
-                clone!(SliceTy { is_mut, elem_ty: elem_ty.clone_ast(alloc) })
+                clone!(SliceTy {
+                    is_mut,
+                    elem_ty: elem_ty.clone_ast(alloc),
+                    type_flags: TypeFlags::default()
+                })
             },
             AstEnum::ArrayTy { len, elem_ty, .. } => {
-                clone!(ArrayTy { len: len.clone_ast(alloc), elem_ty: elem_ty.clone_ast(alloc) })
+                clone!(ArrayTy {
+                    len: len.clone_ast(alloc),
+                    elem_ty: elem_ty.clone_ast(alloc),
+                    type_flags: TypeFlags::default()
+                })
             },
             AstEnum::StructDef { flags, scope, generics_scope, span, decl, .. } => {
                 let decls = scope.decls.clone_ast(alloc);
@@ -2659,7 +2721,10 @@ impl CloneAst for Ptr<Ast> {
             },
             AstEnum::RangeTy { .. } => unreachable_debug(),
             AstEnum::OptionTy { inner_ty, .. } => {
-                clone!(OptionTy { inner_ty: inner_ty.clone_ast(alloc) })
+                clone!(OptionTy {
+                    inner_ty: inner_ty.clone_ast(alloc),
+                    type_flags: TypeFlags::default()
+                })
             },
             AstEnum::Fn { .. } => self.flat_downcast::<Fn>()._clone_ast(alloc)?.upcast(),
             AstEnum::GenericSlot { .. } => {

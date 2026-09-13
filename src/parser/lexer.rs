@@ -3,7 +3,7 @@ use crate::{
     parser::{ParseResult, parser_helper::ParserInterface},
     ptr::{OPtr, Ptr},
     source_file::SourceFile,
-    util::{UnwrapDebug, unreachable_debug},
+    util::unreachable_debug,
 };
 use core::{fmt, ops::Range};
 use std::{
@@ -471,7 +471,8 @@ impl Span {
     }
 
     pub fn get_text(self) -> Ptr<str> {
-        Ptr::from_ref(&self.file.u().code.as_ref()[self])
+        let Some(file) = self.file else { return Ptr::from_ref("{generated}") };
+        Ptr::from_ref(&file.code.as_ref()[self])
     }
 }
 

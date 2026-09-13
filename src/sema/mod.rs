@@ -495,7 +495,7 @@ impl UnitDependency {
             UnitDependency::VarType(d) => d.var_ty.is_some(),
             UnitDependency::ConstVal(d) => d.const_val().is_ok(),
             UnitDependency::RetTy(f) => f.ret_ty.is_some(),
-            UnitDependency::TypeLayout(ty) => type_layout_finished(*ty),
+            UnitDependency::TypeLayout(ty) => ty.check_layout_finished(),
             UnitDependency::EnumVariantTag(variant) => try_get_enum_variant_tag(*variant).is_some(),
             UnitDependency::_AssociatedConst(dot) => {
                 debug_assert_eq!(dot.lhs.u().ty, p().type_ty);
@@ -1120,7 +1120,7 @@ impl Sema {
                     *ty_hint
                 }
                 .map(|elem_ty| {
-                    type_new!(ArrayLikeContainer { elem_ty }, tmp_alloc()).upcast_to_type()
+                    type_new!(tmp_alloc(), ArrayLikeContainer { elem_ty }).upcast_to_type()
                 });
 
                 let lhs_ty = analyze!(*lhs, tmp_ty_hint);
@@ -1989,7 +1989,7 @@ impl Sema {
             },
             AstEnum::SizeOfDirective { type_, .. } => {
                 let ty = self.analyze_type_inst(*type_)?;
-                if !type_layout_finished(ty) {
+                if !ty.check_layout_finished() {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
@@ -1997,7 +1997,7 @@ impl Sema {
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let ty = *analyze!(*val, None);
-                if !type_layout_finished(ty) {
+                if !ty.check_layout_finished() {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
@@ -2005,7 +2005,7 @@ impl Sema {
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 let ty = self.analyze_type_inst(*type_)?;
-                if !type_layout_finished(ty) {
+                if !ty.check_layout_finished() {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
@@ -3969,18 +3969,6 @@ impl PatternSource {
             },
             PatternSourceKind::ByVal => narrowed_inner,
         }
-    }
-}
-
-fn type_layout_finished(ty: Ptr<ast::Type>) -> bool {
-    match ty.matchable().as_ref() {
-        TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
-            fields.iter().all(|f| f.var_ty.is_some())
-        },
-        TypeEnum::EnumDef { variants, tag_ty, .. } => {
-            tag_ty.is_some_and(|i| i.bits.is_some()) && variants.iter().all(|v| v.var_ty.is_some())
-        },
-        _ => true,
     }
 }
 

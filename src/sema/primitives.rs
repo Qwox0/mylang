@@ -95,26 +95,22 @@ impl Primitives {
         let symbols = Ptr::from_ref(symbols);
         let sym = |sym_name: &'static str| symbols.as_mut().get_or_intern(Ptr::from_ref(sym_name));
 
-        macro_rules! ast_new {
-            ($kind:ident {
-                $(
-                    $field:ident
-                    $( : $val:expr )?
-                ),* $(,)?
-            }) => {
-                alloc.alloc(crate::ast::$kind {
-                    kind: crate::ast::AstKind::$kind,
-                    ty: None,
-                    replacement: None,
-                    parenthesis_count: 0,
-                    span: Span::ZERO,
-                    $( $field $(: $val)? ),*
-                })?
+        /// Rust completely falls over if this is also called ast_new.
+        macro_rules! ast_new2 {
+            ($kind:ident { $($field:ident $(: $val:expr)? ),* $(,)? }) => {
+                crate::ast::ast_new!(alloc, $kind { span: Span::ZERO, $( $field $(:$val)?),* })
             };
         }
 
+        macro_rules! type_new {
+            ($kind:ident { $($field:ident $(: $val:expr)? ),* $(,)? }) => {{
+                debug_assert!(crate::ast::Type::KINDS.contains(&crate::ast::AstKind::$kind));
+                ast_new2!($kind { type_flags: crate::ast::TypeFlags::default(), $( $field $(:$val)?),* })
+            }};
+        }
+
         let new_primitive_decl = |decl_name| {
-            let mut ident = ast_new!(Ident { sym: sym(decl_name), decl: None });
+            let mut ident = ast_new2!(Ident { sym: sym(decl_name), decl: None });
             let mut decl = alloc.alloc(ast::Decl::from_ident(ident))?;
             ident.decl = Some(decl);
             decl.is_const = true;
@@ -124,12 +120,12 @@ impl Primitives {
         let type_ty_decl = new_primitive_decl("type")?;
         insert_symbol_no_duplicate(decls, type_ty_decl);
         let type_ty =
-            ast_new!(SimpleTy { decl: type_ty_decl, is_finalized: true }).upcast_to_type();
+            type_new!(SimpleTy { decl: type_ty_decl, is_finalized: true }).upcast_to_type();
 
         let void_ty_decl = new_primitive_decl("void")?;
         insert_symbol_no_duplicate(decls, void_ty_decl);
         let void_ty =
-            ast_new!(SimpleTy { decl: void_ty_decl, is_finalized: true }).upcast_to_type();
+            type_new!(SimpleTy { decl: void_ty_decl, is_finalized: true }).upcast_to_type();
 
         let init_ty = |t: Ptr<ast::Type>| t.as_mut().ty = Some(type_ty);
 
@@ -157,7 +153,7 @@ impl Primitives {
             ($decl_name:expr,simple_ty, finalized: $finalized:expr) => {{
                 let decl = new_primitive_decl($decl_name)?;
                 insert_symbol_no_duplicate(decls, decl);
-                let ty = ast_new!(SimpleTy { decl, is_finalized: $finalized }).upcast_to_type();
+                let ty = type_new!(SimpleTy { decl, is_finalized: $finalized }).upcast_to_type();
                 init_ty_decl(decl, ty);
                 ty
             }};
@@ -167,7 +163,7 @@ impl Primitives {
             ($decl_name:expr, raw $ty_kind:ident { $( $field:ident : $val:expr),* $(,)? }) => {{
                 let decl = new_primitive_decl($decl_name)?;
                 insert_symbol_no_duplicate(decls, decl);
-                let ty = ast_new!($ty_kind { $($field: $val),* });
+                let ty = type_new!($ty_kind { $($field: $val),* });
                 init_ty_decl(decl, ty.upcast_to_type());
                 ty
             }};
@@ -175,11 +171,11 @@ impl Primitives {
 
         let never = new_primitive_ty!("never", simple_ty, finalized: true);
         let never_ptr_ty =
-            ast_new!(PtrTy { pointee: never.upcast(), is_mut: true }).upcast_to_type();
+            type_new!(PtrTy { pointee: never.upcast(), is_mut: true }).upcast_to_type();
         init_ty(never_ptr_ty);
 
         let any = new_primitive_ty!("any", simple_ty, finalized: true);
-        let any_ptr_ty = ast_new!(PtrTy { pointee: any.upcast(), is_mut: false }).upcast_to_type();
+        let any_ptr_ty = type_new!(PtrTy { pointee: any.upcast(), is_mut: false }).upcast_to_type();
         init_ty(any_ptr_ty);
 
         let u8 = new_primitive_ty!("u8", IntTy { bits: Some(8), is_signed: false });
@@ -187,8 +183,8 @@ impl Primitives {
 
         let enum_variant = new_primitive_ty!("{enum variant}", simple_ty, finalized: false);
 
-        let null_val = ast_new!(OptionalVal { is_some: false, val: None });
-        let some_variant_val = ast_new!(OptionalVal { is_some: true, val: None });
+        let null_val = ast_new2!(OptionalVal { is_some: false, val: None });
+        let some_variant_val = ast_new2!(OptionalVal { is_some: true, val: None });
 
         let mut untyped_slice_ptr_field = new_primitive_decl("ptr")?;
         untyped_slice_ptr_field.is_const = false;
@@ -197,7 +193,7 @@ impl Primitives {
         let slice_len_field = new_primitive_decl("len")?;
         init_decl(slice_len_field, u64, None);
 
-        let null_ty = ast_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
+        let null_ty = type_new!(OptionTy { inner_ty: never.upcast() }).upcast_to_type();
         init_ty(null_ty);
 
         Ok(Primitives {
@@ -224,7 +220,7 @@ impl Primitives {
             f128: new_primitive_ty!("f128", FloatTy { bits: Some(128) }),
             str_slice_ty: {
                 let str_slice =
-                    ast_new!(SliceTy { elem_ty: u8.upcast(), is_mut: false }).upcast_to_type();
+                    type_new!(SliceTy { elem_ty: u8.upcast(), is_mut: false }).upcast_to_type();
                 init_ty(str_slice);
                 str_slice
             },
@@ -270,7 +266,7 @@ impl Primitives {
             untyped_slice_struct_def: {
                 let fields_vec = vec![untyped_slice_ptr_field, slice_len_field];
                 let fields = Ptr::from_ref(fields_vec.as_slice());
-                let def = ast_new!(StructDef {
+                let def = type_new!(StructDef {
                     flags: ast::StructFlags::default(),
                     scope: Scope::new(fields_vec, ScopeKind::Struct),
                     generics_scope: None,
@@ -286,14 +282,14 @@ impl Primitives {
                 def
             },
             empty_array_ty: {
-                let arr = ast_new!(ArrayTy {
-                    len: ast_new!(IntVal { val: num::BigInt::ZERO }).upcast(),
+                let arr = type_new!(ArrayTy {
+                    len: ast_new2!(IntVal { val: num::BigInt::ZERO }).upcast(),
                     elem_ty: never.upcast(),
                 });
                 init_ty(arr.upcast_to_type());
                 arr
             },
-            ignored_name: ast_new!(Ident { sym: sym("_"), decl: None }),
+            ignored_name: ast_new2!(Ident { sym: sym("_"), decl: None }),
         })
     }
 

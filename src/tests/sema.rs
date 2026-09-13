@@ -228,3 +228,26 @@ test :: -> MyFunctionType.SOME_CONST;
         substr!("SOME_CONST"),
     );
 }
+
+#[test]
+fn wait_for_nested_type_layout() {
+    // Compile (1) -> wait for `result`
+    // Compile (2) -> wait for `MyStruct`
+    // Compile (3) -> wait for `ValTy`
+    // Compile (4) -> done! -> swap with (1)
+    // done: (4); remaining: (2) (3) (1)
+    // Compile (2) -> must wait for `MyStruct` type layout!
+    // Compile (3) -> done! -> swap with (2)
+    // Compile (1) -> still waiting
+    // done: (4) (3); remaining: (2) (1)
+    // Compile (2) -> done!
+    // Compile (1) -> done!
+
+    let code = r#"
+test :: -> result;                       // (1)
+result :: #sizeof(enum { A(MyStruct) }); // (2)
+MyStruct :: struct { val: ValTy }        // (3)
+ValTy :: u32;                            // (4)
+"#;
+    test(code).ok(4_usize);
+}
