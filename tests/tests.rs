@@ -145,13 +145,25 @@ fn c_ffi_take_array_arg() {
 
 #[test]
 fn set_impl() {
-    let out = test_cmd(mylang(["check", "../lib/std/set.mylang", "--entry-point=test_set"]));
+    let out = test_cmd(mylang(["run", "../lib/std/set.mylang", "--entry-point=test_set"]));
     assert!(out.status.success());
 }
 
 #[test]
 fn hashmap_impl() {
-    let out = test_cmd(mylang(["check", "../lib/std/hashmap.mylang", "--entry-point=test_map"]));
+    let out = test_cmd(mylang(["run", "../lib/std/hashmap.mylang", "--entry-point=test_map"]));
+    assert!(out.status.success());
+}
+
+#[test]
+fn array_list_impl() {
+    let out = test_cmd(mylang(["run", "../lib/std/ArrayList.mylang", "--entry-point=test_array_list"]));
+    assert!(out.status.success());
+}
+
+#[test]
+fn json_impl() {
+    let out = test_cmd(mylang(["run", "../lib/std/json.mylang", "--entry-point=test_json"]));
     assert!(out.status.success());
 }
 

@@ -10,14 +10,13 @@ ParseOptions :: struct {
 /// Dynamic Json value
 Json :: enum {
     Object(std.hashmap.Str2PtrHashMap), // HashMap<[]u8, *Json>
-    Array(std.RawArrayList), // ArrayList<Json>
+    Array(std.Array(Json)),
     String([]u8),
     Number([]u8),
     True,
     False,
     Null,
 };
-Json.LAYOUT :: std.mem.Layout.{ size=#sizeof(Json), align=#alignof(Json) };
 
 Json.destroy :: (self: *Json) -> std.panic("TODO: destroy");
 Json.debug :: (self: *Json) -> std.panic("TODO: debug");
@@ -101,7 +100,7 @@ Parser.object :: (parser: *mut Parser) -> {
 Parser.array :: (parser: *mut Parser) -> {
     parser.eat('[') orelse return null;
 
-    mut items := std.RawArrayList.EMPTY;
+    mut items := std.Array(Json).EMPTY;
     loop {
         parser.whitespace();
         if parser.try_eat(']') {
@@ -113,7 +112,7 @@ Parser.array :: (parser: *mut Parser) -> {
         }
 
         val := parser.value() orelse return null;
-        items.&mut.push(&val, parser.*.alloc, Json.LAYOUT);
+        items.&mut.push(val, parser.*.alloc);
 
         if parser.try_eat(']') break;
         if parser.try_eat(',') continue;
@@ -253,7 +252,7 @@ Parser.peek :: (parser: *Parser) -> ?u8 {
 Parser.peek_or_eof :: (parser: *Parser) -> parser.peek() orelse 0;
 
 Parser.alloc_json :: (parser: *Parser, json: Json) -> {
-    buf := parser.*.alloc.alloc(#sizeof(Json), #alignof(Json)).as(?*mut Json) orelse std.panic("oom");
+    buf := std.mem.alloc(Json, parser.*.alloc) orelse std.panic("oom");
     buf.* = json;
     buf
 }
@@ -312,7 +311,7 @@ test_json :: -> {
         \\  "c": [1, null, "1", {"c":null}],
         \\  "empty_obj": { },
         \\  "empty_arr": [ ],
-        \\  "escapes": "\\u1234 \\\\" ",
+        \\  "escapes": "\\u1234 \\" ",
         \\  "loooong_array": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
         \\}
     ;

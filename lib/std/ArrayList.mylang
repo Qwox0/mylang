@@ -1,0 +1,210 @@
+std :: #import "std";
+libc :: #import "libc";
+
+Layout :: std.mem.Layout;
+Allocator :: std.mem.Allocator;
+
+mut static empty_array_list_buf: u8;
+
+ArrayList :: struct($T) {
+    ptr: *mut T,
+    len: usize,
+    cap: usize,
+
+    Self :: ArrayList(T);
+
+    EMPTY :: Self.{ ptr=empty_array_list_buf.&mut.as(*mut T), len=0, cap=0 };
+
+    new :: (capacity: usize, alloc: Allocator) -> {
+        mut list := Self.EMPTY;
+        list.&mut.reserve(capacity, alloc);
+        list
+    }
+
+    from_slice :: (slice: []T, alloc: Allocator) -> {
+        mut list := Self.new(slice.len, alloc);
+        list.&mut.append_assume_capacity(slice);
+        list
+    }
+
+    reserve :: (self: *mut Self, additional: usize, alloc: Allocator) -> {
+        if self.*.cap - self.*.len >= additional return; // no underflow check needed! // TODO: likely
+
+        mut new_cap := self.*.len + additional; // TODO: overflow check
+        new_cap = std.num.max(new_cap, self.*.cap * 2);
+        new_cap = std.num.max(new_cap, 8); // TODO: dynamic min capacity based on item_size.
+
+        // TODO: try resize
+        new_ptr := (std.mem.alloc_slice(T, new_cap, alloc) orelse std.panic("oom")).ptr;
+        libc.memcpy(new_ptr, self.*.ptr, self.*.len * #sizeof(T));
+        if self.*.ptr != EMPTY.ptr then alloc.free(self.*.ptr);
+
+        self.*.ptr = new_ptr;
+        self.*.cap = new_cap;
+    }
+
+    push :: (self: *mut Self, val: T, alloc: Allocator) -> *mut T {
+        self.reserve(1, alloc);
+
+        slot := self.get_slot(self.*.len);
+        slot.* = val;
+
+        self.*.len += 1;
+        slot
+    }
+
+    append :: (self: *mut Self, data: []T, alloc: Allocator) -> []mut T {
+        self.reserve(data.len, alloc);
+        self.append_assume_capacity(data)
+    }
+
+    append_assume_capacity :: (self: *mut Self, data: []T) -> []mut T {
+        std.assert(self.*.cap - self.*.len >= data.len);
+
+        slots := self.get_slot(self.*.len);
+        libc.memcpy(slots, data.ptr, data.len * #sizeof(T));
+        self.*.len += data.len;
+        .{ ptr=slots, len=data.len }
+    }
+
+    insert :: (self: *mut Self, index: usize, val: T, alloc: Allocator) -> *mut T {
+        std.assert(index <= self.*.len);
+
+        self.reserve(1, alloc);
+
+        slot := self.get_slot(index);
+        libc.memmove(
+            self.get_slot(index + 1),
+            slot,
+            (self.*.len - index) * #sizeof(T),
+        );
+        slot.* = val;
+        slot
+    }
+
+    clear :: (self: *mut Self) -> self.*.len = 0;
+
+    pop :: (self: *mut Self) -> ?T {
+        item := self.last_mut() orelse return null;
+        self.*.len -= 1;
+        Some(item.*)
+    }
+
+    remove :: (self: *mut Self, index: usize) -> T {
+        std.assert(index < self.*.len);
+
+        removed_slot := self.get_slot(index);
+        value := removed_slot.*;
+
+        libc.memmove(
+            removed_slot,
+            self.get_slot(index + 1),
+            (self.*.len - index - 1) * #sizeof(T),
+        );
+        self.*.len -= 1;
+
+        value
+    }
+
+    swap_remove :: (self: *mut Self, index: usize) -> T {
+        std.assert(index < self.*.len);
+
+        removed_slot := self.get_slot(index);
+        value := removed_slot.*;
+        if index < self.*.len - 1 then
+            removed_slot.* = self.get_slot(self.*.len - 1).*;
+        self.*.len -= 1;
+
+        value
+    }
+
+    // -----------------------------------
+    // helpers
+
+    get_slot :: (self: *mut Self, index: usize) -> *mut /* uninit */ T {
+        std.assert(index < self.*.cap);
+        self.*.ptr |> std.ptr.add_bytes_mut(index * #sizeof(T))
+    }
+
+    // -----------------------------------
+    // slice stuff:
+
+    // TODO: generic over mutability
+    as_slice :: (self: *Self) -> []T.{ ptr=self.*.ptr, len=self.*.len };
+    as_slice_mut :: (self: *mut Self) -> []mut T.{ ptr=self.*.ptr, len=self.*.len };
+    get :: (self: *Self, index: usize) -> ?*T
+        if index < self.*.len then Some(&self.as_slice()[index]) else null;
+    get_mut :: (self: *mut Self, index: usize) -> ?*mut T
+        if index < self.*.len then Some(&mut self.as_slice_mut()[index]) else null;
+    first :: (self: *Self) -> ?*T
+        if 0 < self.*.len then Some(self.*.ptr) else null;
+    first_mut :: (self: *mut Self) -> ?*mut T
+        if 0 < self.*.len then Some(self.*.ptr) else null;
+    last :: (self: *Self) -> ?*T
+        if 0 < self.*.len then self.get(self.*.len - 1) else null;
+    last_mut :: (self: *mut Self) -> ?*mut T
+        if 0 < self.*.len then self.get_mut(self.*.len - 1) else null;
+
+    contains :: (self: *Self, val: *T, eq: (a: *T, b: *T) -> bool) -> {
+        for elem in self.as_slice() {
+            if eq(&elem, val) return true;
+        }
+        false
+    }
+    //binary_search  :: (self: *ArrayList, val: *T, eq: OrdClosure) -> std.todo("binary_search");
+
+    debug :: (
+        self: *Self,
+        format_item: (item: *T) -> []u8,
+        free_text: ?(text: []u8) -> void = null,
+    ) -> {
+        std.print("[");
+        for idx in 0..self.*.len {
+            item := self.get(idx) orelse std.panic("unreachable");
+
+            text := format_item(item);
+            defer switch free_text { Some :> free_text(text) } else {};
+
+            std.print(text);
+            if idx != self.*.len - 1 then std.print(", ");
+        }
+        std.print("]");
+    }
+}
+
+test_array_list :: -> {
+    print_list :: (list: *ArrayList($V)) -> {
+        list.debug(i -> std.fmt.format("%d", i.*), t -> libc.free(t.ptr));
+        std.println("");
+    }
+
+    mut buf: [1024]u8;
+    mut buf_alloc := std.mem.FixedArenaAllocator.new(buf[..]mut);
+    alloc := buf_alloc.&mut.allocator();
+
+    mut list := ArrayList(i64).from_slice(.[1, 2, 3][..], alloc);
+    std.assert(list.len == 3);
+    std.assert(list.cap >= 3);
+    std.assert(buf_alloc.&.allocated() >= #sizeof(i64) * 3);
+
+    print_list(&list);
+
+    old_cap := list.cap;
+    old_allocated := buf_alloc.&.allocated();
+
+    pop_res := list.&mut.pop() orelse std.panic("unreachable");
+    std.assert(pop_res == 3);
+    std.assert(list.len == 2);
+    std.assert(list.cap == old_cap);
+    std.assert(buf_alloc.&.allocated() == old_allocated);
+
+    print_list(&list);
+
+    for _ in 0..old_cap do list.&mut.push(99, alloc);
+
+    std.assert(list.len == 2 + old_cap);
+    std.assert(list.cap > old_cap);
+    std.assert(buf_alloc.&.allocated() > old_allocated);
+
+    print_list(&list);
+}

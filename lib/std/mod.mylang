@@ -1,4 +1,3 @@
-pub RawArrayList :: #import "./RawArrayList.mylang".RawArrayList;
 pub RawHashTable :: #import "./RawHashTable.mylang".RawHashTable;
 pub bindgen :: #import "./bindgen/mod.mylang";
 pub closures :: #import "./closures.mylang";
@@ -16,6 +15,9 @@ pub ptr :: #import "./ptr.mylang";
 pub set :: #import "./set.mylang";
 pub slice :: #import "./slice.mylang";
 pub str :: #import "./str.mylang";
+
+pub ArrayList :: #import "./ArrayList.mylang".ArrayList;
+pub Array :: ArrayList;
 
 libc :: #import "libc";
 

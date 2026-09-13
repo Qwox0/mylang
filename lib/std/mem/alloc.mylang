@@ -35,8 +35,3 @@ Allocator :: struct {
         return self.impl.*(self.data, .Resize, new_size, alignment, ptr);
     }
 }
-
-/*
-pub new :: (T: type, allocator := #ctx.alloc) ->
-    allocator.alloc(#sizeof(T), #alignof(T)).as(?*mut T);
-*/

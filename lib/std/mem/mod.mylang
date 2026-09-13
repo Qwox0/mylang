@@ -11,6 +11,14 @@ pub ArenaAllocator :: #import "arena_allocator.mylang".ArenaAllocator;
 pub FixedArenaAllocator :: #import "fixed_arena_allocator.mylang".FixedArenaAllocator;
 pub VirtualArenaAllocator :: #import "virtual_arena_allocator.mylang".VirtualArenaAllocator;
 
+alloc :: ($T: type, allocator := std.ctx.alloc) ->
+    allocator.alloc(#sizeof(T), #alignof(T)).as(?*mut T);
+
+alloc_slice :: ($T: type, len: usize, allocator := std.ctx.alloc) -> ?[]mut T {
+    buf := allocator.alloc_at_least(#sizeof(T) * len, #alignof(T)) orelse return null;
+    []mut T.{ ptr=buf.ptr.as(*mut T), len }
+}
+
 pub pagesize :: () -> {
     mut static pagesize: usize = 0;
     if pagesize == 0 {
