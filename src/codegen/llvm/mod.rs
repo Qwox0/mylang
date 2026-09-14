@@ -474,7 +474,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_cast(*operand, target_ty.downcast_type())
             },
             AstEnum::Autocast { operand, .. } => self.compile_cast(*operand, out_ty),
-            AstEnum::Call { func, resolved_fn_inst, args, .. } => {
+            AstEnum::Call { func, resolved_inst, args, .. } => {
                 if let Some(f) = func.ty.u().try_downcast::<ast::Fn>() {
                     let mut inst = f;
                     let fn_val = match self.compile_expr(*func)? {
@@ -482,12 +482,12 @@ impl<'ctx> Codegen<'ctx> {
                             debug_assert!(!f.flags.get(FnFlags::IS_GENERIC));
                             debug_assert_eq!(
                                 val,
-                                *self.fn_table.get(&resolved_fn_inst.u().downcast::<ast::Fn>()).u()
+                                *self.fn_table.get(&resolved_inst.u().downcast::<ast::Fn>()).u()
                             );
                             CallFnVal::Direct(val)
                         },
                         Symbol::GenericFunction(f) => {
-                            inst = resolved_fn_inst.u().downcast::<ast::Fn>();
+                            inst = resolved_inst.u().downcast::<ast::Fn>();
                             debug_assert!(f.flags.get(FnFlags::IS_GENERIC));
                             debug_assert!(inst.flags.get(FnFlags::IS_INSTANTIATION));
                             debug_assert!(f.polymorphs.contains(&inst));
@@ -1019,6 +1019,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(bb)?;
                 Unreachable(())
             },
+            AstEnum::ReplacementContainer { .. } => todo!(),
             AstEnum::Empty { .. } => Ok(Symbol::Void),
 
             AstEnum::IntVal { .. }
@@ -3393,7 +3394,7 @@ impl<'ctx> Codegen<'ctx> {
                                 prev_bytes -= 8;
                             }
                             if prev_bytes > 0 {
-                                add_field!(self.context.custom_width_int_type(prev_bytes * 8));
+                                add_field!(self.int_type(prev_bytes * 8));
                             }
                         },
                         PrevState::Float => add_field!(self.context.f32_type()),

@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         self, Ast, AstKind, CloneAst, EnumFlags, FnFlags, HasAstKind, StructFlags, TypeVariant,
-        UpcastToAst, inherit_ast,
+        UpcastToAst, inherit_ast, inherit_type,
     },
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
@@ -150,7 +150,7 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
     }
 }
 
-inherit_ast! {
+inherit_type! {
     struct Polymorphable {}
 }
 

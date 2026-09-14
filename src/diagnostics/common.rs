@@ -4,9 +4,9 @@ use crate::{
     diagnostics::{HandledErr, cerror, chint},
     parser::lexer::Span,
     ptr::Ptr,
-    util::{BitFlags, StrExt, UnwrapDebug, unreachable_debug},
+    util::{BitFlags, IteratorExt, StrExt, UnwrapDebug, then, unreachable_debug},
 };
-use std::fmt::{self, Display};
+use std::{fmt, iter::FusedIterator};
 
 #[track_caller]
 pub fn error_cannot_yield_from_loop_block(span: Span) -> HandledErr {
@@ -102,7 +102,7 @@ pub fn error_const_ptr_initializer(initializer: Ptr<ast::Ast>) -> HandledErr {
 }
 
 #[track_caller]
-pub fn error_non_const(runtimevalue: Ptr<ast::Ast>, what: impl Display) -> HandledErr {
+pub fn error_non_const(runtimevalue: Ptr<ast::Ast>, what: impl fmt::Display) -> HandledErr {
     error_non_const_custom(
         runtimevalue,
         format_args!("{} must be known at compile time", what.to_string().capitalize()),
@@ -113,8 +113,8 @@ pub fn error_non_const(runtimevalue: Ptr<ast::Ast>, what: impl Display) -> Handl
 #[track_caller]
 pub fn error_non_const_custom(
     runtimevalue: Ptr<ast::Ast>,
-    for_ident: impl Display,
-    for_expr: impl Display,
+    for_ident: impl fmt::Display,
+    for_expr: impl fmt::Display,
 ) -> HandledErr {
     let span = runtimevalue.full_span();
     if runtimevalue.kind == AstKind::Ident {
@@ -183,4 +183,28 @@ pub fn error_missing_associated_const(dot: Ptr<ast::Dot>) -> HandledErr {
 pub fn error_missing_field(dot: Ptr<ast::Dot>) -> HandledErr {
     let ty = dot.lhs.u().ty.u().flatten_transparent();
     cerror!(dot.rhs.span, "no field `{}` on type `{ty}`", dot.rhs.sym)
+}
+
+pub fn error_missing_variants<I>(
+    variants: impl IntoIterator<IntoIter = I>,
+    variant_used: &[bool],
+    switch: Ptr<ast::Switch>,
+) -> HandledErr
+where
+    I: ExactSizeIterator + DoubleEndedIterator + FusedIterator,
+    I::Item: fmt::Display,
+{
+    let (missing, plural_s) = variants
+        .into_iter()
+        .zip(variant_used)
+        .filter_map(|(v, used)| then!(!*used => v))
+        .join_fancy_list("and");
+
+    cerror!(
+        switch.span.start().join(switch.val.full_span()),
+        "missing case{plural_s} {missing} in exhaustive switch on enum `{}`",
+        switch.val.ty.u(),
+    );
+    chint!(switch.span.end(), "Consider adding an `else` case");
+    HandledErr
 }

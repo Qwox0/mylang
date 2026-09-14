@@ -50,7 +50,7 @@ pub struct CompilationContextInner {
     pub args: BuildArgs,
     pub entry_point: Symbol,
 
-    pub ty_names: HashMap<Ptr<ast::Type>, Symbol>,
+    pub custom_ty_names: HashMap<Ptr<ast::Type>, Symbol>,
 
     #[cfg(test)]
     pub stmts: Option<Box<[Ptr<ast::Ast>]>>,
@@ -119,7 +119,7 @@ impl CompilationContext {
             args,
             entry_point: entry_point_sym,
 
-            ty_names: HashMap::new(),
+            custom_ty_names: HashMap::new(),
 
             #[cfg(test)]
             stmts: None,

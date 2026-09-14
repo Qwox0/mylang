@@ -302,18 +302,21 @@ pub trait IteratorExt: Iterator + Sized {
 
     /// Returns "{item1}, {item2}, ..., {itemN-1} {last_sep} {itemN}"
     ///                                          ^ no comma here (because I don't like it)
-    fn join_fancy_list(mut self, last_sep: &str) -> String
+    fn join_fancy_list(mut self, last_sep: &str) -> (String, PluralS)
     where
         Self: DoubleEndedIterator + FusedIterator,
         Self::Item: std::fmt::Display,
     {
+        let Some(last) = self.next_back() else { return (String::new(), PluralS::Zero) };
+
         let mut buf =
             String::with_capacity((self.size_hint().0.saturating_sub(1)) * 2 + last_sep.len());
-
-        let Some(last) = self.next_back() else { return buf };
         self.join_into(", ", &mut buf);
+        if buf.is_empty() {
+            return (last.to_string(), PluralS::Singular);
+        }
         write!(&mut buf, " {last_sep} {last}").u();
-        buf
+        (buf, PluralS::Plural)
     }
 
     fn zip_exact<O>(self, other: impl IntoIterator<IntoIter = O>) -> std::iter::Zip<Self, O>
@@ -328,6 +331,22 @@ pub trait IteratorExt: Iterator + Sized {
 }
 
 impl<I: Iterator> IteratorExt for I {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PluralS {
+    Zero,
+    Singular,
+    Plural,
+}
+
+impl fmt::Display for PluralS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PluralS::Zero | PluralS::Singular => Ok(()),
+            PluralS::Plural => f.write_str("s"),
+        }
+    }
+}
 
 pub trait StrExt {
     fn capitalize(&mut self) -> &mut Self;

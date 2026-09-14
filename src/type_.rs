@@ -623,7 +623,7 @@ impl Type {
                 } else if self == p.bool {
                     1
                 } else {
-                    unreachable_debug()
+                    panic_debug!("unexpected SimpleTy `{self}`")
                 }
             },
             TypeEnum::IntTy { bits, .. } | TypeEnum::FloatTy { bits, .. } => int_size(bits.u()),

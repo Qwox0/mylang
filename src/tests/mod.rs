@@ -633,6 +633,10 @@ fn reset_test_fd(test_fd: i32) {
 }
 
 macro_rules! assert_contains {
+    ($val:expr, not $($pat:tt)+) => {{
+        let pat = format!($($pat)+);
+        assert!(!$val.contains(&pat), "assertion failed: `{}` doesn't contain \"{pat}\"", stringify!($val));
+    }};
     ($val:expr, $($pat:tt)+) => {{
         let pat = format!($($pat)+);
         assert!($val.contains(&pat), "assertion failed: `{}` contains \"{pat}\"", stringify!($val));

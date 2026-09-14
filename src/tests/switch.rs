@@ -58,7 +58,7 @@ switch e {
         )
         // continues with outer checks:
         .error(
-            "missing cases  and `.Struct` in exhaustive switch on enum `MyEnum`",
+            "missing case `.Struct` in exhaustive switch on enum `MyEnum`",
             substr!("switch e"),
         );
 

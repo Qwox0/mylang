@@ -1,4 +1,4 @@
-use crate::tests::{CompileTest, arr, assert_contains, fields, substr, test, test_body};
+use crate::tests::{CompileTest, TestSpan, arr, assert_contains, fields, substr, test, test_body};
 
 #[test]
 fn generic_function_call() {
@@ -66,7 +66,10 @@ test :: -> {
 take_opt :: (opt: ?$A) -> {};
 test :: -> take_opt(null);
 "#;
-    test(code).error("Cannot infer value of generic argument `A`", substr!("take_opt(null)"));
+    test(code).error(
+        "Cannot infer value of generic parameter `A` on type `(opt:?$A)->{unknown}`", // TODO: better type
+        substr!("take_opt(null)"),
+    );
 }
 
 #[test]
@@ -302,6 +305,30 @@ test :: -> MyStruct(never, void, any){init};
 }
 
 #[test]
+fn struct_non_type_generic_parameter() {
+    let code = r#"
+MyArray :: struct($T, $N: u64) {
+    arr: [N]T;
+    len :: (_self: MyArray(T, N)) -> N;
+};
+test :: -> {
+    a1 := MyArray(i32, 5).(.[1, 2, 3, 4, 5]);
+    a2 := MyArray([]u8, 2).(.["Hello", "World"]);
+
+    mut res: u64 = 0;
+    res += a1.len();
+    res += a2.len();
+    for s in a2.arr do res += s.len;
+    res
+}
+"#;
+    let res = test(code).ok(17_usize);
+    assert_contains!(res.llvm_ir(), r#"@"MyArray(i32,5).len""#);
+    assert_contains!(res.llvm_ir(), r#"@"MyArray([]u8,2).len""#);
+    drop(res);
+}
+
+#[test]
 fn generics_without_instantiations() {
     let code = "
 my_generic_function :: (a: $A) -> a;
@@ -333,13 +360,15 @@ take_val :: (x: MyStruct) -> {
     // before fix this emitted a cycle error
     test(code)
         .error(
-            "Cannot infer generic parameters of type `MyStruct`",
+            "Cannot infer value of generic parameter `T` on type `MyStruct`",
             substr!("x: MyStruct";.until_end(8)),
         )
+        .info("missing generic parameter defined here", substr!("$T"))
         .error(
-            "Cannot infer generic parameters of type `MyStruct`",
+            "Cannot infer value of generic parameter `T` on type `MyStruct`",
             substr!("MyStruct.debug";.start_with_len(8)),
-        );
+        )
+        .info("missing generic parameter defined here", substr!("$T"));
 }
 
 #[test]
@@ -577,4 +606,86 @@ test2 :: -> f(i32);
     test(code).error("no associated constant `UNKNOWN` on type `MyStruct`", substr!("UNKNOWN"))
     // no cycle error!
     ;
+}
+
+#[test]
+fn error_recursive_generic_def() {
+    let code = "
+MyStruct :: struct($T: T) {}
+test :: -> MyStruct(i32).{};
+";
+    let mut res = test(code).compile();
+    if cfg!(debug_assertions) {
+        res.ctx.diag_idx += 1; // skip temporary warning
+    }
+    res.error("cycle(s) detected:", |_| TestSpan::ZERO);
+}
+
+#[test]
+fn fn_ptr_as_generic_struct_field() {
+    let code = "
+MyStruct :: struct($A) { f: *(a: A) -> void };
+test :: -> {
+    s := MyStruct(i32).{ f=& x -> {}};
+}
+";
+    test(code).compile_no_err();
+}
+
+#[test]
+fn struct_generic_default_infer_all() {
+    // type
+    let code = "
+MyStruct :: struct($T := i32) { val: T }
+take_and_inc :: (s: MyStruct) -> s.val + 1;
+test :: -> take_and_inc(.{ val=100 });
+";
+    let res = test(code).ok(101_i32);
+    assert_contains!(res.llvm_ir(), "@take_and_inc(i32 %s)");
+    assert_contains!(res.llvm_ir(), not "@take_and_inc.i64(");
+    assert_contains!(res.llvm_ir(), not "@take_and_inc.i32(");
+    drop(res);
+
+    // const
+}
+
+#[test]
+fn struct_generic_default_infer_some() {
+    // type
+    let code = r#"
+MyStruct :: struct($A, $B := i32) { a: A, b: B }
+take_and_inc :: (s: MyStruct([]u8)) -> s.a.len.as(i32) + s.b;
+test :: -> take_and_inc(.{ a="Hello World", b=5 });
+"#;
+    let res = test(code).ok(16_i32);
+    assert_contains!(res.llvm_ir(), "@take_and_inc(");
+    assert_contains!(res.llvm_ir(), not "@\"take_and_inc.[]u8\"(");
+    assert_contains!(res.llvm_ir(), not "@take_and_inc.i32(");
+    drop(res);
+
+    // const
+    let code = r#"
+MyStruct :: struct($A: u64, $B := 1) { a: [A]i32, b: [B]u8 }
+take_and_inc :: (mut s: MyStruct(3)) -> {
+    s.a[0] += 1;
+    s.b[0] += 1;
+    s
+}
+test :: -> take_and_inc(.{ a=.[-1, -2, -3], b=.[4] });
+"#;
+    let res = test(code).ok(([0_i32, -2, -3], [5_u8]));
+    assert_contains!(res.llvm_ir(), "@take_and_inc(");
+    assert_contains!(res.llvm_ir(), not "@\"take_and_inc.[]u8\"(");
+    assert_contains!(res.llvm_ir(), not "@take_and_inc.i32(");
+    drop(res);
+}
+
+#[test]
+#[ignore = "todo"]
+fn use_generic_in_calculated_field_type() {
+    let code = r#"
+MyStruct :: struct($A: u64) { arr: [A + 1]i32 }
+test :: -> MyStruct(3).(.{ arr=.[1, 2, 3, 4] });
+"#;
+    test(code).ok(arr([1_i32, 2, 3, 4]));
 }

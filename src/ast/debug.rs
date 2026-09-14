@@ -59,8 +59,8 @@ impl DebugAst for Ast {
                 lines.write(")");
             }
             return;
-        } else if let Some(ty) = ptr.try_downcast_type_by_kind()
-            && let Some(&name) = ctx().ty_names.get(&ty)
+        } else if ptr.rep().is_custom_type() // TODO: split of printing types and only debug the flat ast here
+            && let Some(&name) = ctx().custom_ty_names.get(&ptr.downcast_type2())
         {
             lines.write(name.text());
             return;
@@ -318,6 +318,7 @@ impl DebugAst for Ast {
                 }
             },
             AstEnum::Continue { .. } => lines.write("continue"),
+            AstEnum::ReplacementContainer { .. } => todo!(),
             AstEnum::Empty { .. } => {},
             AstEnum::ImportDirective { path, .. } => {
                 lines.write("#import ");

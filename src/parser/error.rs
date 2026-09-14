@@ -51,6 +51,6 @@ fn format_expected_tokens(expected: &[TokenKind]) -> Option<String> {
         [] => return None,
         [e] => format!("{e}"),
         [a, b] => format!("{a} or {b}"),
-        _ => expected.iter().join_fancy_list("or"),
+        _ => expected.iter().join_fancy_list("or").0,
     })
 }

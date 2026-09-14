@@ -66,7 +66,7 @@ macro_rules! inherit_type {
         inherit_ast! {
             $(#[$attr])*
             struct $name {
-                type_flags: TypeFlags,
+                type_flags: crate::ast::TypeFlags,
                 $( $(#[$field_attr])* $field : $ty ),*
             }
         }
@@ -568,7 +568,7 @@ ast_variants! {
     /// `                                        ^ expr.span`
     Call {
         func: Ptr<Ast>,
-        resolved_fn_inst: OPtr<Type>,
+        resolved_inst: OPtr<Type>,
         args: Ptr<[Ptr<Ast>]>,
         /// which argument was piped into this [`Ast::Call`]
         pipe_idx: Option<usize>,
@@ -715,6 +715,7 @@ ast_variants! {
     Continue {},
 
     Empty {},
+    ReplacementContainer {},
 
     ===== Constant Values =====
 
@@ -990,10 +991,11 @@ impl InitializerFlags {
 }
 
 bitflags!(FnFlags: u8 {
-    // # sema flags:
-    /// set during sema
-    HAS_KNOWN_RET_TY,
+    // # parser flags:
     HAS_VARARGS,
+
+    // # sema flags:
+    HAS_KNOWN_RET_TY,
 
     /// ```mylang
     /// named :: () -> {}
@@ -1124,6 +1126,8 @@ impl Ptr<Ast> {
             self.ty.u().p_eq(self) || self.ty.u() == p.err_ty
         } else if self == p.err_ty.upcast() {
             true
+        } else if self.ty.u() == p.err_ty {
+            self.has_type_kind()
         } else {
             false
         }
@@ -1172,6 +1176,12 @@ impl Ptr<Ast> {
     pub fn set_replacement_no_type(self, rep: Ptr<Ast>) {
         debug_assert!(self.replacement.is_none_or(|r| r == rep));
         self.as_mut().replacement = Some(rep)
+    }
+
+    #[inline]
+    pub fn set_replacement_and_type(self, rep: Ptr<Ast>) {
+        self.set_replacement_no_type(rep);
+        self.as_mut().ty.set_or_expect(rep.ty.u());
     }
 
     #[track_caller]
@@ -1247,19 +1257,6 @@ impl Ptr<Ast> {
         ty
     }
 
-    /// returns [`error_cannot_infer_generics2`] for generic type definitions
-    pub fn try_downcast_type_inst(self) -> Result<Ptr<Type>, HandledErr> {
-        let ty = self.downcast_type2();
-
-        if let Some(polymorphable) = ty.try_downcast_polymorphable()
-            && polymorphable.is_generic()
-        {
-            return Err(error_cannot_infer_generics(self));
-        }
-
-        Ok(ty)
-    }
-
     pub fn downcast_type_inst(self) -> Ptr<Type> {
         let ty = self.downcast_type2();
         debug_assert!(!ty.try_downcast_polymorphable().is_some_and(|p| p.is_generic()));
@@ -1272,10 +1269,6 @@ impl Ptr<Ast> {
 
     pub fn try_downcast_type2(self) -> OPtr<Type> {
         then!(self.is_type() => self.downcast_type2())
-    }
-
-    pub fn try_downcast_type_by_kind(self) -> OPtr<Type> {
-        self.rep().try_flat_downcast_type_by_kind()
     }
 
     pub fn downcast_type_ref(&mut self) -> &mut Ptr<Type> {
@@ -1684,6 +1677,21 @@ impl Type {
             | TypeEnum::EnumDef { scope, sema_units, finished_members, .. } => {
                 Some(UnfinishedMembers {
                     items: &mut scope.decls,
+                    units: sema_units.as_mut().u(),
+                    finished_count: finished_members,
+                })
+            },
+            _ => None,
+        }
+    }
+
+    pub fn generics_sema_state(self: &Self) -> Option<UnfinishedMembers<'_, Decl>> {
+        match self.matchable().as_mut() {
+            TypeEnum::StructDef { generics_scope, sema_units, finished_members, .. }
+            //| TypeEnum::UnionDef { generics_scope, sema_units, finished_members, .. }
+            | TypeEnum::EnumDef { generics_scope, sema_units, finished_members, .. } => {
+                Some(UnfinishedMembers {
+                    items: &mut generics_scope.as_mut().u().decls,
                     units: sema_units.as_mut().u(),
                     finished_count: finished_members,
                 })
@@ -2130,7 +2138,7 @@ impl Fn {
     pub fn new(
         params: Vec<Ptr<Decl>>,
         ret_ty_expr: OPtr<Ast>,
-        body: OPtr<Ast>,
+        body: Ptr<Ast>,
         start_span: Span,
         alloc: &Arena,
     ) -> Result<Ptr<Fn>, AllocErr> {
@@ -2144,7 +2152,7 @@ impl Fn {
             ret_ty_expr,
             ret_ty: None,
             polymorphs: vec![],
-            body,
+            body: Some(body),
             decl: None,
             span: start_span,
         });
@@ -2586,7 +2594,7 @@ impl CloneAst for Ptr<Ast> {
                 func: func.clone_ast(alloc),
                 args: args.clone_ast(alloc),
                 pipe_idx,
-                resolved_fn_inst: None,
+                resolved_inst: None,
             }),
             &AstEnum::UnaryOp { is_postfix, op, operand, .. } => {
                 clone!(UnaryOp { is_postfix, op, operand: operand.clone_ast(alloc) })
@@ -2653,6 +2661,7 @@ impl CloneAst for Ptr<Ast> {
             },
             AstEnum::Break { val, .. } => clone!(Break { val: val.clone_ast(alloc) }),
             AstEnum::Continue { .. } => clone!(Continue {}),
+            AstEnum::ReplacementContainer { .. } => todo!(),
             AstEnum::Empty { .. } => clone!(Empty {}),
             AstEnum::IntVal { val, .. } => clone!(IntVal { val: val.clone() }),
             &AstEnum::FloatVal { val, .. } => clone!(FloatVal { val }),
@@ -2786,15 +2795,17 @@ impl CloneAst for Ptr<Fn> {
             })
             .collect::<Vec<_>>();
 
-        let mut f = Fn::new(
-            params,
-            self.ret_ty_expr.clone_ast(alloc),
-            self.body.clone_ast(alloc),
-            self.span,
-            alloc,
-        )?;
-        f.flags = self.flags;
-        f.flags.unset(FnFlags::HAS_KNOWN_RET_TY); // sema flag
+        let (body, ret_ty_expr) = if self.flags.get(FnFlags::IS_TYPE) {
+            debug_assert!(self.body.is_none());
+            // see test `fn_ptr_as_generic_struct_field`
+            (self.ret_ty_expr.u(), None)
+        } else {
+            (self.body.u(), self.ret_ty_expr)
+        };
+
+        let mut f =
+            Fn::new(params, ret_ty_expr.clone_ast(alloc), body.clone_ast(alloc), self.span, alloc)?;
+        f.flags.data = self.flags.data & FnFlags::HAS_VARARGS;
         // also clones generics_scope, even though it is only generated after parsing, to not differ
         // from StructDef cloning.
         debug_assert_eq!(self.generics_scope.is_some(), self.flags.get(FnFlags::IS_GENERIC));

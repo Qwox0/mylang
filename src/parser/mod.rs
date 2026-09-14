@@ -364,7 +364,7 @@ impl Parser {
                             }
                             let decl = self_.var_decl_no_markers(true)?;
                             debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
-                            debug_assert!(decl.is_const);
+                            decl.as_mut().is_const = true; // Currently `$N :: 1` and `$N := 1` are allowed!
                             decl.generic
                                 .u()
                                 .as_mut()
@@ -952,7 +952,7 @@ impl Parser {
         for p in params.iter() {
             p.as_mut().flags.set(DeclFlags::IS_PARAMETER);
         }
-        Ok(ast::Fn::new(params, ret_ty_expr, Some(body), start_span, &self.cctx.alloc)?)
+        Ok(ast::Fn::new(params, ret_ty_expr, body, start_span, &self.cctx.alloc)?)
     }
 
     fn if_after_cond(
@@ -1041,7 +1041,7 @@ impl Parser {
         let mut args = start_args;
         let closing_paren_span = self.parse_call(&mut args)?;
         let args = self.alloc_slice(&args)?;
-        Ok(ast_new!(Call { func, args, pipe_idx, resolved_fn_inst: None }, closing_paren_span))
+        Ok(ast_new!(Call { func, args, pipe_idx, resolved_inst: None }, closing_paren_span))
     }
 
     /// expects next token to be '{' and parses until and including the '}'
