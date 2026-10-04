@@ -500,7 +500,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.compile_call(inst, fn_val, args.into_iter(), write_target.take(), expr)
                 } else if func.ty == p.method_stub {
                     let dot = func.downcast::<ast::Dot>();
-                    let f = dot.rhs.ty.u().downcast::<ast::Fn>();
+                    let f = resolved_inst.u().downcast::<ast::Fn>();
                     let Some(&val) = self.fn_table.get(&f) else {
                         println!("Function was not compiled:",);
                         debug_expr!(f);

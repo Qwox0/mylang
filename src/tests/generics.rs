@@ -689,3 +689,35 @@ test :: -> MyStruct(3).(.{ arr=.[1, 2, 3, 4] });
 "#;
     test(code).ok(arr([1_i32, 2, 3, 4]));
 }
+
+#[test]
+fn struct_generic_pause() {
+    let code = "
+MyStruct :: struct($A: Pause, $B: u64 = 3) { arr: [B]A }
+test :: -> {
+    a := MyStruct(u8).{ arr=.[1, 2, 3] };
+}
+Pause :: type;
+";
+    test(code).compile_no_err();
+}
+
+#[test]
+fn generic_method_correct_codegen() {
+    let code = "
+MyStruct :: struct {
+    val: u64;
+
+    as_float :: (self: MyStruct, $F :: f32) -> self.val.as(F);
+}
+test :: -> {
+    x := MyStruct.(0x123456789abcdef);
+    a := x.as_float();
+    b := x.as_float(f32);
+    c := x.as_float(f64);
+    struct { a: f32, b: f32, c: f64 }.{ a, b, c }
+}
+";
+    let val: u64 = 0x123456789abcdef;
+    test(code).ok((val as f32, val as f32, val as f64));
+}

@@ -120,9 +120,9 @@ pub fn accumulate_generic(
 pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
     type Flags: BitFlags + 'static;
 
-    const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr;
-    const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr;
-    const FLAG_IS_INSTANTIATION_WITH_GENERICS: <Self::Flags as BitFlags>::Repr;
+    const FLAG_IS_GENERIC: Self::Flags;
+    const FLAG_IS_INSTANTIATION: Self::Flags;
+    const FLAG_IS_INSTANTIATION_WITH_GENERICS: Self::Flags;
 
     fn main_scope(self: Ptr<Self>) -> &'static mut Scope;
 
@@ -159,10 +159,9 @@ macro_rules! impl_PolymorphableType {
         $(impl PolymorphableType for ast::$ty {
             type Flags = $flags_ty;
 
-            const FLAG_IS_GENERIC: <Self::Flags as BitFlags>::Repr = Self::Flags::IS_GENERIC;
-            const FLAG_IS_INSTANTIATION: <Self::Flags as BitFlags>::Repr =
-                Self::Flags::IS_INSTANTIATION;
-            const FLAG_IS_INSTANTIATION_WITH_GENERICS: <Self::Flags as BitFlags>::Repr = Self::Flags::IS_INSTANTIATION_WITH_GENERICS;
+            const FLAG_IS_GENERIC: Self::Flags = Self::Flags::IS_GENERIC;
+            const FLAG_IS_INSTANTIATION: Self::Flags = Self::Flags::IS_INSTANTIATION;
+            const FLAG_IS_INSTANTIATION_WITH_GENERICS: Self::Flags = Self::Flags::IS_INSTANTIATION_WITH_GENERICS;
 
             #[inline]
             fn main_scope(self: Ptr<Self>) -> &'static mut Scope {

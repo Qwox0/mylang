@@ -225,6 +225,12 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                     UnitDependency::EnumVariantTag(variant) => {
                         write!(&mut label, "tag value of {}", variant.ident.sym) // TODO: print enum ty
                     },
+                    UnitDependency::GenericsAnalyzed(s) => {
+                        debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
+                        let unfinished =
+                            s.generics().iter().find(|g| g.flags.get(DeclFlags::SEMA_FINISHED)).u();
+                        write!(&mut label, "definition of generic `{}`", unfinished.ident.sym)
+                    },
                     UnitDependency::_AssociatedConst(_) | UnitDependency::_Dot(_) => {
                         unreachable_debug()
                     },
@@ -241,7 +247,31 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
             }
             traverse_unfinished_insts!(sema; unit, inst => print_cycle_element(inst.upcast(), unit));
 
-            break;
+            return; // skip WARN_UNINSTANTIATED_POLYMORPHABLES
+        }
+    }
+
+    // this is probably very slow :(
+    // TODO: bench
+    const WARN_UNINSTANTIATED_POLYMORPHABLES: bool = cfg!(debug_assertions);
+    if WARN_UNINSTANTIATED_POLYMORPHABLES {
+        for stmt in stmts.iter().copied() {
+            // TODO: recursive check
+            let Some(decl) = stmt.try_downcast::<ast::Decl>() else { continue };
+            if decl.var_ty == p().type_ty {
+                let Some(polymorphable) =
+                    decl.const_val().u().upcast().try_downcast_polymorphable()
+                else {
+                    continue;
+                };
+                if polymorphable.try_get_polymorphs().as_deref().is_some_and(<[_]>::is_empty) {
+                    cwarn!(
+                        polymorphable.span,
+                        "`{}` was not analyzed because it was never instantiated",
+                        decl.ident.sym
+                    )
+                }
+            }
         }
     }
 }
@@ -317,6 +347,56 @@ fn analyze_scope<T>(
 
     debug_assert!(*finished_count <= items.len());
     AnalyzeScopeResult { ok, finished: *finished_count == items.len(), continued }
+}
+
+/// TODO: bench reordering ([`analyze_scope`]) vs flag (this) vs global units array vs ast flattening
+fn analyze_scope_no_reorder(
+    decls: &mut [Ptr<ast::Decl>],
+    units: &mut Option<TmpPtr<[SemaUnit]>>,
+    mut analyze_item: impl FnMut(Ptr<ast::Decl>, &SemaUnit) -> SemaResult<()>,
+) -> AnalyzeScopeResult {
+    let units = units.get_or_insert_with(|| {
+        tmp_alloc()
+            .alloc_slice_fill_iter(decls.iter().map(|_d| SemaUnit {
+                #[cfg(debug_assertions)]
+                stmt: _d.upcast(),
+                waiting_for: None,
+            }))
+            .unwrap()
+    });
+
+    debug_assert_eq!(decls.len(), units.len());
+
+    let mut ok = true;
+    let mut finished = true;
+    let mut continued = false;
+
+    for (&decl, unit) in decls.iter().zip_exact(units.iter_mut()) {
+        if decl.flags.get(DeclFlags::SEMA_FINISHED) {
+            continue;
+        }
+
+        if !unit.waiting_for.as_ref().is_none_or(UnitDependency::resolved) {
+            continue;
+        }
+
+        continued = true;
+
+        let res = analyze_item(decl, unit);
+        if matches!(res, Err(_)) {
+            ok = false;
+        }
+        if let NotFinished(dep) = res {
+            finished = false;
+            unit.update_dep(dep);
+        } else {
+            decl.as_mut().flags.set(DeclFlags::SEMA_FINISHED);
+            unit.waiting_for = None;
+        }
+    }
+
+    debug_assert_eq!(finished, decls.iter().all(|d| d.flags.get(DeclFlags::SEMA_FINISHED)));
+    AnalyzeScopeResult { ok, finished, continued }
 }
 
 pub enum TraverseResult {
@@ -466,6 +546,7 @@ pub enum UnitDependency {
     RetTy(Ptr<ast::Fn>),
     TypeLayout(Ptr<ast::Type>),
     EnumVariantTag(Ptr<ast::Decl>),
+    GenericsAnalyzed(Ptr<ast::StructDef>),
 
     _AssociatedConst(Ptr<ast::Dot>),
     _Dot(Ptr<ast::Dot>),
@@ -509,13 +590,22 @@ impl UnitDependency {
                 .any(|u| u.waiting_for.as_ref().is_none_or(UnitDependency::resolved))
         }
 
+        fn for_scope_not_reordered(member_state: Option<UnfinishedMembers<'_, ast::Decl>>) -> bool {
+            member_state
+                .u()
+                .iter()
+                .filter(|(_, d)| !d.flags.get(DeclFlags::SEMA_FINISHED))
+                .any(|(u, _)| u.waiting_for.as_ref().is_none_or(UnitDependency::resolved))
+        }
+
         match self {
             UnitDependency::ExprType(expr) => expr.ty.is_some(),
             UnitDependency::VarType(d) => d.var_ty.is_some(),
             UnitDependency::ConstVal(d) => d.const_val().is_ok(),
             UnitDependency::RetTy(f) => f.ret_ty.is_some(),
-            UnitDependency::TypeLayout(ty) => ty.check_layout_finished(),
+            UnitDependency::TypeLayout(ty) => ty.check_layout_finished() != Result::Ok(false),
             UnitDependency::EnumVariantTag(variant) => try_get_enum_variant_tag(*variant).is_some(),
+            UnitDependency::GenericsAnalyzed(s) => s.flags.get(StructFlags::GENERICS_ANALYZED),
             UnitDependency::_AssociatedConst(dot) => {
                 debug_assert_eq!(dot.lhs.u().ty, p().type_ty);
                 let ty = dot.lhs.u().downcast_type();
@@ -531,7 +621,7 @@ impl UnitDependency {
             UnitDependency::GenericsScope(ty) => {
                 debug_assert!(ty.flags.get(StructFlags::IS_GENERIC));
                 debug_assert!(!ty.flags.get(StructFlags::GENERICS_ANALYZED));
-                for_scope(ty.upcast_to_type().generics_sema_state())
+                for_scope_not_reordered(ty.upcast_to_type().generics_sema_state())
             },
         }
     }
@@ -548,6 +638,22 @@ impl UnitDependency {
             return member_state.unfinished_units().is_empty();
         }
 
+        fn for_scope_not_reordered(member_state: UnfinishedMembers<'_, ast::Decl>) -> bool {
+            let mut all_finished = true;
+            for (unit, member) in member_state.iter() {
+                if member.flags.get(DeclFlags::SEMA_FINISHED) {
+                    continue;
+                }
+                if unit.waiting_for.as_ref().u().emit_missing_dep_error(member.upcast()) {
+                    member.as_mut().flags.set(DeclFlags::SEMA_FINISHED)
+                } else {
+                    all_finished = false
+                }
+            }
+            // skips marking type definition as error, because it seams unnecessary
+            return all_finished;
+        }
+
         match self {
             UnitDependency::_AssociatedConst(dot) => {
                 error_missing_associated_const(*dot);
@@ -557,14 +663,15 @@ impl UnitDependency {
             },
             UnitDependency::Scope(s) => return for_scope(s.member_sema_state().u()),
             UnitDependency::GenericsScope(s) => {
-                return for_scope(s.upcast_to_type().generics_sema_state().u());
+                return for_scope_not_reordered(s.upcast_to_type().generics_sema_state().u());
             },
             UnitDependency::ExprType(_)
             | UnitDependency::VarType(_)
             | UnitDependency::ConstVal(_)
             | UnitDependency::RetTy(_)
             | UnitDependency::TypeLayout(_)
-            | UnitDependency::EnumVariantTag(_) => return false,
+            | UnitDependency::EnumVariantTag(_)
+            | UnitDependency::GenericsAnalyzed(_) => return false,
         }
 
         // mark expression as error to resolve other dependencies
@@ -1247,6 +1354,15 @@ impl Sema {
                     && let ty = func.downcast_type2()
                     && let Some(polymorphable) = func.try_downcast_polymorphable()
                 {
+                    if let PolymorphableMatch::Fn(f) = polymorphable.matchable2() {
+                        debug_assert!(ty == f.upcast_to_type());
+                        debug_assert!(f.flags.get(FnFlags::IS_TYPE));
+                        return cerror2!(
+                            expr.full_span(),
+                            "Cannot call type `{ty}`, because it is a type and not a function \
+                             value"
+                        );
+                    }
                     if !polymorphable.is_generic() {
                         return cerror2!(expr.full_span(), "Cannot call non-generic type `{ty}`");
                     }
@@ -1266,8 +1382,13 @@ impl Sema {
                     }
 
                     let inst = match polymorphable.matchable2() {
-                        PolymorphableMatch::Fn(f) => call!(f), // TODO: this is not correct
-                        PolymorphableMatch::StructDef(s) => call!(s),
+                        PolymorphableMatch::Fn(_) => unreachable_debug(),
+                        PolymorphableMatch::StructDef(s) => {
+                            if !s.flags.get(StructFlags::GENERICS_ANALYZED) {
+                                return NotFinished(UnitDependency::GenericsAnalyzed(s));
+                            }
+                            call!(s)
+                        },
                         PolymorphableMatch::EnumDef(e) => call!(e),
                     };
                     *resolved_inst = Some(inst);
@@ -1986,8 +2107,8 @@ impl Sema {
                 expr.set_replacement(main.const_val()?.upcast());
             },
             AstEnum::SizeOfDirective { type_, .. } => {
-                let ty = self.analyze_type_inst(*type_)?;
-                if !ty.check_layout_finished() {
+                let ty = not_never!(self.analyze_type_inst(*type_)?);
+                if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
@@ -1995,22 +2116,22 @@ impl Sema {
             },
             AstEnum::SizeOfValDirective { val, .. } => {
                 let ty = *analyze!(*val, None);
-                if !ty.check_layout_finished() {
+                if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
-                let ty = self.analyze_type_inst(*type_)?;
-                if !ty.check_layout_finished() {
+                let ty = not_never!(self.analyze_type_inst(*type_)?);
+                if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
                 expr.ty = Some(p.int_lit.upcast_to_type());
                 expr.set_replacement(ast::IntVal::new(ty.alignment())?.upcast());
             },
             AstEnum::OffsetOfDirective { type_, field, .. } => {
-                let ty = self.analyze_type_inst(*type_)?;
+                let ty = not_never!(self.analyze_type_inst(*type_)?);
                 let Some(s_def) = ty.try_downcast_struct_def() else {
                     return cerror2!(type_.full_span(), "expected struct type");
                 };
@@ -2239,16 +2360,16 @@ impl Sema {
                 {
                     let generics_scope = generics_scope.as_ref().u();
                     let osh = self.jump_open_scope(generics_scope);
-                    let res = analyze_scope2(
+                    let res = analyze_scope_no_reorder(
                         generics_scope.as_mut().decls.as_mut(),
                         sema_units,
-                        finished_members,
                         |generic, _unit| self.analyze_explicit_generic_decl(generic),
                     );
                     self.close_scope(osh);
                     let () = res.as_generics_scope_result(expr)?;
 
                     *sema_units = None;
+                    *finished_members = 0;
                     flags.set(StructFlags::GENERICS_ANALYZED);
                 }
 
@@ -2389,7 +2510,7 @@ impl Sema {
 
                 *tag_ty = Some(repr_ty.u().downcast::<ast::IntTy>());
 
-                res.as_normal_scope_result(expr.upcast_to_type())?;
+                res.as_normal_scope_result(expr.upcast_to_type()).ignore_error()?;
                 *sema_units = None;
 
                 let repr_ty = repr_ty.u().downcast::<ast::IntTy>();
@@ -2550,6 +2671,7 @@ impl Sema {
 
         let inst = ty.downcast_type2();
 
+        // This converts `MyStruct` -> `MyStruct()`. TODO: is this implicit instantiation a good idea?
         if let Some(polymorphable) = inst.try_downcast_polymorphable()
             && polymorphable.is_generic()
         {

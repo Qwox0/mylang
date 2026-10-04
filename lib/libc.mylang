@@ -455,12 +455,12 @@ E :: enum {
 }
 
 Result :: enum {
-    Ok(c_size_t),
+    Ok(c_size_t), // TODO: generic over $Int
     Err(E),
 
     unwrap :: (self: Result) -> switch self { .Ok :> self, .Err :> self.fail() };
 }
-result :: (result: c_ssize_t) -> Result {
+result :: (result: $Int) -> Result {
     if result == -1 return .Err(get_errno());
     if result < 0 abort();
     .Ok(result.as(c_size_t))
@@ -482,6 +482,48 @@ get_errno :: -> __errno_location().*.as(E);
 
 time_t :: i64;
 time : (timer: ?*mut time_t) -> time_t : #extern;
+
+clockid_t :: i32;
+/// Identifier for system-wide realtime clock.
+CLOCK_REALTIME :: 0;
+/// Monotonic system-wide clock.
+CLOCK_MONOTONIC :: 1;
+/// High-resolution timer from the CPU.
+/// (since Linux 2.6.12)
+CLOCK_PROCESS_CPUTIME_ID :: 2;
+/// Thread-specific CPU-time clock.
+/// (since Linux 2.6.12)
+CLOCK_THREAD_CPUTIME_ID :: 3;
+/// Monotonic system-wide clock, not adjusted for frequency scaling.
+/// (since Linux 2.6.28; Linux-specific)
+CLOCK_MONOTONIC_RAW :: 4;
+/// Identifier for system-wide realtime clock, updated only on ticks.
+/// (since Linux 2.6.32; Linux-specific)
+CLOCK_REALTIME_COARSE :: 5;
+/// Monotonic system-wide clock, updated only on ticks.
+/// (since Linux 2.6.32; Linux-specific)
+CLOCK_MONOTONIC_COARSE :: 6;
+/// Monotonic system-wide clock that includes time spent in suspension.
+/// (since Linux 2.6.39; Linux-specific)
+CLOCK_BOOTTIME :: 7;
+/// Like CLOCK_REALTIME but also wakes suspended system.
+/// (since Linux 3.0; Linux-specific)
+CLOCK_REALTIME_ALARM :: 8;
+/// Like CLOCK_BOOTTIME but also wakes suspended system.
+/// (since Linux 3.0; Linux-specific)
+CLOCK_BOOTTIME_ALARM :: 9;
+/// Like CLOCK_REALTIME but in International Atomic Time.
+/// (since Linux 3.10; Linux-specific)
+CLOCK_TAI :: 11;
+
+timespec :: struct {
+    tv_sec: i64;
+    tv_nsec: i64;
+}
+
+clock_getres  : (clockid: clockid_t, res: ?*mut timespec) -> i32 : #extern;
+clock_gettime : (clockid: clockid_t, tp:   *mut timespec) -> i32 : #extern;
+clock_settime : (clockid: clockid_t, tp:   *    timespec) -> i32 : #extern;
 
 // ===== <uchar.h> =====
 

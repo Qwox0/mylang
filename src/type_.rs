@@ -12,9 +12,10 @@ use crate::{
         primitives::Primitives,
     },
     util::{
-        BigIntExt, BitFlags, IteratorExt, Layout, UnwrapDebug, aligned_add, debug_only_assert,
-        is_simple_enum, panic_debug, round_up_to_alignment, round_up_to_nearest_power_of_two,
-        unreachable_debug, variant_count_to_tag_size_bits,
+        BigIntExt, BitFlags, IteratorExt, Layout, OptionExt, UnwrapDebug, aligned_add,
+        debug_only_assert, debug_only_assert_eq, is_simple_enum, panic_debug,
+        round_up_to_alignment, round_up_to_nearest_power_of_two, unreachable_debug,
+        variant_count_to_tag_size_bits,
     },
 };
 use std::{convert::Infallible, ops::FromResidual};
@@ -578,25 +579,29 @@ impl Type {
         Ok(*self)
     }
 
-    /// Sets [`TypeFlags::TYPE_LAYOUT_DONE`]
-    pub fn check_layout_finished(self: Ptr<Type>) -> bool {
+    /// memoizes `Ok(true)` by setting [`TypeFlags::TYPE_LAYOUT_DONE`].
+    /// returns `Err(HandledErr)` iff some member type is `{error}`
+    pub fn check_layout_finished(self: Ptr<Type>) -> Result<bool, HandledErr> {
         if self.type_flags.get(TypeFlags::TYPE_LAYOUT_DONE) {
-            return true;
+            return Ok(true);
         }
         let ret = match self.matchable().as_ref() {
-            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => {
-                fields.iter().all(|f| f.var_ty.is_some_and(Type::check_layout_finished))
-            },
+            TypeEnum::StructDef { fields, .. } | TypeEnum::UnionDef { fields, .. } => fields
+                .iter()
+                .try_all(|f| f.var_ty.is_some_and_try(Type::check_layout_finished))?,
             TypeEnum::EnumDef { variants, tag_ty, .. } => {
                 tag_ty.is_some_and(|i| i.bits.is_some())
-                    && variants.iter().all(|v| v.var_ty.is_some_and(Type::check_layout_finished))
+                    && variants
+                        .iter()
+                        .try_all(|v| v.var_ty.is_some_and_try(Type::check_layout_finished))?
             },
-            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.check_layout_finished(),
+            TypeEnum::RangeTy { elem_ty, .. } => elem_ty.check_layout_finished()?,
             TypeEnum::ArrayTy { elem_ty: t, .. } | TypeEnum::OptionTy { inner_ty: t, .. } => {
-                t.downcast_type().check_layout_finished()
+                t.downcast_type().check_layout_finished()?
             },
+            TypeEnum::SimpleTy { .. } if self == primitives().err_ty => return Err(HandledErr),
             TypeEnum::SimpleTy { .. }
-            | TypeEnum::IntTy { .. } // are unsized integers possible?
+            | TypeEnum::IntTy { .. }
             | TypeEnum::FloatTy { .. }
             | TypeEnum::PtrTy { .. }
             | TypeEnum::SliceTy { .. }
@@ -607,13 +612,13 @@ impl Type {
         if ret {
             self.as_mut().type_flags.set(TypeFlags::TYPE_LAYOUT_DONE)
         }
-        ret
+        Ok(ret)
     }
 
     /// size of stack allocation in bytes
     pub fn size(self: Ptr<Self>) -> usize {
         debug_assert!(self.is_finalized(), "`{self}` is not finalized");
-        debug_only_assert!(self.check_layout_finished());
+        debug_only_assert_eq!(self.check_layout_finished(), Ok(true));
         const PTR_SIZE: usize = 8;
         match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
@@ -651,7 +656,7 @@ impl Type {
 
     /// alignment of stack allocation in bytes
     pub fn alignment(self: Ptr<Self>) -> usize {
-        debug_only_assert!(self.check_layout_finished());
+        debug_only_assert_eq!(self.check_layout_finished(), Ok(true));
         let alignment = match self.matchable().as_ref() {
             TypeEnum::SimpleTy { .. } => {
                 let p = primitives();
@@ -685,7 +690,7 @@ impl Type {
 
     /// Returns `(self.size(), self.alignment())`
     pub fn layout(self: Ptr<Self>) -> Layout {
-        debug_only_assert!(self.check_layout_finished());
+        debug_only_assert_eq!(self.check_layout_finished(), Ok(true));
         Layout::new(self.size(), self.alignment())
     }
 
@@ -857,7 +862,7 @@ pub enum OptionalRepr {
 }
 
 pub fn optional_repr(inner_ty: Ptr<Type>) -> OptionalRepr {
-    debug_only_assert!(inner_ty.check_layout_finished());
+    debug_only_assert_eq!(inner_ty.check_layout_finished(), Ok(true));
     use OptionalRepr::*;
     match inner_ty.matchable().as_ref() {
         TypeEnum::SimpleTy { .. } => {

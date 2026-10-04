@@ -8,6 +8,7 @@ use std::{
     hint::unreachable_unchecked,
     iter::FusedIterator,
     mem::{MaybeUninit, size_of, transmute},
+    ops::{ControlFlow, Try},
     path::Path,
 };
 
@@ -168,6 +169,8 @@ pub trait OptionExt<T> {
 
     fn display(&self) -> impl fmt::Display
     where T: fmt::Display;
+
+    fn is_some_and_try<R: Try<Output = bool>>(self, f: impl FnOnce(T) -> R) -> R;
 }
 
 impl<T> OptionExt<T> for Option<T> {
@@ -198,6 +201,13 @@ impl<T> OptionExt<T> for Option<T> {
             }
         }
         DisplayOption(self)
+    }
+
+    fn is_some_and_try<R: Try<Output = bool>>(self, f: impl FnOnce(T) -> R) -> R {
+        match self {
+            Some(t) => f(t),
+            None => R::from_output(false),
+        }
     }
 }
 
@@ -327,6 +337,17 @@ pub trait IteratorExt: Iterator + Sized {
         let other = other.into_iter();
         debug_assert_eq!(self.len(), other.len(), "Expected iterators to have same length");
         self.zip(other)
+    }
+
+    fn try_all<R: Try<Output = bool>>(self, mut f: impl FnMut(Self::Item) -> R) -> R {
+        for val in self {
+            match f(val).branch() {
+                ControlFlow::Continue(true) => continue,
+                ControlFlow::Continue(false) => return R::from_output(false),
+                ControlFlow::Break(r) => return R::from_residual(r),
+            }
+        }
+        R::from_output(true)
     }
 }
 
@@ -523,9 +544,9 @@ pub const BITFLAGS_DEBUG_ALL: bool = false;
 pub trait BitFlags: Copy + Eq + std::fmt::Debug {
     type Repr;
 
-    fn get(&self, mask: Self::Repr) -> bool;
-    fn set(&mut self, mask: Self::Repr);
-    fn unset(&mut self, mask: Self::Repr);
+    fn get(&self, mask: Self) -> bool;
+    fn set(&mut self, mask: Self);
+    fn unset(&mut self, mask: Self);
 }
 
 macro_rules! bitflags {
@@ -543,7 +564,7 @@ macro_rules! bitflags {
                         $(.field(stringify!($flag_name), &self.get($ty_name::$flag_name)))*
                         .finish()
                 } else {
-                    let mut t = f.debug_tuple(stringify!(DeclFlags));
+                    let mut t = f.debug_tuple(stringify!($ty_name));
                     t.field_with(|f| write!(f, "{:01$b}", self.data, Self::_FLAG_COUNT));
                     $(if self.get($ty_name::$flag_name) { t.field(&stringify!($flag_name)); })*
                     t.finish_non_exhaustive()
@@ -562,17 +583,39 @@ macro_rules! bitflags {
         impl $crate::util::BitFlags for $ty_name {
             type Repr = $repr;
 
-            fn get(&self, mask: Self::Repr) -> bool {
-                self.data & mask != 0
+            fn get(&self, mask: Self) -> bool {
+                self.data & mask.data != 0
             }
 
-            fn set(&mut self, mask: Self::Repr) {
-                self.data |= mask;
+            fn set(&mut self, mask: Self) {
+                self.data |= mask.data;
             }
 
-            fn unset(&mut self, mask: Self::Repr) {
-                self.data &= !mask;
+            fn unset(&mut self, mask: Self) {
+                self.data &= !mask.data;
             }
+        }
+
+        impl ::std::ops::BitAnd for $ty_name {
+            type Output = Self;
+            #[inline]
+            fn bitand(self, rhs: Self) -> Self::Output { Self { data: self.data & rhs.data } }
+        }
+
+        impl ::std::ops::BitAndAssign for $ty_name {
+            #[inline]
+            fn bitand_assign(&mut self, rhs: Self) { self.data &= rhs.data }
+        }
+
+        impl ::std::ops::BitOr for $ty_name {
+            type Output = Self;
+            #[inline]
+            fn bitor(self, rhs: Self) -> Self::Output { Self { data: self.data | rhs.data } }
+        }
+
+        impl ::std::ops::BitOrAssign for $ty_name {
+            #[inline]
+            fn bitor_assign(&mut self, rhs: Self) { self.data |= rhs.data }
         }
     };
     (_flags: $repr:ty, $idx:expr,) => {
@@ -580,7 +623,7 @@ macro_rules! bitflags {
     };
     (_flags: $repr:ty, $idx:expr, $(#[$attr:meta])* $flag_name:ident, $($rem:tt)*) => {
         $(#[$attr])*
-        pub const $flag_name: $repr = 1 << $idx;
+        pub const $flag_name: Self = Self { data: 1 << $idx };
         $crate::util::bitflags! { _flags: $repr, $idx + 1, $($rem)* }
     };
 }

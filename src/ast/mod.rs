@@ -2,7 +2,7 @@ use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
     context::{FilesIndex, ctx, primitives},
-    diagnostics::{HandledErr, cerror2, common::error_cannot_infer_generics},
+    diagnostics::{HandledErr, cerror2},
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
@@ -967,6 +967,7 @@ bitflags!(DeclFlags: u16 {
     HAS_INIT_EXPR,
 
     // # sema flags:
+    SEMA_FINISHED,
     IS_DATA_MEMBER,
     IS_CONST_MEMBER,
     IS_PARAMETER,
@@ -987,7 +988,7 @@ bitflags!(InitializerFlags: u8 {
 });
 
 impl InitializerFlags {
-    const PARSER_FLAGS_MASK: <InitializerFlags as BitFlags>::Repr = InitializerFlags::HAS_LHS_EXPR;
+    const PARSER_FLAGS_MASK: InitializerFlags = InitializerFlags::HAS_LHS_EXPR;
 }
 
 bitflags!(FnFlags: u8 {
@@ -1207,17 +1208,21 @@ impl Ptr<Ast> {
     /// downcast to a [`ConstVal`]
     #[track_caller]
     pub fn downcast_const_val(self) -> Ptr<ConstVal> {
-        let p = self.rep();
-        debug_assert!(p.kind.is_const_val_kind());
-        p.cast()
+        let rep = self.rep();
+        debug_assert!(rep.kind.is_const_val_kind());
+        rep.cast()
     }
 
     pub fn try_downcast_const_val(self) -> OPtr<ConstVal> {
-        let p = self.rep();
-        then!(p.is_const_val() => p.downcast_const_val())
+        let rep = self.rep();
+        then!(rep.is_const_val() => rep.downcast_const_val())
     }
 
     pub fn flat_downcast_type(self) -> Ptr<Type> {
+        let p = primitives();
+        if self.ty == p.err_ty {
+            return p.err_ty;
+        }
         debug_assert!(self.has_type_kind(), "expected type kind, got {:?}", self.kind);
         debug_assert!(
             self.ty.is_none() || self.is_type(),
@@ -2544,9 +2549,7 @@ impl CloneAst for Ptr<Ast> {
             },
             &AstEnum::PositionalInitializer { flags, lhs, args, .. } => {
                 clone!(PositionalInitializer {
-                    flags: InitializerFlags {
-                        data: flags.data & InitializerFlags::PARSER_FLAGS_MASK
-                    },
+                    flags: flags & InitializerFlags::PARSER_FLAGS_MASK,
                     lhs: lhs.clone_ast(alloc),
                     args: args.clone_ast(alloc),
                     resolved_struct_inst: None
@@ -2554,9 +2557,7 @@ impl CloneAst for Ptr<Ast> {
             },
             &AstEnum::NamedInitializer { flags, lhs, fields, .. } => {
                 clone!(NamedInitializer {
-                    flags: InitializerFlags {
-                        data: flags.data & InitializerFlags::PARSER_FLAGS_MASK
-                    },
+                    flags: flags & InitializerFlags::PARSER_FLAGS_MASK,
                     lhs: lhs.clone_ast(alloc),
                     fields: fields.clone_ast(alloc),
                     resolved_struct_inst: None
@@ -2805,7 +2806,7 @@ impl CloneAst for Ptr<Fn> {
 
         let mut f =
             Fn::new(params, ret_ty_expr.clone_ast(alloc), body.clone_ast(alloc), self.span, alloc)?;
-        f.flags.data = self.flags.data & FnFlags::HAS_VARARGS;
+        f.flags = self.flags & FnFlags::HAS_VARARGS;
         // also clones generics_scope, even though it is only generated after parsing, to not differ
         // from StructDef cloning.
         debug_assert_eq!(self.generics_scope.is_some(), self.flags.get(FnFlags::IS_GENERIC));
@@ -2825,7 +2826,7 @@ impl CloneAst for Ptr<Scope> {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
         debug_assert!(self.kind.is_generic());
         let mut s = alloc.alloc(Scope::new(self.decls.clone_ast(alloc), self.kind))?;
-        s.flags.data |= self.flags.data & ScopeFlags::WAS_CHECKED_FOR_DUPLICATES;
+        s.flags |= self.flags & ScopeFlags::WAS_CHECKED_FOR_DUPLICATES;
         Ok(s)
     }
 }

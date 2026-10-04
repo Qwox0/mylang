@@ -1,0 +1,62 @@
+std :: #import "std";
+libc :: #import "libc";
+
+MILLIS_PER_SEC  :: 1_000;
+MICROS_PER_SEC  :: 1_000_000;
+NANOS_PER_SEC   :: 1_000_000_000;
+NANOS_PER_MILLI :: 1_000_000;
+NANOS_PER_MICRO :: 1_000;
+
+Duration :: struct {
+    secs: u64;
+    nanos: u32;
+
+    ZERO :: Duration.(0, 0);
+
+    from_nanos  :: (nanos: u64)  -> Duration.{ secs=nanos / NANOS_PER_SEC, nanos=(nanos % NANOS_PER_SEC).as(u32) };
+    from_micros :: (micros: u64) -> Duration.{ secs=micros / MICROS_PER_SEC, nanos=(micros % MICROS_PER_SEC).as(u32) * NANOS_PER_MICRO };
+    from_millis :: (millis: u64) -> Duration.{ secs=millis / MILLIS_PER_SEC, nanos=(millis % MILLIS_PER_SEC).as(u32) * NANOS_PER_MILLI };
+    from_secs   :: (secs: u64)   -> Duration.{ secs, nanos=0 };
+
+    as_secs_f :: (self: Duration, $F :: f32) -> self.secs.as(F) + self.nanos.as(F) / NANOS_PER_SEC;
+}
+
+Duration.add :: (lhs: Duration, rhs: Duration) -> Duration {
+    mut secs := lhs.secs + rhs.secs; // TODO: overflow check
+    mut nanos := lhs.nanos + rhs.nanos; // no overflow: 2 * 999_999_999 < u32.MAX
+    if nanos >= NANOS_PER_SEC {
+        nanos -= NANOS_PER_SEC;
+        secs += 1; // TODO: overflow check
+    };
+    .{ secs, nanos }
+}
+
+Instant :: struct {
+    secs: i64;
+    nanos: u32;
+}
+
+Instant.now :: -> Instant {
+    mut tp: libc.timespec;
+    libc.result(libc.clock_gettime(libc.CLOCK_MONOTONIC, &mut tp)).unwrap();
+    std.assert(0 <= tp.tv_nsec && tp.tv_nsec < NANOS_PER_SEC);
+    .{ secs=tp.tv_sec, nanos=tp.tv_nsec.as(u32) }
+}
+
+Instant.sub_instant :: (lhs: Instant, rhs: Instant) -> Instant {
+    mut secs := lhs.secs - rhs.secs;
+    nanos := if lhs.nanos >= rhs.nanos then lhs.nanos - rhs.nanos else {
+        secs -= 1;
+        lhs.nanos + NANOS_PER_SEC - rhs.nanos
+    };
+    .{ secs, nanos }
+}
+
+Instant.sub :: (lhs: Instant, rhs: Instant) -> Duration {
+    diff := lhs.sub_instant(rhs);
+    if diff.secs < 0 std.panic("Instant.sub resulted in a negative Duration, which is not allowed!");
+    .{ secs=diff.secs.as(u64), nanos=diff.nanos }
+}
+
+Instant.elapsed :: (start: Instant) -> Duration
+    Instant.now().sub(start);

@@ -154,18 +154,6 @@ pub fn error_unimplemented(span: Span, what: fmt::Arguments<'_>) -> HandledErr {
 }
 
 #[track_caller]
-pub fn error_cannot_infer_generics(expr: Ptr<ast::Ast>) -> HandledErr {
-    let ty = expr.downcast_polymorphable();
-    debug_assert!(ty.is_generic());
-    let ty_label = if ty.kind == AstKind::Fn { "function" } else { "type" };
-    cerror!(
-        expr.return_val_span(),
-        "Cannot infer generic parameters of {ty_label} `{}`",
-        ty.upcast().downcast_type2()
-    )
-}
-
-#[track_caller]
 pub fn error_missing_associated_const(dot: Ptr<ast::Dot>) -> HandledErr {
     let lhs = dot.lhs.u().downcast_type();
     if lhs.kind == AstKind::EnumDef {
