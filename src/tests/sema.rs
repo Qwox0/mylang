@@ -251,3 +251,20 @@ ValTy :: u32;                            // (4)
 "#;
     test(code).ok(4_usize);
 }
+
+#[test]
+fn typeof_no_side_effects() {
+    let code = "
+test :: -> {
+    mut data: i32 = 0;
+    data_ty_size := #sizeof(#typeof(func(i32, &mut data)));
+    data == 0 and data_ty_size == 4
+}
+
+func :: ($T, ptr: *mut T) -> T {
+    ptr.* += 1;
+    return ptr.*;
+}
+";
+    test(code).ok(true);
+}

@@ -775,9 +775,11 @@ ast_variants! {
         ret_ty: Ptr<Type>,
     },
 
+    /// Important: `val` is never evaluated.
+    TypeOfDirective { val: Ptr<Ast> },
+
     /// TODO: replace with stdlib functions
     SizeOfDirective { type_: Ptr<Ast> },
-    SizeOfValDirective { val: Ptr<Ast> },
     AlignOfDirective { type_: Ptr<Ast> },
     OffsetOfDirective { type_: Ptr<Ast>, field: Ptr<Ident> },
 
@@ -1314,17 +1316,14 @@ impl Ptr<Ast> {
     }
 
     pub fn try_to_decl(self) -> Result<OPtr<Decl>, HandledErr> {
-        match self.matchable2() {
-            AstMatch::Decl(decl) => Ok(Some(decl)),
-            AstMatch::Ident(i) => ctx().alloc.alloc(Decl::from_ident(i)).map(Some),
-            _ => Ok(None),
-        }
+        Decl::try_from_expr(self, &ctx().alloc)
     }
 
     pub fn try_get_symbol_decl(self) -> OPtr<Decl> {
         match self.matchable2() {
             AstMatch::Ident(i) => Some(i.decl.u()),
             AstMatch::Dot(d) => Some(d.rhs.decl.u()),
+            // GenericSlot?
             _ => None,
         }
     }
@@ -1595,8 +1594,8 @@ impl Ast {
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
             AstEnum::ExternDirective { .. } => span,
             AstEnum::IntrinsicDirective { intrinsic_name, .. } => span.join(intrinsic_name.span),
-            AstEnum::SizeOfDirective { type_: e, .. }
-            | AstEnum::SizeOfValDirective { val: e, .. }
+            AstEnum::TypeOfDirective { val: e, .. }
+            | AstEnum::SizeOfDirective { type_: e, .. }
             | AstEnum::AlignOfDirective { type_: e, .. } => span.join(e.full_span()),
             AstEnum::OffsetOfDirective { field, .. } => span.join(field.span),
 
@@ -1944,6 +1943,15 @@ impl Decl {
             },
             AstMatch::GenericSlot(g) => Ok(Decl::from_generic(g, alloc)?),
             _ => Err(unexpected_expr(lhs, "a variable name")),
+        }
+    }
+
+    pub fn try_from_expr(expr: Ptr<Ast>, alloc: &Arena) -> Result<OPtr<Decl>, AllocErr> {
+        match expr.matchable2() {
+            AstMatch::Decl(decl) => Ok(Some(decl)),
+            AstMatch::Ident(i) => alloc.alloc(Decl::from_ident(i)).map(Some),
+            AstMatch::GenericSlot(g) => Decl::from_generic(g, alloc).map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -2683,11 +2691,11 @@ impl CloneAst for Ptr<Ast> {
             },
             AstEnum::ProgramMainDirective { .. } => clone!(ProgramMainDirective {}),
             &AstEnum::SimpleDirective { ret_ty, .. } => clone!(SimpleDirective { ret_ty }),
+            AstEnum::TypeOfDirective { val, .. } => {
+                clone!(TypeOfDirective { val: val.clone_ast(alloc) })
+            },
             AstEnum::SizeOfDirective { type_, .. } => {
                 clone!(SizeOfDirective { type_: type_.clone_ast(alloc) })
-            },
-            AstEnum::SizeOfValDirective { val, .. } => {
-                clone!(SizeOfValDirective { val: val.clone_ast(alloc) })
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 clone!(AlignOfDirective { type_: type_.clone_ast(alloc) })

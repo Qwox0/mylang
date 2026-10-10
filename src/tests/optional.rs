@@ -371,7 +371,7 @@ test :: () -> {
 }
 
 #[test]
-pub(super) fn optional_repr() {
+fn optional_repr() {
     #[track_caller]
     fn test_size(ty: &str, expected_size: usize) {
         #[rustfmt::skip]
@@ -400,7 +400,7 @@ struct {{ mylang_size: usize, llvm_size: usize }}.(#sizeof(Ty), llvm_size)
     test_size("?struct { a: *i32 }", 8);
 
     //test_size(" never", 0); // TODO: Addrof never causes codegen problems
-    test_body("#sizeof( never)").ok(0_usize);
+    test_body("#sizeof(never)").ok(0_usize);
     test_size("?never", 0);
 
     test_size(" enum {         }", 0); // []

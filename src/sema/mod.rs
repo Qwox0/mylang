@@ -227,15 +227,21 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                     },
                     UnitDependency::GenericsAnalyzed(s) => {
                         debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
-                        let unfinished =
-                            s.generics().iter().find(|g| g.flags.get(DeclFlags::SEMA_FINISHED)).u();
-                        write!(&mut label, "definition of generic `{}`", unfinished.ident.sym)
+                        write!(&mut label, "generics of `{}`", *s)
                     },
                     UnitDependency::_AssociatedConst(_) | UnitDependency::_Dot(_) => {
                         unreachable_debug()
                     },
                     UnitDependency::Scope(_) => write!(&mut label, "some members"),
-                    UnitDependency::GenericsScope(_) => write!(&mut label, "generics"),
+                    UnitDependency::GenericsScope(s) => {
+                        debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
+                        let unfinished = s
+                            .generics()
+                            .iter()
+                            .find(|g| !g.flags.get(DeclFlags::SEMA_FINISHED))
+                            .u();
+                        write!(&mut label, "definition of generic `{}`", unfinished.ident.sym)
+                    },
                 }
                 .unwrap();
 
@@ -2106,16 +2112,16 @@ impl Sema {
                 }
                 expr.set_replacement(main.const_val()?.upcast());
             },
-            AstEnum::SizeOfDirective { type_, .. } => {
-                let ty = not_never!(self.analyze_type_inst(*type_)?);
+            AstEnum::TypeOfDirective { val, .. } => {
+                let ty = *self.analyze(*val, &None, false)?; // don't return on never!
                 if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
-                expr.ty = Some(p.int_lit.upcast_to_type());
-                expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
+                expr.ty = Some(p.type_ty);
+                expr.set_replacement(ty.upcast());
             },
-            AstEnum::SizeOfValDirective { val, .. } => {
-                let ty = *analyze!(*val, None);
+            AstEnum::SizeOfDirective { type_, .. } => {
+                let ty = self.analyze_type_inst(*type_)?;
                 if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
@@ -2123,7 +2129,7 @@ impl Sema {
                 expr.set_replacement(ast::IntVal::new(ty.size())?.upcast());
             },
             AstEnum::AlignOfDirective { type_, .. } => {
-                let ty = not_never!(self.analyze_type_inst(*type_)?);
+                let ty = self.analyze_type_inst(*type_)?;
                 if !ty.check_layout_finished()? {
                     return NotFinished(UnitDependency::TypeLayout(ty));
                 }
@@ -3400,31 +3406,31 @@ impl Sema {
             let Some(arg_name) = named_arg.lhs.try_downcast::<ast::Ident>() else {
                 return cerror2!(named_arg.lhs.full_span(), "Expected a parameter name");
             };
-            let param = if let Some((param_idx, param)) =
-                params_for_named_args.find_field(arg_name.sym)
-            {
-                if was_set_by_named[param_idx] {
-                    error_duplicate_named_arg(arg_name);
-                    chint!(named_args[param_idx].full_span(), "set here already");
-                    return SemaResult::HandledErr;
-                }
-                was_set_by_named[param_idx] = true;
-                param
-            } else if let Some(g_decl) = ty.generics_scope().and_then(|g| g.find_decl(arg_name.sym))
-            {
-                g_decl
-            } else {
-                if let Some((idx, _)) = params_for_normal_pos_args.find_field(arg_name.sym) {
-                    error_duplicate_named_arg(arg_name);
-                    chint!(
-                        args[idx].full_span(),
-                        "The parameter has already been set by this positional argument"
-                    )
+            let param =
+                if let Some((param_idx, param)) = params_for_named_args.find_field(arg_name.sym) {
+                    if was_set_by_named[param_idx] {
+                        error_duplicate_named_arg(arg_name);
+                        chint!(named_args[param_idx].full_span(), "set here already");
+                        return SemaResult::HandledErr;
+                    }
+                    was_set_by_named[param_idx] = true;
+                    param
+                } else if let Some(g_decl) =
+                    ty.generics_scope().and_then(|g| g.find_decl_norec(arg_name.sym, false))
+                {
+                    g_decl
                 } else {
-                    cerror!(arg_name.span, "Unknown parameter");
-                }
-                return SemaResult::HandledErr;
-            };
+                    if let Some((idx, _)) = params_for_normal_pos_args.find_field(arg_name.sym) {
+                        error_duplicate_named_arg(arg_name);
+                        chint!(
+                            args[idx].full_span(),
+                            "The parameter has already been set by this positional argument"
+                        )
+                    } else {
+                        cerror!(arg_name.span, "Unknown parameter");
+                    }
+                    return SemaResult::HandledErr;
+                };
             arg_name.as_mut().decl.set_once(param);
             let res = analyze_if_generic_arg(self, param, named_arg.rhs);
             ok = res.is_ok()? && ok

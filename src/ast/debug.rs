@@ -334,13 +334,13 @@ impl DebugAst for Ast {
             AstEnum::ProgramMainDirective { span, .. } | AstEnum::SimpleDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());
             },
+            AstEnum::TypeOfDirective { val, .. } => {
+                lines.write("#typeof");
+                lines.write_tree(val);
+            },
             AstEnum::SizeOfDirective { type_, .. } => {
                 lines.write("#sizeof");
                 lines.write_tree(type_);
-            },
-            AstEnum::SizeOfValDirective { val, .. } => {
-                lines.write("#sizeof_val");
-                lines.write_tree(val);
             },
             AstEnum::AlignOfDirective { type_, .. } => {
                 lines.write("#alignof");

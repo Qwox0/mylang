@@ -23,6 +23,7 @@ mod array;
 mod associated_consts;
 mod binop;
 mod bool;
+mod bugs;
 mod call_conv_c;
 mod consts;
 mod control_flow_keywords;

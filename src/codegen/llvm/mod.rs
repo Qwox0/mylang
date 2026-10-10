@@ -1046,8 +1046,8 @@ impl<'ctx> Codegen<'ctx> {
                 // logic here seems like a bad idea.
                 Ok(self.get_symbol(decl.u()))
             },
-            AstEnum::SizeOfDirective { .. }
-            | AstEnum::SizeOfValDirective { .. }
+            AstEnum::TypeOfDirective { .. }
+            | AstEnum::SizeOfDirective { .. }
             | AstEnum::AlignOfDirective { .. }
             | AstEnum::OffsetOfDirective { .. } => {
                 panic_debug!("{:?} should have been replaced during sema", expr.kind)
@@ -1758,10 +1758,7 @@ impl<'ctx> Codegen<'ctx> {
             for param_def in f.codegen_params() {
                 let param_ty = param_def.var_ty.u();
                 let s = match self.c_ffi_type(param_ty) {
-                    CFfiType::Zst => {
-                        debug_assert_ne!(param_def.var_ty, primitives().never);
-                        Symbol::Void
-                    },
+                    CFfiType::Zst => Symbol::Void,
                     CFfiType::Simple(simple_ty) => {
                         let param = param_val_iter.next().u();
                         debug_assert_eq!(param.get_type(), simple_ty.basic_ty());

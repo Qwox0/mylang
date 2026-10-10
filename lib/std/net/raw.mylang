@@ -17,7 +17,7 @@ RawSocket :: struct {
     }
 
     set_option :: (self: RawSocket, name: libc.SO, value: c_int) -> {
-        out := libc.setsockopt(self.fd, libc.SOL_SOCKET, name.as(c_int), &value, #sizeof_val(value));
+        out := libc.setsockopt(self.fd, libc.SOL_SOCKET, name.as(c_int), &value, #sizeof(#typeof(value)));
         if out == -1  std.fail_errno("RawSocket.set_option()"); // TODO: error handling
         out
     }

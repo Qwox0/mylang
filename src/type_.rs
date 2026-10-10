@@ -118,12 +118,7 @@ fn type_check(
         return if mode == TypeCheckMode::Strict { Equal } else { Got };
     }
 
-    if is_bottom_type(got, p) || expected == p.any {
-        return Expected;
-    } else if is_bottom_type(expected, p) || got == p.any {
-        return Got;
-    }
-
+    // Generics can have `never` as a value. => This must be above the `is_bottom_type` checks.
     if let Some(expected) = expected.try_downcast::<ast::GenericSlot>() {
         // resolve polymorph instantiation
         debug_assert!(mode == TypeCheckMode::Strict);
@@ -134,6 +129,12 @@ fn type_check(
         };
     } else if let Some(_got) = got.try_downcast::<ast::GenericSlot>() {
         return Expected;
+    }
+
+    if is_bottom_type(got, p) || expected == p.any {
+        return Expected;
+    } else if is_bottom_type(expected, p) || got == p.any {
+        return Got;
     }
 
     if let Some(expected_lvl) = number_subtyping_level(expected) {

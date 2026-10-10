@@ -753,12 +753,12 @@ impl Parser {
                     expr!(SimpleDirective { ret_ty: p.void_ty }, span.join(str_lit.span))
                 } else if directive_name == "program_main" {
                     expr!(ProgramMainDirective {}, span.join(directive_ident.span))
+                } else if directive_name == "typeof" {
+                    let val = self.value(MAX_PRECEDENCE)?;
+                    expr!(TypeOfDirective { val }, span.join(directive_ident.span))
                 } else if directive_name == "sizeof" {
                     let type_ = self.value(MAX_PRECEDENCE)?;
                     expr!(SizeOfDirective { type_ }, span.join(directive_ident.span))
-                } else if directive_name == "sizeof_val" {
-                    let val = self.value(MAX_PRECEDENCE)?;
-                    expr!(SizeOfValDirective { val }, span.join(directive_ident.span))
                 } else if directive_name == "alignof" {
                     let type_ = self.value(MAX_PRECEDENCE)?;
                     expr!(AlignOfDirective { type_ }, span.join(directive_ident.span))
