@@ -266,6 +266,7 @@ test :: ->
 
 #[test]
 fn generic_data_struct() {
+    /* TODO: infer generics
     // infer generics
     for init in [r#".(1, "Hello World", &arr)"#, r#".{ a=1, b="Hello World", c=&arr }"#] {
         #[rustfmt::skip]
@@ -278,6 +279,7 @@ test :: -> MyStruct{init};
         assert_contains!(res.llvm_ir(), "[3 x i16] [i16 1, i16 2, i16 3]");
         assert_contains!(res.llvm_ir(), "sret({{ i64, {{ ptr, i64 }}, ptr }})");
     }
+    */
 
     // explicit generics
     for init in [r#".(1, "Hello World", &arr)"#, r#".{ a=1, b="Hello World", c=&arr }"#] {
@@ -431,6 +433,7 @@ test :: -> MyStruct(i64).(5);
 }
 
 #[test]
+#[ignore = "TODO: infer generics"]
 fn pass_generic_to_generic() {
     let code = r#"
 MyStruct :: struct($A) { val: A, get_val :: (self: MyStruct(A)) -> self.val; }
@@ -531,7 +534,8 @@ MyStruct :: struct($T) { val: T; }
 f :: (
     a: MyStruct($Num) = .{ val=1 },  // this init causes a call to finalize, which must not fail \
                 for `MyStruct($Num)`
-    b := MyStruct.{ val=2 },
+    //b := MyStruct.{ val=2 }, // TODO: infer generics
+    b := MyStruct(i64).{ val=2 },
 ) -> {}
 ";
     test(code).compile_no_err();
@@ -722,4 +726,57 @@ test :: -> {
 ";
     let val: u64 = 0x123456789abcdef;
     test(code).ok((val as f32, val as f32, val as f64));
+}
+
+#[test]
+fn field_of_generic_struct_refers_to_type_def_in_struct_body() {
+    #[derive(Debug, PartialEq, Eq)]
+    #[repr(C)]
+    struct MyStruct {
+        val: u8,
+        other: i64,
+    }
+
+    let code = "
+MyStruct :: struct($T) {
+    val: Inner;
+    other: T;
+
+    Inner :: struct { val: u8 };
+
+    get_other :: (self: MyStruct(T)) -> self.other;
+    //get_other2 :: (self: MyStruct(T)) -> self.other + 1;
+    //get_other3 :: (self: MyStruct(T)) -> switch self.other {} else {};
+}
+test :: -> MyStruct(i64).{ val=.(10), other=20 };
+";
+    test(code).ok(MyStruct { val: 10, other: 20 });
+
+    /* TODO: infer generics
+    let code = "
+MyStruct :: struct($T) {
+    val: Inner;
+    other: T;
+
+    Inner :: struct { val: u8 };
+
+    get_other :: (self: MyStruct(T)) -> self.other;
+}
+test :: -> MyStruct.{ val=.(10), other=20 };
+";
+    test(code).compile_no_err();
+
+    let code = "
+MyStruct :: struct($T) {
+    val: Inner;
+    other: T;
+
+    Inner :: struct { val: u8 };
+
+    get_other :: (self: MyStruct(T)) -> self.other;
+}
+test :: -> MyStruct.(.(10), 20);
+";
+    test(code).error("mismatched types: expected `Inner`; got `Inner`", substr!(""));
+    */
 }

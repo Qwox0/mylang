@@ -3253,7 +3253,10 @@ impl<'ctx> Codegen<'ctx> {
             ),
             //TypeEnum::FunctionTy { .. } => todo!(),
             TypeEnum::StructDef { fields, flags, .. } => {
-                debug_assert!(!flags.get(StructFlags::IS_GENERIC));
+                debug_assert!(
+                    !flags.get(StructFlags::IS_GENERIC)
+                        && !flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS)
+                );
                 CodegenType::new(self.new_struct_type(fields, None))
             },
             TypeEnum::UnionDef { fields, .. } => {

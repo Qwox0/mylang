@@ -62,3 +62,21 @@ test :: -> { sizeof_val(return 123) };
         test(code).with_prelude().ok(123_usize);
     }
 }
+
+#[test]
+#[ignore = "todo"]
+fn bug_003() {
+    // see also `tests::generics::field_of_generic_struct_refers_to_type_def_in_struct_body`
+    let code = "
+MyStruct :: struct($T) {
+    val: Inner;
+    other: T;
+
+    Inner :: struct { val: u8 };
+    SIZE :: #sizeof(T);
+    //X : T : 1;
+}
+test :: -> MyStruct(i64).{ val=.(10), other=20 };
+";
+    test(code).compile_no_err();
+}

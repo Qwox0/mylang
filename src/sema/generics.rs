@@ -151,6 +151,7 @@ pub trait PolymorphableType: TypeVariant + CloneAst<Ptr<Self>> + 'static {
 }
 
 inherit_type! {
+    #[derive(Debug)]
     struct Polymorphable {}
 }
 

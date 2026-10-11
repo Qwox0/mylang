@@ -137,11 +137,9 @@ impl<T> Ptr<[Ptr<T>]> {
     }
 }
 
-impl<T> IntoIterator for Ptr<[Ptr<T>]>
-where Ptr<T>: 'static
-{
-    type IntoIter = std::iter::Copied<std::slice::Iter<'static, Ptr<T>>>;
-    type Item = Ptr<T>;
+impl<T: Copy + 'static> IntoIterator for Ptr<[T]> {
+    type IntoIter = std::iter::Copied<std::slice::Iter<'static, T>>;
+    type Item = T;
 
     fn into_iter(self) -> Self::IntoIter {
         self.as_ref().iter().copied()

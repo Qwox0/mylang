@@ -968,17 +968,31 @@ bitflags!(DeclFlags: u16 {
 
     HAS_INIT_EXPR,
 
-    // # sema flags:
-    SEMA_FINISHED,
     IS_DATA_MEMBER,
     IS_CONST_MEMBER,
     IS_PARAMETER,
+    IS_GENERIC,
+
+    // # sema flags:
+    SEMA_FINISHED,
     IS_FN_TY_PARAM,
 
-    IS_GENERIC,
     IS_INSTANTIATION_VALUE,
     //IS_EXPLICIT_CONST_PARAM,
 });
+
+impl DeclFlags {
+    /// TODO: split up flag types then this is not needed
+    pub const PARSER_FLAGS_MASK: DeclFlags = DeclFlags::IS_MUT
+        | DeclFlags::IS_PUB
+        | DeclFlags::IS_REC
+        | DeclFlags::IS_STATIC
+        | DeclFlags::HAS_INIT_EXPR
+        | DeclFlags::IS_DATA_MEMBER
+        | DeclFlags::IS_CONST_MEMBER
+        | DeclFlags::IS_PARAMETER
+        | DeclFlags::IS_GENERIC;
+}
 
 bitflags!(InitializerFlags: u8 {
     // # parser flags:
@@ -2726,12 +2740,14 @@ impl CloneAst for Ptr<Ast> {
                     type_flags: TypeFlags::default()
                 })
             },
-            AstEnum::StructDef { flags, scope, generics_scope, span, decl, .. } => {
+            AstEnum::StructDef { flags, scope, generics_scope, span, .. } => {
                 let decls = scope.decls.clone_ast(alloc);
                 debug_assert!(generics_scope.is_none_or(|s| s.kind == ScopeKind::StructGenerics));
                 let generics_scope = generics_scope._clone_ast(alloc)?;
                 let s = StructDef::new(*flags, decls, generics_scope, *span, alloc)?;
-                s.as_mut().decl = *decl;
+                // This is a problem if nested type definitions in generic (non-instantiated)
+                // structs are analyzed
+                //s.as_mut().decl = *decl;
                 s.upcast()
             },
             AstEnum::UnionDef { .. } | AstEnum::EnumDef { .. } => {
@@ -2771,7 +2787,7 @@ impl CloneAst for Ptr<Decl> {
         let ident = generic.map(|g| g.name).unwrap_or_else(|| self.ident.clone_ast(alloc));
         let decl = alloc.alloc(ast_new!(local Decl {
             is_const: self.is_const,
-            flags: self.flags,
+            flags: self.flags & DeclFlags::PARSER_FLAGS_MASK,
             ident,
             on_type: self.on_type.clone_ast(alloc),
             generic,

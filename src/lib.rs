@@ -19,6 +19,7 @@
 #![feature(type_changing_struct_update)]
 #![feature(vec_push_within_capacity)]
 #![feature(debug_closure_helpers)]
+#![feature(const_ops, const_trait_impl)]
 
 mod arena_allocator;
 mod ast;

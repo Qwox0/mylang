@@ -596,7 +596,7 @@ macro_rules! bitflags {
             }
         }
 
-        impl ::std::ops::BitAnd for $ty_name {
+        impl const ::std::ops::BitAnd for $ty_name {
             type Output = Self;
             #[inline]
             fn bitand(self, rhs: Self) -> Self::Output { Self { data: self.data & rhs.data } }
@@ -607,7 +607,7 @@ macro_rules! bitflags {
             fn bitand_assign(&mut self, rhs: Self) { self.data &= rhs.data }
         }
 
-        impl ::std::ops::BitOr for $ty_name {
+        impl const ::std::ops::BitOr for $ty_name {
             type Output = Self;
             #[inline]
             fn bitor(self, rhs: Self) -> Self::Output { Self { data: self.data | rhs.data } }

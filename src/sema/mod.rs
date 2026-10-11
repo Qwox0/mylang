@@ -232,7 +232,9 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                     UnitDependency::_AssociatedConst(_) | UnitDependency::_Dot(_) => {
                         unreachable_debug()
                     },
-                    UnitDependency::Scope(_) => write!(&mut label, "some members"),
+                    UnitDependency::Scope(_) | UnitDependency::ScopeNotReordered(_) => {
+                        write!(&mut label, "some members")
+                    },
                     UnitDependency::GenericsScope(s) => {
                         debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
                         let unfinished = s
@@ -296,6 +298,15 @@ impl AnalyzeScopeResult {
             false => Err(HandledErr),
             true if self.finished => Ok(()),
             _ => NotFinished(UnitDependency::Scope(ty_with_scope)),
+        }
+    }
+
+    fn as_normal_scope_result2(self, ty_with_scope: Ptr<ast::Type>) -> SemaResult<()> {
+        debug_assert!(ty_with_scope.get_scope().is_some());
+        match self.ok {
+            false => Err(HandledErr),
+            true if self.finished => Ok(()),
+            _ => NotFinished(UnitDependency::ScopeNotReordered(ty_with_scope)),
         }
     }
 
@@ -379,10 +390,12 @@ fn analyze_scope_no_reorder(
 
     for (&decl, unit) in decls.iter().zip_exact(units.iter_mut()) {
         if decl.flags.get(DeclFlags::SEMA_FINISHED) {
+            //debug_assert!(decl.var_ty.is_some()); // see field_of_generic_struct_refers_to_type_def_in_struct_body
             continue;
         }
 
         if !unit.waiting_for.as_ref().is_none_or(UnitDependency::resolved) {
+            finished = false;
             continue;
         }
 
@@ -557,6 +570,7 @@ pub enum UnitDependency {
     _AssociatedConst(Ptr<ast::Dot>),
     _Dot(Ptr<ast::Dot>),
     Scope(Ptr<ast::Type>),
+    ScopeNotReordered(Ptr<ast::Type>),
     GenericsScope(Ptr<ast::StructDef>),
 }
 
@@ -624,6 +638,9 @@ impl UnitDependency {
                 ty.get_associated_external_consts().u().find_field(dot.rhs.sym).is_some()
             },
             UnitDependency::Scope(ty_with_scope) => for_scope(ty_with_scope.member_sema_state()),
+            UnitDependency::ScopeNotReordered(ty_with_scope) => {
+                for_scope_not_reordered(ty_with_scope.member_sema_state())
+            },
             UnitDependency::GenericsScope(ty) => {
                 debug_assert!(ty.flags.get(StructFlags::IS_GENERIC));
                 debug_assert!(!ty.flags.get(StructFlags::GENERICS_ANALYZED));
@@ -668,6 +685,9 @@ impl UnitDependency {
                 error_missing_field(*dot);
             },
             UnitDependency::Scope(s) => return for_scope(s.member_sema_state().u()),
+            UnitDependency::ScopeNotReordered(s) => {
+                return for_scope_not_reordered(s.member_sema_state().u());
+            },
             UnitDependency::GenericsScope(s) => {
                 return for_scope_not_reordered(s.upcast_to_type().generics_sema_state().u());
             },
@@ -714,7 +734,7 @@ impl SemaUnit {
 
         #[cfg(debug_assertions)]
         if let Some(prev_dep) = &self.waiting_for
-            && !matches!(prev_dep, UnitDependency::Scope(_))
+            && !matches!(prev_dep, UnitDependency::Scope(_) | UnitDependency::ScopeNotReordered(_))
         {
             debug_assert_ne!(new_dep, *prev_dep);
         }
@@ -2340,8 +2360,8 @@ impl Sema {
             AstEnum::StructDef {
                 flags,
                 scope,
-                fields,
                 generics_scope,
+                fields,
                 sema_units,
                 finished_members,
                 ..
@@ -2383,21 +2403,41 @@ impl Sema {
                 let contains_generic = flags.get(StructFlags::IS_GENERIC)
                     || flags.get(StructFlags::IS_INSTANTIATION_WITH_GENERICS);
                 let res = if !contains_generic {
-                    analyze_scope2(
+                    // Reordering breaks field order when a generic struct is instantiated/cloned
+                    analyze_scope_no_reorder(scope.decls.as_mut(), sema_units, |member, _unit| {
+                        self.analyze_decl(member, false)
+                    })
+                    .as_normal_scope_result2(expr.upcast_to_type())
+                    /*
+                    dbg!(analyze_scope2(
                         scope.decls.as_mut(),
                         sema_units,
                         finished_members,
-                        |member, _unit| self.analyze_decl(member, false),
-                    )
+                        |member, _unit| { self.analyze_decl(member, false) }
+                    ))
                     .as_normal_scope_result(expr.upcast_to_type())
+                    */
                 } else {
-                    //debug_assert!(!flags.get(StructFlags::IS_INSTANTIATION));
+                    Ok(())
+                    /*
                     try {
                         for field in fields.into_iter() {
                             debug_assert!(field.flags.get(DeclFlags::IS_DATA_MEMBER));
                             self.analyze_decl(field, true)?
                         }
                     }
+                    */
+                    /*
+                    analyze_scope_no_reorder(scope.decls.as_mut(), sema_units, |member, _unit| {
+                        if member.init.is_some_and(|i| i.kind == AstKind::Fn) {
+                            // functions are a big problem because they can actually use generics,
+                            // thus finalize might panic.
+                            return Ok(());
+                        }
+                        self.analyze_decl(member, false)
+                    })
+                    .as_normal_scope_result2(expr.upcast_to_type())
+                    */
                 };
                 self.close_scope(osh);
                 res?;
@@ -2869,6 +2909,15 @@ impl Sema {
         is_const: bool,
         initializer_expr: Ptr<ast::NamedInitializer>,
     ) -> SemaResult<Ptr<ast::Type>> {
+        if struct_ty.downcast_struct_def().flags.get(StructFlags::IS_GENERIC) {
+            return cerror2!(
+                initializer_expr.full_span(),
+                "Currently cannot infer generics through an initializer. Explicitly specify the \
+                 generics instead: `{}(...).{{`",
+                struct_ty
+            );
+        }
+
         let fields = match struct_ty.matchable().as_ref() {
             TypeEnum::StructDef { fields, .. } => &**fields,
             TypeEnum::SliceTy { elem_ty, is_mut, .. } => {
@@ -2950,6 +2999,17 @@ impl Sema {
                 .upcast_to_type(),
             None => struct_ty,
         };
+
+        // see test `field_of_generic_struct_refers_to_type_def_in_struct_body`
+        if let Some(s) = struct_ty.try_downcast::<ast::StructDef>()
+            && s.flags.get(StructFlags::IS_GENERIC)
+        {
+            debug_assert!(!s.flags.get(StructFlags::IS_INSTANTIATION));
+            debug_assert!(!struct_ty.p_eq(inst));
+            // TODO: For `field_of_generic_struct_refers_to_type_def_in_struct_body` this emits the
+            // incorrect error "mismatched types: expected `Inner`; got `Inner`"
+            self.validate_named_initializer(inst, initializer_values, is_const, initializer_expr)?;
+        }
 
         if is_const {
             let elements = const_values.u().u();
@@ -3539,6 +3599,7 @@ impl Sema {
                     inst.main_scope().decls.contains(&inst_param)
                         || inst.generics_scope().is_some_and(|s| s.decls.contains(&inst_param))
                 );
+                // needed for `tests::generics::pass_generic_to_generic`
                 self.finalize_expr(arg, inst_param.var_ty.u())?;
                 debug_assert!(ty.generics().iter().all(|g| g.generic.u().cur_inst.is_none()));
             }
@@ -3615,6 +3676,11 @@ impl Sema {
             inst.flags().set(T::FLAG_IS_INSTANTIATION_WITH_GENERICS);
         }
 
+        // not set in clone_ast, because it would be invalid for nested struct decls
+        if let Some(s) = ty.upcast().try_downcast::<ast::StructDef>() {
+            inst.upcast().downcast::<ast::StructDef>().as_mut().decl = s.decl;
+        }
+
         debug_assert!(ty.main_scope().flags.get(ScopeFlags::WAS_SETUP));
         debug_assert!(ty.generics_scope().u().flags.get(ScopeFlags::WAS_SETUP));
         setup_scopes(
@@ -3634,16 +3700,19 @@ impl Sema {
         ty.polymorphs().push(inst);
 
         let res = self.analyze(inst.upcast(), &None, false);
-        if let NotFinished(dep) = res {
-            self.unfinished_instantiations.push(inst.upcast().downcast_polymorphable());
-            self.unfinished_instantiation_units.push(SemaUnit {
-                #[cfg(debug_assertions)]
-                stmt: inst.upcast(),
-                waiting_for: Some(dep),
-            });
+        match res {
+            Ok(_) => Ok(inst),
+            NotFinished(dep) => {
+                self.unfinished_instantiations.push(inst.upcast().downcast_polymorphable());
+                self.unfinished_instantiation_units.push(SemaUnit {
+                    #[cfg(debug_assertions)]
+                    stmt: inst.upcast(),
+                    waiting_for: Some(dep),
+                });
+                return NotFinished(UnitDependency::TypeLayout(inst.upcast_to_type()));
+            },
+            Err(HandledErr) => Err(HandledErr),
         }
-        let _ = res; // ignored. see `dont_duplicate_dependency_errors_in_generic_items`
-        Ok(inst)
     }
 
     fn finalize_expr(&mut self, expr: Ptr<Ast>, out_ty: Ptr<ast::Type>) -> Result<(), HandledErr> {
@@ -3669,6 +3738,7 @@ impl Sema {
                 let struct_ty = if flags.get(InitializerFlags::IS_TYPE_INIT) {
                     out_ty
                 } else {
+                    debug_assert!(flags.get(InitializerFlags::IS_PTR_INIT));
                     out_ty.downcast::<ast::PtrTy>().pointee.downcast_type()
                 };
                 debug_assert_matches!(struct_ty.kind, AstKind::StructDef | AstKind::SliceTy);
