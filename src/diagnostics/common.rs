@@ -61,6 +61,11 @@ pub fn error_unknown_field(field: Ptr<ast::Ident>, ty: Ptr<ast::Type>) -> Handle
 }
 
 #[track_caller]
+pub fn error_unknown_field2(dot: Ptr<ast::Dot>) -> HandledErr {
+    error_unknown_field(dot.rhs, dot.lhs.u().ty.u())
+}
+
+#[track_caller]
 pub fn error_cannot_apply_initializer(
     analyzed_lhs: Ptr<ast::Ast>,
     initializer_expr: Ptr<ast::Ast>,
@@ -165,12 +170,6 @@ pub fn error_missing_associated_const(dot: Ptr<ast::Dot>) -> HandledErr {
     } else {
         cerror!(dot.rhs.span, "no associated constant `{}` on type `{lhs}`", dot.rhs.sym)
     }
-}
-
-#[track_caller]
-pub fn error_missing_field(dot: Ptr<ast::Dot>) -> HandledErr {
-    let ty = dot.lhs.u().ty.u().flatten_transparent();
-    cerror!(dot.rhs.span, "no field `{}` on type `{ty}`", dot.rhs.sym)
 }
 
 pub fn error_missing_variants<I>(

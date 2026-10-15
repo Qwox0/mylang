@@ -39,7 +39,7 @@ ArenaAllocator :: struct {
         end: *u8;
         prev_block: ?*mut BlockHeader;
 
-        data_start :: (self: *BlockHeader) -> std.ptr.add_bytes_mut(self.as(*mut u8), #sizeof(BlockHeader));
+        data_start :: (self: *BlockHeader) -> std.ptr.add_bytes(self.as(*mut u8), #sizeof(BlockHeader));
 
         init :: (buf: []u8, prev_block: ?*mut BlockHeader) -> {
             self := buf.ptr.as(*mut BlockHeader);

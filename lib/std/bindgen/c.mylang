@@ -135,8 +135,8 @@ ClientData :: struct {
     tmp_alloc: std.mem.FixedArenaAllocator;
 
     // TODO: needs better hashing function
-    used_names := std.set.CStrHashSet.EMPTY;
-    tmp_used_names := std.set.CStrHashSet.EMPTY;
+    used_names := std.set.StrHashSet.EMPTY;
+    tmp_used_names := std.set.StrHashSet.EMPTY;
 
     item_name: []u8 = "";
     type_decl_naming := TypeDeclNaming.InvalidCursor;
@@ -146,7 +146,7 @@ ClientData :: struct {
     ident_level := 0;
 
     destroy :: (mut self: ClientData) -> {
-        self.used_names.&mut.reset_with_free();
+        self.used_names.&mut.reset_with_free(& str -> libc.free(str.ptr));
         self.used_names.destroy();
     }
 
@@ -215,7 +215,7 @@ visit_toplevel :: (cursor: clang.CXCursor, parent: clang.CXCursor, d: ?*mut any)
         d.emit_docs(cursor);
         fn_ty := clang.getCursorType(cursor);
         mut function_name := item_name;
-        if d.*.used_names.&mut.insert(strclone(function_name.ptr)) != null {
+        if is_some(d.*.used_names.&mut.insert(strclone2(function_name))) {
             d.emit("// DUPLICATE: ");
         } else if d.*.opts.trim_function_prefix {
             if trim_prefix(function_name.&mut, d.*.opts.function_prefix) {
@@ -503,10 +503,10 @@ emit_enum_ty :: (d: *mut ClientData, cursor: clang.CXCursor, ty: clang.CXType) -
         } else { d.emit(" "); }
 
         if d.*.type_decl_naming != .FullyAnonymous {
-            if d.*.tmp_used_names.&mut.insert(strclone(variant.ptr)) != null d.emit("// DUPLICATE: ");
+            if is_some(d.*.tmp_used_names.&mut.insert(strclone2(variant)))  d.emit("// DUPLICATE: ");
             d.emit("%s = %lld,", xx variant.ptr, tag);
         } else {
-            if d.*.used_names.&mut.insert(strclone(variant.ptr)) != null d.emit("// DUPLICATE: ");
+            if is_some(d.*.used_names.&mut.insert(strclone2(variant)))  d.emit("// DUPLICATE: ");
             d.emit("%s :: %lld;", xx variant.ptr, tag);
         }
         return .Continue;
@@ -527,7 +527,7 @@ emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8)
         trim_prefix(macro_name.&mut, d.*.opts.macro_prefix);
 
     // TODO: get HashSet slot > cheaper insert later
-    if d.*.used_names.&.contains(macro_name.ptr)
+    if d.*.used_names.&.contains(macro_name)
         d.emit("// DUPLICATE: ");
 
     tokens := d.tokenize_cursor(cursor);
@@ -555,7 +555,7 @@ emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8)
     t_text := d.tmp_alloc_cxstring(clang.getTokenSpelling(d.*.unit, t));
 
     was_emitted := if t_kind == .Identifier {
-        known_ident := d.*.used_names.&.contains(t_text.ptr);
+        known_ident := d.*.used_names.&.contains(t_text);
         if not known_ident d.emit("// "); // exclude macros which expand to invalid text
         d.emit_ident(macro_name);
         d.emit(" :: %s;", xx t_text.ptr);
@@ -616,7 +616,7 @@ emit_macro :: (d: *mut ClientData, cursor: clang.CXCursor, mut macro_name: []u8)
         false
     };
 
-    if was_emitted d.*.used_names.&mut.insert(strclone(macro_name.ptr));
+    if was_emitted d.*.used_names.&mut.insert(strclone2(macro_name));
 
 
     /*
@@ -871,6 +871,8 @@ as_bool2 :: (clang_bool: i32) -> clang_bool != 0;
 
 strclone :: libc.strdup;
 
+strclone2 :: (s: []u8) -> std.str.strdup(s) orelse std.panic("strdup: oom");
+
 trim_prefix :: (name: *mut []u8, prefix: []u8) -> bool {
     if name.*.len <= prefix.len return false;
     if not std.str.eq_ignore_ascii_case(name.*[..prefix.len], prefix) return false;
@@ -1054,3 +1056,6 @@ is_function_noreturn :: (d: *mut ClientData, fn_cursor: clang.CXCursor) -> {
 
     false
 }
+
+// TODO: null checks shouldn't need this
+is_some :: (opt: ?$T) -> switch opt { Some :> true } else false;

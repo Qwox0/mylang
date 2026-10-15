@@ -87,7 +87,7 @@ from_cstr :: (cstr: ?*u8) -> []u8 {
 
 strdup :: (str: []u8, alloc := std.ctx.alloc) -> ?[]mut u8 {
     buf := alloc.alloc(str.len + 1, 1) orelse return null;
-    buf |> std.ptr.add_bytes_mut(str.len).* = 0;
+    buf |> std.ptr.add_bytes(str.len).* = 0;
     libc.memcpy(buf, str.ptr, str.len);
     Some(.{ ptr=buf, len=str.len })
 }

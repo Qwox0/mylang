@@ -123,7 +123,7 @@ ArrayList :: struct($T) {
 
     get_slot :: (self: *mut Self, index: usize) -> *mut /* uninit */ T {
         std.assert(index < self.*.cap);
-        self.*.ptr |> std.ptr.add_bytes_mut(index * #sizeof(T))
+        self.*.ptr |> std.ptr.add_bytes(index * #sizeof(T))
     }
 
     // -----------------------------------
@@ -152,6 +152,10 @@ ArrayList :: struct($T) {
         false
     }
     //binary_search  :: (self: *ArrayList, val: *T, eq: OrdClosure) -> std.todo("binary_search");
+
+    sort_unstable :: (self: *mut Self, compare: *(l: *T, r: *T) -> i32) -> {
+        libc.qsort(self.*.ptr, self.*.len, #sizeof(T), xx compare)
+    }
 
     debug :: (
         self: *Self,

@@ -9,7 +9,7 @@ ParseOptions :: struct {
 
 /// Dynamic Json value
 Json :: enum {
-    Object(std.hashmap.Str2PtrHashMap), // HashMap<[]u8, *Json>
+    Object(std.HashMap([]u8, *Json, std.hashmap.StringKeyImpl)),
     Array(std.Array(Json)),
     String([]u8),
     Number([]u8),
@@ -66,7 +66,7 @@ Parser.value :: (parser: *mut Parser) -> ?Json {
 
 Parser.object :: (parser: *mut Parser) -> {
     parser.eat('{') orelse return null;
-    mut map := std.hashmap.Str2PtrHashMap.new(alloc=parser.*.alloc);
+    mut map := std.HashMap([]u8, *Json, std.hashmap.StringKeyImpl).new(alloc=parser.*.alloc);
     loop {
         parser.whitespace();
         if parser.try_eat('}') {

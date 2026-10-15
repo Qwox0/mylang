@@ -15,8 +15,11 @@ align_forward :: (ptr: *mut u8, alignment: u64) -> ?*mut u8 {
 align_backward :: (ptr: *mut u8, alignment: u64) ->
     std.num.align_down_pow2(ptr.as(u64), alignment).as(?*mut u8);
 
-add_bytes :: (ptr: *$T, offset: usize) -> (ptr.as(usize) + offset).as(*T);
-add_bytes_opt :: (ptr: ?*$T, offset: usize) -> (ptr.as(usize) + offset).as(?*T);
-add_bytes_mut :: (ptr: *mut $T, offset: usize) -> (ptr.as(usize) + offset).as(*mut T);
+/// TODO: make this more safe.
+add_bytes :: (ptr: $Ptr, offset: usize) -> (ptr.as(usize) + offset).as($Ptr);
+//add_bytes_opt :: (ptr: ?*$T, offset: usize) -> (ptr.as(usize) + offset).as(?*T);
+//add_bytes_mut :: (ptr: *mut $T, offset: usize) -> (ptr.as(usize) + offset).as(*mut T);
+
+sub_bytes :: (ptr: $Ptr, offset: usize) -> (ptr.as(usize) - offset).as($Ptr);
 
 difference :: (minuend: *any, subtrahend: *any) -> minuend.as(usize) - subtrahend.as(usize);

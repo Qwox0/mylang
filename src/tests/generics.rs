@@ -780,3 +780,27 @@ test :: -> MyStruct.(.(10), 20);
     test(code).error("mismatched types: expected `Inner`; got `Inner`", substr!(""));
     */
 }
+
+#[test]
+#[ignore = "generics are complicated"]
+fn recursive_generic_struct_problem() {
+    /*
+    let code = "
+MyStruct :: struct($T) {
+    Other :: MyStruct(*u8);
+}
+X :: MyStruct(*u8);
+
+";
+    test(code).compile_no_err();
+    */
+
+    let code = "
+MyStruct :: struct($T) {
+    Other :: MyStruct(struct {});
+}
+X :: MyStruct(i32);
+
+";
+    test(code).compile_no_err();
+}

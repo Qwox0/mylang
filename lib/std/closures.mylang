@@ -1,8 +1,10 @@
 // TODO: implement real capturing closures
 
-EqClosure :: struct {
-    fn: *(val: *any, capture: *any) -> bool,
-    capture: *any,
+EqClosure :: struct($Arg, $Capture) {
+    fn: *(val: Arg, capture: Capture) -> bool,
+    capture: Capture,
 
-    call :: (self: EqClosure, val: *any) -> self.fn.*(val, self.capture);
+    Self :: EqClosure(Arg, Capture);
+
+    call :: (self: Self, val: Arg) -> self.fn.*(val, self.capture);
 }

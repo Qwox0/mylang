@@ -1,71 +1,330 @@
 std :: #import "std";
 libc :: #import "libc";
-RawHashTable :: std.RawHashTable;
 Allocator :: std.mem.Allocator;
+
+DEBUG :: false;
 
 Hash :: u32;
 
-hash :: (key: Str2PtrHashMap.K) -> std.hash.rapidhash_v3(key).as(Hash);
+default_hash :: (key: []u8) -> std.hash.rapidhash_v3(key).as(Hash);
 
-/// Does not own the stored strings
-Str2PtrHashMap :: struct {
-    table: RawHashTable,
+/*
+KeyImpl :: interface($K) {
+    hash: (key: K) -> Hash;
+    eq: (lhs: K, rhs: K) -> bool;
+}
+*/
 
-    K :: []u8;
-    V :: *any;
-    Entry :: struct { key: K, val: V }
-    ENTRY_LAYOUT :: std.mem.Layout.{ size = #sizeof(Entry), align = #alignof(Entry) };
-    key_eq :: (capture: *K) -> std.closures.EqClosure.{
-        fn = &(v, capture) -> std.str.eq(v.as(*Entry).*.key, capture.as(*K).*),
-        capture
-    };
+DefaultKeyImpl :: struct($K) {
+    hash :: (key: K) -> default_hash(std.mem.as_bytes(&key));
+    eq :: (lhs: K, rhs: K) -> lhs == rhs;
+}
 
-    pub EMPTY :: Str2PtrHashMap.(.EMPTY);
+// TODO: remove $K generic
+StringKeyImpl :: struct($K) {
+    hash :: default_hash;
+    eq :: std.str.eq;
+}
 
-    pub new :: (capacity: u32 = RawHashTable.MIN_CAPACITY, alloc: Allocator) ->
-        Str2PtrHashMap.(.new(capacity, alloc, ENTRY_LAYOUT));
+//StringHashMap :: ($V, $Impl := StringKeyImpl) -> HashMap([]u8, V, Impl);
 
-    pub destroy :: (self: Str2PtrHashMap, alloc: Allocator) ->
-        self.table.destroy(alloc, ENTRY_LAYOUT.size);
+HashMap :: struct($K, $V, $Impl := DefaultKeyImpl) {
+    raw: Raw,
 
-    pub size :: (self: *Str2PtrHashMap) -> self.*.table.size;
+    Self :: HashMap(K, V, Impl);
+    Raw :: RawHashMap(K, V);
+    Entry :: Raw.Entry;
+
+    hash :: Impl(K).hash;
+    eq :: Impl(K).eq;
+    key_eq :: (capture: K) -> std.closures.EqClosure(K, K).{ fn = &eq, capture };
+
+    pub EMPTY :: Self.(.EMPTY);
+
+    pub new :: (capacity: u32 = MIN_CAPACITY, alloc: Allocator) -> Self.(.new(capacity, alloc));
+    pub destroy :: (self: Self, alloc: Allocator) -> self.raw.destroy(alloc);
+
+    pub size :: (self: *Self) -> self.*.raw.size;
 
     /// The number of elements in the set for which no allocations are guaranteed.
-    pub capacity :: (self: *Str2PtrHashMap) -> self.*.table.&.capacity();
+    pub capacity :: (self: *Self) -> self.*.raw.&.capacity();
 
-    pub reserve :: (self: *mut Str2PtrHashMap, additional: u32, alloc: Allocator) -> {
-        self.*.table.&mut.reserve(
-            additional,
-            & entry_ptr -> hash(entry_ptr.as(*Entry).*.key),
-            alloc,
-            ENTRY_LAYOUT,
-        )
+    pub get :: (self: *Self, key: K) -> ?V  self.*.raw.&.get(key, &hash, &eq);
+    pub get_entry :: (self: *Self, key: K) -> ?Entry  self.*.raw.&.get_entry(key, &hash, &eq);
+    pub contains_key :: (self: *Self, key: K) -> bool  self.*.raw.&.contains_key(key, &hash, &eq);
+
+    pub reserve :: (self: *mut Self, additional: u32, alloc: Allocator) -> {
+        self.*.raw.&mut.reserve(additional, &hash, alloc)
     }
 
-    //pub get :: (self: *Str2PtrHashMap, key: *K) -> ?*V {
-    pub get :: (self: *Str2PtrHashMap, key: K) -> ?V {
-        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
-        hash := hash(key);
-        val_ptr := self.*.table.&.get(hash, key_eq(&key), ENTRY_LAYOUT.size) orelse return null;
-        val_ptr.as(*Entry).*.val
+    pub insert :: (self: *mut Self, key: K, val: V, alloc: Allocator) -> ?V {
+        self.*.raw.&mut.insert(key, val, &hash, &eq, alloc)
     }
 
-    pub get_entry :: (self: *Str2PtrHashMap, key: K) -> ?Entry {
-        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
-        hash := hash(key);
-        val_ptr := self.*.table.&.get(hash, key_eq(&key), ENTRY_LAYOUT.size) orelse return null;
-        val_ptr.as(*Entry).*
+    pub insert_assume_capacity :: (self: *mut Self, key: K, val: V) -> ?V {
+        self.*.raw.&mut.insert_assume_capacity(key, val, &hash, &eq)
     }
 
-    pub insert :: (self: *mut Str2PtrHashMap, key: K, val: V, alloc: Allocator) -> ?V {
-        self.reserve(1, alloc);
-        self.insert_assume_capacity(key, val)
+    pub remove :: (self: *mut Self, key: K) -> ?Entry  self.*.raw.&mut.remove(key, &hash, &eq);
+    pub reset :: (self: *mut Self) -> self.*.raw.&mut.reset();
+
+    /*
+    pub reset_with_free :: (self: *mut Self, alloc: Allocator) -> {
+        for idx in 0..self.*.table.&.slots()
+            alloc.free(self.*.table.&.entry(idx, ENTRY_LAYOUT.size));
+        self.reset();
     }
 
-    pub insert_assume_capacity :: (self: *mut Str2PtrHashMap, key: K, val: V) -> ?V {
-        hash := hash(key);
-        slot := self.*.table.&mut.insert_slot_assume_capacity(hash, key_eq(&key), ENTRY_LAYOUT.size);
-        entry := slot.entry.as(*mut Entry);
+    /*
+    pub debug :: (self: *Self) -> {
+        self.*.table.&.debug(
+            ENTRY_LAYOUT.size,
+            & v -> {
+                entry := v.as(*Entry).*;
+                std.fmt.format("key=\"%.*s\"; val=%p", xx entry.key.len, xx entry.key.ptr, xx entry.val)
+            },
+            & text -> libc.free(text.ptr),
+        );
+    }
+    */
+    */
+}
+
+Layout :: std.mem.Layout;
+max :: std.num.max_u32;
+EqClosure :: std.closures.EqClosure;
+
+Size :: u32;
+MAX_LOAD_PERCENTAGE :: 85;
+MIN_CAPACITY :: 8;
+
+RawHashMap :: struct($K, $V) {
+    /// points to `[Entry * slots, Tag * slots]`
+    ///                            ^
+    ptr: ?*mut Tag,
+    /// The number of elements in the set.
+    size: Size,
+    /// The number of elements which can be inserted before `MAX_LOAD_PERCENTAGE` is exceeded.
+    available: Size,
+    /// The mask used to access elements in the buffer. One less than the number of allocated slots.
+    mask: Size,
+
+    Self :: RawHashMap(K, V);
+
+    Entry :: struct { key: K, val: V }
+    ENTRY_LAYOUT :: std.mem.Layout.{ size = #sizeof(Entry), align = #alignof(Entry) };
+
+    /// stores 1 bit to indicate whether a value is present and if present the 7 upper bits of the
+    /// hash.
+    Tag :: struct {
+        val: u8,
+
+        //#assert(#sizeof(Tag) == 1);
+
+        empty :: Tag.(0);
+        deleted :: Tag.(1);
+        //#assert(!empty.is_used());
+        //#assert(!deleted.is_used());
+
+        IS_USED_MASK : u8 : 0b1000_0000;
+
+        is_used :: (tag: Tag) -> (tag.val & IS_USED_MASK) != 0;
+
+        from_hash :: (hash: Hash) -> Tag.((hash >> 8 * #sizeof(Hash) - 7).as(u8) | IS_USED_MASK);
+
+        eq :: (self: Tag, other: Tag) -> self.val == other.val;
+    };
+
+    pub EMPTY :: Self.{ ptr=null, size=0, available=0, mask=!0 };
+
+    pub new :: (capacity: Size, alloc: Allocator) -> Self.with_slots(capacity_to_slots(capacity), alloc);
+
+    with_slots :: (slots: Size, alloc: Allocator) -> {
+        if DEBUG std.assert(std.num.is_power_of_2(slots));
+        buf_size := buf_size(slots);
+        ptr := alloc.alloc(buf_size, ENTRY_LAYOUT.align)
+            orelse std.panic("HashMap allocation failed!");
+        libc.memset(ptr, 0, buf_size);
+        ptr := ptr |> std.ptr.add_bytes(ENTRY_LAYOUT.size * slots.as(usize)).as(*mut Tag);
+        available := slots_to_available(slots);
+        Self.{ ptr, size = 0, available, mask = slots - 1 }
+    }
+
+    pub destroy :: (self: Self, alloc: Allocator) -> {
+        if self.ptr != null then alloc.free(self.&.buf_start());
+    }
+
+    // ========== infos ==========
+
+    buf_start :: (self: *Self) ->
+        (self.*.ptr.as(usize) - ENTRY_LAYOUT.size * self.slots().as(usize)).as(*mut u8);
+
+    buf_size :: (slots: Size) -> {
+        if DEBUG std.assert(slots == 0 or std.num.is_power_of_2(slots));
+        if DEBUG std.assert(#alignof(Tag) == 1, "no padding needed"); // TODO: `#assert`
+        (ENTRY_LAYOUT.size + #sizeof(Tag)) * slots.as(usize)
+    }
+
+    buf_info :: (self: *mut Self) -> []mut u8.{ ptr=self.buf_start(), len=buf_size(self.slots()) };
+
+    /// The number of elements the set can hold without reallocating.
+    pub capacity :: (self: *Self) -> self.*.size + self.*.available;
+
+    /// The number of allocated slots.
+    /// `capacity * 100 / slots <= MAX_LOAD_PERCENTAGE`
+    pub slots :: (self: *Self) -> self.*.mask + 1;
+
+    is_empty :: (self: *Self) -> self.*.size == 0;
+
+    pub tag :: (self: *Self, idx: Size) -> *mut Tag {
+        if DEBUG std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(usize) + idx.as(usize)).as(*mut Tag)
+    };
+
+    pub entry :: (self: *Self, idx: Size) -> *mut Entry {
+        if DEBUG std.assert(idx <= self.*.mask);
+        (self.*.ptr.as(usize) - ENTRY_LAYOUT.size * (self.slots() - idx).as(usize)).as(*mut Entry)
+    }
+
+    // ========== search ==========
+
+    pub find :: (self: *Self, hash: Hash, eq: EqClosure(K, $Capture)) -> ?Size {
+        if self.is_empty() return null; // TODO: unlikely branch
+        tag := Tag.from_hash(hash);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        loop {
+            slot_tag := self.tag(idx).*;
+            if slot_tag.eq(tag) and eq.call(self.entry(idx).*.key) return Some(idx);
+            if slot_tag.eq(Tag.empty) return null;
+
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    pub find_or_insert_slot_assume_capacity :: (self: *Self, hash: Hash, eq: EqClosure(K, $Capture)) -> Size {
+        if DEBUG std.assert(!self.is_empty());
+        if DEBUG std.assert(self.*.available > 0);
+        tag := Tag.from_hash(hash);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        mut deleted_tag_idx: ?Size = null;
+
+        loop {
+            slot_tag := self.tag(idx).*;
+            if slot_tag.eq(tag) and eq.call(self.entry(idx).*.key) return idx
+            else if slot_tag.eq(Tag.deleted) then deleted_tag_idx = Some(idx)
+            else if slot_tag.eq(Tag.empty) break;
+
+            idx = (idx + 1) & mask;
+        }
+
+        deleted_tag_idx orelse idx
+    }
+
+    /// assumes val is not in the set.
+    /// assumes that no deleted items are in the set
+    find_realloc_slot :: (self: *Self, hash: Hash) -> Size {
+        if DEBUG std.assert(!self.is_empty());
+        if DEBUG std.assert(self.*.available > 0);
+
+        mask := self.*.mask;
+        mut idx := hash & mask;
+
+        while not self.tag(idx).*.eq(Tag.empty) {
+            idx = (idx + 1) & mask;
+        }
+
+        idx
+    }
+
+    pub get :: (self: *Self, key: K, hasher: *(key: K) -> Hash, key_eq: *(k1: K, k2: K) -> bool) -> ?V {
+        Some((self.get_entry(key, hasher, key_eq) orelse return null).val)
+    }
+
+    pub get_entry :: (
+        self: *Self,
+        key: K,
+        hasher: *(key: K) -> Hash,
+        key_eq: *(k1: K, k2: K) -> bool,
+    ) -> ?Entry {
+        if self.is_empty() return null; // TODO: unlikely branch
+        hash := hasher.*(key);
+        idx := self.find(hash, EqClosure(K, K).{ fn=key_eq, capture=key }) orelse return null;
+        Some(self.entry(idx).*)
+    }
+
+    pub contains_key :: (
+        self: *Self,
+        key: K,
+        hasher: *(key: K) -> Hash,
+        key_eq: *(k1: K, k2: K) -> bool,
+    ) -> bool {
+        if self.is_empty() return false; // TODO: unlikely branch
+        hash := hasher.*(key);
+        self.find(hash, EqClosure(K, K).{ fn=key_eq, capture=key }) orelse return false;
+        true
+    }
+
+    // ========== insert ==========
+
+    pub reserve :: (
+        self: *mut Self,
+        additional: Size,
+        hasher: *(key: K) -> Hash,
+        alloc: Allocator,
+    ) -> {
+        if (self.*.available >= additional) return;
+
+        if DEBUG  std.assert(std.num.u32_MAX - self.*.size >= additional);
+        new_capacity := std.num.ceil_pow_of_2_u32(self.*.size + additional).max(MIN_CAPACITY);
+        mut new_table := Self.new(new_capacity, alloc);
+        if DEBUG  std.assert(new_table.&.capacity() >= new_capacity);
+
+        for idx in 0..self.slots() {
+            if not self.tag(idx).*.is_used() continue;
+            entry := self.entry(idx);
+            hash := hasher.*(entry.*.key);
+
+            new_idx := new_table.&.find_realloc_slot(hash);
+            new_table.&mut.tag(new_idx).* = Tag.from_hash(hash);
+            libc.memcpy(new_table.&mut.entry(new_idx), entry, ENTRY_LAYOUT.size);
+        }
+
+        if DEBUG std.assert(new_table.available >= self.*.size);
+        new_table.available -= self.*.size;
+        new_table.size = self.*.size;
+
+        self.*.destroy(alloc);
+        self.* = new_table;
+    }
+
+    pub insert :: (
+        self: *mut Self,
+        key: K,
+        val: V,
+        hasher: *(key: K) -> Hash,
+        key_eq: *(k1: K, k2: K) -> bool,
+        alloc: Allocator,
+    ) -> ?V {
+        self.reserve(1, hasher, alloc);
+        self.insert_assume_capacity(key, val, hasher, key_eq)
+    }
+
+    pub insert_assume_capacity :: (
+        self: *mut Self,
+        key: K,
+        val: V,
+        hasher: *(key: K) -> Hash,
+        key_eq: *(k1: K, k2: K) -> bool,
+    ) -> ?V {
+        hash := hasher.*(key);
+        slot := self.insert_slot_assume_capacity(hash, EqClosure(K, K).{ fn=key_eq, capture=key });
+        entry := slot.entry;
         if slot.occupied {
             old_val := entry.*.val;
             entry.*.val = val;
@@ -76,48 +335,112 @@ Str2PtrHashMap :: struct {
         }
     }
 
-    pub contains_key :: (self: *Str2PtrHashMap, key: *K) -> bool {
-        if self.*.table.&.is_empty() return false; // TODO: unlikely branch
-        hash := hash(key.*);
-        self.*.table.&.find(hash, key_eq(key), ENTRY_LAYOUT.size) orelse return false;
-        true
+    InsertSlot :: struct {
+        entry: *mut Entry,
+        occupied: bool,
     }
 
-    pub remove :: (self: *mut Str2PtrHashMap, key: *K) -> ?Entry {
-        if self.*.table.&.is_empty() return null; // TODO: unlikely branch
-
-        hash := hash(key.*);
-        slot := self.*.table.&mut.remove(hash, key_eq(key), ENTRY_LAYOUT.size) orelse return null;
-
-        slot.as(*Entry).*
+    pub insert_slot_assume_capacity :: (self: *mut Self, hash: Hash, eq: EqClosure(K, $Capture)) -> {
+        idx := self.find_or_insert_slot_assume_capacity(hash, eq);
+        self.insert_slot_at(idx, hash)
     }
 
-    pub reset :: (self: *mut Str2PtrHashMap) -> self.*.table.&mut.reset(ENTRY_LAYOUT.size);
-
-    pub reset_with_free :: (self: *mut Str2PtrHashMap, alloc: Allocator) -> {
-        for idx in 0..self.*.table.&.slots()
-            alloc.free(self.*.table.&.entry(idx, ENTRY_LAYOUT.size));
-        self.reset();
+    pub insert_slot_at :: (self: *mut Self, idx: Size, hash: Hash) -> InsertSlot {
+        occupied := self.tag(idx).*.is_used();
+        entry := if occupied {
+            if DEBUG std.assert(self.tag(idx).*.eq(Tag.from_hash(hash)));
+            self.entry(idx)
+        } else {
+            self.insert_slot_at_assume_empty(idx, hash)
+        };
+        .{ entry, occupied }
     }
 
-    pub debug :: (self: *Str2PtrHashMap) -> {
-        self.*.table.&.debug(
-            ENTRY_LAYOUT.size,
-            & v -> {
-                entry := v.as(*Entry).*;
-                std.fmt.format("key=\"%.*s\"; val=%p", xx entry.key.len, xx entry.key.ptr, xx entry.val)
-            },
-            & text -> libc.free(text.ptr),
-        );
+    // inline?
+    pub insert_slot_at_assume_empty :: (self: *mut Self, idx: Size, hash: Hash) -> *mut Entry {
+        if DEBUG std.assert(self.*.available > 0);
+        if DEBUG std.assert(not self.tag(idx).*.is_used());
+
+        self.tag(idx).* = Tag.from_hash(hash);
+        self.*.size += 1;
+        self.*.available -= 1;
+        self.entry(idx)
+    }
+
+    // ========== remove ==========
+
+    pub remove :: (
+        self: *mut Self,
+        key: K,
+        hasher: *(key: K) -> Hash,
+        key_eq: *(k1: K, k2: K) -> bool,
+    ) -> ?Entry {
+        self.remove_raw(hasher.*(key), EqClosure(K, K).{ fn=key_eq, capture=key })
+    }
+
+    pub remove_raw :: (self: *mut Self, hash: Hash, eq: EqClosure(K, $Capture)) -> ?Entry {
+        idx := self.find(hash, eq) orelse return null;
+        Some(self.remove_at(idx))
+    }
+
+    pub remove_at :: (self: *mut Self, idx: Size) -> Entry {
+        if DEBUG std.assert(self.*.size != 0, "RawHashMap.remove_at: size == 0");
+        if DEBUG std.assert(self.tag(idx).*.is_used());
+
+        self.tag(idx).* = Tag.deleted;
+        self.*.size -= 1;
+        self.*.available += 1;
+        self.entry(idx).*
+    }
+
+    pub reset :: (self: *mut Self) -> {
+        buf := self.buf_info();
+        libc.memset(buf.ptr, 0, buf.len);
+        if DEBUG std.assert(std.num.u32_MAX - self.*.available >= self.*.size, "RawHashMap.reset: add overflow");
+        self.*.available += self.*.size;
+        self.*.size = 0;
+    }
+
+    pub debug :: (
+        self: *Self,
+        format_entry: *(entry: Entry) -> []u8,
+        free_text: ?*(text: []u8) -> void = null,
+        c_stream := libc.stderr,
+    ) -> {
+        libc.fprintf(c_stream, "HashMap (ptr=%p; size=%d; available=%d; mask=0x%08x) {\n".ptr, self.*.ptr, self.*.size, self.*.available, self.*.mask);
+        for idx in 0..self.slots() {
+            tag := self.tag(idx).*;
+            text := if tag.is_used() then format_entry.*(self.entry(idx).*)
+            else if tag.eq(Tag.empty) then "EMPTY"
+            else "DELETED";
+
+            libc.fprintf(c_stream, "  %.*s (%08b),\n".ptr, text.len, text.ptr, tag.val);
+
+            if tag.is_used() {
+                free_text := free_text orelse continue;
+                free_text.*(text);
+            }
+        }
+        libc.fprintf(c_stream, "}\n".ptr);
     }
 }
+
+/// Returns the number of slots needed to allow inserting `capacity` items without reallocating.
+capacity_to_slots :: (capacity: u32) -> {
+    unaligned_slots := capacity.as(u64) * 100 / MAX_LOAD_PERCENTAGE + 1;
+    slots := std.num.ceil_pow_of_2_u64(unaligned_slots);
+    if DEBUG  std.assert(slots <= std.num.u32_MAX.as(u64), "capacity_to_slots overflow");
+    slots.as(u32)
+}
+
+slots_to_available :: (slots: u32) -> (slots.as(u64) * MAX_LOAD_PERCENTAGE / 100).as(u32);
 
 test_map :: -> {
     fail :: () -> std.panic("test failed");
 
     alloc := std.ctx.alloc;
 
-    mut map := Str2PtrHashMap.new(alloc=alloc);
+    mut map := HashMap([]u8, *any, StringKeyImpl).new(alloc=alloc);
     defer map.destroy(alloc);
     map := &mut map;
 
@@ -147,18 +470,6 @@ test_map :: -> {
     std.assert((map.get(key1) orelse fail()) == key2.ptr);
     std.assert((map.get(key2) orelse fail()) == key2.ptr);
 
-
     std.println("not contains");
-    std.assert(not map.contains_key(&"not in map"));
-
-    std.println("automatic resizing");
-    libc.printf("cap: %d / slots: %d\n".ptr, map.capacity(), map.*.table.&.slots());
-    for idx in 0..70 {
-        str := std.fmt.format("additional item %d", xx idx); // leaked
-        libc.printf("## insert additional item: %s\n".ptr, str.ptr);
-        map.insert(str, str.ptr, alloc);
-        libc.printf("cap: %d / slots: %d\n".ptr, map.capacity(), map.*.table.&.slots());
-    }
-
-    map.debug();
+    std.assert(not map.contains_key("not in map"));
 }

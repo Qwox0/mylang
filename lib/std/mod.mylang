@@ -1,4 +1,3 @@
-pub RawHashTable :: #import "./RawHashTable.mylang".RawHashTable;
 pub bindgen :: #import "./bindgen/mod.mylang";
 pub closures :: #import "./closures.mylang";
 pub compiler :: #import "./compiler/mod.mylang";
@@ -6,12 +5,12 @@ pub env :: #import "./env.mylang";
 pub fmt :: #import "./fmt.mylang";
 pub fs :: #import "./fs.mylang";
 pub hash :: #import "./hash/mod.mylang";
-pub hashmap :: #import "./hashmap.mylang";
 pub json :: #import "./json.mylang";
 pub mem :: #import "./mem/mod.mylang";
 pub net :: #import "./net/mod.mylang";
 pub num :: #import "./num.mylang";
 pub ptr :: #import "./ptr.mylang";
+pub rng :: #import "./rng.mylang";
 pub set :: #import "./set.mylang";
 pub slice :: #import "./slice.mylang";
 pub str :: #import "./str.mylang";
@@ -19,6 +18,9 @@ pub time :: #import "./time.mylang";
 
 pub ArrayList :: #import "./ArrayList.mylang".ArrayList;
 pub Array :: ArrayList;
+
+pub hashmap :: #import "./hashmap.mylang";
+pub HashMap :: hashmap.HashMap;
 
 libc :: #import "libc";
 

@@ -1,6 +1,6 @@
 std :: #import "std";
 libc :: #import "libc";
-RawHashTable :: std.RawHashTable;
+RawHashMap :: std.hashmap.RawHashMap;
 
 Hash :: u32;
 
@@ -16,89 +16,86 @@ paul_larson_hash :: (mut s: *u8, seed: Hash = 0) -> {
 //hash :: paul_larson_hash;
 hash :: (s: *u8) -> std.hash.rapidhash_v3(std.str.from_cstr(s)).as(Hash);
 
-/// Does not own the stored strings
-CStrHashSet :: struct {
-    table: RawHashTable,
+StrHashSet :: HashSet([]u8, std.hashmap.StringKeyImpl);
 
-    T :: *u8;
+HashSet :: struct($T, $Impl := std.hashmap.DefaultKeyImpl) {
+    map: RawHashMap(T, void),
+
+    Self :: HashSet(T, Impl);
+
     T_LAYOUT :: std.mem.Layout.{ size = #sizeof(T), align = #alignof(T) };
-    t_eq :: (capture: T) -> std.closures.EqClosure.{
-        fn = &(v, capture) -> libc.strcmp(v.as(*T).*, capture.as(T)) == 0,
-        capture
-    };
+    hash :: Impl(T).hash;
+    eq :: Impl(T).eq;
 
-    pub EMPTY :: CStrHashSet.(.EMPTY);
+    pub EMPTY :: Self.(.EMPTY);
 
-    pub new :: (capacity: u32 = RawHashTable.MIN_CAPACITY, alloc := std.ctx.alloc) ->
-        CStrHashSet.(.new(capacity, alloc, T_LAYOUT));
+    pub new :: (capacity: u32 = std.hashmap.MIN_CAPACITY, alloc := std.ctx.alloc) ->
+        Self.(.new(capacity, alloc));
 
-    pub destroy :: (self: CStrHashSet, alloc := std.ctx.alloc) ->
-        self.table.destroy(alloc, T_LAYOUT.size);
+    pub destroy :: (self: Self, alloc := std.ctx.alloc) -> self.map.destroy(alloc);
 
-    pub size :: (self: *CStrHashSet) -> self.*.table.size;
+    pub size :: (self: *Self) -> self.*.map.size;
 
     /// The number of elements in the set for which no allocations are guaranteed.
-    pub capacity :: (self: *CStrHashSet) -> self.*.table.&.capacity();
+    pub capacity :: (self: *Self) -> self.*.map.&.capacity();
 
-    pub reserve :: (self: *mut CStrHashSet, additional: u32, alloc := std.ctx.alloc) -> {
-        self.*.table.&mut.reserve(
-            additional,
-            & entry_ptr -> hash(entry_ptr.as(*T).*),
-            alloc,
-            T_LAYOUT,
-        )
+    pub reserve :: (self: *mut Self, additional: u32, alloc := std.ctx.alloc) -> {
+        self.*.map.&mut.reserve(additional, &hash, alloc)
     }
 
-    pub insert :: (self: *mut CStrHashSet, val: T) -> ?T {
+    pub insert :: (self: *mut Self, val: T) -> ?T {
         self.reserve(1);
         self.insert_assume_capacity(val)
     }
 
-    pub insert_assume_capacity :: (self: *mut CStrHashSet, val: T) -> ?T {
+    pub insert_assume_capacity :: (self: *mut Self, val: T) -> ?T {
         hash := hash(val);
-        slot := self.*.table.&mut.insert_slot_assume_capacity(hash, t_eq(val), T_LAYOUT.size);
-        entry := slot.entry.as(*mut T);
-        old_val := entry.*;
-        entry.* = val;
+        eq := std.closures.EqClosure(T, T).{ fn=&eq, capture=val };
+        slot := self.*.map.&mut.insert_slot_assume_capacity(hash, eq);
+        old_val := slot.entry.*.key;
+        slot.entry.*.key = val;
         if slot.occupied Some(old_val) else null
     }
 
-    pub contains :: (self: *CStrHashSet, val: T) -> bool {
-        if self.size() == 0 return false; // TODO: unlikely branch
-        hash := hash(val);
-        self.*.table.&.find(hash, t_eq(val), T_LAYOUT.size) orelse return false;
-        true
+    pub contains :: (self: *Self, val: T) -> bool  self.*.map.&.contains_key(val, &hash, &eq);
+
+    pub remove :: (self: *mut Self, val: T) -> ?T {
+        entry := self.*.map.&mut.remove(val, &hash, &eq) orelse return null;
+        Some(entry.key)
     }
 
-    pub remove :: (self: *mut CStrHashSet, val: T) -> ?T {
-        if self.size() == 0 return null; // TODO: unlikely branch
+    pub reset :: (self: *mut Self) -> self.*.map.&mut.reset();
 
-        hash := hash(val);
-        slot := self.*.table.&mut.remove(hash, t_eq(val), T_LAYOUT.size) orelse return null;
-
-        slot.as(*T).*
-    }
-
-    pub reset :: (self: *mut CStrHashSet) -> self.*.table.&mut.reset(T_LAYOUT.size);
-
-    pub reset_with_free :: (self: *mut CStrHashSet, alloc := std.ctx.alloc) -> {
-        for idx in 0..self.*.table.&.slots()
-            if self.*.table.&.tag(idx).*.is_used()
-                alloc.free(self.*.table.&.entry(idx, T_LAYOUT.size).as(*T).*.as(*mut u8));
+    pub reset_with_free :: (self: *mut Self, free: *(T) -> void) -> {
+        for idx in 0..self.*.map.&.slots()
+            if self.*.map.&.tag(idx).*.is_used()
+                free.*(self.*.map.&.entry(idx).*.key);
         self.reset();
     }
 
-    pub debug :: (self: *CStrHashSet) -> {
-        self.*.table.&.debug(
-            T_LAYOUT.size,
-            & v -> std.fmt.format("%1$p \"%1$s\"", xx v.as(*T).*),
-            & text -> libc.free(text.ptr),
-        );
+    /*
+    pub debug :: (
+        self: *Self,
+        format_item: *(val: T) -> []u8,
+        free_text: ?*(text: []u8) -> void = null,
+        c_stream := libc.stderr,
+    ) -> {
+        self.*.map.&.debug(& entry -> format_item.*(entry.key), free_text, c_stream);
     }
+    */
 }
 
+CStrHashKeyImpl :: struct($K) {
+    hash :: (s: *u8) -> std.hash.rapidhash_v3(std.str.from_cstr(s)).as(Hash);
+    eq :: (l: *u8, r: *u8) -> libc.strcmp(l, r) == 0;
+};
+
 test_set :: -> {
-    mut set := CStrHashSet.new();
+    format_item :: (val: *u8) -> std.fmt.format("%1$p \"%1$s\"", xx val);
+    free_item_text :: (text: []u8) -> libc.free(text.ptr);
+
+    //mut set := CStrHashSet.new();
+    mut set := HashSet(*u8, CStrHashKeyImpl).new();
     defer set.destroy();
     set := &mut set;
 
@@ -133,16 +130,16 @@ test_set :: -> {
     std.assert(set.size() == 2);
     std.assert(not set.contains(s2));
 
-    set.debug();
+    //set.debug(&format_item, &free_item_text);
 
     std.println("automatic resizing");
-    libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.*.table.&.slots());
+    libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.*.map.&.slots());
     for idx in 0..100 {
         str := std.fmt.format("additional item %d", xx idx); // leaked
         libc.printf("## insert additional item: %s\n".ptr, str.ptr);
         set.insert(str.ptr);
-        libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.*.table.&.slots());
+        libc.printf("cap: %d / slots: %d\n".ptr, set.capacity(), set.*.map.&.slots());
     }
 
-    set.debug();
+    //set.debug(&format_item, &free_item_text);
 }

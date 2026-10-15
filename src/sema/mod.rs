@@ -232,8 +232,15 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                     UnitDependency::_AssociatedConst(_) | UnitDependency::_Dot(_) => {
                         unreachable_debug()
                     },
-                    UnitDependency::Scope(_) | UnitDependency::ScopeNotReordered(_) => {
-                        write!(&mut label, "some members")
+                    UnitDependency::Scope(s) | UnitDependency::ScopeNotReordered(s) => {
+                        let (_, d) = s
+                            .member_sema_state()
+                            .u()
+                            .iter()
+                            .filter(|(_, d)| !d.flags.get(DeclFlags::SEMA_FINISHED))
+                            .next()
+                            .u();
+                        write!(&mut label, "waiting for member `{}`", d.ident.sym)
                     },
                     UnitDependency::GenericsScope(s) => {
                         debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
@@ -519,8 +526,11 @@ impl<'a, T> UnfinishedMembers<'a, T> {
         &self.units[*self.finished_count..]
     }
 
-    pub fn iter(self) -> impl ExactSizeIterator<Item = (&'a mut SemaUnit, Ptr<T>)> {
-        self.units.iter_mut().zip_exact(self.items.iter().copied())
+    pub fn iter(self) -> impl Iterator<Item = (&'a mut SemaUnit, Ptr<T>)> {
+        self.units
+            .iter_mut()
+            .zip_exact(self.items.iter().copied())
+            .skip(*self.finished_count)
     }
 
     #[inline]
@@ -597,7 +607,7 @@ impl UnitDependency {
         if ok.is_some() {
             Result::Ok(UnitDependency::_Dot(dot))
         } else {
-            Result::Err(error_missing_field(dot))
+            Result::Err(error_unknown_field2(dot))
         }
     }
 
@@ -682,7 +692,7 @@ impl UnitDependency {
                 error_missing_associated_const(*dot);
             },
             UnitDependency::_Dot(dot) => {
-                error_missing_field(*dot);
+                error_unknown_field2(*dot);
             },
             UnitDependency::Scope(s) => return for_scope(s.member_sema_state().u()),
             UnitDependency::ScopeNotReordered(s) => {

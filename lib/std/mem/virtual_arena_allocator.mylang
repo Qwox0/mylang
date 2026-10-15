@@ -27,7 +27,7 @@ VirtualArenaAllocator :: struct {
             reserve_end = std.ptr.add_bytes(addr, reserve_size),
             block_size,
             commit_pos = std.ptr.add_bytes(addr, block_size),
-            pos = std.ptr.add_bytes_mut(addr, #sizeof(VirtualArenaAllocator)),
+            pos = std.ptr.add_bytes(addr, #sizeof(VirtualArenaAllocator)),
         }
     }
 
@@ -57,7 +57,7 @@ VirtualArenaAllocator :: struct {
     alloc :: (self: *mut VirtualArenaAllocator, size: usize, alignment: usize) -> {
         aligned_pos := std.ptr.align_forward(self.*.pos, alignment) orelse return null; // overflow
 
-        next_pos := std.ptr.add_bytes_mut(aligned_pos, size);
+        next_pos := std.ptr.add_bytes(aligned_pos, size);
 
         if next_pos > self.*.reserve_end return null; // oom
 

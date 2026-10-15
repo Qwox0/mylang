@@ -32,3 +32,7 @@ pub Layout :: struct {
     size: usize;
     align: usize;
 }
+
+as_bytes :: (val: *$T) -> []u8 {
+    .{ ptr=val.as(*u8), len=#sizeof(T) }
+}

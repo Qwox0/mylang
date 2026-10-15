@@ -1,0 +1,23 @@
+/// Chris Doty-Humphrey’s Small Fast Chaotic PRNG
+Sfc64 :: struct {
+    a: u64,
+    b: u64,
+    c: u64,
+    counter: u64,
+
+    new :: (seed: u64) -> {
+        mut self := Sfc64.{ a=seed, b=seed, c=seed, counter=1 };
+        for i in 0..12 do self.&mut.next();
+        self
+    }
+
+    next :: (self: *mut Sfc64) -> u64 {
+        // wrapping adds!
+        tmp := self.*.a + self.*.b + self.*.counter;
+        self.*.counter += 1;
+        self.*.a = self.*.b ^ (self.*.b >> 11);
+        self.*.b = self.*.c + (self.*.c << 3);
+        self.*.c = ((self.*.c << 24) | (self.*.c >> 40)) + tmp;
+        return tmp;
+    }
+}
