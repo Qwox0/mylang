@@ -1052,7 +1052,7 @@ impl<'ctx> Codegen<'ctx> {
             | AstEnum::OffsetOfDirective { .. } => {
                 panic_debug!("{:?} should have been replaced during sema", expr.kind)
             },
-            AstEnum::GenericSlot { .. } => todo!(),
+            AstEnum::GenericSlot { .. } | AstEnum::TypeOfGenericSlot { .. } => todo!(),
 
             AstEnum::SimpleTy { .. }
             | AstEnum::IntTy { .. }
@@ -1299,7 +1299,7 @@ impl<'ctx> Codegen<'ctx> {
             let mut cur_llvm_arg_offset = sret_offset;
 
             for param in f.params() {
-                let c_ffi_ty = if !param.flags.get(DeclFlags::IS_GENERIC) {
+                let c_ffi_ty = if !param.flags.get(DeclFlags::IS_GENERIC_DEF) {
                     self.c_ffi_type(param.var_ty.u())
                 } else {
                     // Currently required because p_idx below is not continuous when there are
@@ -2691,7 +2691,7 @@ impl<'ctx> Codegen<'ctx> {
                 let rhs_val = self.sym_as_val(rhs_sym, arg_ty)?.float_val();
                 self.build_float_binop(lhs_val, rhs_val, op)?
             },
-            TypeMatch::GenericSlot(_) => todo!("Generic"),
+            TypeMatch::GenericSlot(_) | TypeMatch::TypeOfGenericSlot(_) => todo!("Generic"),
             _ => return Err(CodegenError::UnsupportedBinOp.into()),
         };
         Ok(val)
@@ -3274,7 +3274,7 @@ impl<'ctx> Codegen<'ctx> {
             },
             TypeEnum::Fn { .. } => CodegenType::new(self.ptr_type()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => todo!("Generic"),
         };
 
         let old_entry = self.type_table.insert(ty, llvm_ty);
@@ -3487,7 +3487,9 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 },
                 TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-                TypeEnum::GenericSlot { .. } => todo!("Generic"),
+                TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => {
+                    todo!("Generic")
+                },
             }
         }
 
@@ -4274,7 +4276,7 @@ pub fn for_each_call_arg<'ctx, U>(
     while args.peek().is_some_and(is_pos_arg) {
         let pos_arg = args.next().u();
         let param_def = params.get(pos_idx).copied();
-        if !param_def.is_some_and(|d| d.flags.get(DeclFlags::IS_GENERIC)) {
+        if !param_def.is_some_and(|d| d.flags.get(DeclFlags::IS_GENERIC_DEF)) {
             f(pos_arg, param_def, pos_idx)?;
         }
         pos_idx += 1;
@@ -4290,7 +4292,7 @@ pub fn for_each_call_arg<'ctx, U>(
         }
         let arg_name = named_arg.lhs.downcast::<ast::Ident>();
         let param_def = arg_name.decl.u();
-        if param_def.flags.get(DeclFlags::IS_GENERIC) {
+        if param_def.flags.get(DeclFlags::IS_GENERIC_DEF) {
             continue;
         }
         debug_assert_eq!(param_def, remaining_params.find_field(arg_name.sym).u().1);

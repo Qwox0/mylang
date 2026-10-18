@@ -413,3 +413,18 @@ test :: -> f(1, a=2);
         .error("Parameter 'a' specified multiple times", substr!("a=2";.start()))
         .info("The parameter has already been set by this positional argument", substr!("1"));
 }
+
+#[test]
+fn invalid_function_types() {
+    test("f :: -> { i32 };").error(
+        "Cannot use block as return type of function type, even if the block returns a type.",
+        substr!("{ i32 }"),
+    );
+
+    /* // currently emits bad 'cannot infer type of i32' error
+    test("f :: i32 -> { i32 };").error(
+        "Cannot use block as return type of function type, even if the block returns a type.",
+        substr!("{ i32 }"),
+    );
+    */
+}

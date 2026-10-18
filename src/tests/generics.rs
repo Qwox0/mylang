@@ -377,7 +377,7 @@ take_val :: (x: MyStruct) -> {
 
 #[test]
 fn generic_def_in_struct_body() {
-    test("MyStruct :: struct($A) { a: A; val: $B; }")
+    test("MyStruct :: struct($A) { a: A; val: $B; }; X :: MyStruct(i32);")
         .error("Cannot define generics inside a struct body", substr!("$B"))
         .info("Consider adding the struct generic here. $B", substr!("struct($A)";.end()));
 
@@ -803,4 +803,81 @@ X :: MyStruct(i32);
 
 ";
     test(code).compile_no_err();
+}
+
+#[test]
+fn generic_in_function_type() {
+    // inferred generic return type
+    let code = "
+call1 :: (f: $T -> $Ret, arg: T) -> f(arg);
+add_one :: (x: i16) -> x + 1;
+test :: -> call1(add_one, 5);
+";
+    let res = test(code).ok(6_i16);
+    assert_contains!(res.llvm_ir(), "@call1.i16.i16(");
+    drop(res);
+
+    // explicit generic return type
+    let code = "
+call1 :: (f: $T -> $Ret, arg: T) -> Ret  f(arg);
+add_one :: (x: i16) -> x + 1;
+test :: -> call1(add_one, 5);
+";
+    let res = test(code).ok(6_i16);
+    assert_contains!(res.llvm_ir(), "@call1.i16.i16(");
+    drop(res);
+
+    // some errors
+    {
+        let code = "
+call1 :: (f: [1]$T -> [1]$Ret, arg: T) -> f(arg);
+add_one :: (x: i16) -> .[x + 1];
+test :: -> call1(add_one, 5);
+";
+        test(code).error(
+            "mismatched types: expected `([1]$T)->[1]$Ret`; got `(x:i16)->[1]i16`",
+            substr!("add_one";skip=1),
+        );
+
+        let code = "
+call1 :: (f: [1]$T -> [1]$Ret, arg: T) -> f(arg);
+add_one :: (x: [1]i16) -> .[x + 1];
+test :: -> call1(add_one, 5);
+";
+        test(code)
+            .error("mismatched types (left: `[1]i16`, right: `{integer}`)", substr!("+"))
+            .error(
+                // omit this error?
+                "Cannot infer value of generic parameter `Ret` on type \
+                 `(f:([1]$T)->[1]$Ret,arg:$T)->{unknown}`",
+                substr!("call1(add_one, 5)"),
+            );
+
+        let code = "
+call1 :: (f: [1]$T -> [1]$Ret, arg: T) -> f(arg);
+add_one :: (x: [1]i16) -> .[x[0] + 1];
+test :: -> call1(add_one, 5);
+";
+        test(code).error("mismatched types: expected `[1]i16`; got `i16`", substr!("arg";skip=1));
+    }
+
+    // inferred nested generic return type
+    let code = "
+call1 :: (f: [1]$T -> [1]$Ret, arg: T) -> f(.[arg]);
+add_one :: (x: [1]i16) -> .[x[0] + 1];
+test :: -> call1(add_one, 5);
+";
+    let res = test(code).ok(arr([6_i16]));
+    assert_contains!(res.llvm_ir(), "@call1.i16.i16(");
+    drop(res);
+
+    // explicit nested generic return type
+    let code = "
+call1 :: (f: [1]$T -> [1]$Ret, arg: T) -> [1]Ret  f(.[arg]);
+add_one :: (x: [1]i16) -> .[x[0] + 1];
+test :: -> call1(add_one, 5);
+";
+    let res = test(code).ok(arr([6_i16]));
+    assert_contains!(res.llvm_ir(), "@call1.i16.i16(");
+    drop(res);
 }

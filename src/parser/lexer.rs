@@ -458,6 +458,12 @@ impl Span {
     /// ```
     /// this function is commutative
     pub fn join(self, other: Span) -> Span {
+        if self == Span::ZERO {
+            return other;
+        }
+        if other == Span::ZERO {
+            return self;
+        }
         debug_assert!(self.file == other.file);
         Span::new(self.start.min(other.start)..self.end.max(other.end), self.file)
     }

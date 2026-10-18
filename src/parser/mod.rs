@@ -5,7 +5,7 @@
 
 use crate::{
     ast::{
-        self, Ast, AstKind, BinOpKind, DeclFlags, EnumFlags, FnFlags, For, GenericSlotFlags,
+        self, Ast, AstKind, BinOpKind, Decl, DeclFlags, EnumFlags, FnFlags, For, GenericSlotFlags,
         StructDef, StructFlags, SwitchCase, TypeFlags, UnaryOpKind, UpcastToAst, ast_new,
     },
     context::{CompilationContextInner, ctx_mut, primitives},
@@ -242,15 +242,8 @@ impl Parser {
                 self.alloc(ast::NamedInitializer::new(Some(lhs), fields, span))?.upcast()
             },
             FollowingOperator::ArrayInitializer => self.parse_array_initializer(Some(lhs), span)?,
-            FollowingOperator::SingleArgNoParenFn => {
-                let Some(lhs) = lhs.try_downcast::<ast::Ident>() else {
-                    return cerror2!(
-                        lhs.full_span(),
-                        "expected parameters, got an expression '{:?}'",
-                        lhs.kind
-                    );
-                };
-                let param = self.alloc(ast::Decl::from_ident(lhs))?;
+            FollowingOperator::SingleParamNoParenFn => {
+                let param = Decl::from_single_param(lhs, &self.cctx.alloc)?;
                 self.function_tail(vec![param], span, min_precedence)?.upcast()
             },
             FollowingOperator::PostOp(mut op) => {
@@ -363,7 +356,7 @@ impl Parser {
                                 return Err(unexpected_token(dollar, &[TokenKind::Dollar]));
                             }
                             let decl = self_.var_decl_no_markers(true)?;
-                            debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
+                            debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC_DEF));
                             decl.as_mut().is_const = true; // Currently `$N :: 1` and `$N := 1` are allowed!
                             decl.generic
                                 .u()
@@ -1304,7 +1297,7 @@ pub enum FollowingOperator {
 
     /// `arg -> ...`
     /// `    ^^`
-    SingleArgNoParenFn,
+    SingleParamNoParenFn,
 
     /// `a op`
     /// `  ^^`
@@ -1370,7 +1363,7 @@ impl FollowingOperator {
             TokenKind::PlusEq => FollowingOperator::BinOpAssign(BinOpKind::Add),
             TokenKind::Minus => FollowingOperator::BinOp(BinOpKind::Sub),
             TokenKind::MinusEq => FollowingOperator::BinOpAssign(BinOpKind::Sub),
-            TokenKind::Arrow => FollowingOperator::SingleArgNoParenFn,
+            TokenKind::Arrow => FollowingOperator::SingleParamNoParenFn,
             TokenKind::Asterisk => FollowingOperator::BinOp(BinOpKind::Mul),
             TokenKind::AsteriskEq => FollowingOperator::BinOpAssign(BinOpKind::Mul),
             TokenKind::Slash => FollowingOperator::BinOp(BinOpKind::Div),
@@ -1428,7 +1421,7 @@ impl FollowingOperator {
             | FollowingOperator::PositionalInitializer
             | FollowingOperator::NamedInitializer
             | FollowingOperator::ArrayInitializer => INITIALIZER_PRECEDENCE,
-            FollowingOperator::SingleArgNoParenFn | FollowingOperator::PostOp(_) => {
+            FollowingOperator::SingleParamNoParenFn | FollowingOperator::PostOp(_) => {
                 DIRECT_POSTOP_PRECEDENCE
             },
             FollowingOperator::BinOp(k) => k.precedence(),

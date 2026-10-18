@@ -127,8 +127,21 @@ fn type_check(
         } else {
             Mismatch
         };
-    } else if let Some(_got) = got.try_downcast::<ast::GenericSlot>() {
-        return Expected;
+    } else if let Some(got) = got.try_downcast::<ast::GenericSlot>() {
+        // needed to infer generics behind callback parameters
+        return if accumulate_generic(got, expected.upcast_to_const_val(), quiet) {
+            Equal
+        } else {
+            Mismatch
+        };
+    }
+
+    if let Some(g_ty) = got.try_downcast::<ast::TypeOfGenericSlot>() {
+        debug_assert!(mode == TypeCheckMode::Strict);
+        return match g_ty.generic.restrict_type(expected) {
+            Ok(()) => Equal,
+            Err(()) => Mismatch,
+        };
     }
 
     if is_bottom_type(got, p) || expected == p.any {
@@ -503,7 +516,7 @@ impl Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.is_finalized2(allow_generic),
             TypeEnum::Fn { ret_ty, .. } => ret_ty.is_some_and(|t| t.is_finalized2(allow_generic)),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => allow_generic,
+            TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => allow_generic,
         }
     }
 
@@ -575,6 +588,7 @@ impl Type {
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
             //TypeEnum::GenericSlot { .. } => panic_debug!("cannot finalize GenericDef"),
             TypeEnum::GenericSlot { .. } => {},
+            TypeEnum::TypeOfGenericSlot { .. } => unreachable!(),
         }
         debug_assert!(self.is_finalized2(allow_generic), "Cannot finalize `{self}`");
         Ok(*self)
@@ -608,7 +622,9 @@ impl Type {
             | TypeEnum::SliceTy { .. }
             | TypeEnum::Fn { .. }
             | TypeEnum::GenericSlot { .. } => true,
-            TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => panic_debug!("invalid type"),
+            TypeEnum::TypeOfGenericSlot { .. }
+            | TypeEnum::ArrayLikeContainer { .. }
+            | TypeEnum::Unset => panic_debug!("invalid type"),
         };
         if ret {
             self.as_mut().type_flags.set(TypeFlags::TYPE_LAYOUT_DONE)
@@ -651,7 +667,7 @@ impl Type {
             },
             TypeEnum::OptionTy { inner_ty: t, .. } => aligned_add(1, t.downcast_type().layout()),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => todo!("Generic"),
         }
     }
 
@@ -683,7 +699,7 @@ impl Type {
             TypeEnum::RangeTy { elem_ty, .. } => elem_ty.alignment(),
             TypeEnum::OptionTy { inner_ty, .. } => inner_ty.downcast_type().alignment(),
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => todo!("Generic"),
         };
         debug_assert!(alignment.is_power_of_two());
         alignment
@@ -721,7 +737,7 @@ impl Type {
             },
             TypeEnum::Fn { .. } => false,
             TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-            TypeEnum::GenericSlot { .. } => todo!("Generic"),
+            TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => todo!("Generic"),
         }
     }
 
@@ -937,7 +953,7 @@ pub fn optional_repr(inner_ty: Ptr<Type>) -> OptionalRepr {
         TypeEnum::RangeTy { elem_ty, .. } => optional_repr(*elem_ty),
         TypeEnum::OptionTy { .. } => Tagged,
         TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => unreachable_debug(),
-        TypeEnum::GenericSlot { .. } => todo!("Generic"),
+        TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => todo!("Generic"),
     }
 }
 

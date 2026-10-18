@@ -230,17 +230,26 @@ impl DebugAst for Ast {
                     if flags.get(DeclFlags::IS_STATIC) { "static " } else { "" },
                 ));
 
-                if let Some(ty_expr) = on_type {
-                    lines.write_tree(ty_expr);
-                    lines.write(".");
+                let ignore_name =
+                    flags.get(DeclFlags::IS_PARAMETER) && *ident == primitives().ignored_name;
+
+                if !ignore_name {
+                    if let Some(ty_expr) = on_type {
+                        lines.write_tree(ty_expr);
+                        lines.write(".");
+                    }
+                    lines.write_tree(ident);
                 }
-                lines.write_tree(ident);
 
                 if let Some(var_ty) = var_ty_expr {
-                    lines.write(":");
+                    if !ignore_name {
+                        lines.write(":");
+                    }
                     lines.write_tree(var_ty);
                 } else if let Some(var_ty) = var_ty {
-                    lines.write(":");
+                    if !ignore_name {
+                        lines.write(":");
+                    }
                     lines.write_tree(var_ty);
                 }
 
@@ -420,6 +429,11 @@ impl DebugAst for Ast {
             AstEnum::GenericSlot { name, .. } => {
                 lines.write("$");
                 lines.write(name.sym.text());
+            },
+            AstEnum::TypeOfGenericSlot { generic, .. } => {
+                lines.write("#typeof(");
+                lines.write_tree(generic);
+                lines.write(")");
             },
 
             AstEnum::SimpleTy { decl, .. } => lines.write(decl.ident.sym.text()),
@@ -675,7 +689,7 @@ impl Debug for ast::ConstVal {
 
 impl Display for ast::ConstVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(ty) = Ptr::from_ref(self).try_downcast_type() {
+        if let Some(ty) = Ptr::from_ref(self).try_downcast_type2() {
             return write!(f, "{}", ty);
         }
         write!(f, "{}", self.to_text(false))?;

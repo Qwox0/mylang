@@ -1,14 +1,16 @@
 use crate::{
+    arena_allocator::Arena,
     ast::{
-        self, Ast, AstKind, CloneAst, EnumFlags, FnFlags, HasAstKind, StructFlags, TypeVariant,
-        UpcastToAst, inherit_ast, inherit_type,
+        self, Ast, AstKind, CloneAst, DeclFlags, EnumFlags, FnFlags, GenericSlotFlags, HasAstKind,
+        StructFlags, TypeVariant, UpcastToAst, inherit_ast, inherit_type,
     },
+    diagnostics::HandledErr,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    scope::Scope,
+    scope::{Scope, ScopeFlags, ScopeKind, error_duplicate_in_unordered_scope},
     sema::accumulate_type_inner,
     type_::{ty_match, ty_match_quiet},
-    util::{BitFlags, UnwrapDebug, then, unreachable_debug},
+    util::{BitFlags, OptionExt, UnwrapDebug, then, unreachable_debug},
 };
 
 /// like [`ty_match`]
@@ -99,6 +101,7 @@ pub fn accumulate_generic(
     next_val: Ptr<ast::ConstVal>,
     quiet: bool,
 ) -> bool {
+    debug_assert!(!next_val.p_eq(generic));
     match &mut generic.as_mut().cur_inst {
         cur_inst @ None => {
             if !quiet {
@@ -230,6 +233,17 @@ macro_rules! impl_PolymorphableType {
                     _ => unreachable_debug(),
                 })
             }
+
+            pub fn take_generics(&mut self) -> Ptr<Scope> {
+                match Ptr::from_ref(self).upcast().matchable2() {
+                    $(ast::AstMatch::$ty(t) => {
+                        debug_assert!(t.flags.get(ast::$ty::FLAG_IS_GENERIC));
+                        t.as_mut().flags.unset(ast::$ty::FLAG_IS_GENERIC);
+                        t.as_mut().generics_scope.take().u()
+                    },)*
+                    _ => unreachable_debug(),
+                }
+            }
         }
 
         pub enum PolymorphableMatch {
@@ -281,4 +295,53 @@ impl ast::Type {
         debug_assert!(self.replacement.is_none());
         self.upcast().try_flat_downcast_polymorphable()
     }
+}
+
+pub fn steal_generics(
+    decl_with_generic: Ptr<ast::Decl>,
+    target: Ptr<ast::Fn>,
+    alloc: &Arena,
+) -> Result<(), HandledErr> {
+    debug_assert!(decl_with_generic.flags.get(DeclFlags::CONTAINS_GENERIC));
+
+    let ty = decl_with_generic.var_ty.u().downcast_polymorphable();
+    debug_assert!(ty.is_generic());
+    let generics = ty.as_mut().take_generics();
+    for g in generics.decls.iter().copied() {
+        debug_assert_eq!(g.scope.u(), generics);
+        g.as_mut().scope = None;
+        g.generic.u().as_mut().flags.set(GenericSlotFlags::WAS_STOLEN);
+
+        add_generic_to_fn(target, g, alloc)?;
+    }
+
+    debug_assert!(target.flags.get(FnFlags::IS_GENERIC));
+    Ok(())
+}
+
+pub fn add_generic_to_fn(
+    f: Ptr<ast::Fn>,
+    generic_decl: Ptr<ast::Decl>,
+    alloc: &Arena,
+) -> Result<(), HandledErr> {
+    debug_assert!(generic_decl.flags.get(DeclFlags::IS_GENERIC_DEF));
+    let generic = generic_decl.generic.u();
+    debug_assert_eq!(generic.name.decl, generic_decl);
+
+    let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
+        let s = alloc.alloc(Scope::new(vec![], ScopeKind::FnGenerics)).unwrap();
+        s.as_mut().expr.set_once(f.upcast());
+        debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
+        s.as_mut().setup(f.params_scope.parent.u());
+        f.as_mut().params_scope.parent = Some(s);
+        s
+    });
+    if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
+        return Err(error_duplicate_in_unordered_scope(ScopeKind::FnParams, generic_decl, dup));
+    }
+    debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
+    f.as_mut().flags.set(FnFlags::IS_GENERIC);
+    generic.as_mut().flags.set(GenericSlotFlags::WAS_ADDED_TO_SCOPE);
+
+    Ok(())
 }

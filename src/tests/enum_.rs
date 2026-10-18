@@ -198,7 +198,7 @@ test :: -> MyEnum.B.as(i64);";
 
 #[test]
 fn invalid_tag_ty() {
-    test_body("enum { A = \"hello\" }")
+    test("E :: enum { A = \"hello\" };")
         .error("mismatched types: expected `{integer}`; got `[]u8`", substr!("\"hello\""));
 }
 

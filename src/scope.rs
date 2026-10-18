@@ -101,7 +101,7 @@ impl Scope {
         debug_assert!(decls.iter().all(|d| d.on_type.is_none()));
         #[cfg(debug_assertions)]
         if kind.is_generic() {
-            debug_assert!(decls.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
+            debug_assert!(decls.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC_DEF)));
             debug_assert!(decls.iter().all(|p| p.is_const));
         }
 
@@ -244,14 +244,9 @@ impl Scope {
     }
 
     pub fn find_decl(&self, sym: Symbol) -> OPtr<Decl> {
-        let mut cur_scope = Some(Ptr::from_ref(self));
-        while let Some(scope) = cur_scope {
-            if let Some(sym) = scope.find_decl_norec(sym, true) {
-                return Some(sym);
-            }
-            cur_scope = scope.parent;
-        }
-        return None;
+        Ptr::from_ref(self)
+            .iter_up_scopes()
+            .find_map(|scope| scope.find_decl_norec(sym, true))
     }
 
     pub fn get_expr(self: Ptr<Self>) -> OPtr<Ast> {
@@ -276,9 +271,30 @@ impl Scope {
             ScopeKind::Union => get_scope_container!(ast::UnionDef, scope).upcast(),
             ScopeKind::Enum => get_scope_container!(ast::EnumDef, scope).upcast(),
             ScopeKind::FnGenerics | ScopeKind::StructGenerics | ScopeKind::EnumGenerics => {
-                panic_debug!("generic scopes are not supported")
+                // Cannot be used to find expr because the ast node store a pointer instead of
+                // the scope itself
+                return None;
             },
         })
+    }
+
+    /// starts with `self`
+    pub fn iter_up_scopes(self: Ptr<Scope>) -> impl Iterator<Item = Ptr<Scope>> {
+        struct ScopeIter {
+            next: OPtr<Scope>,
+        }
+
+        impl Iterator for ScopeIter {
+            type Item = Ptr<Scope>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let cur_scope = self.next?;
+                self.next = cur_scope.parent;
+                Some(cur_scope)
+            }
+        }
+
+        ScopeIter { next: Some(self) }
     }
 }
 

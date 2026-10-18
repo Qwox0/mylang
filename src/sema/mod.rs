@@ -14,11 +14,12 @@ use crate::{
     intern_pool::Symbol,
     parser::lexer::Span,
     ptr::{OPtr, Ptr},
-    scope::{Scope, ScopeFlags, ScopeKind, error_duplicate_in_unordered_scope, setup_scopes},
+    scope::{Scope, ScopeFlags, ScopeKind, setup_scopes},
     scoped_stack::ScopedStack,
     scratch_allocator::TmpPtr,
     sema::generics::{
-        Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic, generic_val_eq,
+        Polymorphable, PolymorphableMatch, PolymorphableType, accumulate_generic,
+        add_generic_to_fn, generic_val_eq, steal_generics,
     },
     source_file::SourceFile,
     type_::{
@@ -39,23 +40,23 @@ pub mod generics;
 pub mod primitives;
 
 /// [`None`] return value means [`CompilationContextInner::error_mismatched_types`]
-fn check_or_infer_type(
+pub fn check_or_infer_type(
     ty: Ptr<ast::Type>,
     target_ty: &mut OPtr<ast::Type>,
     strict_target: bool,
-) -> Option<()> {
+) -> Result<(), ()> {
     if let Some(target_ty) = target_ty {
         if strict_target {
             if !ty_match(ty, *target_ty) {
-                return None;
+                return Result::Err(());
             }
         } else {
-            *target_ty = common_type(*target_ty, ty)?;
+            *target_ty = common_type(*target_ty, ty).ok_or(())?;
         }
     } else {
         *target_ty = Some(ty);
     }
-    Some(())
+    Result::Ok(())
 }
 
 macro_rules! check_or_infer_target {
@@ -63,7 +64,7 @@ macro_rules! check_or_infer_target {
         let strict_target: bool = $strict_target;
         let ty: Ptr<ast::Type> = $ty;
         let target_ty: &mut OPtr<ast::Type> = $target_ty;
-        let Some(()) = check_or_infer_type(ty, target_ty, strict_target) else {
+        let Result::Ok(()) = check_or_infer_type(ty, target_ty, strict_target) else {
             return error_mismatched_types($err_span, target_ty.u(), ty).into();
         };
         target_ty.as_mut().u()
@@ -240,7 +241,7 @@ pub fn analyze(cctx: Ptr<CompilationContextInner>, stmts: &mut [Ptr<Ast>]) {
                             .filter(|(_, d)| !d.flags.get(DeclFlags::SEMA_FINISHED))
                             .next()
                             .u();
-                        write!(&mut label, "waiting for member `{}`", d.ident.sym)
+                        write!(&mut label, "member `{}`", d.ident.sym)
                     },
                     UnitDependency::GenericsScope(s) => {
                         debug_assert!(!s.flags.get(StructFlags::GENERICS_ANALYZED));
@@ -1392,7 +1393,7 @@ impl Sema {
                 {
                     if let PolymorphableMatch::Fn(f) = polymorphable.matchable2() {
                         debug_assert!(ty == f.upcast_to_type());
-                        debug_assert!(f.flags.get(FnFlags::IS_TYPE));
+                        debug_assert!(f.flags.get(FnFlags::IS_FN_TYPE));
                         return cerror2!(
                             expr.full_span(),
                             "Cannot call type `{ty}`, because it is a type and not a function \
@@ -2208,7 +2209,7 @@ impl Sema {
             AstEnum::EnumVal { .. } => todo!(),
             AstEnum::OptionalVal { .. } => unreachable_debug(),
             AstEnum::AggregateVal { .. } => todo!(),
-            AstEnum::Fn { ret_ty_expr, ret_ty, body, flags, .. } => {
+            AstEnum::Fn { ret_ty, flags, .. } => {
                 let mut f = expr.downcast::<ast::Fn>();
 
                 if let Some(decl) = self.decl_stack.last()
@@ -2230,7 +2231,7 @@ impl Sema {
                 let osh = self.jump_open_scope(&f.params_scope);
                 let res = (|| {
                     for (p_idx, param) in f.as_ref().params_scope.decls.iter().enumerate() {
-                        if param.is_const && !param.flags.get(DeclFlags::IS_GENERIC) {
+                        if param.is_const && !param.flags.get(DeclFlags::IS_GENERIC_DEF) {
                             let err = cerror2!(
                                 param.lhs_span(),
                                 "constant function parameters are currently not implemented"
@@ -2248,7 +2249,7 @@ impl Sema {
                             param.as_mut().var_ty = Some(p_hint.var_ty.u());
                         }
 
-                        if param.flags.get(DeclFlags::IS_GENERIC) {
+                        let () = if param.flags.get(DeclFlags::IS_GENERIC_DEF) {
                             if !f.flags.get(FnFlags::IS_INSTANTIATION) {
                                 self.analyze_fn_generic(*param, f)?;
                                 param.as_mut().scope = None;
@@ -2263,7 +2264,11 @@ impl Sema {
                         } else {
                             self.analyze_decl(*param, false)
                         }
-                        .ignore_error()?
+                        .ignore_error()?;
+
+                        if param.flags.get(DeclFlags::CONTAINS_GENERIC) {
+                            steal_generics(*param, f, &self.cctx.alloc)?;
+                        }
                     }
 
                     if f.flags.get(FnFlags::HAS_KNOWN_RET_TY) {
@@ -2290,12 +2295,6 @@ impl Sema {
                     let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
                         || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
                     if contains_generic {
-                        if might_be_fn_ty {
-                            return cerror2!(
-                                f.generics().first().u().full_span(),
-                                "Currently generic function types are not implemented"
-                            );
-                        }
                     } else if let Some(body) = f.body {
                         let body_ty = self
                             .analyze(body, &f.ret_ty, false)
@@ -2308,7 +2307,24 @@ impl Sema {
                             f.flags.get(FnFlags::HAS_KNOWN_RET_TY),
                             body.return_val_span()
                         );
-                        if *ret_ty == p.rec_ret_ty {
+
+                        // cannot use `ty_match(*ret_ty, p.type_ty)` because it incorrectly returns
+                        // `true` for functions with generic return types.
+                        let is_fn_ty = *ret_ty == p.type_ty
+                            || ret_ty
+                                .try_downcast::<ast::TypeOfGenericSlot>()
+                                .is_some_and(|g_ty| g_ty.generic.restrict_type(p.type_ty).is_ok());
+                        if is_fn_ty {
+                            if body.kind == AstKind::Block {
+                                return cerror2!(
+                                    body.full_span(),
+                                    "Cannot use block as return type of function type, even if \
+                                     the block returns a type."
+                                );
+                            }
+
+                            self.convert_to_fn_type(f)?
+                        } else if *ret_ty == p.rec_ret_ty {
                             let rec_fn_decl = self
                                 .decl_stack
                                 .last()
@@ -2317,10 +2333,12 @@ impl Sema {
                                 rec_fn_decl.map(|d| d.ident.span).unwrap_or_else(|| f.full_span()),
                                 "cannot infer the return type of this recursive function"
                             );
+                        } else {
+                            f.flags.set(FnFlags::IS_FN_VAL);
+                            ret_ty.finalize2(Some(f.ret_ty_expr.unwrap_or(body)), false)?;
                         }
-                        ret_ty.finalize2(Some(f.ret_ty_expr.unwrap_or(body)), false)?;
                     } else {
-                        debug_assert!(f.flags.get(FnFlags::IS_TYPE));
+                        debug_assert!(f.flags.get(FnFlags::IS_FN_TYPE));
                         //panic_debug!("this function has already been analyzed as a function type")
                     }
                     Ok(())
@@ -2329,18 +2347,12 @@ impl Sema {
                 res?;
                 debug_assert!(ret_ty.is_some() || flags.get(FnFlags::IS_GENERIC));
 
-                let is_fn_ty = *ty_hint == p.type_ty
-                    || (*ret_ty == p.type_ty && body.u().kind != AstKind::Block);
-                expr.ty = Some(if is_fn_ty {
-                    flags.set(FnFlags::IS_TYPE);
-                    let Some(b) = *body else { return Ok(()) }; // only needed for `NotFinished`
-                    *ret_ty_expr = Some(b);
-                    *ret_ty = Some(b.downcast_type());
-                    *body = None;
-                    p.type_ty
+                if flags.get(FnFlags::IS_FN_TYPE) {
+                    debug_assert!(!f.flags.get(FnFlags::IS_FN_VAL));
+                    debug_assert_eq!(expr.ty, p.type_ty);
                 } else {
-                    f.upcast_to_type()
-                });
+                    expr.ty = Some(f.upcast_to_type())
+                }
             },
 
             AstEnum::SimpleTy { .. } | AstEnum::IntTy { .. } | AstEnum::FloatTy { .. } => {
@@ -2594,11 +2606,34 @@ impl Sema {
             AstEnum::GenericSlot { name, .. } => {
                 let g = expr.downcast::<ast::GenericSlot>();
 
+                if g.flags.get(GenericSlotFlags::WAS_STOLEN) {
+                    // we must be in an instantiation!
+                    #[cfg(debug_assertions)]
+                    {
+                        let inst = self
+                            .cur_scope
+                            .iter_up_scopes()
+                            .filter_map(|s| s.get_expr()?.try_downcast::<ast::Fn>())
+                            .find(|f| f.flags.get(FnFlags::IS_INSTANTIATION))
+                            .u();
+                        debug_assert!(
+                            inst.generics_scope.u().decls.find_field(g.name.sym).is_some()
+                        );
+                    };
+                    expr.ty = Some(*self.analyze(g.name.upcast(), ty_hint, is_const)?);
+                    expr.set_replacement(g.name.upcast());
+                    return Ok(());
+                }
+
                 match self.cur_scope.kind {
                     ScopeKind::FnParams => {
                         let f = self.cur_scope.get_expr().u().downcast::<ast::Fn>();
 
+                        // TODO: remove this duplication (see above)
                         if f.flags.get(FnFlags::IS_INSTANTIATION) {
+                            debug_assert!(
+                                f.generics_scope.u().decls.find_field(g.name.sym).is_some()
+                            );
                             expr.ty = Some(*self.analyze(g.name.upcast(), ty_hint, is_const)?);
                             expr.set_replacement(g.name.upcast());
                             return Ok(());
@@ -2606,7 +2641,7 @@ impl Sema {
 
                         let generic_decl = match g.name.decl {
                             Some(d) => d,
-                            None => g.generate_decl(ty_hint.u(), &self.cctx.alloc)?,
+                            None => g.generate_decl(&self.cctx.alloc)?,
                         };
 
                         self.analyze_fn_generic(generic_decl, f)?
@@ -2652,12 +2687,17 @@ impl Sema {
                     },
                 }
 
-                expr.ty = Some(g.upcast_to_type());
+                if expr.ty.is_none() {
+                    expr.as_mut()
+                        .ty
+                        .set_once(type_new!(TypeOfGenericSlot { generic: g }).upcast_to_type());
+                }
             },
+            AstEnum::TypeOfGenericSlot { .. } => unreachable_debug(),
         }
         #[cfg(debug_assertions)]
         if expr.ty.is_none() {
-            display(expr.full_span()).label("missing type").finish();
+            crate::display_code::debug_expr!(expr);
             debug_assert!(expr.ty.is_some());
         }
         Ok(())
@@ -2716,6 +2756,9 @@ impl Sema {
         let ty = *self.analyze(ty_expr, &Some(p.type_ty), true)?;
         if ty_match(ty, p.type_ty) {
             self.resolve_type_inst(ty_expr)
+        } else if let Some(f) = ty_expr.try_downcast::<ast::Fn>() {
+            self.convert_to_fn_type(f)?;
+            return Ok(f.upcast_to_type());
         } else {
             error_mismatched_types(ty_expr.full_span(), p.type_ty, ty).into()
         }
@@ -2747,6 +2790,45 @@ impl Sema {
         } else {
             Ok(inst)
         }
+    }
+
+    fn convert_to_fn_type(&mut self, mut f: Ptr<ast::Fn>) -> SemaResult<()> {
+        debug_assert!(!f.flags.get(FnFlags::IS_FN_VAL));
+
+        let p = p();
+
+        let body = f.body.u();
+        if let Some(ret_ty_expr) = f.ret_ty_expr {
+            // TODO: test
+            return cerror2!(ret_ty_expr.full_span(), "invalid return type: `type`");
+        } else if body.kind == AstKind::Block {
+            // TODO: test
+            return cerror2!(
+                body.full_span(),
+                "Cannot use block as return type of function type, even if the block returns a \
+                 type."
+            );
+        }
+
+        debug_assert!(f.params_scope.decls.iter().all(|d| d.var_ty.is_some()));
+
+        if body.ty.is_none() {
+            let osh = self.jump_open_scope(&f.params_scope);
+            let res = self.analyze_and_check_type(body, p.type_ty, false).handle_err().map(|_| ());
+            self.close_scope(osh);
+            res?;
+        }
+
+        debug_assert_eq!(body.ty, p.type_ty);
+        debug_assert!(body.rep().has_type_kind());
+
+        f.ret_ty_expr = Some(body);
+        f.ret_ty = Some(body.downcast_type());
+        f.body = None;
+        f.flags.set(FnFlags::IS_FN_TYPE);
+        f.ty = Some(p.type_ty);
+
+        Ok(())
     }
 
     pub fn try_custom_bitwith_int_type(&self, name: &str) -> Option<ast::IntTy> {
@@ -3134,6 +3216,10 @@ impl Sema {
             decl.var_ty = Some(ty);
             if ty == p.err_ty {
                 return Err(HandledErr);
+            } else if let Some(p) = ty.try_downcast_polymorphable() // TODO: Add TypeFlags::IS_GENERIC
+                && p.is_generic()
+            {
+                decl.flags.set(DeclFlags::CONTAINS_GENERIC);
             }
         }
         if let Some(init) = decl.init.filter(|_| !skip_init) {
@@ -3147,7 +3233,7 @@ impl Sema {
             let is_init_const = decl.is_const
                 || is_static
                 || decl.flags.get(DeclFlags::IS_DATA_MEMBER)
-                || decl.flags.get(DeclFlags::IS_GENERIC);
+                || decl.flags.get(DeclFlags::IS_GENERIC_DEF);
             let init_ty = *self.analyze(init, &decl.var_ty, is_init_const)?;
             let var_ty = check_or_infer_target!(init_ty, &mut decl.var_ty, true, init.full_span());
             let var_ty = if !decl.is_const { var_ty.finalize_allow_generic() } else { *var_ty };
@@ -3169,7 +3255,7 @@ impl Sema {
             }
             Ok(())
         } else if decl.var_ty.is_some() {
-            debug_assert!(!decl.is_const || decl.flags.get(DeclFlags::IS_GENERIC));
+            debug_assert!(!decl.is_const || decl.flags.get(DeclFlags::IS_GENERIC_DEF));
             Ok(())
         } else if decl.flags.get(DeclFlags::IS_FN_TY_PARAM) {
             debug_assert!(decl.var_ty_expr.is_none());
@@ -3238,7 +3324,7 @@ impl Sema {
     fn analyze_explicit_generic_decl(&mut self, decl: Ptr<ast::Decl>) -> SemaResult<()> {
         let p = p();
 
-        debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC));
+        debug_assert!(decl.flags.get(DeclFlags::IS_GENERIC_DEF));
         debug_assert!(decl.is_const);
         if decl.var_ty_expr.is_none() && decl.init.is_none() {
             decl.as_mut().var_ty = Some(p.type_ty);
@@ -3307,22 +3393,7 @@ impl Sema {
             return Ok(());
         }
 
-        let generics_scope = f.as_mut().generics_scope.get_or_insert_with(|| {
-            let s = self.cctx.alloc.alloc(Scope::new(vec![], ScopeKind::FnGenerics)).unwrap();
-            s.as_mut().expr.set_once(f.upcast());
-            debug_assert!(f.params_scope.flags.get(ScopeFlags::WAS_SETUP));
-            s.as_mut().setup(f.params_scope.parent.u());
-            f.as_mut().params_scope.parent = Some(s);
-            s
-        });
-        if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
-            return error_duplicate_in_unordered_scope(ScopeKind::FnParams, generic_decl, dup)
-                .into();
-        }
-        f.as_mut().flags.set(FnFlags::IS_GENERIC);
-        generic.as_mut().flags.set(GenericSlotFlags::WAS_ADDED_TO_SCOPE);
-
-        Ok(())
+        Ok(add_generic_to_fn(f, generic_decl, &self.cctx.alloc)?)
     }
 
     fn validate_fn_call(
@@ -3442,7 +3513,7 @@ impl Sema {
             param: Ptr<ast::Decl>,
             arg_val: Ptr<ast::Ast>,
         ) -> SemaResult<()> {
-            if param.flags.get(DeclFlags::IS_GENERIC) {
+            if param.flags.get(DeclFlags::IS_GENERIC_DEF) {
                 sema.analyze_and_check_type(arg_val, get_var_ty(param)?, true)?;
                 param
                     .generic
@@ -3512,8 +3583,9 @@ impl Sema {
 
         // infer generic based on return value
         if let CallKind::Function { ty_hint: Some(ty_hint) } = kind
-            && let Some(g_def) =
-                ty.upcast().downcast::<ast::Fn>().ret_ty.try_downcast::<ast::GenericSlot>()
+            && let f = ty.upcast().downcast::<ast::Fn>()
+            && f.flags.get(FnFlags::IS_GENERIC) // ignore callbacks with stolen generics
+            && let Some(g_def) = f.ret_ty.try_downcast::<ast::GenericSlot>()
         {
             // TODO: this is not called when type return type is inferred (see infer_generic_based_on_inferred_return_type)
             let _ignore = accumulate_generic(g_def, ty_hint.upcast_to_const_val(), false);
@@ -3590,7 +3662,7 @@ impl Sema {
                 if ty.flags().get(T::FLAG_IS_GENERIC) {
                     let ty_param_decl = lhs.decl.u();
                     debug_assert!(!inst.main_scope().decls.contains(&ty_param_decl)); // ty_param_decl cannot be used
-                    let inst_param = if ty_param_decl.flags.get(DeclFlags::IS_GENERIC) {
+                    let inst_param = if ty_param_decl.flags.get(DeclFlags::IS_GENERIC_DEF) {
                         inst.generics_scope().u().as_ref()
                     } else {
                         inst.main_scope()
@@ -3699,11 +3771,10 @@ impl Sema {
             ty.generics_scope().u().parent.u(),
         );
 
-        for (idx, c) in inst.generics_scope().u().decls.iter().enumerate() {
-            let inst_val = generic_inst.get(idx).u().upcast();
+        for (c, inst_val) in inst.generics_scope().u().decls.iter().zip_exact(generic_inst) {
             c.as_mut().flags.set(DeclFlags::IS_INSTANTIATION_VALUE);
             c.as_mut().var_ty = Some(inst_val.ty.u());
-            c.as_mut().init = Some(inst_val);
+            c.as_mut().init = Some(inst_val.upcast());
         }
 
         // Add instantiation immediately to prevent recursive instantiation. (see `tests::generics::recursive_generic_instantiation`)
@@ -4027,7 +4098,7 @@ impl Sema {
             f.upcast_to_type()
         } else {
             #[cfg(debug_assertions)]
-            if sym.flags.get(DeclFlags::IS_GENERIC) {
+            if sym.flags.get(DeclFlags::IS_GENERIC_DEF) {
                 cwarn!(
                     sym.full_span(),
                     "Trying to access generic decl var_ty before it's analyzed. Maybe the Generic \

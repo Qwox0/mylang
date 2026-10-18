@@ -2,13 +2,13 @@ use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
     context::{FilesIndex, ctx, primitives},
-    diagnostics::{HandledErr, cerror2},
+    diagnostics::{HandledErr, cerror, cerror2},
     intern_pool::Symbol,
     parser::{ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeFlags, ScopeKind},
     scratch_allocator::TmpPtr,
-    sema::{SemaUnit, UnfinishedMembers, UnitDependency},
+    sema::{SemaUnit, UnfinishedMembers, UnitDependency, check_or_infer_type},
     type_::{finalize_ty, ty_match},
     util::{
         BitFlags, Extends, OptionExt, UnwrapDebug, bitflags, macro_orelse, panic_debug, then,
@@ -934,6 +934,7 @@ ast_variants! {
     GenericSlot {
         flags: GenericSlotFlags,
 
+        @debug(simple_ident)
         name: Ptr<Ident>,
 
         cur_inst: OPtr<ConstVal>,
@@ -949,6 +950,10 @@ ast_variants! {
         // var_ty: OPtr<Type>,
         // /// expression which must be checked for every generic instantiation.
         // contraints: Vec<Ptr<Ast>>,
+    },
+    /// TODO: remove this (maybe pass expr to type_check)
+    TypeOfGenericSlot {
+        generic: Ptr<GenericSlot>
     },
 
     /// only for type hints
@@ -971,11 +976,14 @@ bitflags!(DeclFlags: u16 {
     IS_DATA_MEMBER,
     IS_CONST_MEMBER,
     IS_PARAMETER,
-    IS_GENERIC,
+    IS_GENERIC_DEF,
 
     // # sema flags:
     SEMA_FINISHED,
     IS_FN_TY_PARAM,
+
+    /// `decl.var_ty` is Polymorphable
+    CONTAINS_GENERIC,
 
     IS_INSTANTIATION_VALUE,
     //IS_EXPLICIT_CONST_PARAM,
@@ -991,7 +999,7 @@ impl DeclFlags {
         | DeclFlags::IS_DATA_MEMBER
         | DeclFlags::IS_CONST_MEMBER
         | DeclFlags::IS_PARAMETER
-        | DeclFlags::IS_GENERIC;
+        | DeclFlags::IS_GENERIC_DEF;
 }
 
 bitflags!(InitializerFlags: u8 {
@@ -1020,7 +1028,9 @@ bitflags!(FnFlags: u8 {
     /// ```
     IS_NAMED,
 
-    IS_TYPE,
+    IS_FN_TYPE,
+    IS_FN_VAL,
+
     IS_GENERIC,
     IS_INSTANTIATION,
     /// instantiation which contains at least one external [`GenericSlot`] as an instantiation
@@ -1050,7 +1060,13 @@ bitflags!(EnumFlags: u8 {
 bitflags!(GenericSlotFlags: u8 {
     // # sema flags:
     WAS_ADDED_TO_SCOPE,
+
+    WAS_STOLEN,
 });
+
+impl GenericSlotFlags {
+    const AST_CLONED_FLAGS: GenericSlotFlags = GenericSlotFlags::WAS_STOLEN;
+}
 
 bitflags!(TypeFlags: u8 {
     // # sema flags:
@@ -1379,6 +1395,11 @@ impl Ptr<ConstVal> {
         then!(self.upcast().has_type_kind() => self.downcast_type())
     }
 
+    pub fn try_downcast_type2(self) -> OPtr<Type> {
+        debug_assert!(self.replacement.is_none());
+        then!(self.upcast().has_type_kind() => self.upcast().downcast_type2())
+    }
+
     pub fn try_downcast_type_ref(&mut self) -> Option<&mut Ptr<Type>> {
         debug_assert!(self.replacement.is_none());
         then!(self.upcast().has_type_kind() => self.upcast_ref().downcast_type_ref())
@@ -1473,7 +1494,9 @@ impl Ptr<Type> {
                 TypeEnum::ArrayLikeContainer { .. } | TypeEnum::Unset => {
                     panic_debug!("invalid type")
                 },
-                TypeEnum::GenericSlot { .. } => todo!("Generic"),
+                TypeEnum::GenericSlot { .. } | TypeEnum::TypeOfGenericSlot { .. } => {
+                    todo!("Generic")
+                },
             }
         }
     }
@@ -1495,6 +1518,7 @@ impl Ptr<Type> {
             TypeMatch::GenericSlot(g) => {
                 g.cur_inst.and_then(Ptr::<ConstVal>::try_downcast_type).and_then(Ptr::inner_ty)
             },
+            TypeMatch::TypeOfGenericSlot(_) => unreachable_debug(),
         }
     }
 
@@ -1622,7 +1646,9 @@ impl Ast {
             AstEnum::RangeTy { .. } => todo!(),
             AstEnum::Fn { params_scope, body, ret_ty_expr, .. } => span
                 .maybe_join(params_scope.decls.get(0).map(|p| {
-                    Some(p.ident.span)
+                    p.generic
+                        .map(|g| g.span)
+                        .or(Some(p.ident.span))
                         .filter(|s| *s != Span::ZERO)
                         .unwrap_or_else(|| p.var_ty_expr.u().full_span()) // for special case: `i32 -> i32`
                 }))
@@ -1788,7 +1814,7 @@ impl Type {
                 alloc.alloc(OptionTy { inner_ty, ..*o })?.upcast_to_type()
             },
             TypeMatch::ArrayLikeContainer(_) => unreachable_debug(),
-            TypeMatch::GenericSlot(_) => todo!("Generic"),
+            TypeMatch::GenericSlot(_) | TypeMatch::TypeOfGenericSlot(_) => todo!("Generic"),
         })
     }
 }
@@ -1927,7 +1953,7 @@ impl Decl {
             obj_symbol_name: None,
             scope: None,
         });
-        generic_decl.flags.set(DeclFlags::IS_GENERIC);
+        generic_decl.flags.set(DeclFlags::IS_GENERIC_DEF);
         generic.as_mut().name.decl.set_once(generic_decl);
         Ok(generic_decl)
     }
@@ -1957,6 +1983,22 @@ impl Decl {
             },
             AstMatch::GenericSlot(g) => Ok(Decl::from_generic(g, alloc)?),
             _ => Err(unexpected_expr(lhs, "a variable name")),
+        }
+    }
+
+    pub fn from_single_param(param_expr: Ptr<Ast>, alloc: &Arena) -> Result<Ptr<Decl>, HandledErr> {
+        if let Some(i) = param_expr.try_downcast::<Ident>() {
+            alloc.alloc(Decl::from_ident(i))
+        } else if param_expr.kind.is_type_kind() {
+            let mut decl = alloc.alloc(Decl::from_ident(primitives().ignored_name))?;
+            decl.var_ty_expr.set_once(param_expr);
+            Ok(decl)
+        } else {
+            Err(cerror!(
+                param_expr.full_span(),
+                "expected parameters, got an expression '{:?}'",
+                param_expr.kind
+            ))
         }
     }
 
@@ -1992,7 +2034,7 @@ impl Decl {
     }
 
     pub fn generic_val(self: Ptr<Decl>) -> Ptr<ConstVal> {
-        debug_assert!(self.flags.get(DeclFlags::IS_GENERIC));
+        debug_assert!(self.flags.get(DeclFlags::IS_GENERIC_DEF));
         self.const_val().u()
     }
 
@@ -2141,7 +2183,9 @@ impl StructDef {
         struct_.as_mut().scope.expr.set_once(struct_.upcast());
         if let Some(generics_scope) = generics_scope {
             debug_assert_eq!(generics_scope.kind, ScopeKind::StructGenerics);
-            debug_assert!(generics_scope.decls.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC)));
+            debug_assert!(
+                generics_scope.decls.iter().all(|p| p.flags.get(DeclFlags::IS_GENERIC_DEF))
+            );
             debug_assert!(generics_scope.decls.iter().all(|p| p.is_const));
             generics_scope.as_mut().expr.set_once(struct_.upcast());
         }
@@ -2170,7 +2214,7 @@ impl Fn {
         alloc: &Arena,
     ) -> Result<Ptr<Fn>, AllocErr> {
         debug_assert!(params.iter().all(|p| p.flags.get(DeclFlags::IS_PARAMETER)));
-        debug_assert!(params.iter().all(|p| !p.is_const || p.flags.get(DeclFlags::IS_GENERIC)));
+        debug_assert!(params.iter().all(|p| !p.is_const || p.flags.get(DeclFlags::IS_GENERIC_DEF)));
         let fn_ = ast_new!(alloc, Fn {
             flags: FnFlags::default(),
             type_flags: TypeFlags::default(),
@@ -2194,7 +2238,10 @@ impl Fn {
 
     #[inline]
     pub fn codegen_params(&self) -> impl Iterator<Item = Ptr<Decl>> + Clone {
-        self.params().iter().copied().filter(|d| !d.flags.get(DeclFlags::IS_GENERIC))
+        self.params()
+            .iter()
+            .copied()
+            .filter(|d| !d.flags.get(DeclFlags::IS_GENERIC_DEF))
     }
 }
 
@@ -2210,16 +2257,20 @@ impl GenericSlot {
         })
     }
 
-    pub fn generate_decl(
-        self: Ptr<Self>,
-        ty: Ptr<Type>,
-        alloc: &Arena,
-    ) -> Result<Ptr<Decl>, AllocErr> {
+    pub fn generate_decl(self: Ptr<Self>, alloc: &Arena) -> Result<Ptr<Decl>, AllocErr> {
         let mut generic_decl = Decl::from_generic(self, alloc)?;
-        generic_decl.var_ty = Some(ty);
+        //self.restrict_type(type_new!(alloc, TypeOfGenericSlot { generic: self }).upcast_to_type()) .u();
         generic_decl.init = Some(self.upcast());
-        self.as_mut().ty.set_once(ty);
         Ok(generic_decl)
+    }
+
+    pub fn restrict_type(self: Ptr<Self>, ty: Ptr<Type>) -> Result<(), ()> {
+        let mut generic_decl = self.name.decl.u();
+        debug_assert_eq!(generic_decl.generic.u(), self);
+
+        let () = check_or_infer_type(ty, &mut generic_decl.var_ty, false)?;
+        self.as_mut().ty = generic_decl.var_ty;
+        Ok(())
     }
 }
 
@@ -2764,7 +2815,9 @@ impl CloneAst for Ptr<Ast> {
             AstEnum::GenericSlot { .. } => {
                 self.flat_downcast::<GenericSlot>()._clone_ast(alloc)?.upcast()
             },
-            AstEnum::ArrayLikeContainer { .. } => unreachable_debug(),
+            AstEnum::ArrayLikeContainer { .. } | AstEnum::TypeOfGenericSlot { .. } => {
+                unreachable_debug()
+            },
         })
     }
 }
@@ -2812,7 +2865,7 @@ impl CloneAst for Ptr<Fn> {
             .decls
             .iter()
             .map(|p| {
-                if p.flags.get(DeclFlags::IS_GENERIC) {
+                if p.flags.get(DeclFlags::IS_GENERIC_DEF) {
                     generics_scope.u().find_decl_norec(p.ident.sym, true).u()
                 } else {
                     p.clone_ast(alloc)
@@ -2820,7 +2873,7 @@ impl CloneAst for Ptr<Fn> {
             })
             .collect::<Vec<_>>();
 
-        let (body, ret_ty_expr) = if self.flags.get(FnFlags::IS_TYPE) {
+        let (body, ret_ty_expr) = if self.flags.get(FnFlags::IS_FN_TYPE) {
             debug_assert!(self.body.is_none());
             // see test `fn_ptr_as_generic_struct_field`
             (self.ret_ty_expr.u(), None)
@@ -2842,7 +2895,9 @@ impl CloneAst for Ptr<Fn> {
 
 impl CloneAst for Ptr<GenericSlot> {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Self, AllocErr> {
-        alloc.alloc(GenericSlot::new(self.name.clone_ast(alloc), self.span))
+        let g = alloc.alloc(GenericSlot::new(self.name.clone_ast(alloc), self.span))?;
+        g.as_mut().flags |= self.flags & GenericSlotFlags::AST_CLONED_FLAGS;
+        Ok(g)
     }
 }
 
