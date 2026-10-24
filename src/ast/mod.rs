@@ -1,10 +1,10 @@
 use crate::{
     arena_allocator::{AllocErr, Arena},
     ast::debug::DebugAst,
-    context::{FilesIndex, ctx, primitives},
-    diagnostics::{HandledErr, cerror, cerror2},
+    context::{FilesIndex, primitives},
+    diagnostics::{HandledErr, cerror2},
     intern_pool::Symbol,
-    parser::{ParseResult, lexer::Span, unexpected_expr},
+    parser::{ParseError, ParseResult, lexer::Span, unexpected_expr},
     ptr::{OPtr, Ptr},
     scope::{Scope, ScopeAndAggregateInfo, ScopeFlags, ScopeKind},
     scratch_allocator::TmpPtr,
@@ -1269,6 +1269,11 @@ impl Ptr<Ast> {
         then!(self.has_type_kind() => self.flat_downcast_type())
     }
 
+    /// useful for ast::debug
+    pub fn try_downcast_type_only_check_kind(self) -> OPtr<Type> {
+        then!(self.has_type_kind() => self.cast())
+    }
+
     /// allows generic type definitions
     #[inline]
     pub fn downcast_type2(self) -> Ptr<Type> {
@@ -1343,10 +1348,6 @@ impl Ptr<Ast> {
     /// ```
     pub fn can_ignore_yielded_value(self) -> bool {
         self.ty.u().matches_void() || self.kind == AstKind::Call
-    }
-
-    pub fn try_to_decl(self) -> Result<OPtr<Decl>, HandledErr> {
-        Decl::try_from_expr(self, &ctx().alloc)
     }
 
     pub fn try_get_symbol_decl(self) -> OPtr<Decl> {
@@ -1986,19 +1987,17 @@ impl Decl {
         }
     }
 
-    pub fn from_single_param(param_expr: Ptr<Ast>, alloc: &Arena) -> Result<Ptr<Decl>, HandledErr> {
-        if let Some(i) = param_expr.try_downcast::<Ident>() {
-            alloc.alloc(Decl::from_ident(i))
-        } else if param_expr.kind.is_type_kind() {
-            let mut decl = alloc.alloc(Decl::from_ident(primitives().ignored_name))?;
-            decl.var_ty_expr.set_once(param_expr);
-            Ok(decl)
-        } else {
-            Err(cerror!(
-                param_expr.full_span(),
-                "expected parameters, got an expression '{:?}'",
-                param_expr.kind
-            ))
+    pub fn from_single_param(param_expr: Ptr<Ast>, alloc: &Arena) -> Result<Ptr<Decl>, ParseError> {
+        match param_expr.matchable2() {
+            // `a -> ...` the `a` might be a parameter name or a type name
+            AstMatch::Ident(i) => Ok(alloc.alloc(Decl::from_ident(i))?),
+            AstMatch::Decl(d) => Ok(d),
+            _ if param_expr.kind.is_type_kind() => {
+                let mut decl = alloc.alloc(Decl::from_ident(primitives().ignored_name))?;
+                decl.var_ty_expr.set_once(param_expr);
+                Ok(decl)
+            },
+            _ => Err(unexpected_expr(param_expr, "parameter")),
         }
     }
 

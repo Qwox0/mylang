@@ -1522,7 +1522,7 @@ impl Sema {
                     UnaryOpKind::AddrOf | UnaryOpKind::AddrMutOf => {
                         let ty_hint = ty_hint
                             .try_downcast_ty_hint::<ast::PtrTy>()
-                            .map(|ptr_ty| ptr_ty.pointee.downcast_type_inst());
+                            .map(|ptr_ty| ptr_ty.pointee.downcast_type2());
                         let pointee = *analyze!(*operand, ty_hint);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         if is_mut {
@@ -2228,6 +2228,10 @@ impl Sema {
                 let fn_hint = ty_hint.try_downcast_ty_hint::<ast::Fn>();
                 let might_be_fn_ty = *ty_hint == p.type_ty;
 
+                if might_be_fn_ty {
+                    flags.set(FnFlags::IS_FN_TYPE); // idk whether this is valid in general
+                }
+
                 let osh = self.jump_open_scope(&f.params_scope);
                 let res = (|| {
                     for (p_idx, param) in f.as_ref().params_scope.decls.iter().enumerate() {
@@ -2294,7 +2298,7 @@ impl Sema {
 
                     let contains_generic = f.flags.get(FnFlags::IS_GENERIC)
                         || f.flags.get(FnFlags::IS_INSTANTIATION_WITH_GENERICS);
-                    if contains_generic {
+                    if contains_generic && !f.flags.get(FnFlags::IS_FN_TYPE) {
                     } else if let Some(body) = f.body {
                         let body_ty = self
                             .analyze(body, &f.ret_ty, false)
@@ -2383,7 +2387,6 @@ impl Sema {
                 flags,
                 scope,
                 generics_scope,
-                fields,
                 sema_units,
                 finished_members,
                 ..
@@ -2627,7 +2630,12 @@ impl Sema {
 
                 match self.cur_scope.kind {
                     ScopeKind::FnParams => {
-                        let f = self.cur_scope.get_expr().u().downcast::<ast::Fn>();
+                        let f = self
+                            .cur_scope
+                            .iter_up_scopes()
+                            .filter_map(|s| s.get_expr()?.try_downcast::<ast::Fn>())
+                            .find(|f| !f.flags.get(FnFlags::IS_FN_TYPE))
+                            .u();
 
                         // TODO: remove this duplication (see above)
                         if f.flags.get(FnFlags::IS_INSTANTIATION) {
@@ -2827,6 +2835,11 @@ impl Sema {
         f.body = None;
         f.flags.set(FnFlags::IS_FN_TYPE);
         f.ty = Some(p.type_ty);
+
+        if f.flags.get(FnFlags::IS_GENERIC) {
+            debug_assert!(f.generics_scope.is_some_and(|s| s.decls.len() > 0));
+            cerror!(f.full_span(), "Standalone generic function types are currently not supported");
+        }
 
         Ok(())
     }

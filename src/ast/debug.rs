@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, DeclFlags, HasAstKind, InitializerFlags, OPtrTypeExt,
-        StructFlags, TypeEnum, UnaryOpKind, UpcastToAst,
+        StructFlags, Type, TypeEnum, UnaryOpKind, UpcastToAst,
     },
     context::{ctx, primitives},
     parser::lexer::Span,
@@ -748,6 +748,10 @@ pub fn debug_ast_base_fields(debug_struct: &mut fmt::DebugStruct, value: Ptr<Ast
     normal(debug_struct, "replacement", &value.replacement);
     normal(debug_struct, "span", &value.span);
     //normal(debug_struct, "parenthesis_count", &value.parenthesis_count);
+
+    if let Some(ty) = value.try_downcast_type_only_check_kind() {
+        normal(debug_struct, "type_flags", &ty.type_flags);
+    }
 }
 
 pub mod special_debug_handlers {

@@ -337,7 +337,7 @@ pub fn add_generic_to_fn(
         s
     });
     if let Result::Err(dup) = generics_scope.add_decl(generic_decl) {
-        return Err(error_duplicate_in_unordered_scope(ScopeKind::FnParams, generic_decl, dup));
+        return Err(error_duplicate_in_unordered_scope(ScopeKind::FnGenerics, generic_decl, dup));
     }
     debug_assert!(!f.flags.get(FnFlags::IS_INSTANTIATION));
     f.as_mut().flags.set(FnFlags::IS_GENERIC);

@@ -782,6 +782,32 @@ test :: -> MyStruct.(.(10), 20);
 }
 
 #[test]
+#[ignore = "todo"]
+fn hashmap_key_impl_as_const_val() {
+    let code = "
+Hash :: u32;
+
+KeyImpl :: struct($K) {
+    hash: *(key: K) -> Hash,
+    eq: *(lhs: *K, rhs: *K) -> bool,
+
+    default :: KeyImpl(K).{
+        hash = & key -> 0,
+        eq = (lhs, rhs) -> lhs.* == rhs.*,
+    };
+}
+
+HashMap :: struct($K, $V, $Impl: KeyImpl(K) = .default) {
+}
+
+test :: -> {
+    a := HashMap([]u8, *void).{};
+}
+";
+    test(code).compile_no_err();
+}
+
+#[test]
 #[ignore = "generics are complicated"]
 fn recursive_generic_struct_problem() {
     /*
@@ -806,7 +832,46 @@ X :: MyStruct(i32);
 }
 
 #[test]
-fn generic_in_function_type() {
+fn generic_in_parameter_function_type() {
+    // function type directly as parameter type
+    let code = "
+spawn_with_capture :: (func: (capture: *mut $T) -> void, capture: *mut $T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture((_: *mut u32) -> {}, &mut futex_val); }
+";
+    test(code)
+        .error("duplicate generic '$T'", substr!("T";skip=1))
+        .info("first definition of 'T'", substr!("T"));
+
+    // function type nested in other types
+    let code = "
+spawn_with_capture :: (func: ?*(capture: *mut $T) -> void, capture: *mut $T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture(&(_: *mut u32) -> {}, &mut futex_val); }
+";
+    test(code)
+        .error("duplicate generic '$T'", substr!("T";skip=1))
+        .info("first definition of 'T'", substr!("T"));
+
+    let code = "
+spawn_with_capture :: (func: ?*(capture: *mut $T) -> void, capture: *mut T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture(&(_: *mut u32) -> {}, &mut futex_val); }
+";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@spawn_with_capture.u32(");
+    drop(res);
+
+    /* TODO: unordered parameter analyze
+    let code = "
+spawn_with_capture :: (func: ?*(capture: *mut T) -> void, capture: *mut $T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture(&(_: *mut u32) -> {}, &mut futex_val); }
+";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "spawn_with_capture.u32(");
+    drop(res);
+    */
+}
+
+#[test]
+fn generic_in_function_type_return() {
     // inferred generic return type
     let code = "
 call1 :: (f: $T -> $Ret, arg: T) -> f(arg);
@@ -879,5 +944,25 @@ test :: -> call1(add_one, 5);
 ";
     let res = test(code).ok(arr([6_i16]));
     assert_contains!(res.llvm_ir(), "@call1.i16.i16(");
+    drop(res);
+}
+
+#[test]
+#[ignore = "todo"]
+fn infer_generic_lambda_parameter_type() {
+    // non-generic
+    let code = "
+spawn_with_capture :: (capture: *mut u32, func: *mut u32 -> void) -> { }
+test :: -> { spawn_with_capture(&mut 0, x -> {}); }
+";
+    test(code).compile_no_err();
+
+    // generic
+    let code = "
+spawn_with_capture :: (capture: *mut $T, func: *mut T -> void) -> { }
+test :: -> { spawn_with_capture(&mut 0.as(u32), x -> {}); }
+";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@spawn_with_capture.u32(");
     drop(res);
 }

@@ -586,7 +586,7 @@ impl Parser {
                     },
                     // (expr) -> ...
                     TokenKind::CloseParenthesis if let Some(e) = first_expr => {
-                        vec![e.try_to_decl()?.ok_or_else(|| unexpected_expr(e, "a parameter"))?]
+                        vec![Decl::from_single_param(e, &self.cctx.alloc)?]
                     },
                     // () -> ...
                     TokenKind::CloseParenthesis => Vec::new(),
@@ -595,9 +595,7 @@ impl Parser {
                         let Some(expr) = first_expr else {
                             return Err(unexpected_token_expect1(t, "parameter"));
                         };
-                        let Some(first_decl) = expr.try_to_decl()? else {
-                            return Err(unexpected_expr(expr, "a parameter"));
-                        };
+                        let first_decl = Decl::from_single_param(expr, &self.cctx.alloc)?;
                         let mut params = vec![first_decl];
                         self.parse_with_sep(
                             &[TokenKind::Comma],
@@ -695,7 +693,7 @@ impl Parser {
             TokenKind::DotOpenBracket => self.advanced().parse_array_initializer(None, span)?,
             TokenKind::Colon => todo!("TokenKind::Colon"),
             TokenKind::Question => {
-                let inner_ty = self.advanced().expr_(TY_PREFIX_PRECEDENCE).expect("type after ?");
+                let inner_ty = self.advanced().expr_(TY_PREFIX_PRECEDENCE)?;
                 ty_expr!(OptionTy { inner_ty }, span.join(inner_ty.full_span()))
             },
             TokenKind::Pound => {

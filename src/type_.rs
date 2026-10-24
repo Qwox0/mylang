@@ -233,8 +233,8 @@ fn type_check(
             let out_mut = expected.is_mut && got.is_mut;
             let child_sel = type_check(
                 mode,
-                got.$child_field.downcast_type_inst(),
-                expected.$child_field.downcast_type_inst(),
+                got.$child_field.downcast_type2(),
+                expected.$child_field.downcast_type2(),
                 AllowOptionalCoercion::TRUE, // *NonNull -> *?NonNull coercion is valid
                 quiet,
             );

@@ -38,7 +38,7 @@ pub fn unexpected_token_expect1(t: Token, expected: impl fmt::Display) -> ParseE
 
 #[track_caller]
 pub fn unexpected_expr(expr: Ptr<ast::Ast>, expected: impl fmt::Display) -> ParseError {
-    cerror2!(expr.full_span(), "expected {expected}, got an expression")
+    cerror2!(expr.full_span(), "expected {expected}, got an expression ('{:?}')", expr.kind)
 }
 
 #[track_caller]

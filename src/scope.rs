@@ -400,6 +400,7 @@ pub fn error_duplicate_in_unordered_scope(
     decl: Ptr<ast::Decl>,
     first: Ptr<ast::Decl>,
 ) -> HandledErr {
+    debug_assert!(decl.span != first.span);
     match scope_kind {
         ScopeKind::Root | ScopeKind::File => {
             cerror!(decl.ident.span, "duplicate definition in file scope");

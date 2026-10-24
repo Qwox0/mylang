@@ -1,5 +1,6 @@
 use crate::{
     ast,
+    context::primitives,
     ptr::{OPtr, Ptr},
     tests::*,
 };
@@ -427,4 +428,46 @@ fn invalid_function_types() {
         substr!("{ i32 }"),
     );
     */
+}
+
+#[test]
+fn function_types_without_param_names() {
+    {
+        let code = "
+my_fn :: (func: u16 -> void, capture: u16) -> { }      // u16 -> type
+test :: -> my_fn(x -> {}, 0);      // x -> param name; param type inferred to be u16
+";
+        let res = test(code).compile_no_err();
+        assert_contains!(res.llvm_ir(), "@lambda(i16");
+
+        let my_fn = res.stmts()[0].downcast::<ast::Decl>().init.unwrap().downcast::<ast::Fn>();
+        let func_param_ty = my_fn.params()[0].var_ty.unwrap().downcast::<ast::Fn>();
+        let u16_param = func_param_ty.params()[0];
+        assert_eq!(u16_param.ident, primitives().ignored_name);
+        assert_eq!(&*u16_param.var_ty_expr.unwrap().span.get_text(), "u16");
+        assert_eq!(u16_param.var_ty.unwrap(), primitives().u16);
+
+        let test_fn = res.stmts()[1].downcast::<ast::Decl>().init.unwrap().downcast::<ast::Fn>();
+        let lambda = test_fn.body.unwrap().downcast::<ast::Call>().args[0].downcast::<ast::Fn>();
+        let x_param = lambda.params()[0];
+        assert_eq!(x_param.ident.sym.text(), "x");
+        assert!(x_param.var_ty_expr.is_none());
+        assert_eq!(x_param.var_ty.unwrap(), primitives().u16);
+    }
+
+    let code = "
+spawn_with_capture :: (func: ?*(*mut $T) -> void, capture: *mut T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture(&(_: *mut u32) -> {}, &mut futex_val); }
+";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@spawn_with_capture.u32(");
+    drop(res);
+
+    let code = "
+spawn_with_capture :: (func: *mut $T -> void, capture: *mut T) -> { }
+test :: -> { mut futex_val: u32 = 0; spawn_with_capture((_: *mut u32) -> {}, &mut futex_val); }
+";
+    let res = test(code).compile_no_err();
+    assert_contains!(res.llvm_ir(), "@spawn_with_capture.u32(");
+    drop(res);
 }
