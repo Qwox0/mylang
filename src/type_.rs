@@ -43,6 +43,13 @@ impl CommonTypeSelection {
             s => s,
         }
     }
+
+    pub fn map_new_alloc(self, f: impl FnOnce(Ptr<Type>) -> Ptr<Type>) -> Self {
+        match self {
+            CommonTypeSelection::NewAlloc(ty) => CommonTypeSelection::NewAlloc(f(ty)),
+            s => s,
+        }
+    }
 }
 
 /// symmetrical
@@ -83,7 +90,9 @@ pub fn ty_match_quiet(got: Ptr<Type>, expected: Ptr<Type>, quiet: bool) -> bool 
     match type_check(TypeCheckMode::Strict, got, expected, AllowOptionalCoercion::TRUE, quiet) {
         CommonTypeSelection::Equal | CommonTypeSelection::Expected => true,
         CommonTypeSelection::Mismatch | CommonTypeSelection::Got => false,
-        CommonTypeSelection::NewAlloc(_) => unreachable_debug(),
+        CommonTypeSelection::NewAlloc(ty) => {
+            panic_debug!("ty_match(got={got}, expected={expected}, quiet={quiet}) allocated {ty}")
+        },
     }
 }
 
@@ -172,6 +181,7 @@ fn type_check(
         {
             match type_check(mode, lhs, rhs_inner, AllowOptionalCoercion::FALSE, quiet) {
                 Equal | Expected => Expected,
+                Got if mode == TypeCheckMode::Strict => Got, // == Mismatch
                 Got => NewAlloc(type_new!(OptionTy { inner_ty: lhs.upcast() }).upcast_to_type()),
                 NewAlloc(inner_common) => NewAlloc(
                     type_new!(OptionTy { inner_ty: inner_common.upcast() }).upcast_to_type(),
@@ -193,6 +203,9 @@ fn type_check(
                 AllowOptionalCoercion::FALSE,
                 quiet,
             )
+            .map_new_alloc(|inner_ty| {
+                type_new!(OptionTy { inner_ty: inner_ty.upcast() }).upcast_to_type()
+            })
         } else {
             opt_coercion(mode, got, expected, allow_opt_coercion.lhs, quiet)
         };
@@ -229,13 +242,15 @@ fn type_check(
                 Mismatch => Mismatch,
                 Got | Expected => {
                     let sel = if child_sel == Got { got } else { expected };
-                    if sel.is_mut == out_mut {
-                        child_sel
-                    } else {
+                    if sel.is_mut != out_mut && mode == TypeCheckMode::Join {
                         NewAlloc(
                             type_new!($ty { is_mut: out_mut, $child_field: sel.$child_field })
                                 .upcast_to_type(),
                         )
+                    } else {
+                        // `sel.is_mut != out_mut` is fine for strict mode because mutability was
+                        // already verified above.
+                        child_sel
                     }
                 },
                 Equal if got.is_mut == expected.is_mut => Equal,
@@ -281,21 +296,21 @@ fn type_check(
             expected.elem_ty.downcast_type(),
             allow_opt_coercion,
             quiet,
-        );
+        )
+        .map_new_alloc(|elem_ty| {
+            type_new!(ArrayTy { elem_ty: elem_ty.upcast(), len: expected.len }).upcast_to_type()
+        });
     }
 
-    if let Some(expected_range) = expected.try_downcast::<ast::RangeTy>() {
-        let got_range = got.try_downcast::<ast::RangeTy>()?;
-        if got_range.rkind != expected_range.rkind {
+    if let Some(expected) = expected.try_downcast::<ast::RangeTy>() {
+        let got = got.try_downcast::<ast::RangeTy>()?;
+        if got.rkind != expected.rkind {
             return Mismatch;
         }
-        return type_check(
-            mode,
-            got_range.elem_ty,
-            expected_range.elem_ty,
-            allow_opt_coercion,
-            quiet,
-        );
+        return type_check(mode, got.elem_ty, expected.elem_ty, allow_opt_coercion, quiet)
+            .map_new_alloc(|elem_ty| {
+                type_new!(RangeTy { rkind: expected.rkind, elem_ty }).upcast_to_type()
+            });
     }
 
     if let Some(expected) = expected.try_downcast_polymorphable() {

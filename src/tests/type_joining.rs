@@ -33,3 +33,45 @@ test :: -> { dont_break_my_return_type() orelse return; };
 ";
     test(code).compile_no_err();
 }
+
+#[test]
+fn allocate_new_type_wrappers_only_in_common_type() {
+    fn t(
+        got: &'static str,
+        expected: &'static str,
+        val: &'static str,
+        expected_common: &'static str,
+    ) {
+        let res = test(format!("_ :: .[{val}.as({expected}), {val}.as({got})];")).compile_no_err();
+        assert_eq!(res.one_stmt::<ast::Decl>().var_ty.unwrap().to_text(true), expected_common);
+        drop(res);
+
+        let res = test(format!("_ :: .[{val}.as({got}), {val}.as({expected})];")).compile_no_err();
+        assert_eq!(res.one_stmt::<ast::Decl>().var_ty.unwrap().to_text(true), expected_common);
+        drop(res);
+
+        test(format!("_ : {expected} : {val}.as({got});")).error(
+            format!("mismatched types: expected `{expected}`; got `{got}`"),
+            |code: &str| TestSpan::of_substr(code, &format!("{val}.as({got})"), 0, None),
+        );
+    }
+
+    // mut-error => inner types not checked
+    t("?*any", "?*mut void", "null", "[2]?*any");
+
+    // inner type selection doesn't match mut selection => must allocate `*any` (but only in
+    // common_type, not ty_match!)
+    t("?*mut any", "?*void", "null", "[2]?*any");
+
+    // inner type is slice
+    t("?[]any", "?[]mut void", "null", "[2]?[]any");
+    t("?[]mut any", "?[]void", "null", "[2]?[]any");
+
+    // coerce to optional
+    t("[]any", "?[]mut void", ".[]", "[2]?[]any");
+    t("[]mut any", "?[]void", ".[]", "[2]?[]any");
+
+    // other outer types:
+    t("[0]*mut any", "[0]*void", ".[]", "[2][0]*any");
+    t("[]*mut any", "[]*void", ".[]", "[2][]*any");
+}
