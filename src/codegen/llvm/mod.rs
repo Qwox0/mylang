@@ -1892,7 +1892,15 @@ impl<'ctx> Codegen<'ctx> {
                 /*
                 ast::ConstValMatch::RawPtrVal(ptr) => todo!(),
                 ast::ConstValMatch::StaticPtrVal(ptr) => todo!(),
-                ast::ConstValMatch::EnumVal(ptr) => todo!(),
+                */
+                ast::ConstValMatch::EnumVal(e) if e.enum_ty.is_simple_enum => {
+                    debug_assert!(e.is_valid);
+                    debug_assert!(e.data.is_none());
+                    let variant = e.enum_ty.variants.get(e.variant_idx).u();
+                    // "{enum_ty}." should not be needed to make this unique.
+                    write!(&mut mangled_buf, "{}", variant.ident.sym)
+                },
+                /*
                 ast::ConstValMatch::OptionalVal(ptr) => todo!(),
                 ast::ConstValMatch::AggregateVal(ptr) => todo!(),
                 */
@@ -2414,6 +2422,7 @@ impl<'ctx> Codegen<'ctx> {
     ) -> CodegenResult<Option<PointerValue<'ctx>>> {
         Ok(Some(match sym {
             Symbol::Stack(ptr_value) => ptr_value,
+            Symbol::Register(fn_ptr) if ty.kind == AstKind::Fn => fn_ptr.ptr_val(),
             Symbol::Register(val) => self.build_alloca_value(val.basic_val(), ty.alignment())?,
             Symbol::Global(global) => global.as_pointer_value(),
             Symbol::FunctionInst(f) => f.as_global_value().as_pointer_value(),

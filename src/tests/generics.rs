@@ -1,4 +1,4 @@
-use crate::tests::{CompileTest, TestSpan, arr, assert_contains, fields, substr, test, test_body};
+use crate::tests::*;
 
 #[test]
 fn generic_function_call() {
@@ -182,7 +182,7 @@ test :: -> {
 fn duplicate_generic_def() {
     // TODO: better error?
     test("f :: (a: $T, b: $T) -> {}")
-        .error("duplicate parameter 'T'", substr!("T"; skip=1))
+        .error("duplicate generic '$T'", substr!("T"; skip=1))
         .info("first definition of 'T'", substr!("T"));
 }
 
@@ -965,4 +965,16 @@ test :: -> { spawn_with_capture(&mut 0.as(u32), x -> {}); }
     let res = test(code).compile_no_err();
     assert_contains!(res.llvm_ir(), "@spawn_with_capture.u32(");
     drop(res);
+}
+
+#[test]
+fn constant_enum_param_infer_arg() {
+    let code = "
+MyEnum :: enum { A, B, C };
+take_const_enum :: ($x: MyEnum) -> x;
+test :: -> take_const_enum(.B);
+";
+    let res = test(code).ok(1_u8);
+    assert_contains!(res.llvm_ir(), "i32 @take_const_enum.B()"); // x is const => no runtime arg
+    assert_contains!(res.llvm_ir(), "ret i32 1");
 }

@@ -1415,7 +1415,10 @@ impl Ptr<ConstVal> {
         }
     }
 
-    pub fn finalize_allow_generic(&mut self) -> Self {
+    pub fn finalize_allow_generic(&mut self, type_of_generic: Ptr<Type>) -> Self {
+        //debug_assert!(type_of_generic.is_finalized2(true)); // see 'tests::generics::struct_generic_default_infer_some'
+        finalize_ty(self.ty.as_mut().u(), type_of_generic, false);
+
         if let Some(ty) = self.try_downcast_type_ref() {
             let _ = ty.finalize_allow_generic();
         }

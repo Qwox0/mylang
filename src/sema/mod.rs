@@ -1154,6 +1154,11 @@ impl Sema {
                     } else if let Some(enum_ty) = lhs.try_downcast::<ast::EnumDef>() {
                         // enum variant: `MyEnum.Variant`
                         let is_simple_variant = get_var_ty(member)? == p.void_ty;
+                        let out_ty = if is_simple_variant {
+                            enum_ty.upcast_to_type()
+                        } else {
+                            p.enum_variant
+                        };
                         if is_const {
                             let variant_idx =
                                 enum_ty.variants.iter().position(|v| *v == member).u();
@@ -1167,10 +1172,10 @@ impl Sema {
                                 Span::ZERO
                             )
                             .upcast();
-                            tag.as_mut().ty = Some(p.enum_variant);
+                            tag.as_mut().ty = Some(out_ty);
                             expr.set_replacement(tag);
                         }
-                        if is_simple_variant { enum_ty.upcast_to_type() } else { p.enum_variant }
+                        out_ty
                     } else {
                         return cerror2!(
                             expr.full_span(),
@@ -1523,24 +1528,22 @@ impl Sema {
                         let ty_hint = ty_hint
                             .try_downcast_ty_hint::<ast::PtrTy>()
                             .map(|ptr_ty| ptr_ty.pointee.downcast_type2());
-                        let pointee = *analyze!(*operand, ty_hint);
+                        let pointee_ty = *analyze!(*operand, ty_hint);
                         let is_mut = *op == UnaryOpKind::AddrMutOf;
                         if is_mut {
                             self.validate_mutation(MutationKind::AddrOf, *operand, expr)?;
-                        }
-                        expr.ty = Some(
-                            type_new!(PtrTy { pointee: pointee.upcast(), is_mut }).upcast_to_type(),
-                        );
-                        if pointee.kind == AstKind::Fn {
-                            if is_mut {
+                            if pointee_ty.kind == AstKind::Fn {
                                 return cerror2!(
                                     expr.full_span(),
                                     "Cannot mutably reference functions"
                                 );
                             }
-                            let const_val = operand.downcast_const_val();
-                            debug_assert!(const_val.kind == AstKind::Fn);
-                            expr.set_replacement(const_val.upcast());
+                        }
+                        let pointee = pointee_ty.upcast();
+                        expr.ty = Some(type_new!(PtrTy { pointee, is_mut }).upcast_to_type());
+                        if let Some(f) = operand.try_downcast::<ast::Fn>() {
+                            //debug_assert!(f.flags.get(FnFlags::IS_FN_VAL)); // currently sema of `f` might not be done
+                            expr.set_replacement(f.upcast());
                         } else if is_const {
                             let Some(sym) =
                                 operand.try_get_symbol_decl().filter(|d| d.is_allowed_in_const())
@@ -2261,7 +2264,8 @@ impl Sema {
                                 self.analyze_explicit_generic_decl(*param)
                             } else {
                                 debug_assert!(param.is_const);
-                                debug_assert!(param.var_ty.is_some());
+                                debug_assert!(param.flags.get(DeclFlags::IS_INSTANTIATION_VALUE));
+                                debug_assert!(param.var_ty.u().is_finalized2(true));
                                 debug_assert!(param.init.is_some());
                                 Ok(())
                             }
@@ -3527,13 +3531,10 @@ impl Sema {
             arg_val: Ptr<ast::Ast>,
         ) -> SemaResult<()> {
             if param.flags.get(DeclFlags::IS_GENERIC_DEF) {
-                sema.analyze_and_check_type(arg_val, get_var_ty(param)?, true)?;
-                param
-                    .generic
-                    .u()
-                    .as_mut()
-                    .cur_inst
-                    .set_once(arg_val.downcast_const_val().finalize_allow_generic());
+                let generic_ty = get_var_ty(param)?;
+                sema.analyze_and_check_type(arg_val, generic_ty, true)?;
+                let generic_val = arg_val.downcast_const_val().finalize_allow_generic(generic_ty);
+                param.generic.u().as_mut().cur_inst.set_once(generic_val);
             }
             Ok(())
         }
@@ -3715,17 +3716,21 @@ impl Sema {
         debug_assert!(!ty.flags().get(T::FLAG_IS_INSTANTIATION));
 
         // finalize generics & handle missing generics
-        let mut generic_inst = Vec::with_capacity(ty.generics_scope().u().decls.len());
+        let ty_generics = ty.generics_scope().u().as_ref().decls.as_slice();
+        let mut generic_inst = Vec::with_capacity(ty_generics.len());
         let mut is_instantiation_with_generics = false;
         let mut missing_generics = Vec::new();
         debug_assert_eq!(missing_generics.capacity(), 0);
-        for g_decl in ty.generics_scope().u().decls.iter() {
+        for g_decl in ty_generics {
             let g = g_decl.generic.u();
             let Some(mut inst_val) = g.as_mut().cur_inst.take().or(g.default) else {
                 missing_generics.push(g);
                 continue;
             };
-            inst_val.finalize_allow_generic();
+
+            // TODO: this was already called for positional generics args (see _validate_call)
+            inst_val.finalize_allow_generic(g_decl.var_ty.u());
+
             debug_assert!(inst_val.replacement.is_none());
             if inst_val.kind == AstKind::GenericSlot {
                 is_instantiation_with_generics = true;
@@ -3786,6 +3791,7 @@ impl Sema {
 
         for (c, inst_val) in inst.generics_scope().u().decls.iter().zip_exact(generic_inst) {
             c.as_mut().flags.set(DeclFlags::IS_INSTANTIATION_VALUE);
+            //debug_assert!(inst_val.ty.u().is_finalized2(true)); // see 'tests::generics::struct_generic_default_infer_some'
             c.as_mut().var_ty = Some(inst_val.ty.u());
             c.as_mut().init = Some(inst_val.upcast());
         }

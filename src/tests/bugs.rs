@@ -80,3 +80,27 @@ test :: -> MyStruct(i64).{ val=.(10), other=20 };
 ";
     test(code).compile_no_err();
 }
+
+#[test]
+fn bug_004() {
+    // BUG: `operand.downcast_const_val()` in AddrOf Fn
+
+    // *(A -> B) == A -> B => no alloca
+    let code = r#"
+take_fn_ptr :: (f: *(u32) -> u32) -> f.*(123);
+take_fn :: (func: u32 -> u32) -> take_fn_ptr(func.&);    // `func` Ident is not a const val
+test :: -> take_fn(x -> x);
+"#;
+    let res = test(code).ok(123_u32);
+    assert_contains!(res.llvm_ir(), not "alloca");
+    drop(res);
+
+    // **(A -> B) != *(A -> B) => alloca
+    let code = r#"
+take_fn_ptr2 :: (f: **(u32) -> u32) -> f.*.*(123);
+take_fn :: (func: u32 -> u32) -> take_fn_ptr2(func.&.&);
+test :: -> take_fn(x -> x);
+"#;
+    let res = test(code).ok(123_u32);
+    assert_contains!(res.llvm_ir(), "alloca");
+}

@@ -6,16 +6,18 @@ use num::ToPrimitive;
 
 #[test]
 fn error_invalid_lhs() {
-    let err_msg = "expected a variable name, got an expression";
+    test_body("{ 1 :: 2; }")
+        .error("expected a variable name, got an expression (IntVal)", substr!("1"));
 
-    test_body("{ 1 :: 2; }").error(err_msg, substr!("1"));
-
-    test_body("{ a+b := 1; }").error(err_msg, substr!("a+b"));
+    test_body("{ a+b := 1; }")
+        .error("expected a variable name, got an expression (BinOp)", substr!("a+b"));
 
     // The `mut` marker shouln't change the error.
-    test_body("{ mut a+b := 1; }").error(err_msg, substr!("a+b"));
+    test_body("{ mut a+b := 1; }")
+        .error("expected a variable name, got an expression (BinOp)", substr!("a+b"));
 
-    test_body("{ mut a+b; }").error(err_msg, substr!("a+b"));
+    test_body("{ mut a+b; }")
+        .error("expected a variable name, got an expression (BinOp)", substr!("a+b"));
 }
 
 #[test]

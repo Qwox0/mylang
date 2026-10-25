@@ -261,6 +261,24 @@ test :: -> {
     data == 0 and data_ty_size == 4
 }
 
+func :: ($T: type, ptr: *mut T) -> T {
+    ptr.* += 1;
+    return ptr.*;
+}
+";
+    test(code).ok(true);
+}
+
+#[test]
+#[ignore = "todo: fix bad error"]
+fn todo_fix_bad_error() {
+    let code = "
+test :: -> {
+    mut data: i32 = 0;
+    data_ty_size := #sizeof(#typeof(func(i32, &mut data)));
+    data == 0 and data_ty_size == 4
+}
+
 func :: ($T, ptr: *mut T) -> T {
     ptr.* += 1;
     return ptr.*;
