@@ -4,9 +4,10 @@
 
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, DeclFlags, DeclListExt, FnFlags,
-        GenericSlotFlags, InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind, StructFlags, TypeEnum,
-        TypeMatch, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst, is_pos_arg, type_new,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, BuiltinDefInfo, BuiltinKind, DeclFlags,
+        DeclListExt, FnFlags, GenericSlotFlags, InitializerFlags, OPtrExt, OPtrTypeExt, RangeKind,
+        StructFlags, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, ast_new, debug::DebugAst,
+        is_pos_arg, type_new,
     },
     context::{CompilationContextInner, primitives as p, tmp_alloc},
     diagnostics::{HandledErr, cerror, cerror2, chint, common::*, cunimplemented, cwarn},
@@ -2102,6 +2103,40 @@ impl Sema {
                 };
                 expr.ty = Some(f.upcast_to_type())
             },
+            AstEnum::BuiltinDirective { def, .. } => {
+                let Some(f) = Some(self.cur_scope)
+                    .filter(|s| s.kind == ScopeKind::FnParams)
+                    .map(|s| s.get_expr().u().downcast::<ast::Fn>())
+                    .filter(|f| f.body == expr)
+                else {
+                    return cerror2!(
+                        expr.full_span(),
+                        "`#builtin` can currently only be used instead of a function body"
+                    );
+                };
+
+                let Some(decl) = f.decl else {
+                    return cerror2!(f.full_span(), "the #builtin function must be named");
+                };
+
+                let builtin_name = decl.ident.sym.text();
+                let kind = if builtin_name == "load" {
+                    // TODO: verify function
+                    BuiltinKind::AtomicLoad
+                } else if builtin_name == "store" {
+                    BuiltinKind::AtomicStore
+                } else if builtin_name == "cmpxchg_strong" {
+                    BuiltinKind::AtomicCmpxchg { weak: false }
+                } else if builtin_name == "cmpxchg_weak" {
+                    BuiltinKind::AtomicCmpxchg { weak: true }
+                } else {
+                    return cerror2!(decl.full_span(), "unknown #builtin '{builtin_name}'");
+                };
+
+                def.set_once(BuiltinDefInfo { kind, func: f });
+
+                expr.ty = Some(f.ret_ty.u());
+            },
             AstEnum::ProgramMainDirective { .. } => {
                 if self.cctx.args.is_lib {
                     return cerror2!(
@@ -2215,7 +2250,8 @@ impl Sema {
             AstEnum::Fn { ret_ty, flags, .. } => {
                 let mut f = expr.downcast::<ast::Fn>();
 
-                if let Some(decl) = self.decl_stack.last()
+                if !f.flags.get(FnFlags::IS_INSTANTIATION) // for instantiations the decl_stack is broken. see Fn::_clone_ast
+                    && let Some(decl) = self.decl_stack.last()
                     && decl.init == f.upcast()
                 {
                     f.as_mut().decl.set_or_expect(*decl);
@@ -3316,7 +3352,9 @@ impl Sema {
         }
         match res {
             Err(HandledErr) => {
-                decl.var_ty = Some(p.err_ty);
+                if decl.var_ty_expr.is_none() || decl.var_ty.is_none() {
+                    decl.var_ty = Some(p.err_ty);
+                }
                 decl.ty = Some(p.err_ty);
                 if let Some(init) = decl.init.as_mut() {
                     // see `tests::ordering::correctly_handle_error_in_later_cycles`

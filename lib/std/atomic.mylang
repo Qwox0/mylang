@@ -1,0 +1,53 @@
+Ordering :: enum {
+    Relaxed = 0,
+    Acquire = 1,
+    Release = 2,
+    AcqRel  = 3,
+    SeqCst  = 4,
+}
+
+LoadOrdering :: enum {
+    Relaxed = 0,
+    Acquire = 1,
+    SeqCst  = 4,
+}
+
+StoreOrdering :: enum {
+    Relaxed = 0,
+    Release = 2,
+    SeqCst  = 4,
+}
+
+load :: (ptr: *$T, $ordering: LoadOrdering) -> T  #builtin;
+store :: (ptr: *mut $T, val: T, $ordering: StoreOrdering) -> void  #builtin;
+
+/*
+RmwOp :: enum {}
+rmw :: (ptr: *mut $T, operand: T, $op: RmwOp, $ordering: Ordering) -> T  #builtin;
+*/
+
+/*
+CmpxchgResult :: enum($T) {
+    /// contains the value loaded with `fail_ordering`
+    Fail(T)    = 0,
+    Success(T) = 1,
+}
+*/
+
+CmpxchgFailOrdering :: enum {
+    Relaxed = 0,
+    Acquire = 1,
+    SeqCst  = 4,
+}
+
+/// null -> success
+/// Some(T) -> value loaded using `fail_ordering` when `!= expected`
+///
+/// `success_ordering >= fail_ordering` must hold
+cmpxchg_strong :: (ptr: *mut $T, expected: T, new: T, $success_ordering: Ordering, $fail_ordering: CmpxchgFailOrdering) -> ?T  #builtin;
+
+/// null -> success
+/// Some(T) -> value loaded using `fail_ordering` when `!= expected`
+///
+/// `success_ordering >= fail_ordering` must hold
+cmpxchg_weak :: (ptr: *mut $T, expected: T, new: T, $success_ordering: Ordering, $fail_ordering: CmpxchgFailOrdering) -> ?T  #builtin;

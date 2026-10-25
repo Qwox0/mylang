@@ -24,6 +24,7 @@ mod associated_consts;
 mod binop;
 mod bool;
 mod bugs;
+mod builtins;
 mod call_conv_c;
 mod consts;
 mod control_flow_keywords;
@@ -179,7 +180,7 @@ impl NewTest {
         let print_source = self.options.print_source;
         let args = BuildArgs::test_args(self.options);
         if print_source {
-            println!("##### TEST SOURCE {} #####", args.path.display());
+            println!("##### TEST SOURCE {{test @ {}}} #####", std::panic::Location::caller());
             println!("{code}");
             println!("##### END TEST SOURCE #####");
         }

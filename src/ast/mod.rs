@@ -770,6 +770,10 @@ ast_variants! {
         intrinsic_name: Ptr<StrVal>,
         decl: OPtr<Decl>,
     },
+    BuiltinDirective {
+        /// function might be generic -> cannot just store decl
+        def: Option<BuiltinDefInfo>,
+    },
     ProgramMainDirective {},
     SimpleDirective {
         ret_ty: Ptr<Type>,
@@ -1634,7 +1638,6 @@ impl Ast {
             AstEnum::GenericSlot { name, .. } => span.join(name.span),
 
             AstEnum::ImportDirective { path, .. } => span.join(path.span),
-            AstEnum::ExternDirective { .. } => span,
             AstEnum::IntrinsicDirective { intrinsic_name, .. } => span.join(intrinsic_name.span),
             AstEnum::TypeOfDirective { val: e, .. }
             | AstEnum::SizeOfDirective { type_: e, .. }
@@ -2756,6 +2759,7 @@ impl CloneAst for Ptr<Ast> {
             &AstEnum::IntrinsicDirective { intrinsic_name, .. } => {
                 clone!(IntrinsicDirective { intrinsic_name, decl: None })
             },
+            AstEnum::BuiltinDirective { .. } => clone!(BuiltinDirective { def: None }),
             AstEnum::ProgramMainDirective { .. } => clone!(ProgramMainDirective {}),
             &AstEnum::SimpleDirective { ret_ty, .. } => clone!(SimpleDirective { ret_ty }),
             AstEnum::TypeOfDirective { val, .. } => {
@@ -2891,6 +2895,9 @@ impl CloneAst for Ptr<Fn> {
         debug_assert_eq!(self.generics_scope.is_some(), self.flags.get(FnFlags::IS_GENERIC));
         debug_assert!(self.generics_scope.is_none_or(|s| s.kind == ScopeKind::FnGenerics));
         f.generics_scope = generics_scope;
+
+        f.decl = self.decl;
+
         Ok(f)
     }
 }
@@ -2917,4 +2924,17 @@ impl<V: AstVariant> CloneAst<Ptr<V>> for V {
     fn _clone_ast(&self, alloc: &Arena) -> Result<Ptr<V>, AllocErr> {
         Ok(Ptr::from_ref(self).upcast()._clone_ast(alloc)?.downcast::<V>())
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BuiltinKind {
+    AtomicLoad,
+    AtomicStore,
+    AtomicCmpxchg { weak: bool },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinDefInfo {
+    pub kind: BuiltinKind,
+    pub func: Ptr<Fn>,
 }

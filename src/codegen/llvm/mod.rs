@@ -1,8 +1,8 @@
 use crate::{
     ast::{
-        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, ConstValEnum, DeclFlags, DeclList,
-        DeclListExt, FnFlags, OPtrTypeExt, RangeKind, StructFlags, TypeEnum, TypeMatch,
-        UnaryOpKind, UpcastToAst, is_pos_arg,
+        self, Ast, AstEnum, AstKind, AstMatch, BinOpKind, BuiltinDefInfo, BuiltinKind,
+        ConstValEnum, DeclFlags, DeclList, DeclListExt, FnFlags, OPtrTypeExt, RangeKind,
+        StructFlags, TypeEnum, TypeMatch, UnaryOpKind, UpcastToAst, debug::DebugAst, is_pos_arg,
     },
     codegen::llvm::{bindings::*, error::get_inner_err},
     context::{ctx, primitives, tmp_alloc},
@@ -20,7 +20,7 @@ use crate::{
     },
     util::{
         self, BigIntExt, BitFlags, OptionExt, UnwrapDebug, debug_only_assert, forget_lifetime,
-        hash_val, is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64,
+        hash_val, is_simple_enum, panic_debug, round_up_to_alignment, then, to_f64, ui,
         unreachable_debug,
     },
 };
@@ -37,7 +37,7 @@ use inkwell::{
     builder::Builder,
     context::Context,
     llvm_sys::{
-        LLVMType, LLVMValue,
+        self, LLVMType, LLVMValue,
         core::{LLVMGetUndef, LLVMTypeOf},
         prelude::{LLVMTypeRef, LLVMValueRef},
     },
@@ -99,6 +99,7 @@ pub struct Codegen<'ctx> {
     continue_break_depth: usize,
 
     noundef: Attribute,
+    alwaysinline: Attribute,
     /// Can be used for ZST fields instead of `void`.
     empty_struct_ty: StructType<'ctx>,
     isize_type: IntType<'ctx>,
@@ -125,6 +126,7 @@ impl<'ctx> Codegen<'ctx> {
             continue_break_depth: 0,
 
             noundef: context.create_enum_attribute(Attribute::get_named_enum_kind_id("noundef"), 0),
+            alwaysinline: context.create_string_attribute("alwaysinline", ""),
             empty_struct_ty: context.struct_type(&[], false),
             isize_type: context.i64_type(), // TODO: 32-bit
             c_int: context.i32_type(),
@@ -545,7 +547,13 @@ impl<'ctx> Codegen<'ctx> {
                     } else {
                         let tag = self.context.i8_type().const_int(1, false);
                         let llvm_ty = self.llvm_type(out_ty);
-                        self.build_enum_val(llvm_ty, inner_ty.alignment(), tag, Some(val), None)
+                        self.build_enum_val_tagged(
+                            llvm_ty.struct_ty(),
+                            inner_ty.alignment(),
+                            tag,
+                            Some(val),
+                            None,
+                        )
                     }
                 } else if func.ty == p.enum_variant {
                     let dot = func.downcast::<ast::Dot>();
@@ -1045,6 +1053,153 @@ impl<'ctx> Codegen<'ctx> {
                 // TODO: replacing idents with these directive and duplicating the symbol lookup
                 // logic here seems like a bad idea.
                 Ok(self.get_symbol(decl.u()))
+            },
+            AstEnum::BuiltinDirective { def, .. } => {
+                fn convert_ty_generic(generic: Ptr<ast::Decl>) -> Ptr<ast::Type> {
+                    debug_assert_eq!(generic.ident.sym.text(), "T");
+                    debug_assert_eq!(generic.var_ty, primitives().type_ty);
+                    debug_assert!(generic.flags.get(DeclFlags::IS_INSTANTIATION_VALUE));
+                    generic.generic_val().downcast_type()
+                }
+
+                fn convert_atomic_ordering_const(
+                    generic: Ptr<ast::Decl>,
+                ) -> llvm_sys::LLVMAtomicOrdering {
+                    debug_assert!(generic.flags.get(DeclFlags::IS_GENERIC_DEF));
+                    debug_assert!(generic.flags.get(DeclFlags::IS_INSTANTIATION_VALUE));
+                    debug_assert_matches!(
+                        generic.ident.sym.text(),
+                        "ordering" | "success_ordering" | "fail_ordering"
+                    );
+                    debug_assert_matches!(
+                        generic.var_ty.u().to_text(true).as_str(),
+                        "Ordering" | "LoadOrdering" | "StoreOrdering" | "CmpxchgFailOrdering"
+                    );
+
+                    let ordering_val = generic.generic_val().downcast::<ast::EnumVal>();
+                    debug_assert!(ordering_val.is_valid);
+                    let ordering_variant =
+                        ordering_val.enum_ty.variants.get(ordering_val.variant_idx).u();
+                    let ordering_int = ui(&ordering_variant.init.u().downcast::<ast::IntVal>().val);
+
+                    /// std.atomic.Ordering definition must match this!
+                    #[allow(unused)]
+                    #[repr(u8)]
+                    enum O {
+                        Relaxed = 0,
+                        Acquire = 1,
+                        Release = 2,
+                        AcqRel = 3,
+                        SeqCst = 4,
+                        _Other, // #[non_exhaustive] doesn't work in the same crate
+                    }
+                    use llvm_sys::LLVMAtomicOrdering::*;
+                    match unsafe { std::mem::transmute::<u8, O>(ordering_int) } {
+                        // LLVMAtomicOrderingNotAtomic
+                        // LLVMAtomicOrderingUnordered
+                        O::Relaxed => LLVMAtomicOrderingMonotonic,
+                        O::Acquire => LLVMAtomicOrderingAcquire,
+                        O::Release => LLVMAtomicOrderingRelease,
+                        O::AcqRel => LLVMAtomicOrderingAcquireRelease,
+                        O::SeqCst => LLVMAtomicOrderingSequentiallyConsistent,
+                        _ => panic!("unexpected atomic ordering (idx={ordering_int})"),
+                    }
+                }
+
+                let BuiltinDefInfo { kind: builtin_kind, func: f } = def.u();
+                let f_llvm = self.cur_fn.u();
+                f_llvm.add_attribute(AttributeLoc::Function, self.alwaysinline);
+
+                debug_assert!(f.flags.get(FnFlags::IS_INSTANTIATION));
+                let atomic_ty = convert_ty_generic(*f.generics().get(0).u());
+
+                // i1 is invalid for atomic operations
+                let ty = if atomic_ty == p.bool { p.u8 } else { atomic_ty };
+
+                let ret = match builtin_kind {
+                    BuiltinKind::AtomicLoad => {
+                        debug_assert_eq!(f_llvm.count_params(), 1);
+                        let ptr = f_llvm.get_first_param().u().into_pointer_value();
+
+                        debug_assert_eq!(f.params().len(), 2); // ptr, $ordering
+                        debug_assert_eq!(f.generics().len(), 2); // $T, $ordering
+                        let ordering = convert_atomic_ordering_const(*f.generics().get(1).u());
+
+                        let ty_llvm = self.llvm_type(ty);
+                        let mut load =
+                            self.build_atomic_load(ty_llvm, ptr, "", ty.alignment(), ordering)?;
+
+                        if atomic_ty == p.bool {
+                            load = self.int_to_bool(load.into_int_value())?.as_basic_value_enum()
+                        }
+
+                        self.convert_return_val(reg_sym(load), atomic_ty)?
+                    },
+                    BuiltinKind::AtomicStore => {
+                        debug_assert_eq!(f_llvm.count_params(), 2);
+                        let ptr = f_llvm.get_first_param().u().into_pointer_value();
+                        let mut new_val = f_llvm.get_nth_param(1).u();
+
+                        if atomic_ty == p.bool {
+                            new_val = self
+                                .bool_to_u8(BoolValue::from_basic(new_val))?
+                                .as_basic_value_enum();
+                        }
+
+                        debug_assert_eq!(f.params().len(), 3); // ptr, val, $ordering
+                        debug_assert_eq!(f.generics().len(), 2); // $T, $ordering
+                        let ordering = convert_atomic_ordering_const(*f.generics().get(1).u());
+
+                        let store = self.build_store(ptr, new_val, atomic_ty.alignment())?;
+                        unsafe {
+                            inkwell::llvm_sys::core::LLVMSetOrdering(store.as_value_ref(), ordering)
+                        };
+                        None
+                    },
+                    BuiltinKind::AtomicCmpxchg { weak } => {
+                        debug_assert_eq!(f_llvm.count_params(), 3);
+                        let ptr = f_llvm.get_first_param().u().into_pointer_value();
+                        let mut expected = f_llvm.get_nth_param(1).u();
+                        let mut new_val = f_llvm.get_nth_param(2).u();
+
+                        if atomic_ty == p.bool {
+                            expected = self
+                                .bool_to_u8(BoolValue::from_basic(expected))?
+                                .as_basic_value_enum();
+                            new_val = self
+                                .bool_to_u8(BoolValue::from_basic(new_val))?
+                                .as_basic_value_enum();
+                        }
+
+                        debug_assert_eq!(f.params().len(), 5); // ptr, expected, new, $success_ordering, $fail_ordering
+                        debug_assert_eq!(f.generics().len(), 3); // $T, $success_ordering, $fail_ordering
+                        let success_ord = convert_atomic_ordering_const(*f.generics().get(1).u());
+                        let fail_ord = convert_atomic_ordering_const(*f.generics().get(2).u());
+
+                        // yields { T, i1 }
+                        let cmpxchg = self.builder.build_cmpxchg(
+                            ptr,
+                            expected,
+                            new_val,
+                            success_ord.into(),
+                            fail_ord.into(),
+                        )?;
+                        unsafe { llvm_sys::core::LLVMSetWeak(cmpxchg.as_value_ref(), weak.into()) };
+
+                        let old_val = self.builder.build_extract_value(cmpxchg, 0, "old")?;
+                        let success = self.builder.build_extract_value(cmpxchg, 1, "ok")?;
+                        let ret_some =
+                            self.builder.build_not(success.into_int_value(), "is_some")?;
+
+                        let ret_ty = f.ret_ty.u().downcast::<ast::OptionTy>();
+                        debug_assert_eq!(ret_ty.inner_ty.downcast_type(), atomic_ty);
+                        let out =
+                            self.build_tagged_optional(ret_ty, BoolValue::new(ret_some), old_val)?;
+
+                        self.convert_return_val(out, ret_ty.upcast_to_type())?
+                    },
+                };
+                let _: ! = self.build_return_raw(ret)?;
             },
             AstEnum::TypeOfDirective { .. }
             | AstEnum::SizeOfDirective { .. }
@@ -1556,11 +1711,11 @@ impl<'ctx> Codegen<'ctx> {
         Ok(val.as_basic_value_enum())
     }
 
-    fn build_enum_val(
+    fn build_enum_val_tagged(
         &mut self,
-        llvm_ty: impl BasicType<'ctx> + Copy,
+        llvm_ty: StructType<'ctx>,
         align: usize,
-        tag_val: impl BasicValue<'ctx>,
+        tag_val: IntValue<'ctx>,
         data: OPtr<Ast>,
         write_target: Option<PointerValue<'ctx>>,
     ) -> CodegenResultAndControlFlow<Symbol<'ctx>> {
@@ -1577,6 +1732,34 @@ impl<'ctx> Codegen<'ctx> {
         if let Some(data) = data {
             let data_ptr = self.builder.build_struct_gep(llvm_ty, enum_ptr, 1, "enum_data")?;
             self.compile_expr_with_write_target(data, Some(data_ptr))?;
+        }
+
+        stack_val(enum_ptr)
+    }
+
+    fn build_enum_val_tagged2(
+        &mut self,
+        llvm_ty: StructType<'ctx>,
+        align: usize,
+        tag_val: IntValue<'ctx>,
+        data: Option<BasicValueEnum<'ctx>>,
+        write_target: Option<PointerValue<'ctx>>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        let enum_ptr = if let Some(ptr) = write_target {
+            ptr
+        } else {
+            self.build_alloca_with_align(llvm_ty, "enum", align)?
+        };
+
+        // set tag
+        self.build_store(enum_ptr, tag_val, align)?;
+
+        // set data
+        if let Some(data) = data {
+            let data_ptr = self.builder.build_struct_gep(llvm_ty, enum_ptr, 1, "enum_data")?;
+            //self.compile_expr_with_write_target(data, Some(data_ptr))?;
+            //self.write_symbol_to_write_target(sym, ty, write_target);
+            self.build_store(data_ptr, data, align)?;
         }
 
         stack_val(enum_ptr)
@@ -1809,7 +1992,7 @@ impl<'ctx> Codegen<'ctx> {
             finalize_ty(f.body.u().as_mut().ty.as_mut().u(), ret_ty, true);
 
             if let Some(body) = self.compile_expr(f.body.u()).handle_unreachable()? {
-                self.build_return(body, ret_ty)?;
+                let None = self.build_return(body, ret_ty).handle_unreachable()?;
             }
 
             if !func.verify(true) {
@@ -2310,6 +2493,18 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn build_tagged_optional(
+        &mut self,
+        opt_ty: Ptr<ast::OptionTy>,
+        is_some: BoolValue<'ctx>,
+        some_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Symbol<'ctx>> {
+        debug_assert_matches!(optional_repr(opt_ty.inner_ty.downcast_type()), OptionalRepr::Tagged);
+        let opt_ty = opt_ty.upcast_to_type();
+        let llvm_ty = self.llvm_type(opt_ty).struct_ty();
+        self.build_enum_val_tagged2(llvm_ty, opt_ty.alignment(), is_some.int, Some(some_val), None)
+    }
+
     /// TODO: pass `OptionalRepr` to this function
     fn build_optional_is_some(
         &mut self,
@@ -2474,9 +2669,26 @@ impl<'ctx> Codegen<'ctx> {
         Ok(out)
     }
 
-    fn build_return(&mut self, ret_sym: Symbol<'ctx>, ret_ty: Ptr<ast::Type>) -> CodegenResult<()> {
+    fn build_atomic_load(
+        &self,
+        pointee_ty: impl BasicType<'ctx>,
+        ptr: PointerValue<'ctx>,
+        name: &str,
+        alignment: usize,
+        ordering: llvm_sys::LLVMAtomicOrdering,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let load = self.build_load(pointee_ty, ptr, name, alignment)?;
+        unsafe { inkwell::llvm_sys::core::LLVMSetOrdering(load.as_value_ref(), ordering) };
+        Ok(load)
+    }
+
+    fn convert_return_val(
+        &mut self,
+        ret_sym: Symbol<'ctx>,
+        ret_ty: Ptr<ast::Type>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ffi_ty = self.c_ffi_type(ret_ty).flatten_simple2(self);
-        let ret = match (ret_sym.basic(), ffi_ty) {
+        Ok(match (ret_sym.basic(), ffi_ty) {
             (_, CFfiType::Zst) => None,
             (BasicSymbol::Zst, CFfiType::Simple(ty)) => {
                 debug_assert_eq!(ret_ty.kind, AstKind::OptionTy);
@@ -2528,12 +2740,27 @@ impl<'ctx> Codegen<'ctx> {
                 Some(self.build_load(ffi_int, ptr, "ret", ret_ty.alignment())?)
             },
             (_, CFfiType::Simple2(_)) => unreachable_debug(),
-        };
-        match ret {
-            Some(ret) => self.builder.build_return(Some(&ret))?,
+        })
+    }
+
+    fn build_return(
+        &mut self,
+        ret_sym: Symbol<'ctx>,
+        ret_ty: Ptr<ast::Type>,
+    ) -> CodegenResultAndControlFlow<!> {
+        let ret = self.convert_return_val(ret_sym, ret_ty)?;
+        self.build_return_raw(ret)
+    }
+
+    fn build_return_raw(
+        &mut self,
+        val: Option<BasicValueEnum<'ctx>>,
+    ) -> CodegenResultAndControlFlow<!> {
+        match val {
+            Some(val) => self.builder.build_return(Some(&val))?,
             None => self.builder.build_return(None)?,
         };
-        Ok(())
+        Unreachable(())
     }
 
     fn build_unreachable<T>(&self) -> CodegenResultAndControlFlow<T> {
@@ -2924,6 +3151,19 @@ impl<'ctx> Codegen<'ctx> {
     fn bool_val(&self, val: bool) -> BoolValue<'ctx> {
         let b_ty = self.context.bool_type();
         BoolValue::new(if val { b_ty.const_all_ones() } else { b_ty.const_zero() })
+    }
+
+    fn int_to_bool(
+        &self,
+        int: IntValue<'ctx>,
+    ) -> Result<BoolValue<'ctx>, inkwell::builder::BuilderError> {
+        self.builder
+            .build_int_compare(IntPredicate::NE, int, int.get_type().const_zero(), "")
+            .map(BoolValue::new)
+    }
+
+    fn bool_to_u8(&self, bool: BoolValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        self.build_int_extend(bool.int, self.context.i8_type(), false)
     }
 
     fn const_slice(&mut self, ptr: PointerValue<'ctx>, len: u64) -> StructValue<'ctx> {

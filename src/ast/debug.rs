@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         self, Ast, AstEnum, AstKind, DeclFlags, HasAstKind, InitializerFlags, OPtrTypeExt,
-        StructFlags, Type, TypeEnum, UnaryOpKind, UpcastToAst,
+        StructFlags, TypeEnum, UnaryOpKind, UpcastToAst,
     },
     context::{ctx, primitives},
     parser::lexer::Span,
@@ -333,13 +333,12 @@ impl DebugAst for Ast {
                 lines.write("#import ");
                 lines.write_tree(path);
             },
-            AstEnum::ExternDirective { .. } => {
-                lines.write("#extern");
-            },
+            AstEnum::ExternDirective { .. } => lines.write("#extern"),
             AstEnum::IntrinsicDirective { intrinsic_name, .. } => {
                 lines.write("#intrinsic ");
                 lines.write_tree(intrinsic_name);
             },
+            AstEnum::BuiltinDirective { .. } => lines.write("#builtin"),
             AstEnum::ProgramMainDirective { span, .. } | AstEnum::SimpleDirective { span, .. } => {
                 lines.write(span.get_text().as_ref());
             },
@@ -372,7 +371,20 @@ impl DebugAst for Ast {
             AstEnum::StaticPtrVal { sym, .. } => {
                 lines.write(&format!("{{ptr to {}}}", sym.ident.sym))
             },
-            AstEnum::EnumVal { .. } => todo!(),
+            AstEnum::EnumVal { is_valid, enum_ty, variant_idx, data, .. } => {
+                lines.write_tree(enum_ty);
+                lines.write(".");
+                let variant = enum_ty.variants.get(*variant_idx).u();
+                lines.write(variant.ident.sym.text());
+                if let Some(data) = data {
+                    debug_assert!(*is_valid);
+                    lines.write("(");
+                    lines.write_tree(data);
+                    lines.write(")");
+                } else if !*is_valid {
+                    lines.write("(?)");
+                }
+            },
             AstEnum::OptionalVal { is_some, val, .. } => match val {
                 Some(val) => {
                     lines.write("Some(");

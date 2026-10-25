@@ -123,7 +123,8 @@ impl BuildArgs {
         BuildArgs {
             path: match opt.path {
                 Some(p) => p,
-                None => PathBuf::from(format!("{{test @ {}}}", Location::caller())),
+                //None => PathBuf::from(format!("{{test @ {}}}", Location::caller())),
+                None => PathBuf::from(Location::caller().file()).canonicalize().unwrap(),
             },
             optimization_level: opt.llvm_optimization_level,
             target_triple: None,

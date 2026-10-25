@@ -733,6 +733,8 @@ impl Parser {
                 } else if directive_name == "intrinsic" {
                     let intrinsic_name = parse_str_lit_arg("an intrinsic name")?;
                     expr!(IntrinsicDirective { intrinsic_name, decl: None }, span)
+                } else if directive_name == "builtin" {
+                    expr!(BuiltinDirective { def: None }, span.join(directive_ident.span))
                 } else if directive_name == "library" {
                     let str_lit = parse_str_lit_arg("a library name")?;
                     self.cctx.add_library(str_lit)?;
